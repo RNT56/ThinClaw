@@ -519,7 +519,7 @@ pub struct GmailOAuthResult {
     pub error: Option<String>,
 }
 
-/// Human-readable routing rule summary from IronClaw's RoutingPolicy.
+/// Human-readable routing rule summary from ThinClaw's RoutingPolicy.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
 pub struct RoutingRuleSummary {
     pub index: u32,

@@ -3,7 +3,7 @@
 //! Each ThinClaw Desktop build targets **one** inference engine per platform
 //! (determined by Cargo feature flags at compile time). This module provides
 //! the `InferenceEngine` trait that all engines implement, plus the
-//! `get_active_engine_info` Tauri command that tells the frontend which
+//! `direct_runtime_get_active_engine_info` Tauri command that tells the frontend which
 //! engine is active.
 
 use async_trait::async_trait;
@@ -160,7 +160,7 @@ pub struct EngineInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Tauri command: get_active_engine_info
+// Tauri command: direct_runtime_get_active_engine_info
 // ---------------------------------------------------------------------------
 
 /// Returns information about the single inference engine compiled into this build.
@@ -171,7 +171,7 @@ pub struct EngineInfo {
 /// - Display the engine name in the status bar
 #[tauri::command]
 #[specta::specta]
-pub fn get_active_engine_info() -> EngineInfo {
+pub fn direct_runtime_get_active_engine_info() -> EngineInfo {
     // Exactly one of these feature flags is expected to be active per build.
     // Priority: mlx > vllm > llamacpp > ollama > none
 
@@ -240,11 +240,24 @@ pub fn get_active_engine_info() -> EngineInfo {
     }
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn direct_runtime_snapshot(
+    sidecar: tauri::State<'_, crate::sidecar::SidecarManager>,
+    engine_manager: tauri::State<'_, EngineManager>,
+) -> Result<LocalRuntimeSnapshot, String> {
+    Ok(local_runtime_snapshot(&sidecar, &engine_manager).await)
+}
+
 // ---------------------------------------------------------------------------
 // EngineManager — Tauri managed state holding the active engine instance
 // ---------------------------------------------------------------------------
 
 use std::path::PathBuf;
+use thinclaw_runtime_contracts::{
+    LocalRuntimeEndpoint, LocalRuntimeKind, LocalRuntimeSnapshot, RuntimeCapability,
+    RuntimeExposurePolicy, RuntimeReadiness,
+};
 
 /// Managed state that holds the active inference engine instance.
 ///
@@ -252,6 +265,93 @@ use std::path::PathBuf;
 pub struct EngineManager {
     pub engine: tokio::sync::Mutex<Option<Box<dyn InferenceEngine>>>,
     pub app_data_dir: PathBuf,
+}
+
+fn runtime_kind_from_engine_id(engine_id: &str) -> LocalRuntimeKind {
+    match engine_id {
+        "llamacpp" => LocalRuntimeKind::LlamaCpp,
+        "mlx" => LocalRuntimeKind::Mlx,
+        "vllm" => LocalRuntimeKind::Vllm,
+        "ollama" => LocalRuntimeKind::Ollama,
+        _ => LocalRuntimeKind::None,
+    }
+}
+
+/// Build the shared local runtime snapshot consumed by Direct Workbench and
+/// the ThinClaw runtime bridge.
+pub async fn local_runtime_snapshot(
+    sidecar: &crate::sidecar::SidecarManager,
+    engine_manager: &EngineManager,
+) -> LocalRuntimeSnapshot {
+    let info = direct_runtime_get_active_engine_info();
+    let kind = runtime_kind_from_engine_id(&info.id);
+
+    if let Some((port, token, context_size, model_family)) = sidecar.get_chat_config() {
+        let mut capabilities = vec![RuntimeCapability::Chat];
+        if sidecar.get_embedding_config().is_some() {
+            capabilities.push(RuntimeCapability::Embedding);
+        }
+        if sidecar.is_stt_active() {
+            capabilities.push(RuntimeCapability::Stt);
+        }
+        if sidecar.is_tts_active() {
+            capabilities.push(RuntimeCapability::Tts);
+        }
+        if sidecar.is_image_active() {
+            capabilities.push(RuntimeCapability::Diffusion);
+        }
+
+        return LocalRuntimeSnapshot {
+            kind,
+            display_name: info.display_name,
+            readiness: RuntimeReadiness::Ready,
+            endpoint: Some(LocalRuntimeEndpoint {
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                api_key: if token.is_empty() { None } else { Some(token) },
+                model_id: Some("default".to_string()),
+                context_size: Some(context_size),
+                model_family: Some(model_family),
+            }),
+            capabilities,
+            exposure_policy: RuntimeExposurePolicy::DirectOnly,
+            unavailable_reason: None,
+        };
+    }
+
+    let guard = engine_manager.engine.lock().await;
+    if let Some(engine) = guard.as_ref() {
+        if let Some(base_url) = engine.base_url() {
+            return LocalRuntimeSnapshot {
+                kind: runtime_kind_from_engine_id(engine.engine_id()),
+                display_name: engine.display_name().to_string(),
+                readiness: RuntimeReadiness::Ready,
+                endpoint: Some(LocalRuntimeEndpoint {
+                    base_url,
+                    api_key: None,
+                    model_id: engine.model_id(),
+                    context_size: engine.max_context(),
+                    model_family: None,
+                }),
+                capabilities: vec![RuntimeCapability::Chat],
+                exposure_policy: RuntimeExposurePolicy::DirectOnly,
+                unavailable_reason: None,
+            };
+        }
+    }
+
+    LocalRuntimeSnapshot {
+        kind,
+        display_name: info.display_name,
+        readiness: if info.requires_setup {
+            RuntimeReadiness::SetupRequired
+        } else {
+            RuntimeReadiness::Unavailable
+        },
+        endpoint: None,
+        capabilities: Vec::new(),
+        exposure_policy: RuntimeExposurePolicy::DirectOnly,
+        unavailable_reason: Some("No local chat runtime endpoint is running".to_string()),
+    }
 }
 
 impl EngineManager {
@@ -408,10 +508,10 @@ pub struct EngineSetupStatus {
 /// - `mlx` / `vllm`: need setup if the Python venv hasn't been bootstrapped yet
 #[tauri::command]
 #[specta::specta]
-pub fn get_engine_setup_status(
+pub fn direct_runtime_get_engine_setup_status(
     #[allow(unused_variables)] engine_manager: tauri::State<'_, EngineManager>,
 ) -> EngineSetupStatus {
-    let info = get_active_engine_info();
+    let info = direct_runtime_get_active_engine_info();
 
     // Only MLX and vLLM need bootstrap
     let needs_setup = match info.id.as_str() {
@@ -455,11 +555,11 @@ pub fn get_engine_setup_status(
 /// `{ stage: "creating_venv" | "installing" | "complete" | "error", message: String }`
 #[tauri::command]
 #[specta::specta]
-pub async fn setup_engine(
+pub async fn direct_runtime_setup_engine(
     app: tauri::AppHandle,
     _engine_manager: tauri::State<'_, EngineManager>,
 ) -> Result<(), String> {
-    let info = get_active_engine_info();
+    let info = direct_runtime_get_active_engine_info();
 
     #[derive(Clone, serde::Serialize)]
     struct SetupProgress {
@@ -522,10 +622,10 @@ pub async fn setup_engine(
 /// Start the active engine with the given model.
 ///
 /// This is the new engine-aware entry point. For llamacpp builds, the existing
-/// `start_chat_server` in sidecar.rs still works — this command is for MLX/vLLM/Ollama.
+/// `direct_runtime_start_chat_server` in sidecar.rs still works — this command is for MLX/vLLM/Ollama.
 #[tauri::command]
 #[specta::specta]
-pub async fn start_engine(
+pub async fn direct_runtime_start_engine(
     engine_manager: tauri::State<'_, EngineManager>,
     model_path: String,
     context_size: u32,
@@ -549,7 +649,9 @@ pub struct EngineStartResult {
 /// Stop the active engine.
 #[tauri::command]
 #[specta::specta]
-pub async fn stop_engine(engine_manager: tauri::State<'_, EngineManager>) -> Result<(), String> {
+pub async fn direct_runtime_stop_engine(
+    engine_manager: tauri::State<'_, EngineManager>,
+) -> Result<(), String> {
     let mut guard = engine_manager.engine.lock().await;
     if let Some(engine) = guard.as_mut() {
         engine.stop().await?;
@@ -560,7 +662,7 @@ pub async fn stop_engine(engine_manager: tauri::State<'_, EngineManager>) -> Res
 /// Check if the active engine is ready (health check).
 #[tauri::command]
 #[specta::specta]
-pub async fn is_engine_ready(
+pub async fn direct_runtime_is_engine_ready(
     engine_manager: tauri::State<'_, EngineManager>,
 ) -> Result<bool, String> {
     let guard = engine_manager.engine.lock().await;
@@ -581,7 +683,7 @@ mod tests {
 
     #[test]
     fn get_active_engine_returns_valid_info() {
-        let info = get_active_engine_info();
+        let info = direct_runtime_get_active_engine_info();
         assert!(!info.id.is_empty(), "engine id must not be empty");
         assert!(
             !info.display_name.is_empty(),
@@ -608,7 +710,7 @@ mod tests {
 
     #[test]
     fn engine_info_serializes() {
-        let info = get_active_engine_info();
+        let info = direct_runtime_get_active_engine_info();
         let json = serde_json::to_string(&info).expect("EngineInfo should serialize");
         assert!(json.contains(&info.id));
     }

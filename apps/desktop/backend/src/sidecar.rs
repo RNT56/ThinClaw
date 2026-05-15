@@ -90,7 +90,7 @@ impl SidecarManager {
         }
     }
 
-    pub fn start_chat_server<F>(
+    pub fn direct_runtime_start_chat_server<F>(
         &self,
         app: AppHandle,
         options: ChatServerOptions,
@@ -444,7 +444,7 @@ impl SidecarManager {
         Ok((port, token))
     }
 
-    pub fn start_embedding_server(
+    pub fn direct_runtime_start_embedding_server(
         &self,
         app: AppHandle,
         model_path: String,
@@ -881,7 +881,7 @@ impl SidecarManager {
         Err(anyhow!("Cannot find MLX script: {}", script_name))
     }
 
-    pub fn start_summarizer_server(
+    pub fn direct_runtime_start_summarizer_server(
         &self,
         app: AppHandle,
         model_path: String,
@@ -958,7 +958,11 @@ impl SidecarManager {
         Ok((port, token))
     }
 
-    pub fn start_stt_server(&self, app: AppHandle, model_path: String) -> Result<(u16, String)> {
+    pub fn direct_runtime_start_stt_server(
+        &self,
+        app: AppHandle,
+        model_path: String,
+    ) -> Result<(u16, String)> {
         // Get ProcessTracker
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         tracker.cleanup_by_service("stt");
@@ -1049,7 +1053,11 @@ impl SidecarManager {
         Ok((port, token))
     }
 
-    pub fn start_image_server(&self, _app: AppHandle, model_path: String) -> Result<()> {
+    pub fn direct_runtime_start_image_server(
+        &self,
+        _app: AppHandle,
+        model_path: String,
+    ) -> Result<()> {
         let mut model_guard = self
             .image_model_path
             .lock()
@@ -1058,7 +1066,11 @@ impl SidecarManager {
         Ok(())
     }
 
-    pub fn start_tts_server(&self, _app: AppHandle, model_path: String) -> Result<()> {
+    pub fn direct_runtime_start_tts_server(
+        &self,
+        _app: AppHandle,
+        model_path: String,
+    ) -> Result<()> {
         let mut model_guard = self
             .tts_model_path
             .lock()
@@ -1067,7 +1079,7 @@ impl SidecarManager {
         Ok(())
     }
 
-    pub fn stop_chat_server(&self) -> Result<()> {
+    pub fn direct_runtime_stop_chat_server(&self) -> Result<()> {
         *self
             .is_chat_stop_intentional
             .lock()
@@ -1077,6 +1089,10 @@ impl SidecarManager {
             proc.kill()?;
         }
         Ok(())
+    }
+
+    pub fn stop_chat_server(&self) -> Result<()> {
+        self.direct_runtime_stop_chat_server()
     }
 
     pub fn stop_all(&self) -> Result<()> {
@@ -1295,7 +1311,7 @@ use tauri::Emitter;
 #[tauri::command]
 #[specta::specta]
 #[allow(unused_variables)] // params are intentionally unused in MLX/vLLM builds that return early
-pub async fn start_chat_server(
+pub async fn direct_runtime_start_chat_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
@@ -1333,7 +1349,7 @@ pub async fn start_chat_server(
     #[allow(unreachable_code)]
     let app_handle_for_closure = app.clone();
     let (port, _) = state
-        .start_chat_server(
+        .direct_runtime_start_chat_server(
             app.clone(),
             ChatServerOptions {
                 model_path: model_path.clone(),
@@ -1505,7 +1521,7 @@ pub async fn start_embedding_server_core(
     #[cfg(not(feature = "mlx"))]
     {
         state
-            .start_embedding_server(app.clone(), model_path)
+            .direct_runtime_start_embedding_server(app.clone(), model_path)
             .map(|_| ())
             .map_err(|e| e.to_string())?;
     }
@@ -1522,7 +1538,7 @@ pub async fn start_embedding_server_core(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn start_embedding_server(
+pub async fn direct_runtime_start_embedding_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
@@ -1534,14 +1550,14 @@ pub async fn start_embedding_server(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn start_summarizer_server(
+pub async fn direct_runtime_start_summarizer_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
     context_size: u32,
 ) -> Result<(), String> {
     let res = state
-        .start_summarizer_server(app.clone(), model_path, context_size, -1)
+        .direct_runtime_start_summarizer_server(app.clone(), model_path, context_size, -1)
         .map(|_| ())
         .map_err(|e| e.to_string());
 
@@ -1560,7 +1576,7 @@ pub async fn start_summarizer_server(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn start_stt_server(
+pub async fn direct_runtime_start_stt_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
@@ -1575,7 +1591,7 @@ pub async fn start_stt_server(
 
     #[cfg(not(feature = "mlx"))]
     let res = state
-        .start_stt_server(app.clone(), model_path)
+        .direct_runtime_start_stt_server(app.clone(), model_path)
         .map(|_| ())
         .map_err(|e| e.to_string());
 
@@ -1594,25 +1610,25 @@ pub async fn start_stt_server(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn start_image_server(
+pub async fn direct_runtime_start_image_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), String> {
     state
-        .start_image_server(app, model_path)
+        .direct_runtime_start_image_server(app, model_path)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn start_tts_server(
+pub async fn direct_runtime_start_tts_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), String> {
     state
-        .start_tts_server(app, model_path)
+        .direct_runtime_start_tts_server(app, model_path)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -1639,7 +1655,9 @@ pub struct ChatServerConfig {
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_chat_server_config(state: State<'_, SidecarManager>) -> Option<ChatServerConfig> {
+pub fn direct_runtime_get_chat_server_config(
+    state: State<'_, SidecarManager>,
+) -> Option<ChatServerConfig> {
     state.get_chat_config().map(
         |(port, token, context_size, model_family)| ChatServerConfig {
             port,
@@ -1652,7 +1670,7 @@ pub fn get_chat_server_config(state: State<'_, SidecarManager>) -> Option<ChatSe
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_sidecar_status(state: State<'_, SidecarManager>) -> SidecarStatus {
+pub fn direct_runtime_get_sidecar_status(state: State<'_, SidecarManager>) -> SidecarStatus {
     let (chat, embed, stt, tts, image, summ) = state.get_status();
     SidecarStatus {
         chat_running: chat,
@@ -1666,7 +1684,7 @@ pub fn get_sidecar_status(state: State<'_, SidecarManager>) -> SidecarStatus {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn stop_chat_server(
+pub async fn direct_runtime_stop_chat_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     _model_path: String,
@@ -1684,7 +1702,9 @@ pub async fn stop_chat_server(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn cancel_generation(state: State<'_, SidecarManager>) -> Result<(), String> {
+pub async fn direct_runtime_cancel_generation(
+    state: State<'_, SidecarManager>,
+) -> Result<(), String> {
     state.cancellation_token.store(true, Ordering::SeqCst);
     Ok(())
 }

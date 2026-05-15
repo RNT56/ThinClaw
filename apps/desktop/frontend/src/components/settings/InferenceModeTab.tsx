@@ -106,7 +106,7 @@ function TtsVoiceSelector() {
         if (voices.length > 0) return; // already loaded
         setLoading(true);
         try {
-            const data = await invoke<VoiceInfo[]>('tts_list_voices');
+            const data = await invoke<VoiceInfo[]>('direct_media_tts_list_voices');
             setVoices(data);
             // Auto-select the default if nothing is saved
             if (!selectedVoice) {
@@ -475,7 +475,7 @@ export function InferenceModeTab() {
 
     const load = useCallback(async () => {
         try {
-            const data = await invoke<ModalityBackends[]>('get_inference_backends');
+            const data = await invoke<ModalityBackends[]>('direct_inference_get_backends');
             setBackends(data);
             setError(null);
         } catch (e) {
@@ -493,7 +493,7 @@ export function InferenceModeTab() {
     const handleSwitch = async (modality: Modality, backendId: string) => {
         setSwitching(modality);
         try {
-            await invoke('update_inference_backend', { modality, backendId });
+            await invoke('direct_inference_update_backend', { modality, backendId });
             toast.success(`${MODALITY_META[modality].label} switched to ${backendId === 'local' ? 'Local' : backendId}`);
             // Reload to reflect changes
             await load();

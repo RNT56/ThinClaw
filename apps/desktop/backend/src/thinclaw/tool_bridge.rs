@@ -1,13 +1,13 @@
-//! ToolBridge — hardware sensor bridge between IronClaw agent and ThinClaw Desktop host.
+//! ToolBridge — hardware sensor bridge between ThinClaw runtime and ThinClaw Desktop host.
 //!
-//! This module re-exports `ironclaw::hardware_bridge::ToolBridge` and provides
+//! This module re-exports `thinclaw_core::hardware_bridge::ToolBridge` and provides
 //! `TauriToolBridge`, which routes tool-execution requests through Tauri's
 //! event system for user approval (3-tier: Deny / Allow Once / Allow Session).
 //!
 //! ## Architecture
 //!
 //! ```text
-//! IronClaw Agent
+//! ThinClaw Agent
 //!   │ ToolBridge::request_approval()
 //!   ▼
 //! TauriToolBridge
@@ -23,7 +23,7 @@
 //!   ▼
 //! TauriToolBridge receives decision
 //!   │ If AllowSession → cache permission
-//!   │ Returns decision to IronClaw
+//!   │ Returns decision to ThinClaw
 //! ```
 
 use std::collections::{HashMap, HashSet};
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-use ironclaw::hardware_bridge::{SensorRequest, SensorResponse, SensorType};
+use thinclaw_core::hardware_bridge::{SensorRequest, SensorResponse, SensorType};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -71,9 +71,9 @@ pub struct ToolBridgeRequest {
 
 // ── Trait ─────────────────────────────────────────────────────────────────────
 
-// Re-export the canonical ToolBridge trait from IronClaw.
+// Re-export the canonical ToolBridge trait from ThinClaw.
 // TauriToolBridge below implements this trait for the Tauri desktop app.
-pub use ironclaw::hardware_bridge::ToolBridge;
+pub use thinclaw_core::hardware_bridge::ToolBridge;
 
 // ── TauriToolBridge ──────────────────────────────────────────────────────────
 
@@ -277,11 +277,11 @@ impl ToolBridge for TauriToolBridge {
     }
 }
 
-// ── Map ApprovalDecision to IronClaw's resolve_approval params ───────────────
+// ── Map ApprovalDecision to ThinClaw's resolve_approval params ───────────────
 
 impl ApprovalDecision {
     /// Convert to the `(approved, always)` pair used by
-    /// `ironclaw::api::chat::resolve_approval()`.
+    /// `thinclaw_core::api::chat::resolve_approval()`.
     pub fn to_ironclaw_params(self) -> (bool, bool) {
         match self {
             ApprovalDecision::Deny => (false, false),

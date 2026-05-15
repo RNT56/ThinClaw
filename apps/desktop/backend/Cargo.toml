@@ -95,7 +95,9 @@ hkdf = "0.12"
 zstd = "0.13"
 
 # ThinClaw agent engine (root crate, desktop feature = libsql + html-to-markdown)
-ironclaw = { path = "../../..", package = "thinclaw", features = ["desktop"] }
+thinclaw_core = { path = "../../..", package = "thinclaw", features = ["desktop"] }
+thinclaw-config = { path = "../../../crates/thinclaw-config" }
+thinclaw-runtime-contracts = { path = "../../../crates/thinclaw-runtime-contracts", features = ["specta"] }
 
 # macOS Keychain — secure encrypted storage for API keys
 [target.'cfg(target_os = "macos")'.dependencies]

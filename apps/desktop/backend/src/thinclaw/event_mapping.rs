@@ -1,10 +1,10 @@
-//! Conversion layer: IronClaw StatusUpdate → ThinClaw Desktop UiEvent
+//! Conversion layer: ThinClaw StatusUpdate → ThinClaw Desktop UiEvent
 //!
-//! IronClaw's Channel trait receives StatusUpdate variants during a turn.
+//! ThinClaw's Channel trait receives StatusUpdate variants during a turn.
 //! This module converts them to UiEvent variants that the frontend consumes.
 
-use ironclaw::channels::StatusUpdate;
 use serde_json::Value;
+use thinclaw_core::channels::StatusUpdate;
 
 use super::sanitizer::strip_llm_tokens;
 use super::ui_types::{UiEvent, UiUsage};
@@ -57,7 +57,7 @@ pub fn routing_from_status<'a>(
     (session_key, run_id, message_id)
 }
 
-/// Convert an IronClaw `StatusUpdate` to a ThinClaw Desktop `UiEvent`.
+/// Convert an ThinClaw `StatusUpdate` to a ThinClaw Desktop `UiEvent`.
 ///
 /// The `session_key` and `run_id` are injected from the channel's routing
 /// metadata (extracted from IncomingMessage::metadata).
@@ -700,8 +700,8 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
 mod tests {
     use super::*;
 
-    fn subagent_packet() -> ironclaw::agent::subagent_executor::SubagentTaskPacket {
-        ironclaw::agent::subagent_executor::SubagentTaskPacket {
+    fn subagent_packet() -> thinclaw_core::agent::subagent_executor::SubagentTaskPacket {
+        thinclaw_core::agent::subagent_executor::SubagentTaskPacket {
             objective: "test objective".to_string(),
             ..Default::default()
         }
@@ -777,7 +777,7 @@ mod tests {
                 message: "failed".into(),
                 code: Some("code".into()),
             },
-            StatusUpdate::CanvasAction(ironclaw::tools::builtin::CanvasAction::Dismiss {
+            StatusUpdate::CanvasAction(thinclaw_core::tools::builtin::CanvasAction::Dismiss {
                 panel_id: "panel-1".into(),
             }),
             StatusUpdate::AgentMessage {

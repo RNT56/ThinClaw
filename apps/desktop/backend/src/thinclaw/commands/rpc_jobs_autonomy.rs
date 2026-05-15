@@ -3,7 +3,7 @@
 use tauri::State;
 use uuid::Uuid;
 
-use crate::thinclaw::ironclaw_bridge::IronClawState;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 fn local_unavailable(capability: &str, reason: impl AsRef<str>) -> String {
     format!(
@@ -24,8 +24,8 @@ fn autonomy_unavailable(reason: impl AsRef<str>) -> String {
 }
 
 async fn local_direct_jobs(
-    ironclaw: &IronClawState,
-) -> Result<Vec<ironclaw::context::JobContext>, String> {
+    ironclaw: &ThinClawRuntimeState,
+) -> Result<Vec<thinclaw_core::context::JobContext>, String> {
     let agent = ironclaw.agent().await?;
     let context_manager = agent.context_manager();
     let mut jobs = Vec::new();
@@ -38,7 +38,7 @@ async fn local_direct_jobs(
     Ok(jobs)
 }
 
-fn job_summary(jobs: &[ironclaw::context::JobContext]) -> serde_json::Value {
+fn job_summary(jobs: &[thinclaw_core::context::JobContext]) -> serde_json::Value {
     let mut summary = serde_json::json!({
         "total": jobs.len(),
         "pending": 0,
@@ -52,16 +52,15 @@ fn job_summary(jobs: &[ironclaw::context::JobContext]) -> serde_json::Value {
 
     for job in jobs {
         let key = match job.state {
-            ironclaw::context::JobState::Pending => "pending",
-            ironclaw::context::JobState::InProgress => "in_progress",
-            ironclaw::context::JobState::Completed
-            | ironclaw::context::JobState::Submitted
-            | ironclaw::context::JobState::Accepted => "completed",
-            ironclaw::context::JobState::Failed | ironclaw::context::JobState::Abandoned => {
-                "failed"
-            }
-            ironclaw::context::JobState::Cancelled => "cancelled",
-            ironclaw::context::JobState::Stuck => "stuck",
+            thinclaw_core::context::JobState::Pending => "pending",
+            thinclaw_core::context::JobState::InProgress => "in_progress",
+            thinclaw_core::context::JobState::Completed
+            | thinclaw_core::context::JobState::Submitted
+            | thinclaw_core::context::JobState::Accepted => "completed",
+            thinclaw_core::context::JobState::Failed
+            | thinclaw_core::context::JobState::Abandoned => "failed",
+            thinclaw_core::context::JobState::Cancelled => "cancelled",
+            thinclaw_core::context::JobState::Stuck => "stuck",
         };
         if let Some(value) = summary.get_mut(key).and_then(|v| v.as_u64()) {
             summary[key] = serde_json::json!(value + 1);
@@ -71,7 +70,7 @@ fn job_summary(jobs: &[ironclaw::context::JobContext]) -> serde_json::Value {
     summary
 }
 
-fn job_list_item(job: &ironclaw::context::JobContext) -> serde_json::Value {
+fn job_list_item(job: &thinclaw_core::context::JobContext) -> serde_json::Value {
     serde_json::json!({
         "id": job.job_id,
         "title": job.title,
@@ -85,7 +84,7 @@ fn job_list_item(job: &ironclaw::context::JobContext) -> serde_json::Value {
     })
 }
 
-fn job_detail(job: &ironclaw::context::JobContext) -> serde_json::Value {
+fn job_detail(job: &thinclaw_core::context::JobContext) -> serde_json::Value {
     let elapsed_secs = job.started_at.map(|started| {
         let end = job.completed_at.unwrap_or_else(chrono::Utc::now);
         (end - started).num_seconds().max(0) as u64
@@ -123,9 +122,9 @@ fn job_detail(job: &ironclaw::context::JobContext) -> serde_json::Value {
 }
 
 async fn local_job_by_id(
-    ironclaw: &IronClawState,
+    ironclaw: &ThinClawRuntimeState,
     job_id: &str,
-) -> Result<ironclaw::context::JobContext, String> {
+) -> Result<thinclaw_core::context::JobContext, String> {
     let parsed = Uuid::parse_str(job_id).map_err(|_| "Invalid job ID".to_string())?;
     let agent = ironclaw.agent().await?;
     agent
@@ -138,7 +137,7 @@ async fn local_job_by_id(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_jobs_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_jobs().await;
@@ -166,7 +165,7 @@ pub async fn thinclaw_jobs_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_jobs_summary(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_jobs_summary().await;
@@ -179,7 +178,7 @@ pub async fn thinclaw_jobs_summary(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_job_detail(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -193,7 +192,7 @@ pub async fn thinclaw_job_detail(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_job_cancel(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -223,7 +222,7 @@ pub async fn thinclaw_job_cancel(
         .context_manager()
         .update_context(parsed, |ctx| {
             ctx.transition_to(
-                ironclaw::context::JobState::Cancelled,
+                thinclaw_core::context::JobState::Cancelled,
                 Some("Cancelled by user".to_string()),
             )
         })
@@ -243,7 +242,7 @@ pub async fn thinclaw_job_cancel(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_job_restart(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -259,7 +258,7 @@ pub async fn thinclaw_job_restart(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_job_prompt(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
     content: Option<String>,
     done: Option<bool>,
@@ -279,7 +278,7 @@ pub async fn thinclaw_job_prompt(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_job_events(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -325,7 +324,7 @@ pub async fn thinclaw_job_events(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_job_files_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
     path: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -342,7 +341,7 @@ pub async fn thinclaw_job_files_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_job_file_read(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
     path: String,
 ) -> Result<serde_json::Value, String> {
@@ -359,13 +358,13 @@ pub async fn thinclaw_job_file_read(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_status(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_autonomy_status().await;
     }
 
-    ironclaw::tauri_commands::autonomy_status()
+    thinclaw_core::tauri_commands::autonomy_status()
         .await
         .and_then(|status| serde_json::to_value(status).map_err(|e| e.to_string()))
         .map_err(autonomy_unavailable)
@@ -374,13 +373,13 @@ pub async fn thinclaw_autonomy_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_bootstrap(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.bootstrap_autonomy().await;
     }
 
-    ironclaw::tauri_commands::autonomy_bootstrap()
+    thinclaw_core::tauri_commands::autonomy_bootstrap()
         .await
         .and_then(|report| serde_json::to_value(report).map_err(|e| e.to_string()))
         .map_err(autonomy_unavailable)
@@ -389,14 +388,14 @@ pub async fn thinclaw_autonomy_bootstrap(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_pause(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     reason: Option<String>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.pause_autonomy(reason).await;
     }
 
-    ironclaw::tauri_commands::autonomy_pause(reason)
+    thinclaw_core::tauri_commands::autonomy_pause(reason)
         .await
         .map_err(autonomy_unavailable)
 }
@@ -404,13 +403,13 @@ pub async fn thinclaw_autonomy_pause(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_resume(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.resume_autonomy().await;
     }
 
-    ironclaw::tauri_commands::autonomy_resume()
+    thinclaw_core::tauri_commands::autonomy_resume()
         .await
         .map_err(autonomy_unavailable)
 }
@@ -418,13 +417,13 @@ pub async fn thinclaw_autonomy_resume(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_permissions(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_autonomy_permissions().await;
     }
 
-    ironclaw::tauri_commands::desktop_permission_status()
+    thinclaw_core::tauri_commands::desktop_permission_status()
         .await
         .map_err(autonomy_unavailable)
 }
@@ -432,7 +431,7 @@ pub async fn thinclaw_autonomy_permissions(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_desktop_permission_status(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     thinclaw_autonomy_permissions(ironclaw).await
 }
@@ -440,13 +439,13 @@ pub async fn thinclaw_desktop_permission_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_rollback(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.rollback_autonomy().await;
     }
 
-    ironclaw::tauri_commands::autonomy_rollback()
+    thinclaw_core::tauri_commands::autonomy_rollback()
         .await
         .map_err(autonomy_unavailable)
 }
@@ -454,13 +453,13 @@ pub async fn thinclaw_autonomy_rollback(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_rollouts(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_autonomy_rollouts().await;
     }
 
-    let Some(manager) = ironclaw::desktop_autonomy::desktop_autonomy_manager() else {
+    let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
         return Err(autonomy_unavailable(
             "desktop autonomy manager is not active",
         ));
@@ -475,13 +474,13 @@ pub async fn thinclaw_autonomy_rollouts(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_checks(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_autonomy_checks().await;
     }
 
-    let Some(manager) = ironclaw::desktop_autonomy::desktop_autonomy_manager() else {
+    let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
         return Err(autonomy_unavailable(
             "desktop autonomy manager is not active",
         ));
@@ -496,13 +495,13 @@ pub async fn thinclaw_autonomy_checks(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_evidence(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_autonomy_evidence().await;
     }
 
-    let Some(manager) = ironclaw::desktop_autonomy::desktop_autonomy_manager() else {
+    let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
         return Err(autonomy_unavailable(
             "desktop autonomy manager is not active",
         ));

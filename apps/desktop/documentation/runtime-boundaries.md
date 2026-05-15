@@ -86,7 +86,7 @@ Primary backend ownership:
 Runtime model:
 
 - Local mode embeds the root ThinClaw runtime in-process through
-  `IronClawState` and `IronClawInner`.
+  `ThinClawRuntimeState` and `ThinClawRuntimeInner`.
 - Remote mode talks to a remote ThinClaw HTTP gateway through
   `RemoteGatewayProxy`.
 - The frontend invokes stable `thinclaw_*` Tauri commands in both modes.

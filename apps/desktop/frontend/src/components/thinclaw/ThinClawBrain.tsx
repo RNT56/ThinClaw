@@ -55,7 +55,7 @@ function fileIcon(path: string) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// DB Files Tab (IronClaw workspace DB)
+// DB Files Tab (ThinClaw workspace DB)
 // ───────────────────────────────────────────────────────────────────────────────
 
 /** Core seeded files that cannot be deleted — only cleared. */

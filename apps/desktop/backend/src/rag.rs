@@ -26,7 +26,7 @@ struct EmbeddingData {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn upload_document(
+pub async fn direct_rag_upload_document(
     _app: tauri::AppHandle,
     file_store: tauri::State<'_, crate::file_store::FileStore>,
     file_bytes: Vec<u8>,
@@ -314,7 +314,7 @@ pub async fn extract_document_content(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn ingest_document(
+pub async fn direct_rag_ingest_document(
     app: AppHandle,
     sidecar: State<'_, SidecarManager>,
     pool: State<'_, SqlitePool>,
@@ -326,7 +326,7 @@ pub async fn ingest_document(
     embedding_model_path: Option<String>,
 ) -> Result<String, String> {
     println!(
-        "[rag] ingest_document: start for {}, chat_id={:?}, project_id={:?}",
+        "[rag] direct_rag_ingest_document: start for {}, chat_id={:?}, project_id={:?}",
         &file_path, chat_id, project_id
     );
 
@@ -660,7 +660,7 @@ pub async fn ingest_document(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn retrieve_context(
+pub async fn direct_rag_retrieve_context(
     app: tauri::AppHandle,
     sidecar: State<'_, SidecarManager>,
     pool: State<'_, SqlitePool>,
@@ -1184,7 +1184,7 @@ pub async fn perform_integrity_check(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn check_vector_index_integrity(
+pub async fn direct_rag_check_vector_index_integrity(
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
 ) -> Result<String, String> {

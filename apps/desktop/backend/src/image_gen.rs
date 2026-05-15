@@ -801,7 +801,7 @@ async fn run_inference(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn generate_image(
+pub async fn direct_media_generate_image(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     config: State<'_, ConfigManager>,

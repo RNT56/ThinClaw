@@ -323,7 +323,7 @@ export function ThinClawChannels() {
     const handleGmailConnect = async () => {
         setGmailConnecting(true);
         try {
-            // Use IronClaw's PKCE flow — opens browser, binds callback, exchanges tokens automatically
+            // Use ThinClaw's PKCE flow — opens browser, binds callback, exchanges tokens automatically
             const result = await thinclaw.startGmailOAuth();
             if (result.success) {
                 setGmailConnected(true);

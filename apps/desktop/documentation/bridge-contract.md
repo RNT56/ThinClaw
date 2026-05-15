@@ -24,7 +24,7 @@ Related docs:
 
 ### Local Mode
 
-Desktop runs ThinClaw in-process through `IronClawState` and `IronClawInner`.
+Desktop runs ThinClaw in-process through `ThinClawRuntimeState` and `ThinClawRuntimeInner`.
 
 - The frontend invokes stable Tauri commands.
 - Chat messages are injected into ThinClaw through `TauriChannel`.
@@ -48,8 +48,8 @@ Desktop talks to a remote ThinClaw gateway through `RemoteGatewayProxy`.
 - Event bus: `thinclaw-event`
 - Rust schema: `apps/desktop/backend/src/thinclaw/ui_types.rs`
 - Generated TS type: `apps/desktop/frontend/src/lib/bindings.ts`
-- Local conversion: `apps/desktop/backend/src/thinclaw/ironclaw_types.rs`
-- Local transport: `apps/desktop/backend/src/thinclaw/ironclaw_channel.rs`
+- Local conversion: `apps/desktop/backend/src/thinclaw/event_mapping.rs`
+- Local transport: `apps/desktop/backend/src/thinclaw/tauri_channel.rs`
 - Remote transport: `apps/desktop/backend/src/thinclaw/remote_proxy.rs`
 
 Every current ThinClaw `StatusUpdate` variant must be either mapped to `UiEvent` or explicitly documented as intentionally ignored. As of this checkpoint, Desktop maps chat, plan, usage, cost, lifecycle, approval, auth, canvas, job, subagent, agent-message, and routine events. Unknown remote gateway SSE events are forwarded as `UiEvent::GatewayEvent` instead of being silently dropped.

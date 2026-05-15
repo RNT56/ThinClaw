@@ -31,7 +31,6 @@ pub mod chat;
 pub mod diffusion;
 pub mod embedding;
 pub mod model_discovery;
-pub mod provider_endpoints;
 pub mod router;
 pub mod stt;
 pub mod tts;
@@ -232,7 +231,7 @@ pub struct ModalityBackends {
 /// Returns the active and available backends for all 5 modalities.
 #[tauri::command]
 #[specta::specta]
-pub async fn get_inference_backends(
+pub async fn direct_inference_get_backends(
     router: tauri::State<'_, InferenceRouter>,
 ) -> Result<Vec<ModalityBackends>, String> {
     let active_list = router.active_backends().await;
@@ -256,7 +255,7 @@ pub async fn get_inference_backends(
 /// providers) or mark local backends for deferred construction.
 #[tauri::command]
 #[specta::specta]
-pub async fn update_inference_backend(
+pub async fn direct_inference_update_backend(
     app: tauri::AppHandle,
     router: tauri::State<'_, InferenceRouter>,
     config_manager: tauri::State<'_, crate::config::ConfigManager>,
@@ -442,6 +441,7 @@ fn remote_model_option_to_entry(
         supports_vision: false,
         supports_tools: false,
         supports_streaming: true,
+        capabilities: Default::default(),
         deprecated: false,
         pricing: None,
         embedding_dimensions: None,
@@ -489,8 +489,8 @@ async fn remote_discover_cloud_models(
 /// Pass an empty `providers` array to discover from ALL providers with keys.
 #[tauri::command]
 #[specta::specta]
-pub async fn discover_cloud_models(
-    ironclaw: tauri::State<'_, crate::thinclaw::ironclaw_bridge::IronClawState>,
+pub async fn direct_inference_discover_cloud_models(
+    ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
     registry: tauri::State<'_, CloudModelRegistry>,
     providers: Vec<String>,
 ) -> Result<model_discovery::types::DiscoveryResult, String> {
@@ -519,8 +519,8 @@ pub async fn discover_cloud_models(
 /// Refresh models for a single provider (bypasses cache).
 #[tauri::command]
 #[specta::specta]
-pub async fn refresh_cloud_models(
-    ironclaw: tauri::State<'_, crate::thinclaw::ironclaw_bridge::IronClawState>,
+pub async fn direct_inference_refresh_cloud_models(
+    ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
     registry: tauri::State<'_, CloudModelRegistry>,
     provider: String,
 ) -> Result<model_discovery::types::ProviderDiscoveryResult, String> {

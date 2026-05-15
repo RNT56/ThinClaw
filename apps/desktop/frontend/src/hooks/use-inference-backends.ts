@@ -35,16 +35,26 @@ export function useInferenceBackends() {
         stt: null,
         diffusion: null,
     });
+    const [available, setAvailable] = useState<Record<Modality, BackendInfo[]>>({
+        chat: [],
+        embedding: [],
+        tts: [],
+        stt: [],
+        diffusion: [],
+    });
     const [loaded, setLoaded] = useState(false);
 
     const load = useCallback(async () => {
         try {
-            const data = await invoke<ModalityBackends[]>("get_inference_backends");
+            const data = await invoke<ModalityBackends[]>("direct_inference_get_backends");
             const map: Record<string, BackendInfo | null> = {};
+            const availableMap: Record<string, BackendInfo[]> = {};
             for (const mb of data) {
                 map[mb.modality] = mb.active;
+                availableMap[mb.modality] = mb.available;
             }
             setBackends(map as Record<Modality, BackendInfo | null>);
+            setAvailable(availableMap as Record<Modality, BackendInfo[]>);
             setLoaded(true);
         } catch (e) {
             // InferenceRouter may not be initialized yet — that's fine
@@ -59,6 +69,8 @@ export function useInferenceBackends() {
     return {
         /** Active backend for each modality (null = not configured). */
         backends,
+        /** Available backend options for each modality. */
+        available,
         /** Whether the data has been loaded at least once. */
         loaded,
         /** Re-fetch backend status. */

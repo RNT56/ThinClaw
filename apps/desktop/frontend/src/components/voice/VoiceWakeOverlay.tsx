@@ -39,7 +39,7 @@ export function VoiceWakeOverlay() {
             const arrayBuffer = await blob.arrayBuffer();
             const audioBytes = Array.from(new Uint8Array(arrayBuffer));
 
-            const res = await commands.transcribeAudio(audioBytes);
+            const res = await commands.directMediaTranscribeAudio(audioBytes);
 
             if (res.status === 'error') {
                 toast.error('Transcription failed', { description: res.error });

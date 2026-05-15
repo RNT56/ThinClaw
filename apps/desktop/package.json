@@ -21,7 +21,7 @@
     "tauri:build:ollama": "bash scripts/generate_tauri_overrides.sh ollama && tauri build --config backend/tauri.override.json -- --no-default-features --features ollama",
     "tauri:build:cloud": "bash scripts/generate_tauri_overrides.sh none && tauri build --config backend/tauri.override.json -- --no-default-features",
     "tauri:build:cloud:unsigned": "DISABLE_UPDATER_ARTIFACTS=1 bash scripts/generate_tauri_overrides.sh none && tauri build --config backend/tauri.override.json -- --no-default-features",
-    "validate:packaging": "bash scripts/validate_packaging_readiness.sh",
+    "validate:packaging": "npm run validate:naming && bash scripts/validate_packaging_readiness.sh",
     "test": "cd frontend && vitest run",
     "test:watch": "cd frontend && vitest",
     "test:ui": "cd frontend && vitest --ui",
@@ -38,7 +38,8 @@
     "lint:ts": "cd frontend && tsc --noEmit",
     "lint:all": "npm run lint:fmt && npm run lint:thinclaw && npm run lint:ts",
     "test:thinclaw": "cd ../.. && cargo test --workspace",
-    "ci": "npm run lint:all && npm run test:thinclaw"
+    "ci": "npm run lint:all && npm run test:thinclaw",
+    "validate:naming": "node scripts/check-naming-cleanliness.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

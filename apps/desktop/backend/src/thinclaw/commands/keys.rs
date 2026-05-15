@@ -10,17 +10,17 @@ use tracing::{error, info};
 use super::super::config::*;
 use super::remote_provider_config::{apply_remote_selected_brain, normalize_provider_slug};
 use super::types::*;
-// ws_rpc removed — IronClaw is in-process, no remote WS gateway
+// ws_rpc removed — ThinClaw is in-process, no remote WS gateway
 use super::ThinClawManager;
 use crate::sidecar::SidecarManager;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
-async fn remote_secret_reads_are_opaque(ironclaw: &IronClawState) -> bool {
+async fn remote_secret_reads_are_opaque(ironclaw: &ThinClawRuntimeState) -> bool {
     ironclaw.remote_proxy().await.is_some()
 }
 
 async fn save_remote_provider_key_if_needed(
-    ironclaw: &IronClawState,
+    ironclaw: &ThinClawRuntimeState,
     provider_slug: &str,
     key: Option<&str>,
 ) -> Result<bool, String> {
@@ -49,7 +49,7 @@ async fn save_remote_provider_key_if_needed(
 #[specta::specta]
 pub async fn thinclaw_get_openai_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Option<String>, String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
@@ -63,7 +63,7 @@ pub async fn thinclaw_get_openai_key(
 #[specta::specta]
 pub async fn thinclaw_save_openai_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "openai", key.as_deref()).await? {
@@ -106,7 +106,7 @@ pub async fn thinclaw_save_openai_key(
 #[specta::specta]
 pub async fn thinclaw_get_openrouter_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Option<String>, String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
@@ -120,7 +120,7 @@ pub async fn thinclaw_get_openrouter_key(
 #[specta::specta]
 pub async fn thinclaw_save_openrouter_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "openrouter", key.as_deref()).await? {
@@ -162,7 +162,7 @@ pub async fn thinclaw_save_openrouter_key(
 #[specta::specta]
 pub async fn thinclaw_get_gemini_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Option<String>, String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
@@ -176,7 +176,7 @@ pub async fn thinclaw_get_gemini_key(
 #[specta::specta]
 pub async fn thinclaw_save_gemini_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "gemini", key.as_deref()).await? {
@@ -219,7 +219,7 @@ pub async fn thinclaw_save_gemini_key(
 #[specta::specta]
 pub async fn thinclaw_get_groq_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Option<String>, String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
@@ -233,7 +233,7 @@ pub async fn thinclaw_get_groq_key(
 #[specta::specta]
 pub async fn thinclaw_save_groq_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "groq", key.as_deref()).await? {
@@ -276,7 +276,7 @@ pub async fn thinclaw_save_groq_key(
 #[specta::specta]
 pub async fn thinclaw_get_anthropic_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Option<String>, String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
@@ -290,7 +290,7 @@ pub async fn thinclaw_get_anthropic_key(
 #[specta::specta]
 pub async fn thinclaw_get_brave_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Option<String>, String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
@@ -304,7 +304,7 @@ pub async fn thinclaw_get_brave_key(
 #[specta::specta]
 pub async fn thinclaw_save_anthropic_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "anthropic", key.as_deref()).await? {
@@ -317,7 +317,7 @@ pub async fn thinclaw_save_anthropic_key(
         state.init_config().await?
     };
 
-    // Remote WS gateway path removed — IronClaw is in-process
+    // Remote WS gateway path removed — ThinClaw is in-process
 
     println!(
         "[thinclaw] save_anthropic_key called with: {:?}",
@@ -358,7 +358,7 @@ pub async fn thinclaw_save_anthropic_key(
 #[specta::specta]
 pub async fn thinclaw_save_brave_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
 ) -> Result<(), String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
@@ -374,7 +374,7 @@ pub async fn thinclaw_save_brave_key(
         state.init_config().await?
     };
 
-    // Remote WS gateway path removed — IronClaw is in-process
+    // Remote WS gateway path removed — ThinClaw is in-process
 
     println!(
         "[thinclaw] save_brave_key called with: {:?}",
@@ -420,7 +420,7 @@ pub async fn thinclaw_toggle_secret_access(
         state.init_config().await?
     };
 
-    // Remote WS gateway path removed — IronClaw is in-process
+    // Remote WS gateway path removed — ThinClaw is in-process
 
     let result = cfg.toggle_secret_access(&secret, granted);
 
@@ -453,7 +453,7 @@ pub async fn thinclaw_toggle_secret_access(
 #[specta::specta]
 pub async fn select_thinclaw_brain(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     brain: Option<String>,
 ) -> Result<(), String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -504,7 +504,7 @@ pub async fn select_thinclaw_brain(
 #[specta::specta]
 pub async fn thinclaw_set_hf_token(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     token: String,
 ) -> Result<(), String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
@@ -567,7 +567,7 @@ pub async fn thinclaw_set_hf_token(
 #[specta::specta]
 pub async fn thinclaw_save_implicit_provider_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     provider: String,
     key: String,
 ) -> Result<(), String> {
@@ -662,7 +662,7 @@ pub async fn thinclaw_save_implicit_provider_key(
 #[specta::specta]
 pub async fn thinclaw_get_implicit_provider_key(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     provider: String,
 ) -> Result<Option<String>, String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
@@ -677,7 +677,7 @@ pub async fn thinclaw_get_implicit_provider_key(
 #[specta::specta]
 pub async fn thinclaw_save_bedrock_credentials(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     access_key_id: String,
     secret_access_key: String,
     region: String,
@@ -766,7 +766,7 @@ pub async fn thinclaw_save_bedrock_credentials(
 #[specta::specta]
 pub async fn thinclaw_get_bedrock_credentials(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<(Option<String>, Option<String>, Option<String>), String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok((None, None, None));

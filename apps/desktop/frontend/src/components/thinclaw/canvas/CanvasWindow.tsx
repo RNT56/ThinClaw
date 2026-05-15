@@ -2,7 +2,7 @@
  * CanvasWindow — renders Canvas/A2UI panels.
  *
  * Supports two modes:
- * 1. **A2UI panels** — native rendering of IronClaw CanvasAction payloads via CanvasPanelRenderer
+ * 1. **A2UI panels** — native rendering of ThinClaw CanvasAction payloads via CanvasPanelRenderer
  * 2. **Legacy content** — iframe-based HTML/URL rendering (backward compat)
  *
  * Panels are draggable, resizable, and support floating/docked/center/modal positions.

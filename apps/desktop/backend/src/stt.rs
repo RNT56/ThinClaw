@@ -13,7 +13,7 @@ use tempfile::NamedTempFile;
 
 #[tauri::command]
 #[specta::specta]
-pub async fn transcribe_audio(
+pub async fn direct_media_transcribe_audio(
     #[allow(unused_variables)] app: AppHandle,
     state: State<'_, SidecarManager>,
     router: State<'_, InferenceRouter>,

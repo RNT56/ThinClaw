@@ -48,6 +48,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
                 supports_vision: false,
                 supports_tools: false,
                 supports_streaming: false,
+                capabilities: Default::default(),
                 deprecated: false,
                 pricing: Some(ModelPricing {
                     per_image: Some(0.04), // ~$0.04 per image for SDXL

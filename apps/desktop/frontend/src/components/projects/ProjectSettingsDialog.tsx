@@ -72,12 +72,12 @@ export function ProjectSettingsDialog({
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const upRes = await commands.uploadDocument(bytes, file.name);
+                    const upRes = await commands.directRagUploadDocument(bytes, file.name);
                     const savedPath = unwrap(upRes);
 
                     toast.loading(`Indexing ${file.name}...`, { id: toastId });
                     // Pass embedding model path — backend auto-starts server if needed
-                    const ingestRes = await commands.ingestDocument(savedPath, null, projectId, currentEmbeddingModelPath || null);
+                    const ingestRes = await commands.directRagIngestDocument(savedPath, null, projectId, currentEmbeddingModelPath || null);
                     unwrap(ingestRes);
 
                     toast.success("Added to Knowledge Base", { id: toastId });

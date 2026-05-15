@@ -20,7 +20,7 @@ use std::process::Stdio;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-/// Deploy the IronClaw remote agent to a Linux server via SSH + Docker Compose.
+/// Deploy the ThinClaw remote agent to a Linux server via SSH + Docker Compose.
 ///
 /// Accepts the SSH host, user, and optional configuration for Tailscale VPN
 /// and systemd service. Emits live `deploy-log` events and a final

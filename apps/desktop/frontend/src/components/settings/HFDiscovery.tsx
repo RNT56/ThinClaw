@@ -244,7 +244,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
     // Fallback engine info load if context doesn't have it yet
     useEffect(() => {
         if (!contextEngineInfo) {
-            invoke<EngineInfo>("get_active_engine_info")
+            invoke<EngineInfo>("direct_runtime_get_active_engine_info")
                 .then(setLocalEngineInfo)
                 .catch((err) => console.error("Failed to get engine info:", err));
         }

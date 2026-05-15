@@ -1,11 +1,11 @@
-//! Keychain-backed SecretsStore adapter for IronClaw.
+//! Keychain-backed SecretsStore adapter for ThinClaw.
 //!
 //! Bridges ThinClaw Desktop's macOS Keychain (`keychain::get_key()` / `set_key()`) to
-//! ThinClaw's `ironclaw::secrets::SecretsStore` trait.
+//! ThinClaw's `thinclaw_core::secrets::SecretsStore` trait.
 //!
 //! ## Secret policy mapping
 //!
-//! IronClaw looks up secrets by ThinClaw secret names like
+//! ThinClaw looks up secrets by ThinClaw secret names like
 //! `"llm_anthropic_api_key"`, while ThinClaw Desktop stores provider slugs like
 //! `"anthropic"` in Keychain. `SECRET_POLICIES` is the single compatibility
 //! table for secret names, provider slugs, env vars, Keychain keys, and grants.
@@ -23,7 +23,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock, RwLock};
 use uuid::Uuid;
 
-use ironclaw::secrets::{
+use thinclaw_core::secrets::{
     CreateSecretParams, DecryptedSecret, MasterKeyRotationReport, Secret, SecretAccessContext,
     SecretError, SecretRef, SecretsCrypto, SecretsStore,
 };
@@ -412,7 +412,7 @@ fn secret_name_allowed_by_patterns(secret_name: &str, allowed_secrets: &[String]
 ///
 /// Key values live in the keychain module's global `Mutex<HashMap>` cache.
 /// Grant flags are snapshotted from `ThinClawConfig` when the adapter is
-/// created so stale or denied secrets cannot be returned to IronClaw.
+/// created so stale or denied secrets cannot be returned to ThinClaw.
 pub struct KeychainSecretsAdapter {
     grants: Option<SecretGrantSnapshot>,
 }

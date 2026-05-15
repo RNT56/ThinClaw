@@ -129,7 +129,7 @@ async fn generate_with_cloud_backend(
 ///   - `"local"` / anything else → local sd.cpp / mflux sidecar
 #[tauri::command]
 #[specta::specta]
-pub async fn imagine_generate(
+pub async fn direct_imagine_generate(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
     sidecar: State<'_, SidecarManager>,
@@ -176,7 +176,7 @@ pub async fn imagine_generate(
                 sampling_method: None,
             };
 
-            crate::image_gen::generate_image(
+            crate::image_gen::direct_media_generate_image(
                 app.clone(),
                 sidecar.clone(),
                 config.clone(),
@@ -192,13 +192,15 @@ pub async fn imagine_generate(
 
     sqlx::query(
         r#"
-        INSERT INTO generated_images (
-            id, prompt, style_id, provider, aspect_ratio, resolution,
-            width, height, file_path, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO direct_assets (
+            id, namespace, kind, origin, status, visibility, path,
+            prompt, style_id, provider, aspect_ratio, resolution,
+            width, height, created_at, updated_at
+        ) VALUES (?, 'direct_workbench', 'generated_image', 'generated', 'ready', 'private', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&image_id)
+    .bind(&result.path)
     .bind(&params.prompt)
     .bind(&params.style_id)
     .bind(&params.provider)
@@ -206,7 +208,7 @@ pub async fn imagine_generate(
     .bind(&params.resolution)
     .bind(width as i32)
     .bind(height as i32)
-    .bind(&result.path)
+    .bind(&created_at)
     .bind(&created_at)
     .execute(pool.inner())
     .await
@@ -233,7 +235,7 @@ pub async fn imagine_generate(
 /// List all generated images for the gallery
 #[tauri::command]
 #[specta::specta]
-pub async fn imagine_list_images(
+pub async fn direct_imagine_list_images(
     pool: State<'_, SqlitePool>,
     limit: Option<i32>,
     offset: Option<i32>,
@@ -246,19 +248,25 @@ pub async fn imagine_list_images(
     let query = if favorites_only {
         r#"
         SELECT id, prompt, style_id, provider, aspect_ratio, resolution,
-               width, height, seed, file_path, thumbnail_path, created_at,
+               width, height, seed, path AS file_path, thumbnail_path, created_at,
                is_favorite, tags
-        FROM generated_images
+        FROM direct_assets
         WHERE is_favorite = 1
+          AND namespace = 'direct_workbench'
+          AND kind = 'generated_image'
+          AND status != 'deleted'
         ORDER BY created_at DESC
         LIMIT ? OFFSET ?
         "#
     } else {
         r#"
         SELECT id, prompt, style_id, provider, aspect_ratio, resolution,
-               width, height, seed, file_path, thumbnail_path, created_at,
+               width, height, seed, path AS file_path, thumbnail_path, created_at,
                is_favorite, tags
-        FROM generated_images
+        FROM direct_assets
+        WHERE namespace = 'direct_workbench'
+          AND kind = 'generated_image'
+          AND status != 'deleted'
         ORDER BY created_at DESC
         LIMIT ? OFFSET ?
         "#
@@ -313,7 +321,7 @@ pub async fn imagine_list_images(
 /// Search generated images by prompt
 #[tauri::command]
 #[specta::specta]
-pub async fn imagine_search_images(
+pub async fn direct_imagine_search_images(
     pool: State<'_, SqlitePool>,
     query: String,
 ) -> Result<Vec<GeneratedImage>, String> {
@@ -340,10 +348,13 @@ pub async fn imagine_search_images(
     >(
         r#"
         SELECT id, prompt, style_id, provider, aspect_ratio, resolution,
-               width, height, seed, file_path, thumbnail_path, created_at,
+               width, height, seed, path AS file_path, thumbnail_path, created_at,
                is_favorite, tags
-        FROM generated_images
-        WHERE prompt LIKE ? OR tags LIKE ?
+        FROM direct_assets
+        WHERE namespace = 'direct_workbench'
+          AND kind = 'generated_image'
+          AND status != 'deleted'
+          AND (prompt LIKE ? OR tags LIKE ?)
         ORDER BY created_at DESC
         LIMIT 100
         "#,
@@ -378,13 +389,13 @@ pub async fn imagine_search_images(
 /// Toggle favorite status for an image
 #[tauri::command]
 #[specta::specta]
-pub async fn imagine_toggle_favorite(
+pub async fn direct_imagine_toggle_favorite(
     pool: State<'_, SqlitePool>,
     image_id: String,
 ) -> Result<bool, String> {
     // Get current status
     let current: Option<(i32,)> =
-        sqlx::query_as("SELECT is_favorite FROM generated_images WHERE id = ?")
+        sqlx::query_as("SELECT is_favorite FROM direct_assets WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
             .bind(&image_id)
             .fetch_optional(pool.inner())
             .await
@@ -397,8 +408,9 @@ pub async fn imagine_toggle_favorite(
         None => return Err("Image not found".to_string()),
     };
 
-    sqlx::query("UPDATE generated_images SET is_favorite = ? WHERE id = ?")
+    sqlx::query("UPDATE direct_assets SET is_favorite = ?, updated_at = ? WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image'")
         .bind(new_status)
+        .bind(chrono::Utc::now().to_rfc3339())
         .bind(&image_id)
         .execute(pool.inner())
         .await
@@ -410,14 +422,14 @@ pub async fn imagine_toggle_favorite(
 /// Delete a generated image
 #[tauri::command]
 #[specta::specta]
-pub async fn imagine_delete_image(
+pub async fn direct_imagine_delete_image(
     _app: AppHandle,
     pool: State<'_, SqlitePool>,
     image_id: String,
 ) -> Result<(), String> {
     // Get file path first
     let row: Option<(String,)> =
-        sqlx::query_as("SELECT file_path FROM generated_images WHERE id = ?")
+        sqlx::query_as("SELECT path FROM direct_assets WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image'")
             .bind(&image_id)
             .fetch_optional(pool.inner())
             .await
@@ -429,7 +441,8 @@ pub async fn imagine_delete_image(
         let _ = tokio::fs::remove_file(file_path_buf).await;
 
         // Delete from database
-        sqlx::query("DELETE FROM generated_images WHERE id = ?")
+        sqlx::query("UPDATE direct_assets SET status = 'deleted', updated_at = ? WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image'")
+            .bind(chrono::Utc::now().to_rfc3339())
             .bind(&image_id)
             .execute(pool.inner())
             .await
@@ -442,20 +455,22 @@ pub async fn imagine_delete_image(
 /// Get image count and stats
 #[tauri::command]
 #[specta::specta]
-pub async fn imagine_get_stats(pool: State<'_, SqlitePool>) -> Result<serde_json::Value, String> {
-    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM generated_images")
+pub async fn direct_imagine_get_stats(
+    pool: State<'_, SqlitePool>,
+) -> Result<serde_json::Value, String> {
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM direct_assets WHERE namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
         .fetch_one(pool.inner())
         .await
         .map_err(|e| format!("Failed to get count: {}", e))?;
 
     let favorites: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM generated_images WHERE is_favorite = 1")
+        sqlx::query_as("SELECT COUNT(*) FROM direct_assets WHERE namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted' AND is_favorite = 1")
             .fetch_one(pool.inner())
             .await
             .map_err(|e| format!("Failed to get favorites count: {}", e))?;
 
     let by_provider: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT provider, COUNT(*) FROM generated_images GROUP BY provider ORDER BY COUNT(*) DESC",
+        "SELECT provider, COUNT(*) FROM direct_assets WHERE namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted' GROUP BY provider ORDER BY COUNT(*) DESC",
     )
     .fetch_all(pool.inner())
     .await

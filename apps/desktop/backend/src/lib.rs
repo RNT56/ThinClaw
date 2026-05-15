@@ -3,11 +3,11 @@ use std::fs;
 use std::sync::OnceLock;
 
 /// Global log broadcaster — shared between the tracing subscriber (WebLogLayer)
-/// and the IronClaw bridge so all tracing::* events reach the UI Logs panel.
+/// and the ThinClaw bridge so all tracing::* events reach the UI Logs panel.
 ///
 /// Initialized once in `run()` before any threads are spawned.
 pub(crate) static GLOBAL_LOG_BROADCASTER: OnceLock<
-    Arc<ironclaw::channels::web::log_layer::LogBroadcaster>,
+    Arc<thinclaw_core::channels::web::log_layer::LogBroadcaster>,
 > = OnceLock::new();
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -259,7 +259,7 @@ fn copy_dir_contents(from: &std::path::Path, to: &std::path::Path) -> std::io::R
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // ── Tracing / Logging init ───────────────────────────────────────────
-    // IronClaw's init_tracing() installs:
+    // ThinClaw's init_tracing() installs:
     //   1. A reloadable EnvFilter (ironclaw=debug by default)
     //   2. A fmt layer writing to stderr (visible in terminal / macOS Console)
     //   3. A WebLogLayer that feeds LogBroadcaster → UI Logs tab
@@ -285,12 +285,12 @@ pub fn run() {
         }
         // Create a shared broadcaster and install the full tracing stack.
         let broadcaster =
-            std::sync::Arc::new(ironclaw::channels::web::log_layer::LogBroadcaster::new());
+            std::sync::Arc::new(thinclaw_core::channels::web::log_layer::LogBroadcaster::new());
         // Store globally so the bridge can retrieve it.
         GLOBAL_LOG_BROADCASTER
             .set(std::sync::Arc::clone(&broadcaster))
             .ok();
-        ironclaw::channels::web::log_layer::init_tracing(broadcaster, cfg!(debug_assertions));
+        thinclaw_core::channels::web::log_layer::init_tracing(broadcaster, cfg!(debug_assertions));
     });
 
     let specta_builder = setup::commands::specta_builder();
@@ -480,14 +480,14 @@ pub fn run() {
             if let Err(e) = thinclaw_state.init_config().await {
                 eprintln!("[main] Failed to init ThinClaw config: {}", e);
             } else {
-                // IronClaw is in-process — no separate gateway to auto-start
+                // ThinClaw is in-process — no separate gateway to auto-start
             }
 
-            // ── IronClaw Engine Init (async — safe now that libsql bootstrap ran) ──
+            // ── ThinClaw Engine Init (async — safe now that libsql bootstrap ran) ──
             // Pre-register the state container in "stopped" mode so all Tauri
             // commands can access it immediately. Then auto-start the engine.
             let ironclaw_state_dir = app_data_dir.clone();
-            let ironclaw_state = thinclaw::ironclaw_bridge::IronClawState::new_stopped(
+            let ironclaw_state = thinclaw::runtime_bridge::ThinClawRuntimeState::new_stopped(
                 handle.clone(),
                 ironclaw_state_dir,
             );
@@ -498,7 +498,7 @@ pub fn run() {
                 use tauri::Manager;
 
                 // ── Respect auto_start_gateway setting ───────────────────
-                // Only auto-start IronClaw if the user has explicitly enabled
+                // Only auto-start ThinClaw if the user has explicitly enabled
                 // it in Gateway Settings. When false, the user starts/stops
                 // the engine manually via the Gateway panel.
                 let should_auto_start = {
@@ -512,15 +512,15 @@ pub fn run() {
 
                 if !should_auto_start {
                     println!(
-                        "[main] IronClaw auto-start disabled (auto_start_gateway=false). \
+                        "[main] ThinClaw auto-start disabled (auto_start_gateway=false). \
                               Start manually via Gateway settings."
                     );
                     return;
                 }
 
                 // If local inference is selected but no server is running yet,
-                // wait for the engine to come online before starting IronClaw.
-                // This handles the common case where MLX boots after IronClaw init.
+                // wait for the engine to come online before starting ThinClaw.
+                // This handles the common case where MLX boots after ThinClaw init.
                 let needs_local_wait = {
                     let thinclaw_mgr = ironclaw_handle.state::<thinclaw::ThinClawManager>();
                     let oc_config = thinclaw_mgr.get_config().await;
@@ -543,7 +543,7 @@ pub fn run() {
                 };
 
                 if needs_local_wait {
-                    println!("[main] IronClaw: waiting for local inference engine (up to 45s)...");
+                    println!("[main] ThinClaw: waiting for local inference engine (up to 45s)...");
 
                     let mut engine_ready = false;
                     for attempt in 1..=90 {
@@ -553,7 +553,7 @@ pub fn run() {
                         let sidecar_mgr = ironclaw_handle.state::<sidecar::SidecarManager>();
                         if sidecar_mgr.get_chat_config().is_some() {
                             println!(
-                                "[main] IronClaw: sidecar detected after {}ms",
+                                "[main] ThinClaw: sidecar detected after {}ms",
                                 attempt * 500
                             );
                             engine_ready = true;
@@ -565,7 +565,7 @@ pub fn run() {
                         let guard = engine_mgr.engine.lock().await;
                         if let Some(eng) = guard.as_ref() {
                             if eng.is_ready().await {
-                                println!("[main] IronClaw: engine ready after {}ms", attempt * 500);
+                                println!("[main] ThinClaw: engine ready after {}ms", attempt * 500);
                                 engine_ready = true;
                                 break;
                             }
@@ -574,7 +574,7 @@ pub fn run() {
 
                     if !engine_ready {
                         eprintln!(
-                            "[main] IronClaw auto-start skipped: local inference engine \
+                            "[main] ThinClaw auto-start skipped: local inference engine \
                              did not come online within 45s. Start manually via gateway."
                         );
                         return;
@@ -583,21 +583,22 @@ pub fn run() {
 
                 // Bridge ThinClaw Desktop's macOS Keychain to ThinClaw's SecretsStore trait.
                 let secrets_store: Option<
-                    std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>,
+                    std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
                 > = Some(std::sync::Arc::new(
-                    thinclaw::ironclaw_secrets::KeychainSecretsAdapter::new(),
+                    thinclaw::secrets_adapter::KeychainSecretsAdapter::new(),
                 ));
 
-                let state = ironclaw_handle.state::<thinclaw::ironclaw_bridge::IronClawState>();
+                let state =
+                    ironclaw_handle.state::<thinclaw::runtime_bridge::ThinClawRuntimeState>();
                 match state.start(secrets_store).await {
                     Ok(true) => {
-                        println!("[main] IronClaw engine initialized successfully.");
+                        println!("[main] ThinClaw runtime initialized successfully.");
                     }
                     Ok(false) => {
-                        println!("[main] IronClaw engine was already running.");
+                        println!("[main] ThinClaw runtime was already running.");
                     }
                     Err(e) => {
-                        eprintln!("[main] IronClaw init failed (non-fatal): {}", e);
+                        eprintln!("[main] ThinClaw init failed (non-fatal): {}", e);
                     }
                 }
             });
@@ -622,9 +623,9 @@ pub fn run() {
                 api.prevent_close();
             }
             tauri::RunEvent::Exit => {
-                // Shutdown IronClaw engine gracefully
+                // Shutdown ThinClaw runtime gracefully
                 if let Some(state) =
-                    _app_handle.try_state::<thinclaw::ironclaw_bridge::IronClawState>()
+                    _app_handle.try_state::<thinclaw::runtime_bridge::ThinClawRuntimeState>()
                 {
                     tauri::async_runtime::block_on(state.shutdown());
                 }

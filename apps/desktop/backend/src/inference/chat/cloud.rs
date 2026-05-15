@@ -1,17 +1,17 @@
 //! Cloud chat backend — wraps the existing UnifiedProvider.
 
 use crate::inference::chat::{ChatBackend, ChatEvent, ChatMessage, ChatRequest, ChatRole};
-use crate::inference::provider_endpoints::ProviderEndpoint;
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use crate::rig_lib::unified_provider::{ProviderEvent, ProviderKind, UnifiedProvider};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
+use thinclaw_runtime_contracts::{ApiStyle, ProviderEndpoint};
 
 /// Cloud chat backend for any supported provider.
 ///
 /// Wraps `UnifiedProvider` with the appropriate API key and base URL,
-/// looked up from `provider_endpoints::PROVIDER_ENDPOINTS`.
+/// looked up from the shared provider catalog.
 pub struct CloudChatBackend {
     /// Provider keychain slug (e.g. "anthropic", "openai").
     pub provider_id: String,
@@ -26,7 +26,7 @@ pub struct CloudChatBackend {
     /// Context window size.
     pub context_size: u32,
     /// API compatibility mode.
-    pub api_compat: crate::inference::provider_endpoints::ApiCompat,
+    pub api_style: ApiStyle,
 }
 
 impl CloudChatBackend {
@@ -45,19 +45,17 @@ impl CloudChatBackend {
             display_name: endpoint.display_name.to_string(),
             model_name: model_override.unwrap_or_else(|| endpoint.default_model.to_string()),
             context_size: context_size_override.unwrap_or(endpoint.default_context_size),
-            api_compat: endpoint.api_compat,
+            api_style: endpoint.api_style,
         }
     }
 
-    /// Map our ApiCompat to UnifiedProvider's ProviderKind.
+    /// Map shared ApiStyle to UnifiedProvider's ProviderKind.
     fn provider_kind(&self) -> ProviderKind {
-        use crate::inference::provider_endpoints::ApiCompat;
-        match self.api_compat {
-            ApiCompat::OpenAi => ProviderKind::OpenAI,
-            ApiCompat::Anthropic => ProviderKind::Anthropic,
-            ApiCompat::Gemini => ProviderKind::Gemini,
-            ApiCompat::Cohere => ProviderKind::OpenAI, // Cohere uses OpenAI-compat endpoint
-            ApiCompat::Bedrock => ProviderKind::OpenAI, // Bedrock passthrough
+        match self.api_style {
+            ApiStyle::OpenAi => ProviderKind::OpenAI,
+            ApiStyle::Anthropic => ProviderKind::Anthropic,
+            ApiStyle::OpenAiCompatible => ProviderKind::OpenAI,
+            ApiStyle::Ollama => ProviderKind::OpenAI,
         }
     }
 

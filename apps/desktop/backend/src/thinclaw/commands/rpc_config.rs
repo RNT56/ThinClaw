@@ -7,8 +7,8 @@ use tracing::info;
 
 use super::remote_provider_config::{apply_remote_cloud_config, apply_remote_selected_cloud_model};
 use super::ThinClawManager;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
 use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 // ============================================================================
 // Config commands
@@ -17,7 +17,7 @@ use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_config_schema(
-    _ironclaw: State<'_, IronClawState>,
+    _ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     // Config schema is static — return a minimal schema for the UI
     Ok(serde_json::json!({
@@ -33,7 +33,7 @@ pub async fn thinclaw_config_schema(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_config_get(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.list_settings().await;
@@ -41,7 +41,7 @@ pub async fn thinclaw_config_get(
 
     let agent = ironclaw.agent().await?;
     if let Some(store) = agent.store() {
-        let resp = ironclaw::api::config::list_settings(store, "local_user")
+        let resp = thinclaw_core::api::config::list_settings(store, "local_user")
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -53,7 +53,7 @@ pub async fn thinclaw_config_get(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_config_set(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: String,
     value: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -65,7 +65,7 @@ pub async fn thinclaw_config_set(
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
-    ironclaw::api::config::set_setting(store, "local_user", &key, &value)
+    thinclaw_core::api::config::set_setting(store, "local_user", &key, &value)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -75,7 +75,7 @@ pub async fn thinclaw_config_set(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_config_patch(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     patch: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -92,7 +92,7 @@ pub async fn thinclaw_config_patch(
 
     if let Some(obj) = patch.as_object() {
         for (key, value) in obj {
-            ironclaw::api::config::set_setting(store, "local_user", key, value)
+            thinclaw_core::api::config::set_setting(store, "local_user", key, value)
                 .await
                 .map_err(|e| e.to_string())?;
         }
@@ -193,7 +193,7 @@ pub async fn thinclaw_set_dev_mode_wizard(
 #[specta::specta]
 pub async fn thinclaw_set_autonomy_mode(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     enabled: bool,
 ) -> Result<(), String> {
     if ironclaw.remote_proxy().await.is_some() {
@@ -220,7 +220,7 @@ pub async fn thinclaw_set_autonomy_mode(
     );
 
     info!(
-        "[ironclaw] Autonomy mode set to: {}",
+        "[thinclaw-runtime] Autonomy mode set to: {}",
         if enabled {
             "autonomous"
         } else {
@@ -236,7 +236,7 @@ pub async fn thinclaw_set_autonomy_mode(
 #[specta::specta]
 pub async fn thinclaw_get_autonomy_mode(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<bool, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_autonomy_status().await?;
@@ -273,7 +273,7 @@ pub async fn thinclaw_set_bootstrap_completed(
     *state.config.write().await = Some(cfg);
 
     info!(
-        "[ironclaw] Bootstrap ritual marked as: {}",
+        "[thinclaw-runtime] Bootstrap ritual marked as: {}",
         if completed { "completed" } else { "pending" }
     );
     Ok(())
@@ -292,7 +292,7 @@ pub async fn thinclaw_set_bootstrap_completed(
 #[specta::specta]
 pub async fn thinclaw_check_bootstrap_needed(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<bool, String> {
     let cfg = state.get_config().await;
     let already_done = cfg.as_ref().map(|c| c.bootstrap_completed).unwrap_or(false);
@@ -309,14 +309,15 @@ pub async fn thinclaw_check_bootstrap_needed(
     match ironclaw.agent().await {
         Ok(agent) => {
             if let Some(workspace) = agent.workspace() {
-                let bootstrap_exists = ironclaw::api::memory::get_file(workspace, "BOOTSTRAP.md")
-                    .await
-                    .map(|r| !r.content.trim().is_empty())
-                    .unwrap_or(false);
+                let bootstrap_exists =
+                    thinclaw_core::api::memory::get_file(workspace, "BOOTSTRAP.md")
+                        .await
+                        .map(|r| !r.content.trim().is_empty())
+                        .unwrap_or(false);
 
                 if !bootstrap_exists {
                     tracing::info!(
-                        "[ironclaw] BOOTSTRAP.md not found in workspace — \
+                        "[thinclaw-runtime] BOOTSTRAP.md not found in workspace — \
                          auto-healing bootstrap_completed flag to true"
                     );
                     // Persist the healed state
@@ -338,7 +339,7 @@ pub async fn thinclaw_check_bootstrap_needed(
             // "Trigger Boot Sequence" after a factory reset even before the
             // engine has fully initialized.
             tracing::debug!(
-                "[ironclaw] Agent not available yet for bootstrap check, \
+                "[thinclaw-runtime] Agent not available yet for bootstrap check, \
                  trusting identity.json (bootstrap_completed=false → needed)"
             );
             return Ok(true);
@@ -365,7 +366,7 @@ pub async fn thinclaw_trigger_bootstrap(state: State<'_, ThinClawManager>) -> Re
         .map_err(|e| e.to_string())?;
     *state.config.write().await = Some(cfg);
 
-    info!("[ironclaw] Bootstrap ritual re-triggered");
+    info!("[thinclaw-runtime] Bootstrap ritual re-triggered");
     Ok(())
 }
 
@@ -376,7 +377,7 @@ pub async fn thinclaw_trigger_bootstrap(state: State<'_, ThinClawManager>) -> Re
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_system_presence(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
@@ -484,7 +485,7 @@ pub async fn thinclaw_system_presence(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_logs_tail(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     limit: u32,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -554,7 +555,7 @@ pub async fn thinclaw_logs_tail(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_update_run(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if ironclaw.remote_proxy().await.is_some() {
         return Ok(serde_json::json!({
@@ -565,7 +566,7 @@ pub async fn thinclaw_update_run(
     }
 
     // Alpha compatibility IPC: the public command name remains for existing
-    // frontend callers, but embedded IronClaw has no separate updater process.
+    // frontend callers, but embedded ThinClaw has no separate updater process.
     Ok(serde_json::json!({ "status": "embedded", "update_available": false }))
 }
 
@@ -574,7 +575,7 @@ pub async fn thinclaw_update_run(
 pub async fn thinclaw_web_login_whatsapp(
     _state: State<'_, ThinClawManager>,
 ) -> Result<serde_json::Value, String> {
-    // WhatsApp web login not supported in IronClaw desktop mode
+    // WhatsApp web login not supported in ThinClaw desktop mode
     Err("WhatsApp web login is not available in desktop mode".into())
 }
 
@@ -583,7 +584,7 @@ pub async fn thinclaw_web_login_whatsapp(
 pub async fn thinclaw_web_login_telegram(
     _state: State<'_, ThinClawManager>,
 ) -> Result<serde_json::Value, String> {
-    // Telegram web login not supported in IronClaw desktop mode
+    // Telegram web login not supported in ThinClaw desktop mode
     Err("Telegram web login is not available in desktop mode".into())
 }
 
@@ -596,7 +597,7 @@ pub async fn thinclaw_web_login_telegram(
 #[specta::specta]
 pub async fn thinclaw_save_selected_cloud_model(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     model: Option<String>,
 ) -> Result<(), String> {
     let remote_mode = ironclaw.remote_proxy().await;
@@ -621,7 +622,7 @@ pub async fn thinclaw_save_selected_cloud_model(
     cfg.update_selected_cloud_model(model)
         .map_err(|e| e.to_string())?;
 
-    // Regenerate engine config so IronClaw picks up the new model selection
+    // Regenerate engine config so ThinClaw picks up the new model selection
     let existing_thinclaw_engine = cfg.load_config().ok();
     let local_llm = existing_thinclaw_engine
         .as_ref()
@@ -656,7 +657,7 @@ pub struct CustomLlmConfigInput {
 #[specta::specta]
 pub async fn thinclaw_save_cloud_config(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     enabled_providers: Vec<String>,
     enabled_models: std::collections::HashMap<String, Vec<String>>,
     custom_llm: Option<CustomLlmConfigInput>,
@@ -724,7 +725,7 @@ pub async fn thinclaw_save_cloud_config(
 
     cfg.save_identity().map_err(|e| e.to_string())?;
 
-    // Regenerate engine config so IronClaw picks up the new model allowlist
+    // Regenerate engine config so ThinClaw picks up the new model allowlist
     // and provider selections. Without this, changes were lost on engine restart.
     let existing_thinclaw_engine = cfg.load_config().ok();
     let local_llm = existing_thinclaw_engine

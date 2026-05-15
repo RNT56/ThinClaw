@@ -300,12 +300,18 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
-        .route("/api/chat/thread/{id}/reset", post(chat_thread_reset_handler))
+        .route(
+            "/api/chat/thread/{id}/reset",
+            post(chat_thread_reset_handler),
+        )
         .route(
             "/api/chat/thread/{id}/compact",
             post(chat_thread_compact_handler),
         )
-        .route("/api/chat/thread/{id}/export", get(chat_thread_export_handler))
+        .route(
+            "/api/chat/thread/{id}/export",
+            get(chat_thread_export_handler),
+        )
         .route("/api/chat/thread/{id}", delete(chat_delete_thread_handler))
         // Autonomy
         .route("/api/autonomy/status", get(autonomy_status_handler))

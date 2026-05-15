@@ -97,6 +97,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
                 supports_vision,
                 supports_tools: matches!(category, ModelCategory::Chat),
                 supports_streaming: true,
+                capabilities: Default::default(),
                 deprecated: false,
                 pricing: None, // Gemini API doesn't expose pricing
                 embedding_dimensions: None,

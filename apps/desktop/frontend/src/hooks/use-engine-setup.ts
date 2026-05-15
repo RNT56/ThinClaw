@@ -1,7 +1,7 @@
 /**
  * useEngineSetup — reusable hook for first-launch engine bootstrap.
  *
- * Checks `get_engine_setup_status` on mount, listens for
+ * Checks `direct_runtime_get_engine_setup_status` on mount, listens for
  * `engine_setup_progress` events, and exposes a `triggerSetup()` callback.
  *
  * Used by both OnboardingWizard and EngineSetupBanner.
@@ -43,7 +43,7 @@ export function useEngineSetup(): EngineSetupState {
 
     // Check setup status on mount
     useEffect(() => {
-        invoke<EngineSetupStatus>("get_engine_setup_status")
+        invoke<EngineSetupStatus>("direct_runtime_get_engine_setup_status")
             .then(setStatus)
             .catch((err) => console.warn("Failed to check engine setup:", err));
     }, []);
@@ -76,7 +76,7 @@ export function useEngineSetup(): EngineSetupState {
         setSetupMessage("Starting setup...");
 
         try {
-            await invoke("setup_engine");
+            await invoke("direct_runtime_setup_engine");
             // Events will handle state transitions
         } catch (err: any) {
             const msg = typeof err === "string" ? err : "Setup failed";

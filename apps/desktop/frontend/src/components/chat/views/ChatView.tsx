@@ -282,7 +282,7 @@ export function ChatView() {
                                 imageRunning={imageRunning}
                                 startServer={isLlamaCppEngine ? async () => {
                                     const { commands: cmds } = await import('../../../lib/bindings');
-                                    await cmds.startChatServer(modelPath || localModels[0]?.path, maxContext, currentModelTemplate, null, false, false, false);
+                                    await cmds.directRuntimeStartChatServer(modelPath || localModels[0]?.path, maxContext, currentModelTemplate, null, false, false, false);
                                 } : undefined}
                                 slashQuery={slashQuery}
                                 setSlashQuery={setSlashQuery}

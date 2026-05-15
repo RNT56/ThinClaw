@@ -362,8 +362,8 @@ impl ThinClawConfig {
         std::fs::write(self.config_path(), json)?;
 
         // NOTE: auth-profiles.json, agent.json, and models.json were consumed
-        // by the Node.js ThinClaw engine gateway (replaced by IronClaw in-process).
-        // IronClaw gets keys via SecretsStore and config via ironclaw.toml/env vars.
+        // by the Node.js ThinClaw engine gateway (replaced by ThinClaw in-process).
+        // ThinClaw gets keys via SecretsStore and config via thinclaw.toml/env vars.
         // These files are no longer written.
 
         // Ensure workspace directory exists

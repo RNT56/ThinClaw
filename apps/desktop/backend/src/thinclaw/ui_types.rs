@@ -4,7 +4,7 @@
 //! The frontend's `ThinClawChatView.tsx` pattern-matches on `kind` to
 //! decide how to render each event.
 //!
-//! After IronClaw integration, these are emitted by `TauriChannel`
+//! After ThinClaw integration, these are emitted by `TauriChannel`
 //! instead of the old WS normalizer. The types themselves don't change.
 
 use serde::{Deserialize, Serialize};

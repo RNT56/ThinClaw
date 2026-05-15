@@ -1,7 +1,7 @@
 //! Fleet status and orchestration commands.
 //!
-//! **Phase 4 migration**: Uses IronClawState for local core status instead of
-//! WS handle polling. Fleet broadcast uses IronClaw's chat API.
+//! **Phase 4 migration**: Uses ThinClawRuntimeState for local core status instead of
+//! WS handle polling. Fleet broadcast uses ThinClaw's chat API.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use tauri::State;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use crate::thinclaw::ironclaw_bridge::IronClawState;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 use crate::thinclaw::ThinClawManager;
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
@@ -195,7 +195,7 @@ fn get_active_model(cfg: &crate::thinclaw::config::ThinClawConfig) -> String {
 #[specta::specta]
 pub async fn thinclaw_get_fleet_status(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Vec<AgentStatusSummary>, String> {
     let cfg = if let Some(c) = state.get_config().await {
         c
@@ -212,12 +212,12 @@ pub async fn thinclaw_get_fleet_status(
     let local_capabilities = get_capabilities(&cfg);
     let active_model = get_active_model(&cfg);
 
-    // Add Local Core status from IronClawState
+    // Add Local Core status from ThinClawRuntimeState
     if ironclaw.is_initialized() {
         let local_summary = AgentStatusSummary {
             id: "main".to_string(),
             name: "Local Core".to_string(),
-            url: "embedded://ironclaw".to_string(),
+            url: "embedded://thinclaw-runtime".to_string(),
             online: true,
             latency_ms: Some(0),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -247,14 +247,14 @@ pub async fn thinclaw_get_fleet_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_broadcast_command(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     command: String,
 ) -> Result<(), String> {
     tracing::info!("Broadcasting fleet command: {}", command);
 
-    // Get sessions from IronClaw
+    // Get sessions from ThinClaw
     let agent = ironclaw.agent().await?;
-    let thread_list = ironclaw::api::sessions::list_threads(
+    let thread_list = thinclaw_core::api::sessions::list_threads(
         agent.session_manager(),
         agent.store(),
         "local_user",
@@ -268,7 +268,7 @@ pub async fn thinclaw_broadcast_command(
     // Send to all threads
     for thread in &thread_list.threads {
         let session_key = thread.id.to_string();
-        if let Err(e) = ironclaw::api::chat::send_message(
+        if let Err(e) = thinclaw_core::api::chat::send_message(
             Arc::clone(&agent),
             &session_key,
             &broadcast_msg,

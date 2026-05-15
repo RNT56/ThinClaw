@@ -5,8 +5,8 @@
 use tauri::State;
 
 use super::types::*;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
 use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 fn extension_info_from_json(ext: &serde_json::Value) -> ExtensionInfoItem {
     ExtensionInfoItem {
@@ -92,7 +92,7 @@ fn extension_info_from_json(ext: &serde_json::Value) -> ExtensionInfoItem {
 }
 
 fn extension_info_from_api(
-    ext: ironclaw::channels::web::types::ExtensionInfo,
+    ext: thinclaw_core::channels::web::types::ExtensionInfo,
 ) -> ExtensionInfoItem {
     ExtensionInfoItem {
         name: ext.name,
@@ -167,7 +167,7 @@ fn extension_action_from_json(raw: serde_json::Value) -> ExtensionActionResponse
 }
 
 fn extension_action_from_api(
-    resp: ironclaw::channels::web::types::ActionResponse,
+    resp: thinclaw_core::channels::web::types::ActionResponse,
 ) -> ExtensionActionResponse {
     extension_action_from_json(serde_json::to_value(resp).unwrap_or_else(|_| {
         serde_json::json!({
@@ -185,7 +185,7 @@ fn extension_action_from_api(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_hooks_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<HooksListResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.list_hooks().await?;
@@ -260,7 +260,7 @@ pub async fn thinclaw_hooks_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_hooks_register(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     input: HookRegisterInput,
 ) -> Result<HookRegisterResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -298,11 +298,11 @@ pub async fn thinclaw_hooks_register(
     let value: serde_json::Value =
         serde_json::from_str(&input.bundle_json).map_err(|e| format!("Invalid JSON: {}", e))?;
 
-    let bundle = ironclaw::hooks::bundled::HookBundleConfig::from_value(&value)
+    let bundle = thinclaw_core::hooks::bundled::HookBundleConfig::from_value(&value)
         .map_err(|e| format!("Invalid hook bundle: {}", e))?;
 
     let source = input.source.unwrap_or_else(|| "ui".to_string());
-    let summary = ironclaw::hooks::bundled::register_bundle(hooks, &source, bundle).await;
+    let summary = thinclaw_core::hooks::bundled::register_bundle(hooks, &source, bundle).await;
 
     Ok(HookRegisterResponse {
         ok: summary.errors == 0,
@@ -324,7 +324,7 @@ pub async fn thinclaw_hooks_register(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_hooks_unregister(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     hook_name: String,
 ) -> Result<HookUnregisterResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -369,7 +369,7 @@ pub async fn thinclaw_hooks_unregister(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extensions_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<ExtensionsListResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.list_extensions().await?;
@@ -389,7 +389,7 @@ pub async fn thinclaw_extensions_list(
         .extension_manager()
         .ok_or("Extension manager not available")?;
 
-    let extensions = ironclaw::api::extensions::list_extensions(ext_mgr)
+    let extensions = thinclaw_core::api::extensions::list_extensions(ext_mgr)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -409,7 +409,7 @@ pub async fn thinclaw_extensions_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extension_activate(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<ExtensionActionResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -422,7 +422,7 @@ pub async fn thinclaw_extension_activate(
         .extension_manager()
         .ok_or("Extension manager not available")?;
 
-    let resp = ironclaw::api::extensions::activate_extension(ext_mgr, &name)
+    let resp = thinclaw_core::api::extensions::activate_extension(ext_mgr, &name)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -433,7 +433,7 @@ pub async fn thinclaw_extension_activate(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extension_remove(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<ExtensionActionResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -446,7 +446,7 @@ pub async fn thinclaw_extension_remove(
         .extension_manager()
         .ok_or("Extension manager not available")?;
 
-    let resp = ironclaw::api::extensions::remove_extension(ext_mgr, &name)
+    let resp = thinclaw_core::api::extensions::remove_extension(ext_mgr, &name)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -457,7 +457,7 @@ pub async fn thinclaw_extension_remove(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extension_install(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     url: Option<String>,
     kind: Option<String>,
@@ -476,7 +476,7 @@ pub async fn thinclaw_extension_install(
     let ext_mgr = agent
         .extension_manager()
         .ok_or("Extension manager not available")?;
-    let resp = ironclaw::api::extensions::install_extension(
+    let resp = thinclaw_core::api::extensions::install_extension(
         ext_mgr,
         &name,
         url.as_deref(),
@@ -491,7 +491,7 @@ pub async fn thinclaw_extension_install(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extension_registry_search(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     query: Option<String>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -519,7 +519,7 @@ pub async fn thinclaw_extension_registry_search(
     };
     let query_lower = query.unwrap_or_default().to_lowercase();
     let tokens: Vec<&str> = query_lower.split_whitespace().collect();
-    let registry = ironclaw::extensions::ExtensionRegistry::new();
+    let registry = thinclaw_core::extensions::ExtensionRegistry::new();
     let entries = registry
         .all_entries()
         .await
@@ -560,7 +560,7 @@ pub async fn thinclaw_extension_registry_search(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extension_reconnect(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<ExtensionActionResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -583,7 +583,7 @@ pub async fn thinclaw_extension_reconnect(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extension_setup_get(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -602,7 +602,7 @@ pub async fn thinclaw_extension_setup_get(
     let setup = ext_mgr
         .get_setup_schema(
             &name,
-            ironclaw::extensions::manager::AuthRequestContext::default(),
+            thinclaw_core::extensions::manager::AuthRequestContext::default(),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -632,7 +632,7 @@ pub async fn thinclaw_extension_setup_get(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extension_setup_submit(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     secrets: std::collections::HashMap<String, String>,
 ) -> Result<ExtensionActionResponse, String> {
@@ -668,7 +668,7 @@ pub async fn thinclaw_extension_setup_submit(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_extension_validate_setup(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<ExtensionActionResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -688,7 +688,7 @@ pub async fn thinclaw_extension_validate_setup(
     match ext_mgr
         .validate_setup(
             &name,
-            ironclaw::extensions::manager::AuthRequestContext::default(),
+            thinclaw_core::extensions::manager::AuthRequestContext::default(),
         )
         .await
     {
@@ -704,8 +704,8 @@ pub async fn thinclaw_extension_validate_setup(
 }
 
 fn mcp_ext_mgr<'a>(
-    agent: &'a ironclaw::agent::Agent,
-) -> Result<&'a std::sync::Arc<ironclaw::extensions::ExtensionManager>, String> {
+    agent: &'a thinclaw_core::agent::Agent,
+) -> Result<&'a std::sync::Arc<thinclaw_core::extensions::ExtensionManager>, String> {
     agent
         .extension_manager()
         .ok_or_else(|| "Extension manager not available".to_string())
@@ -715,13 +715,13 @@ fn mcp_ext_mgr<'a>(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_servers(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/mcp/servers").await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::list_servers(mcp_ext_mgr(&agent)?)
+    let resp = thinclaw_core::api::mcp::list_servers(mcp_ext_mgr(&agent)?)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -731,7 +731,7 @@ pub async fn thinclaw_mcp_servers(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_server(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -740,7 +740,7 @@ pub async fn thinclaw_mcp_server(
             .await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::get_server(mcp_ext_mgr(&agent)?, &name)
+    let resp = thinclaw_core::api::mcp::get_server(mcp_ext_mgr(&agent)?, &name)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -750,7 +750,7 @@ pub async fn thinclaw_mcp_server(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_server_tools(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -762,7 +762,7 @@ pub async fn thinclaw_mcp_server_tools(
             .await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::list_tools(mcp_ext_mgr(&agent)?, &name)
+    let resp = thinclaw_core::api::mcp::list_tools(mcp_ext_mgr(&agent)?, &name)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -772,7 +772,7 @@ pub async fn thinclaw_mcp_server_tools(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_server_resources(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -784,7 +784,7 @@ pub async fn thinclaw_mcp_server_resources(
             .await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::list_resources(mcp_ext_mgr(&agent)?, &name)
+    let resp = thinclaw_core::api::mcp::list_resources(mcp_ext_mgr(&agent)?, &name)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -794,7 +794,7 @@ pub async fn thinclaw_mcp_server_resources(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_read_resource(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     uri: String,
 ) -> Result<serde_json::Value, String> {
@@ -808,7 +808,7 @@ pub async fn thinclaw_mcp_read_resource(
             .await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::read_resource(mcp_ext_mgr(&agent)?, &name, &uri)
+    let resp = thinclaw_core::api::mcp::read_resource(mcp_ext_mgr(&agent)?, &name, &uri)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -818,7 +818,7 @@ pub async fn thinclaw_mcp_read_resource(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_resource_templates(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -830,7 +830,7 @@ pub async fn thinclaw_mcp_resource_templates(
             .await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::list_resource_templates(mcp_ext_mgr(&agent)?, &name)
+    let resp = thinclaw_core::api::mcp::list_resource_templates(mcp_ext_mgr(&agent)?, &name)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -840,7 +840,7 @@ pub async fn thinclaw_mcp_resource_templates(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_server_prompts(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -852,7 +852,7 @@ pub async fn thinclaw_mcp_server_prompts(
             .await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::list_prompts(mcp_ext_mgr(&agent)?, &name)
+    let resp = thinclaw_core::api::mcp::list_prompts(mcp_ext_mgr(&agent)?, &name)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -862,7 +862,7 @@ pub async fn thinclaw_mcp_server_prompts(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_get_prompt(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     server_name: String,
     prompt_name: String,
     prompt_args: Option<serde_json::Value>,
@@ -880,7 +880,7 @@ pub async fn thinclaw_mcp_get_prompt(
             .await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::get_named_prompt(
+    let resp = thinclaw_core::api::mcp::get_named_prompt(
         mcp_ext_mgr(&agent)?,
         &server_name,
         &prompt_name,
@@ -895,7 +895,7 @@ pub async fn thinclaw_mcp_get_prompt(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_oauth(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -907,7 +907,7 @@ pub async fn thinclaw_mcp_oauth(
             .await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::discover_oauth_metadata(mcp_ext_mgr(&agent)?, &name)
+    let resp = thinclaw_core::api::mcp::discover_oauth_metadata(mcp_ext_mgr(&agent)?, &name)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -917,7 +917,7 @@ pub async fn thinclaw_mcp_oauth(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_set_log_level(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     level: String,
 ) -> Result<ExtensionActionResponse, String> {
@@ -931,7 +931,7 @@ pub async fn thinclaw_mcp_set_log_level(
         return Ok(extension_action_from_json(raw));
     }
     let agent = ironclaw.agent().await?;
-    ironclaw::api::mcp::set_logging_level(mcp_ext_mgr(&agent)?, &name, &level)
+    thinclaw_core::api::mcp::set_logging_level(mcp_ext_mgr(&agent)?, &name, &level)
         .await
         .map_err(|e| e.to_string())?;
     Ok(extension_action_from_json(serde_json::json!({
@@ -944,13 +944,13 @@ pub async fn thinclaw_mcp_set_log_level(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_interactions(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/mcp/interactions").await;
     }
     let agent = ironclaw.agent().await?;
-    let resp = ironclaw::api::mcp::list_pending_interactions(mcp_ext_mgr(&agent)?)
+    let resp = thinclaw_core::api::mcp::list_pending_interactions(mcp_ext_mgr(&agent)?)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -960,7 +960,7 @@ pub async fn thinclaw_mcp_interactions(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_mcp_interaction_respond(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     interaction_id: String,
     action: String,
     response: Option<serde_json::Value>,
@@ -979,10 +979,10 @@ pub async fn thinclaw_mcp_interaction_respond(
         return Ok(extension_action_from_json(raw));
     }
     let agent = ironclaw.agent().await?;
-    ironclaw::api::mcp::respond_to_interaction(
+    thinclaw_core::api::mcp::respond_to_interaction(
         mcp_ext_mgr(&agent)?,
         &interaction_id,
-        ironclaw::api::mcp::McpInteractionRespondRequest {
+        thinclaw_core::api::mcp::McpInteractionRespondRequest {
             action,
             response,
             message,
@@ -1003,7 +1003,7 @@ pub async fn thinclaw_mcp_interaction_respond(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_diagnostics(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<DiagnosticsResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_diagnostics().await?;
@@ -1029,7 +1029,7 @@ pub async fn thinclaw_diagnostics(
     let mut failed = 0u32;
     let mut skipped = 0u32;
 
-    // 1. IronClaw engine
+    // 1. ThinClaw runtime
     let engine_ok = ironclaw.agent().await.is_ok();
     if engine_ok {
         checks.push(DiagnosticCheck {
@@ -1051,7 +1051,7 @@ pub async fn thinclaw_diagnostics(
         // 2. Database
         if let Some(store) = agent.store() {
             // Try listing settings to verify DB health
-            match ironclaw::api::config::list_settings(store, "local_user").await {
+            match thinclaw_core::api::config::list_settings(store, "local_user").await {
                 Ok(_) => {
                     checks.push(DiagnosticCheck {
                         name: "Database".into(),
@@ -1124,7 +1124,7 @@ pub async fn thinclaw_diagnostics(
 
         // 6. Extensions
         if let Some(ext_mgr) = agent.extension_manager() {
-            match ironclaw::api::extensions::list_extensions(ext_mgr).await {
+            match thinclaw_core::api::extensions::list_extensions(ext_mgr).await {
                 Ok(resp) => {
                     let active = resp.iter().filter(|e| e.active).count();
                     checks.push(DiagnosticCheck {
@@ -1154,7 +1154,7 @@ pub async fn thinclaw_diagnostics(
 
         // 7. Skills
         if let Some(registry) = agent.skill_registry() {
-            match ironclaw::api::skills::list_skills(registry).await {
+            match thinclaw_core::api::skills::list_skills(registry).await {
                 Ok(resp) => {
                     checks.push(DiagnosticCheck {
                         name: "Skills".into(),
@@ -1197,7 +1197,7 @@ pub async fn thinclaw_diagnostics(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_tools_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<ToolsListResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.list_tools().await?;
@@ -1298,7 +1298,7 @@ pub async fn thinclaw_tools_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_tool_policy_get(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Vec<String>, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.get_setting("disabled_tools").await?;
@@ -1333,7 +1333,7 @@ pub async fn thinclaw_tool_policy_get(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_tool_policy_set(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     disabled_tools: Vec<String>,
 ) -> Result<(), String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -1361,7 +1361,7 @@ pub async fn thinclaw_tool_policy_set(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_pairing_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     channel: String,
 ) -> Result<PairingListResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -1414,7 +1414,7 @@ pub async fn thinclaw_pairing_list(
         });
     }
 
-    let store = ironclaw::pairing::PairingStore::new();
+    let store = thinclaw_core::pairing::PairingStore::new();
 
     // Collect pending pairing requests
     let pending = store
@@ -1450,7 +1450,7 @@ pub async fn thinclaw_pairing_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_pairing_approve(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     channel: String,
     code: String,
 ) -> Result<serde_json::Value, String> {
@@ -1470,7 +1470,7 @@ pub async fn thinclaw_pairing_approve(
         return Err(reason.to_string());
     }
 
-    let store = ironclaw::pairing::PairingStore::new();
+    let store = thinclaw_core::pairing::PairingStore::new();
     store
         .approve(&channel, &code)
         .map_err(|e| format!("Failed to approve pairing: {}", e))?;
@@ -1484,7 +1484,7 @@ pub async fn thinclaw_pairing_approve(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_compact_session(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
 ) -> Result<CompactSessionResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {

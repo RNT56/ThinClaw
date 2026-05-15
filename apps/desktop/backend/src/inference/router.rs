@@ -193,56 +193,51 @@ impl InferenceRouter {
             available: true,
         });
 
-        // Add cloud backends based on available keys
+        // Add cloud backends based on the shared provider catalog and modality
+        // specific direct-workbench support.
         let cloud = match modality {
-            Modality::Chat => vec![
-                ("anthropic", "Anthropic"),
-                ("openai", "OpenAI"),
-                ("gemini", "Google Gemini"),
-                ("groq", "Groq"),
-                ("openrouter", "OpenRouter"),
-                ("mistral", "Mistral AI"),
-                ("xai", "xAI (Grok)"),
-                ("together", "Together AI"),
-                ("venice", "Venice AI"),
-                ("moonshot", "Moonshot (Kimi)"),
-                ("minimax", "MiniMax"),
-                ("nvidia", "NVIDIA NIM"),
-                ("cohere", "Cohere"),
-                ("xiaomi", "Xiaomi"),
-            ],
+            Modality::Chat => thinclaw_config::provider_catalog::catalog()
+                .values()
+                .map(|endpoint| {
+                    (
+                        endpoint.slug.as_str(),
+                        endpoint.display_name.as_str(),
+                        endpoint.secret_name.as_str(),
+                    )
+                })
+                .collect(),
             Modality::Embedding => vec![
-                ("openai", "OpenAI Embeddings"),
-                ("gemini", "Gemini Embeddings"),
-                ("voyage", "Voyage AI"),
-                ("cohere", "Cohere Embed"),
+                ("openai", "OpenAI Embeddings", "llm_openai_api_key"),
+                ("gemini", "Gemini Embeddings", "gemini"),
+                ("voyage", "Voyage AI", "voyage"),
+                ("cohere", "Cohere Embed", "cohere"),
             ],
             Modality::Tts => vec![
-                ("openai", "OpenAI TTS"),
-                ("elevenlabs", "ElevenLabs"),
-                ("gemini", "Gemini TTS"),
+                ("openai", "OpenAI TTS", "llm_openai_api_key"),
+                ("elevenlabs", "ElevenLabs", "elevenlabs"),
+                ("gemini", "Gemini TTS", "gemini"),
             ],
             Modality::Stt => vec![
-                ("openai", "OpenAI Whisper"),
-                ("gemini", "Gemini STT"),
-                ("deepgram", "Deepgram"),
+                ("openai", "OpenAI Whisper", "llm_openai_api_key"),
+                ("gemini", "Gemini STT", "gemini"),
+                ("deepgram", "Deepgram", "deepgram"),
             ],
             Modality::Diffusion => vec![
-                ("openai", "DALL·E 3"),
-                ("gemini", "Imagen 3"),
-                ("stability", "Stability AI"),
-                ("fal", "fal.ai"),
-                ("together", "Together AI"),
+                ("openai", "DALL·E 3", "llm_openai_api_key"),
+                ("gemini", "Imagen 3", "gemini"),
+                ("stability", "Stability AI", "stability"),
+                ("fal", "fal.ai", "fal"),
+                ("together", "Together AI", "together"),
             ],
         };
 
-        for (key_slug, display_name) in cloud {
+        for (key_slug, display_name, secret_name) in cloud {
             backends.push(BackendInfo {
                 id: key_slug.to_string(),
                 display_name: display_name.to_string(),
                 is_local: false,
                 model_id: None,
-                available: self.secret_store.has(key_slug),
+                available: self.secret_store.has(secret_name),
             });
         }
 
@@ -278,8 +273,8 @@ impl InferenceRouter {
         tracing::info!("[inference_router] Chat backend: {}", chat_id);
 
         if chat_id != "local" {
-            if let Some(ep) = super::provider_endpoints::endpoint_for(chat_id) {
-                if let Some(api_key) = self.secret_store.get(chat_id) {
+            if let Some(ep) = thinclaw_config::provider_catalog::endpoint_for(chat_id) {
+                if let Some(api_key) = self.secret_store.get(&ep.secret_name) {
                     let model_override = config
                         .inference_models
                         .as_ref()

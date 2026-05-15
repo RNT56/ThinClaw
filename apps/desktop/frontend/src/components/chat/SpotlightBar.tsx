@@ -44,7 +44,7 @@ function CodeCopyButton({ content }: { content: string }) {
 }
 
 export function SpotlightBar() {
-    const { messages, isStreaming, sendMessage, clearMessages, modelRunning, currentConversationId, deleteConversation } = useChat();
+    const { messages, isStreaming, sendMessage, clearMessages, modelRunning, currentConversationId, directHistoryDeleteConversation } = useChat();
     const { config: userCfg } = useConfig();
     const { currentModelPath, maxContext } = useModelContext();
     const [input, setInput] = useState("");
@@ -287,7 +287,7 @@ export function SpotlightBar() {
                     if (modelsRes.status === "ok" && modelsRes.data.length > 0) {
                         const localModels = modelsRes.data.filter(m => !m.path.startsWith('http'));
                         const best = localModels.length > 0 ? localModels.sort((a, b) => b.size - a.size)[0] : modelsRes.data[0];
-                        await commands.startChatServer(best.path, maxContext, null, null, false, false, false);
+                        await commands.directRuntimeStartChatServer(best.path, maxContext, null, null, false, false, false);
                     } else {
                         toast.error("No models found. Please download one in settings.");
                         return;
@@ -299,7 +299,7 @@ export function SpotlightBar() {
             } else if (currentModelPath) {
                 toast.info("Waking up LLM...");
                 try {
-                    await commands.startChatServer(currentModelPath, maxContext, null, null, false, false, false);
+                    await commands.directRuntimeStartChatServer(currentModelPath, maxContext, null, null, false, false, false);
                 } catch (e) {
                     toast.error(`Wake failed: ${String(e)}`);
                     return;
@@ -322,7 +322,7 @@ export function SpotlightBar() {
             const idToDelete = lastConversationId.current;
             lastConversationId.current = null;
             try {
-                await deleteConversation(idToDelete);
+                await directHistoryDeleteConversation(idToDelete);
             } catch (e) {
                 console.error("Failed to delete spotlight conversation:", e);
             }
@@ -333,21 +333,21 @@ export function SpotlightBar() {
         } else {
             (commands as any).hideSpotlight?.();
         }
-    }, [deleteConversation, messages]);
+    }, [directHistoryDeleteConversation, messages]);
 
     const handleClear = useCallback(async () => {
         if (lastConversationId.current) {
             const idToDelete = lastConversationId.current;
             lastConversationId.current = null;
             try {
-                await deleteConversation(idToDelete);
+                await directHistoryDeleteConversation(idToDelete);
             } catch (e) {
                 console.error("Failed to delete spotlight conversation:", e);
             }
         }
         clearMessages();
         toast.info("Chat purged", { duration: 1000 });
-    }, [deleteConversation, clearMessages]);
+    }, [directHistoryDeleteConversation, clearMessages]);
 
     const handleCopyMessage = useCallback((content: string, index: number) => {
         navigator.clipboard.writeText(content);

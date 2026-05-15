@@ -56,6 +56,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
                 supports_vision: true, // All Claude 3.x+ models support vision
                 supports_tools: true,
                 supports_streaming: true,
+                capabilities: Default::default(),
                 deprecated: m.created_at.as_deref().map_or(false, |d| d < "2024-01-01"),
                 pricing: anthropic_pricing(&m.id),
                 embedding_dimensions: None,

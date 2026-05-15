@@ -10,10 +10,10 @@ export function ChatSidebar() {
         conversations,
         loadConversation,
         currentConversationId,
-        deleteConversation,
+        directHistoryDeleteConversation,
         createNewConversation,
         moveConversation,
-        updateConversationsOrder,
+        directHistoryUpdateConversationsOrder,
         fetchConversations,
         fetchProjects,
         projects,
@@ -67,11 +67,11 @@ export function ChatSidebar() {
                     conversations={conversations}
                     onSelectConversation={loadConversation}
                     currentConversationId={currentConversationId}
-                    onDeleteConversation={deleteConversation}
+                    onDeleteConversation={directHistoryDeleteConversation}
                     onCreateConversationInProject={(projectId) => createNewConversation("New Chat", projectId)}
                     onSelectProject={setSelectedProjectId}
                     onMoveChat={moveConversation}
-                    onUpdateConversationsOrder={updateConversationsOrder}
+                    onUpdateConversationsOrder={directHistoryUpdateConversationsOrder}
                     onProjectDeleted={() => {
                         fetchConversations();
                         fetchProjects();

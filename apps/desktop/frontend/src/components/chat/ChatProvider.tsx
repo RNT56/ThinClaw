@@ -46,7 +46,7 @@ export interface ChatLayoutState {
     loadConversation: ReturnType<typeof useChat>['loadConversation'];
     loadMoreMessages: ReturnType<typeof useChat>['loadMoreMessages'];
     currentConversationId: string | null;
-    deleteConversation: ReturnType<typeof useChat>['deleteConversation'];
+    directHistoryDeleteConversation: ReturnType<typeof useChat>['directHistoryDeleteConversation'];
     loadingHistory: boolean;
     hasMore: boolean;
     isLoadingMore: boolean;
@@ -60,8 +60,8 @@ export interface ChatLayoutState {
     autoMode: ReturnType<typeof useChat>['autoMode'];
     setAutoMode: ReturnType<typeof useChat>['setAutoMode'];
     moveConversation: ReturnType<typeof useChat>['moveConversation'];
-    updateConversationsOrder: ReturnType<typeof useChat>['updateConversationsOrder'];
-    cancelGeneration: ReturnType<typeof useChat>['cancelGeneration'];
+    directHistoryUpdateConversationsOrder: ReturnType<typeof useChat>['directHistoryUpdateConversationsOrder'];
+    directRuntimeCancelGeneration: ReturnType<typeof useChat>['directRuntimeCancelGeneration'];
     fetchConversations: ReturnType<typeof useChat>['fetchConversations'];
     tokenUsage: ReturnType<typeof useChat>['tokenUsage'];
 
@@ -226,7 +226,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         loadConversation,
         loadMoreMessages,
         currentConversationId,
-        deleteConversation,
+        directHistoryDeleteConversation,
         loadingHistory,
         hasMore,
         isLoadingMore,
@@ -240,8 +240,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         autoMode,
         setAutoMode,
         moveConversation,
-        updateConversationsOrder,
-        cancelGeneration,
+        directHistoryUpdateConversationsOrder,
+        directRuntimeCancelGeneration,
         fetchConversations,
         tokenUsage,
     } = useChat();
@@ -511,15 +511,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
     const handleEditMessage = useCallback(async (messageId: string, newContent: string) => {
         try {
-            await cancelGeneration();
-            await commands.editMessage(messageId, newContent);
+            await directRuntimeCancelGeneration();
+            await commands.directHistoryEditMessage(messageId, newContent);
             if (currentConversationId) await loadConversation(currentConversationId);
             toast.success('Message edited. Regenerating response...');
             await regenerate();
         } catch {
             toast.error('Failed to edit');
         }
-    }, [cancelGeneration, currentConversationId, loadConversation, regenerate]);
+    }, [directRuntimeCancelGeneration, currentConversationId, loadConversation, regenerate]);
 
     const handleGenerateImage = useCallback(async () => {
         if (!input.trim()) { toast.error('Please enter a prompt.'); return; }
@@ -542,7 +542,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         if (!imageRunning) {
             const tId = toast.loading('Starting Image Engine...');
             try {
-                const res = await commands.startImageServer(modelPathToUse);
+                const res = await commands.directRuntimeStartImageServer(modelPathToUse);
                 if (res.status !== 'ok') throw new Error(res.error);
                 await new Promise(r => setTimeout(r, 4000));
                 toast.success('Image Engine Ready', { id: tId });
@@ -597,7 +597,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                         if (mDef && mDef.mmproj && modelsDir) {
                             mmproj = await join(modelsDir, mDef.mmproj.filename);
                         }
-                        await commands.startChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false, false, false);
+                        await commands.directRuntimeStartChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false, false, false);
                         toast.success('Chat Ready', { id: tId });
                     } catch (e) {
                         console.warn('Failed to resume chat', e);
@@ -628,12 +628,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     if (sorted.length > 0) bestModel = isComplex ? sorted[sorted.length - 1] : sorted[0];
                     if (bestModel) {
                         toast.loading(`Auto-switching to ${bestModel.name}...`, { id: tId });
-                        await commands.startChatServer(bestModel.path, maxContext, currentModelTemplate, null, false, false, false);
+                        await commands.directRuntimeStartChatServer(bestModel.path, maxContext, currentModelTemplate, null, false, false, false);
                     } else {
                         throw new Error('No local models found.');
                     }
                 } else {
-                    await commands.startChatServer(modelPath, maxContext, currentModelTemplate, null, false, false, false);
+                    await commands.directRuntimeStartChatServer(modelPath, maxContext, currentModelTemplate, null, false, false, false);
                 }
                 toast.success('Ready', { id: tId });
             } catch (e) {
@@ -678,7 +678,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const res = await commands.uploadImage(bytes);
+                    const res = await commands.directAssetsUploadImage(bytes);
                     if (res.status === 'ok') {
                         setAttachedImages(prev => [...prev, res.data]);
                         toast.success('Image attached', { id: toastId });
@@ -691,13 +691,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 }
             } else {
                 if (!isRagCapable) { toast.error(`Cannot ingest ${file.name}: Select an embedding model in Settings first.`); continue; }
-                // Note: the backend ingest_document command auto-starts the embedding server
+                // Note: the backend direct_rag_ingest_document command auto-starts the embedding server
                 // if it's not running (using the model path passed with the request).
                 const toastId = toast.loading(`Uploading ${file.name}...`);
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const res = await commands.uploadDocument(bytes, file.name);
+                    const res = await commands.directRagUploadDocument(bytes, file.name);
                     if (res.status === 'ok') {
                         const savedPath = res.data;
                         toast.loading(`Indexing ${file.name}...`, { id: toastId });
@@ -759,7 +759,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 if (currentSttModelPath) {
                     const tId = toast.loading('Starting STT Engine...');
                     try {
-                        const res = await commands.startSttServer(currentSttModelPath);
+                        const res = await commands.directRuntimeStartSttServer(currentSttModelPath);
                         if (res.status !== 'ok') throw new Error(res.error);
                         await new Promise(r => setTimeout(r, 2000));
                         toast.success('STT Engine Ready', { id: tId });
@@ -782,7 +782,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             const bytes = Array.from(new Uint8Array(buffer));
             const toastId = toast.loading('Transcribing...');
             try {
-                const res = await commands.transcribeAudio(bytes);
+                const res = await commands.directMediaTranscribeAudio(bytes);
                 if (res.status === 'ok') {
                     setInput(prev => (prev ? prev + ' ' + res.data : res.data));
                     toast.success('Transcribed', { id: toastId });
@@ -815,9 +815,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }, [setInput]);
 
     const handleCancelGeneration = useCallback(async () => {
-        try { await cancelGeneration(); toast.info('Stopping generation...'); }
+        try { await directRuntimeCancelGeneration(); toast.info('Stopping generation...'); }
         catch { toast.error('Failed to cancel generation'); }
-    }, [cancelGeneration]);
+    }, [directRuntimeCancelGeneration]);
 
     const handleNewThinClawSession = () => {
         const newKey = `agent:main:chat-${crypto.randomUUID()}`;
@@ -862,7 +862,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             if (options.provider === 'local' && !imageRunning) {
                 if (resolvedModelPath) {
                     setGenerationProgress({ stage: 'Initializing', progress: 0.1, text: 'Warming up diffusion engine...' } as any);
-                    await commands.startImageServer(resolvedModelPath);
+                    await commands.directRuntimeStartImageServer(resolvedModelPath);
                     await new Promise(r => setTimeout(r, 1000));
                 }
             }
@@ -892,10 +892,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const value: ChatLayoutState = {
         // chat hook
         messages, isStreaming, sendMessage, clearMessages, conversations, loadConversation,
-        loadMoreMessages, currentConversationId, deleteConversation, loadingHistory, hasMore,
+        loadMoreMessages, currentConversationId, directHistoryDeleteConversation, loadingHistory, hasMore,
         isLoadingMore, ingestFile, modelRunning, sttRunning, imageRunning, createNewConversation,
         sendImagePrompt, regenerate, autoMode, setAutoMode, moveConversation,
-        updateConversationsOrder, cancelGeneration, fetchConversations, tokenUsage,
+        directHistoryUpdateConversationsOrder, directRuntimeCancelGeneration, fetchConversations, tokenUsage,
         // projects
         projects, createProject, deleteProject, fetchProjects, updateProjectsOrder,
         // model context

@@ -1,12 +1,12 @@
 //! Engine lifecycle commands: start, stop, status, diagnostics, sync.
 //!
 //! Dual-mode operation:
-//!   Local mode:  IronClaw runs in-process via TauriChannel (default)
-//!   Remote mode: ThinClaw Desktop connects to an external IronClaw HTTP gateway
+//!   Local mode:  ThinClaw runs in-process via TauriChannel (default)
+//!   Remote mode: ThinClaw Desktop connects to an external ThinClaw HTTP gateway
 //!                via RemoteGatewayProxy — no local engine is started
 //!
 //! The mode is selected by `identity.json:gateway_mode`:
-//!   "local"  (or empty) → start embedded IronClaw engine
+//!   "local"  (or empty) → start embedded ThinClaw runtime
 //!   "remote"            → connect to remote_url with remote_token
 
 use tauri::State;
@@ -14,7 +14,7 @@ use tracing::info;
 
 use super::types::*;
 use super::ThinClawManager;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 /// Get ThinClaw status.
 ///
@@ -25,7 +25,7 @@ use crate::thinclaw::ironclaw_bridge::IronClawState;
 #[specta::specta]
 pub async fn thinclaw_get_status(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<ThinClawStatus, String> {
     let config = state.get_config().await;
 
@@ -104,7 +104,7 @@ pub async fn thinclaw_get_status(
             .and_then(|c| c.groq_api_key.clone())
             .is_some(),
         groq_granted: config.as_ref().map(|c| c.groq_granted).unwrap_or(false),
-        // IronClaw engine status (in-process = always connected when running)
+        // ThinClaw runtime status (in-process = always connected when running)
         engine_running,
         engine_connected: engine_running,
         slack_enabled: config
@@ -279,7 +279,7 @@ pub async fn thinclaw_get_status(
 /// Sync Local LLM config (llama-server) to ThinClaw config.
 ///
 /// Still needed: ThinClaw Desktop manages the local llama-server sidecar and needs to
-/// sync its port/model info to the config that IronClaw reads on restart.
+/// sync its port/model info to the config that ThinClaw reads on restart.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_sync_local_llm(
@@ -320,12 +320,12 @@ pub async fn thinclaw_sync_local_llm(
     Ok(())
 }
 
-/// Start the IronClaw gateway.
+/// Start the ThinClaw gateway.
 ///
 /// Behavior depends on `identity.json:gateway_mode`:
 ///   "local" (default):
 ///     - Waits for local inference engine if configured
-///     - Starts the IronClaw in-process engine via IronClawState::start()
+///     - Starts the ThinClaw in-process engine via ThinClawRuntimeState::start()
 ///   "remote":
 ///     - Reads remote_url + remote_token from config
 ///     - Creates a RemoteGatewayProxy, verifies health, opens SSE subscription
@@ -337,7 +337,7 @@ pub async fn thinclaw_sync_local_llm(
 #[specta::specta]
 pub async fn thinclaw_start_gateway(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     app_handle: tauri::AppHandle,
@@ -350,10 +350,10 @@ pub async fn thinclaw_start_gateway(
         .map(|c| c.gateway_mode.clone())
         .unwrap_or_default();
 
-    info!("[ironclaw] Engine start requested (mode={})", mode);
+    info!("[thinclaw-runtime] Engine start requested (mode={})", mode);
 
     if mode == "remote" {
-        // ── Remote mode: connect to external IronClaw gateway ───────────
+        // ── Remote mode: connect to external ThinClaw gateway ───────────
         let remote_url = oc_config
             .as_ref()
             .and_then(|c| c.remote_url.clone())
@@ -373,7 +373,7 @@ pub async fn thinclaw_start_gateway(
             if let Some(existing) = ironclaw.remote_proxy().await {
                 if existing.base_url() == remote_url {
                     info!(
-                        "[ironclaw] Already connected to remote {} — no-op",
+                        "[thinclaw-runtime] Already connected to remote {} — no-op",
                         remote_url
                     );
                     return Ok(());
@@ -398,7 +398,7 @@ pub async fn thinclaw_start_gateway(
             .await
             .map_err(|e| format!("Failed to start SSE subscription: {}", e))?;
 
-        // Activate in IronClawState
+        // Activate in ThinClawRuntimeState
         ironclaw.connect_remote(proxy).await;
 
         // Emit Connected event so frontend updates status
@@ -408,11 +408,14 @@ pub async fn thinclaw_start_gateway(
             &crate::thinclaw::ui_types::UiEvent::Connected { protocol: 2 },
         );
 
-        info!("[ironclaw] Remote gateway connected: {}", remote_url);
+        info!(
+            "[thinclaw-runtime] Remote gateway connected: {}",
+            remote_url
+        );
         return Ok(());
     }
 
-    // ── Local mode (default): start in-process IronClaw engine ─────────────
+    // ── Local mode (default): start in-process ThinClaw runtime ─────────────
     if ironclaw.is_remote_mode().await {
         // Switching from remote → local: disconnect proxy first
         ironclaw.disconnect_remote().await;
@@ -436,7 +439,7 @@ pub async fn thinclaw_start_gateway(
 
         if !has_sidecar && !has_engine {
             info!(
-                "[ironclaw] Local inference selected but server not ready — \
+                "[thinclaw-runtime] Local inference selected but server not ready — \
                  waiting for engine to come online (up to 30s)..."
             );
 
@@ -446,7 +449,10 @@ pub async fn thinclaw_start_gateway(
 
                 // Check sidecar first (used by llamacpp builds)
                 if sidecar.get_chat_config().is_some() {
-                    info!("[ironclaw] Sidecar detected after {}ms", attempt * 500);
+                    info!(
+                        "[thinclaw-runtime] Sidecar detected after {}ms",
+                        attempt * 500
+                    );
                     ready = true;
                     break;
                 }
@@ -455,7 +461,7 @@ pub async fn thinclaw_start_gateway(
                 let guard = engine_manager.engine.lock().await;
                 if let Some(engine) = guard.as_ref() {
                     if engine.is_ready().await {
-                        info!("[ironclaw] Engine ready after {}ms", attempt * 500);
+                        info!("[thinclaw-runtime] Engine ready after {}ms", attempt * 500);
                         ready = true;
                         break;
                     }
@@ -470,38 +476,37 @@ pub async fn thinclaw_start_gateway(
         }
     }
 
-    // ── Start IronClaw engine ────────────────────────────────────────
-    // Create secrets adapter (bridges macOS Keychain to IronClaw and enforces grants)
+    // ── Start ThinClaw runtime ────────────────────────────────────────
+    // Create secrets adapter (bridges macOS Keychain to ThinClaw and enforces grants)
     let cfg_for_secrets = if let Some(cfg) = state.get_config().await {
         cfg
     } else {
         state.init_config().await?
     };
-    let secrets_store: Option<std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> =
-        Some(std::sync::Arc::new(
-            crate::thinclaw::ironclaw_secrets::KeychainSecretsAdapter::with_config(
-                &cfg_for_secrets,
-            ),
-        ));
+    let secrets_store: Option<
+        std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
+    > = Some(std::sync::Arc::new(
+        crate::thinclaw::secrets_adapter::KeychainSecretsAdapter::with_config(&cfg_for_secrets),
+    ));
 
     match ironclaw.start(secrets_store).await {
         Ok(true) => {
-            info!("[ironclaw] Engine started successfully");
+            info!("[thinclaw-runtime] Engine started successfully");
             Ok(())
         }
         Ok(false) => {
-            info!("[ironclaw] Engine was already running");
+            info!("[thinclaw-runtime] Engine was already running");
             Ok(())
         }
         Err(e) => {
-            let msg = format!("Failed to start IronClaw engine: {}", e);
+            let msg = format!("Failed to start ThinClaw runtime: {}", e);
             tracing::error!("{}", msg);
             Err(msg)
         }
     }
 }
 
-/// Stop the IronClaw gateway.
+/// Stop the ThinClaw gateway.
 ///
 /// - Local mode: shuts down in-process engine gracefully.
 /// - Remote mode: closes the SSE subscription and clears the proxy.
@@ -509,32 +514,32 @@ pub async fn thinclaw_start_gateway(
 #[specta::specta]
 pub async fn thinclaw_stop_gateway(
     _state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<(), String> {
     info!(
-        "[ironclaw] Gateway stop requested (mode={})",
+        "[thinclaw-runtime] Gateway stop requested (mode={})",
         ironclaw.mode_label().await
     );
 
     if ironclaw.is_remote_mode().await {
         ironclaw.disconnect_remote().await;
-        info!("[ironclaw] Remote proxy disconnected");
+        info!("[thinclaw-runtime] Remote proxy disconnected");
     } else {
         let was_running = ironclaw.stop().await;
         if was_running {
-            info!("[ironclaw] Engine stopped successfully");
+            info!("[thinclaw-runtime] Engine stopped successfully");
         } else {
-            info!("[ironclaw] Engine was already stopped");
+            info!("[thinclaw-runtime] Engine was already stopped");
         }
     }
 
     Ok(())
 }
 
-/// Reload secrets (API keys) into the running IronClaw agent.
+/// Reload secrets (API keys) into the running ThinClaw runtime.
 ///
 /// Performs a graceful stop→start cycle to re-inject keys from macOS Keychain.
-/// Called by the frontend after API key save/toggle operations so the IronClaw
+/// Called by the frontend after API key save/toggle operations so the ThinClaw
 /// agent picks up changes without requiring manual restart by the user.
 ///
 /// **Flow:** stop engine → create fresh KeychainSecretsAdapter → start engine
@@ -544,23 +549,24 @@ pub async fn thinclaw_stop_gateway(
 #[specta::specta]
 pub async fn thinclaw_reload_secrets(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<(), String> {
-    info!("[ironclaw] Reload secrets requested");
+    info!("[thinclaw-runtime] Reload secrets requested");
 
     // Create a fresh secrets adapter (reads live from Keychain, grants from config)
     let cfg = state
         .get_config()
         .await
         .ok_or_else(|| "ThinClaw config is not initialized".to_string())?;
-    let secrets_store: Option<std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> =
-        Some(std::sync::Arc::new(
-            crate::thinclaw::ironclaw_secrets::KeychainSecretsAdapter::with_config(&cfg),
-        ));
+    let secrets_store: Option<
+        std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
+    > = Some(std::sync::Arc::new(
+        crate::thinclaw::secrets_adapter::KeychainSecretsAdapter::with_config(&cfg),
+    ));
 
     ironclaw.reload_secrets(secrets_store).await?;
 
-    info!("[ironclaw] Secrets reloaded successfully");
+    info!("[thinclaw-runtime] Secrets reloaded successfully");
     Ok(())
 }
 
@@ -569,7 +575,7 @@ pub async fn thinclaw_reload_secrets(
 #[specta::specta]
 pub async fn thinclaw_get_diagnostics(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<ThinClawDiagnostics, String> {
     let cfg = state.get_config().await;
     let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
@@ -606,7 +612,7 @@ pub async fn thinclaw_get_diagnostics(
     })
 }
 
-/// Test connectivity to a remote IronClaw gateway.
+/// Test connectivity to a remote ThinClaw gateway.
 ///
 /// Called by the frontend's "Test Connection" button in Gateway Settings.
 /// Returns Ok(true) if reachable and healthy, Err if not reachable.
@@ -632,13 +638,13 @@ pub async fn thinclaw_test_connection(url: String, token: Option<String>) -> Res
 #[specta::specta]
 pub async fn thinclaw_switch_to_profile(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     app_handle: tauri::AppHandle,
     profile_id: String,
 ) -> Result<(), String> {
-    info!("[ironclaw] Switching to profile: {}", profile_id);
+    info!("[thinclaw-runtime] Switching to profile: {}", profile_id);
 
     let mut cfg = if let Some(c) = state.get_config().await {
         c
@@ -671,7 +677,7 @@ pub async fn thinclaw_switch_to_profile(
     *state.config.write().await = Some(cfg);
 
     info!(
-        "[ironclaw] Profile '{}' (mode={}) activated - restarting gateway...",
+        "[thinclaw-runtime] Profile '{}' (mode={}) activated - restarting gateway...",
         profile.name, profile.mode
     );
 

@@ -1,5 +1,5 @@
 /**
- * CanvasPanelRenderer — renders IronClaw UiComponent arrays natively.
+ * CanvasPanelRenderer — renders ThinClaw UiComponent arrays natively.
  *
  * Handles: Text (markdown-like), Heading, Table, Code, Image, Progress,
  * KeyValue, Divider, Button, Form, and JSON viewer.

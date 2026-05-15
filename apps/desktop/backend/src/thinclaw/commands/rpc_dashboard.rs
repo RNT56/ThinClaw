@@ -8,9 +8,9 @@ use tracing::{info, warn};
 
 use super::types::*;
 use super::ThinClawManager;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
-use crate::thinclaw::ironclaw_builder::get_resolved_workspace_root;
 use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
+use crate::thinclaw::runtime_builder::get_resolved_workspace_root;
 
 fn json_number_as_f64(value: &serde_json::Value) -> Option<f64> {
     value
@@ -343,7 +343,7 @@ fn unavailable_route_simulation(reason: impl Into<String>) -> RouteSimulationRes
 }
 
 fn map_route_simulation_result(
-    result: ironclaw::llm::RouteSimulationResult,
+    result: thinclaw_core::llm::RouteSimulationResult,
 ) -> RouteSimulationResponse {
     RouteSimulationResponse {
         target: result.target,
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn route_simulation_result_maps_planner_details() {
-        let mapped = map_route_simulation_result(ironclaw::llm::RouteSimulationResult {
+        let mapped = map_route_simulation_result(thinclaw_core::llm::RouteSimulationResult {
             target: "anthropic/claude-sonnet-4-5".to_string(),
             reason: "matched large context policy".to_string(),
             fallback_chain: vec!["openai/gpt-5-mini".to_string()],
@@ -697,7 +697,7 @@ mod tests {
                 "openai/gpt-5-mini".to_string(),
             ],
             rejections: vec!["groq/llama: missing vision support".to_string()],
-            score_breakdown: vec![ironclaw::llm::RouteSimulationScore {
+            score_breakdown: vec![thinclaw_core::llm::RouteSimulationScore {
                 target: "anthropic/claude-sonnet-4-5".to_string(),
                 telemetry_key: Some("primary|anthropic|claude-sonnet-4-5".to_string()),
                 quality: 0.95,
@@ -763,11 +763,11 @@ mod tests {
 /// Returns total spend, daily/monthly breakdowns, per-model costs,
 /// token totals, and alert status. The frontend picks what to display.
 ///
-/// Also auto-persists entries to the IronClaw DB on each poll (cheap, ~10s interval).
+/// Also auto-persists entries to the ThinClaw DB on each poll (cheap, ~10s interval).
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_cost_summary(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<CostSummary, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return map_remote_cost_summary(proxy.get_cost_summary().await?);
@@ -775,7 +775,7 @@ pub async fn thinclaw_cost_summary(
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let tracker = tracker_lock.lock().await;
-    let ic_summary = ironclaw::tauri_commands::cost_summary(&tracker)?;
+    let ic_summary = thinclaw_core::tauri_commands::cost_summary(&tracker)?;
 
     // Auto-persist to DB on each summary poll (cheap — 10s interval).
     if let Ok(agent) = ironclaw.agent().await {
@@ -806,7 +806,7 @@ pub async fn thinclaw_cost_summary(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_cost_export_csv(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<String, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.export_cost_csv().await;
@@ -814,22 +814,22 @@ pub async fn thinclaw_cost_export_csv(
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let tracker = tracker_lock.lock().await;
-    ironclaw::tauri_commands::cost_export_csv(&tracker)
+    thinclaw_core::tauri_commands::cost_export_csv(&tracker)
 }
 
 /// Reset (clear) all cost tracking data.
 ///
-/// Clears in-memory entries and persists the empty state to the IronClaw DB.
+/// Clears in-memory entries and persists the empty state to the ThinClaw DB.
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_cost_reset(ironclaw: State<'_, IronClawState>) -> Result<(), String> {
+pub async fn thinclaw_cost_reset(ironclaw: State<'_, ThinClawRuntimeState>) -> Result<(), String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.reset_costs().await;
     }
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let mut tracker = tracker_lock.lock().await;
-    ironclaw::tauri_commands::cost_reset(&mut tracker)?;
+    thinclaw_core::tauri_commands::cost_reset(&mut tracker)?;
 
     // Persist empty state to DB
     if let Ok(agent) = ironclaw.agent().await {
@@ -843,14 +843,14 @@ pub async fn thinclaw_cost_reset(ironclaw: State<'_, IronClawState>) -> Result<(
     Ok(())
 }
 
-/// List channel statuses from the live IronClaw agent.
+/// List channel statuses from the live ThinClaw runtime.
 ///
 /// Queries the agent's ChannelManager for actually registered channels
 /// instead of reading static config/env vars.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_channel_status_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Vec<ChannelStatusEntry>, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
@@ -872,22 +872,23 @@ pub async fn thinclaw_channel_status_list(
         .into_iter()
         .map(|e| {
             let (state_str, uptime) = match &e.state {
-                ironclaw::channels::status_view::ChannelViewState::Running { uptime_secs } => {
+                thinclaw_core::channels::status_view::ChannelViewState::Running { uptime_secs } => {
                     ("Running".to_string(), Some(*uptime_secs as u32))
                 }
-                ironclaw::channels::status_view::ChannelViewState::Connecting { attempt } => {
+                thinclaw_core::channels::status_view::ChannelViewState::Connecting { attempt } => {
                     (format!("Connecting (attempt {})", attempt), None)
                 }
-                ironclaw::channels::status_view::ChannelViewState::Reconnecting {
-                    attempt, ..
+                thinclaw_core::channels::status_view::ChannelViewState::Reconnecting {
+                    attempt,
+                    ..
                 } => (format!("Reconnecting (attempt {})", attempt), None),
-                ironclaw::channels::status_view::ChannelViewState::Failed { error, .. } => {
-                    (format!("Failed: {}", error), None)
-                }
-                ironclaw::channels::status_view::ChannelViewState::Disabled => {
+                thinclaw_core::channels::status_view::ChannelViewState::Failed {
+                    error, ..
+                } => (format!("Failed: {}", error), None),
+                thinclaw_core::channels::status_view::ChannelViewState::Disabled => {
                     ("Disabled".to_string(), None)
                 }
-                ironclaw::channels::status_view::ChannelViewState::Draining => {
+                thinclaw_core::channels::status_view::ChannelViewState::Draining => {
                     ("Draining".to_string(), None)
                 }
             };
@@ -914,7 +915,7 @@ pub async fn thinclaw_channel_status_list(
 #[specta::specta]
 pub async fn thinclaw_agents_set_default(
     _state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     agent_id: String,
 ) -> Result<(), String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -924,11 +925,11 @@ pub async fn thinclaw_agents_set_default(
         return Ok(());
     }
 
-    // Persist default agent via IronClaw's config API
+    // Persist default agent via ThinClaw's config API
     let agent = ironclaw.agent().await.ok();
     if let Some(agent) = agent {
         if let Some(store) = agent.store() {
-            ironclaw::api::config::set_setting(
+            thinclaw_core::api::config::set_setting(
                 store,
                 "local_user",
                 "default_agent_id",
@@ -938,15 +939,15 @@ pub async fn thinclaw_agents_set_default(
             .map_err(|e| format!("Failed to set default agent: {}", e))?;
         }
     }
-    info!("[ironclaw] Set default agent to: {}", agent_id);
+    info!("[thinclaw-runtime] Set default agent to: {}", agent_id);
     Ok(())
 }
 
-/// Search ClawHub plugin catalog (proxied through IronClaw).
+/// Search ClawHub plugin catalog (proxied through ThinClaw).
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_clawhub_search(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     query: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -960,7 +961,7 @@ pub async fn thinclaw_clawhub_search(
 
     let cache_lock = ironclaw.catalog_cache().await?;
     let cache = cache_lock.lock().await;
-    let entries = ironclaw::tauri_commands::clawhub_search(&cache, &query)?;
+    let entries = thinclaw_core::tauri_commands::clawhub_search(&cache, &query)?;
     Ok(serde_json::json!({ "entries": entries }))
 }
 
@@ -968,7 +969,7 @@ pub async fn thinclaw_clawhub_search(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_clawhub_install(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     plugin_id: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -982,7 +983,7 @@ pub async fn thinclaw_clawhub_install(
 
     let cache_lock = ironclaw.catalog_cache().await?;
     let cache = cache_lock.lock().await;
-    let result = ironclaw::tauri_commands::clawhub_prepare_install(&cache, &plugin_id)?;
+    let result = thinclaw_core::tauri_commands::clawhub_prepare_install(&cache, &plugin_id)?;
     Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
 }
 
@@ -990,7 +991,7 @@ pub async fn thinclaw_clawhub_install(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_cache_stats(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<CacheStats, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.cache_stats().await?;
@@ -1020,7 +1021,7 @@ pub async fn thinclaw_cache_stats(
 
     let cache_lock = ironclaw.response_cache().await?;
     let cache = cache_lock.read().await;
-    let ic_stats = ironclaw::tauri_commands::cache_stats(&cache)?;
+    let ic_stats = thinclaw_core::tauri_commands::cache_stats(&cache)?;
     Ok(CacheStats {
         hits: ic_stats.hits as u32,
         misses: ic_stats.misses as u32,
@@ -1034,10 +1035,10 @@ pub async fn thinclaw_cache_stats(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_plugin_lifecycle_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Vec<LifecycleEventItem>, String> {
     let hook = ironclaw.audit_log_hook().await?;
-    let events = ironclaw::tauri_commands::plugin_lifecycle_list(&hook)?;
+    let events = thinclaw_core::tauri_commands::plugin_lifecycle_list(&hook)?;
     Ok(events
         .into_iter()
         .map(|e| LifecycleEventItem {
@@ -1053,7 +1054,7 @@ pub async fn thinclaw_plugin_lifecycle_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_manifest_validate(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     plugin_id: String,
 ) -> Result<ManifestValidationResponse, String> {
     let validator = ironclaw.manifest_validator().await?;
@@ -1061,7 +1062,7 @@ pub async fn thinclaw_manifest_validate(
     // Build a PluginInfoRef from the plugin_id. In a full implementation,
     // this would look up actual manifest data from the extension manager.
     // For now, construct a minimal ref to validate against.
-    let info = ironclaw::extensions::manifest_validator::PluginInfoRef {
+    let info = thinclaw_core::extensions::manifest_validator::PluginInfoRef {
         name: plugin_id,
         version: None,
         description: None,
@@ -1070,7 +1071,7 @@ pub async fn thinclaw_manifest_validate(
         homepage_url: None,
     };
 
-    let response = ironclaw::tauri_commands::manifest_validate(&validator, &info)?;
+    let response = thinclaw_core::tauri_commands::manifest_validate(&validator, &info)?;
     Ok(ManifestValidationResponse {
         errors: response.errors,
         warnings: response.warnings,
@@ -1081,7 +1082,7 @@ pub async fn thinclaw_manifest_validate(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_get(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let enabled = remote_smart_routing_enabled(&proxy).await?;
@@ -1110,13 +1111,13 @@ pub async fn thinclaw_routing_get(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_set(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     smart_routing_enabled: bool,
 ) -> Result<(), String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         remote_set_smart_routing_enabled(&proxy, smart_routing_enabled).await?;
         info!(
-            "[ironclaw] Remote smart routing set to: {}",
+            "[thinclaw-runtime] Remote smart routing set to: {}",
             smart_routing_enabled
         );
         return Ok(());
@@ -1134,7 +1135,10 @@ pub async fn thinclaw_routing_set(
                 .map_err(|e| format!("Failed to set routing config: {}", e))?;
         }
     }
-    info!("[ironclaw] Smart routing set to: {}", smart_routing_enabled);
+    info!(
+        "[thinclaw-runtime] Smart routing set to: {}",
+        smart_routing_enabled
+    );
     Ok(())
 }
 
@@ -1142,7 +1146,7 @@ pub async fn thinclaw_routing_set(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_rules_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<RoutingRulesResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return Ok(RoutingRulesResponse {
@@ -1185,7 +1189,7 @@ pub async fn thinclaw_routing_rules_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_rules_save(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     rules: Vec<RoutingRule>,
 ) -> Result<(), String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -1201,7 +1205,7 @@ pub async fn thinclaw_routing_rules_save(
                 .map_err(|e| format!("Failed to save routing rules: {}", e))?;
         }
     }
-    info!("[ironclaw] Saved {} routing rules", rules.len());
+    info!("[thinclaw-runtime] Saved {} routing rules", rules.len());
     Ok(())
 }
 
@@ -1209,7 +1213,7 @@ pub async fn thinclaw_routing_rules_save(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_pools_save(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     primary_pool_order: Vec<String>,
     cheap_pool_order: Vec<String>,
 ) -> Result<(), String> {
@@ -1218,7 +1222,7 @@ pub async fn thinclaw_routing_pools_save(
 
     if let Some(proxy) = ironclaw.remote_proxy().await {
         remote_save_routing_pools(&proxy, primary_pool_order, cheap_pool_order).await?;
-        info!("[ironclaw] Saved remote provider routing pools");
+        info!("[thinclaw-runtime] Saved remote provider routing pools");
         return Ok(());
     }
 
@@ -1251,11 +1255,11 @@ pub async fn thinclaw_routing_pools_save(
             .map_err(|e| format!("Failed to reload routing runtime: {}", e))?;
     }
 
-    info!("[ironclaw] Saved local provider routing pools");
+    info!("[thinclaw-runtime] Saved local provider routing pools");
     Ok(())
 }
 
-/// Start the Gmail OAuth PKCE flow via IronClaw.
+/// Start the Gmail OAuth PKCE flow via ThinClaw.
 ///
 /// This opens the user's browser for Google consent, waits for the
 /// callback, exchanges the auth code for tokens, and returns them.
@@ -1263,7 +1267,7 @@ pub async fn thinclaw_routing_pools_save(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_gmail_oauth_start(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<GmailOAuthResult, String> {
     if ironclaw.remote_proxy().await.is_some() {
         return Ok(GmailOAuthResult {
@@ -1278,20 +1282,20 @@ pub async fn thinclaw_gmail_oauth_start(
         });
     }
 
-    // Call IronClaw's gmail_oauth_start which handles the full PKCE flow:
+    // Call ThinClaw's gmail_oauth_start which handles the full PKCE flow:
     // 1. Generates PKCE verifier/challenge
     // 2. Builds Google auth URL
     // 3. Opens browser
     // 4. Binds localhost callback listener
     // 5. Exchanges code for tokens
-    let ic_result = ironclaw::tauri_commands::gmail_oauth_start()
+    let ic_result = thinclaw_core::tauri_commands::gmail_oauth_start()
         .await
         .map_err(|e| format!("Gmail OAuth failed: {}", e))?;
 
     // If successful, persist refresh token in Keychain for future use
     if ic_result.success {
         if let Some(ref refresh_token) = ic_result.refresh_token {
-            // Store via IronClaw's agent secrets store if available
+            // Store via ThinClaw's agent secrets store if available
             if let Ok(agent) = ironclaw.agent().await {
                 if let Some(store) = agent.store() {
                     let _ = store
@@ -1304,10 +1308,10 @@ pub async fn thinclaw_gmail_oauth_start(
                 }
             }
         }
-        info!("[ironclaw] Gmail OAuth completed successfully");
+        info!("[thinclaw-runtime] Gmail OAuth completed successfully");
     } else {
         let err_msg = ic_result.error.as_deref().unwrap_or("unknown error");
-        warn!("[ironclaw] Gmail OAuth failed: {}", err_msg);
+        warn!("[thinclaw-runtime] Gmail OAuth failed: {}", err_msg);
     }
 
     Ok(GmailOAuthResult {
@@ -1324,7 +1328,7 @@ pub async fn thinclaw_gmail_oauth_start(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_rules_add(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     rule: RoutingRule,
     position: Option<u32>,
 ) -> Result<Vec<RoutingRule>, String> {
@@ -1389,7 +1393,7 @@ pub async fn thinclaw_routing_rules_add(
         .map_err(|e| format!("Failed to save rules: {}", e))?;
 
     info!(
-        "[ironclaw] Added routing rule, now have {} rules",
+        "[thinclaw-runtime] Added routing rule, now have {} rules",
         rules.len()
     );
     Ok(rules)
@@ -1399,7 +1403,7 @@ pub async fn thinclaw_routing_rules_add(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_rules_remove(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     index: u32,
 ) -> Result<Vec<RoutingRule>, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -1451,7 +1455,7 @@ pub async fn thinclaw_routing_rules_remove(
         .map_err(|e| format!("Failed to save rules: {}", e))?;
 
     info!(
-        "[ironclaw] Removed routing rule at index {}, now have {} rules",
+        "[thinclaw-runtime] Removed routing rule at index {}, now have {} rules",
         index,
         rules.len()
     );
@@ -1462,7 +1466,7 @@ pub async fn thinclaw_routing_rules_remove(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_rules_reorder(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     from: u32,
     to: u32,
 ) -> Result<Vec<RoutingRule>, String> {
@@ -1522,7 +1526,10 @@ pub async fn thinclaw_routing_rules_reorder(
         .await
         .map_err(|e| format!("Failed to save rules: {}", e))?;
 
-    info!("[ironclaw] Reordered routing rule from {} to {}", from, to);
+    info!(
+        "[thinclaw-runtime] Reordered routing rule from {} to {}",
+        from, to
+    );
     Ok(rules)
 }
 
@@ -1530,7 +1537,7 @@ pub async fn thinclaw_routing_rules_reorder(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_status(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<RoutingStatusResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let provider_config = proxy.get_providers_config().await?;
@@ -1684,11 +1691,11 @@ pub async fn thinclaw_routing_status(
 
     let rule_summaries = routing_rule_summaries(&rules);
 
-    // Collect latency data from IronClaw's cost tracker if available
+    // Collect latency data from ThinClaw's cost tracker if available
     let mut latency_data: Vec<LatencyEntry> = Vec::new();
     if let Ok(tracker) = ironclaw.cost_tracker().await {
         let ct = tracker.lock().await;
-        if let Ok(summary) = ironclaw::tauri_commands::cost_summary(&ct) {
+        if let Ok(summary) = thinclaw_core::tauri_commands::cost_summary(&ct) {
             for (provider, _cost) in &summary.by_model {
                 latency_data.push(LatencyEntry {
                     provider: provider.clone(),
@@ -1726,7 +1733,7 @@ pub async fn thinclaw_routing_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routing_simulate(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     request: RouteSimulationRequest,
 ) -> Result<RouteSimulationResponse, String> {
     if request.prompt.trim().is_empty() {
@@ -1754,7 +1761,7 @@ pub async fn thinclaw_routing_simulate(
         Ok(runtime) => runtime,
         Err(err) => return Ok(unavailable_route_simulation(format!("unavailable: {err}"))),
     };
-    let ctx = ironclaw::llm::routing_policy::RoutingContext {
+    let ctx = thinclaw_core::llm::routing_policy::RoutingContext {
         estimated_input_tokens: (request.prompt.len() / 4) as u32,
         has_vision: request.has_vision,
         has_tools: request.has_tools,
@@ -1772,7 +1779,7 @@ pub async fn thinclaw_routing_simulate(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_gmail_status(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<GmailStatusResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
@@ -1787,7 +1794,7 @@ pub async fn thinclaw_gmail_status(
     let mut oauth_configured = false;
     let mut missing_fields: Vec<String> = Vec::new();
 
-    // Read Gmail config from environment variables (IronClaw pattern)
+    // Read Gmail config from environment variables (ThinClaw pattern)
     if let Ok(val) = std::env::var("GMAIL_ENABLED") {
         enabled = val == "true" || val == "1";
     }
@@ -1897,7 +1904,7 @@ pub async fn thinclaw_gmail_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_canvas_panels_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     let agent = ironclaw.agent().await?;
     let store = agent.canvas_store().ok_or("Canvas store not available")?;
@@ -1918,7 +1925,7 @@ pub async fn thinclaw_canvas_panels_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_canvas_panel_get(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     panel_id: String,
 ) -> Result<serde_json::Value, String> {
     let agent = ironclaw.agent().await?;
@@ -1938,7 +1945,7 @@ pub async fn thinclaw_canvas_panel_get(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_canvas_panel_dismiss(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     panel_id: String,
 ) -> Result<bool, String> {
     let agent = ironclaw.agent().await?;
@@ -1955,7 +1962,7 @@ pub async fn thinclaw_canvas_panel_dismiss(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_heartbeat_set_interval(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     interval_minutes: u32,
 ) -> Result<serde_json::Value, String> {
     if interval_minutes < 5 || interval_minutes > 1440 {
@@ -1973,10 +1980,10 @@ pub async fn thinclaw_heartbeat_set_interval(
         .ok_or("Heartbeat routine not found — is the engine running?")?;
 
     let cron_5field = format!("*/{} * * * *", interval_minutes);
-    let schedule = ironclaw::agent::routine::normalize_cron_expr(&cron_5field);
-    let next_fire = ironclaw::agent::routine::next_cron_fire(&schedule).unwrap_or(None);
+    let schedule = thinclaw_core::agent::routine::normalize_cron_expr(&cron_5field);
+    let next_fire = thinclaw_core::agent::routine::next_cron_fire(&schedule).unwrap_or(None);
 
-    routine.trigger = ironclaw::agent::routine::Trigger::Cron {
+    routine.trigger = thinclaw_core::agent::routine::Trigger::Cron {
         schedule: schedule.clone(),
     };
     routine.next_fire_at = next_fire;
@@ -1989,38 +1996,38 @@ pub async fn thinclaw_heartbeat_set_interval(
         .map_err(|e| format!("Failed to update heartbeat routine: {}", e))?;
 
     info!(
-        "[ironclaw] Updated heartbeat interval to {} min (schedule='{}', next_fire={:?})",
+        "[thinclaw-runtime] Updated heartbeat interval to {} min (schedule='{}', next_fire={:?})",
         interval_minutes, schedule, next_fire
     );
 
-    // ── 2. Persist to ironclaw.toml so boot won't overwrite ───────────
+    // ── 2. Persist to thinclaw.toml so boot won't overwrite ───────────
     let interval_secs = interval_minutes as u64 * 60;
-    let toml_path = ironclaw.state_dir().join("ironclaw.toml");
+    let toml_path = crate::thinclaw::runtime_builder::runtime_toml_path(&ironclaw.state_dir());
     if toml_path.exists() {
-        match ironclaw::settings::Settings::load_toml(&toml_path) {
+        match thinclaw_core::settings::Settings::load_toml(&toml_path) {
             Ok(Some(mut settings)) => {
                 settings.heartbeat.interval_secs = interval_secs;
                 if let Err(e) = settings.save_toml(&toml_path) {
                     tracing::warn!(
-                        "Failed to persist heartbeat interval to ironclaw.toml: {}",
+                        "Failed to persist heartbeat interval to thinclaw.toml: {}",
                         e
                     );
                 } else {
                     tracing::info!(
-                        "Persisted heartbeat.interval_secs={} to ironclaw.toml",
+                        "Persisted heartbeat.interval_secs={} to thinclaw.toml",
                         interval_secs
                     );
                 }
             }
             Ok(None) => {
-                tracing::debug!("ironclaw.toml exists but is empty — skipping persistence");
+                tracing::debug!("thinclaw.toml exists but is empty — skipping persistence");
             }
             Err(e) => {
-                tracing::warn!("Failed to parse ironclaw.toml for persistence: {}", e);
+                tracing::warn!("Failed to parse thinclaw.toml for persistence: {}", e);
             }
         }
     } else {
-        tracing::debug!("No ironclaw.toml found — skipping persistence (DB is source of truth)");
+        tracing::debug!("No thinclaw.toml found — skipping persistence (DB is source of truth)");
     }
 
     // ── 3. Also update the env var so any in-process re-init matches ────
@@ -2070,7 +2077,7 @@ pub async fn thinclaw_reveal_workspace(
     // Ensure directory exists
     if let Err(e) = std::fs::create_dir_all(&path_str) {
         warn!(
-            "[ironclaw] Could not create workspace dir {}: {}",
+            "[thinclaw-runtime] Could not create workspace dir {}: {}",
             path_str, e
         );
     }
@@ -2092,7 +2099,7 @@ pub async fn thinclaw_reveal_workspace(
         .spawn()
         .map_err(|e| format!("Failed to open folder: {}", e))?;
 
-    info!("[ironclaw] Revealed workspace: {}", path_str);
+    info!("[thinclaw-runtime] Revealed workspace: {}", path_str);
     Ok(path_str)
 }
 

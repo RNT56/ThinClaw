@@ -385,7 +385,7 @@ pub async fn cloud_get_storage_breakdown(
         ("documents", "Documents", "documents/"),
         ("images", "Chat Images", "images/"),
         ("database", "Database", ""),
-        ("ironclaw_db", "Agent Database", "ironclaw"),
+        ("thinclaw_runtime_db", "Agent Database", "thinclaw-runtime"),
         ("vectors", "Vector Indices", "vectors/"),
         ("previews", "Previews", "previews/"),
         ("thinclaw", "Agent State", "thinclaw/"),
@@ -395,8 +395,13 @@ pub async fn cloud_get_storage_breakdown(
     for (id, label, subdir) in categories {
         let path = if subdir.is_empty() {
             app_data_dir.join("thinclaw.db")
-        } else if subdir == "ironclaw" {
-            app_data_dir.join("ironclaw.db")
+        } else if subdir == "thinclaw-runtime" {
+            let runtime_db = app_data_dir.join("thinclaw-runtime.db");
+            if runtime_db.exists() {
+                runtime_db
+            } else {
+                app_data_dir.join("ironclaw.db")
+            }
         } else {
             app_data_dir.join(subdir)
         };

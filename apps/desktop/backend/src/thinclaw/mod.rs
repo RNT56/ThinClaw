@@ -1,7 +1,7 @@
 //! ThinClaw module — agent engine integration
 //!
 //! Core modules:
-//! - ironclaw_bridge, ironclaw_channel, ironclaw_secrets, ironclaw_types (engine)
+//! - runtime_bridge, tauri_channel, secrets_adapter, event_mapping (engine)
 //! - commands (Tauri command handlers)
 //! - config (identity.json, keychain, workspace paths)
 //! - ui_types (UiEvent enum for frontend events)
@@ -9,14 +9,14 @@
 pub mod commands;
 pub mod config;
 pub mod deploy;
+pub mod event_mapping; // StatusUpdate → UiEvent conversion
 pub mod fleet;
-pub mod ironclaw_bridge; // IronClaw lifecycle manager (IronClawState)
-mod ironclaw_builder; // Engine construction logic (extracted from ironclaw_bridge)
-pub mod ironclaw_channel; // impl Channel for TauriChannel
-pub mod ironclaw_secrets; // SecretsStore adapter (Keychain → IronClaw trait)
-pub mod ironclaw_types; // StatusUpdate → UiEvent conversion
-pub mod remote_proxy; // HTTP/SSE proxy client for remote IronClaw gateway
+pub mod remote_proxy; // HTTP/SSE proxy client for remote ThinClaw gateway
+pub mod runtime_bridge; // ThinClaw lifecycle manager (ThinClawRuntimeState)
+mod runtime_builder; // Engine construction logic (extracted from runtime_bridge)
 pub mod sanitizer; // LLM token stripping
+pub mod secrets_adapter; // SecretsStore adapter (Keychain → ThinClaw trait)
+pub mod tauri_channel; // impl Channel for TauriChannel
 pub mod tool_bridge; // ToolBridge trait + TauriToolBridge (3-tier approval)
 pub mod ui_types; // UiEvent enum + supporting types
 

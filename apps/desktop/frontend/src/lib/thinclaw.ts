@@ -277,21 +277,21 @@ export async function saveGatewaySettings(
 }
 
 /**
- * Start the IronClaw engine (in-process, no HTTP server)
+ * Start the ThinClaw runtime (in-process, no HTTP server)
  */
 export async function startThinClawGateway(): Promise<void> {
     return invoke('thinclaw_start_gateway');
 }
 
 /**
- * Stop the IronClaw engine
+ * Stop the ThinClaw runtime
  */
 export async function stopThinClawGateway(): Promise<void> {
     return invoke('thinclaw_stop_gateway');
 }
 
 /**
- * Reload secrets (API keys) into the running IronClaw agent.
+ * Reload secrets (API keys) into the running ThinClaw runtime.
  *
  * Performs a graceful engine restart to re-inject keys from macOS Keychain.
  * Call after saving or toggling API keys so the agent picks up changes
@@ -962,7 +962,7 @@ export interface ThinkingConfigResult {
 }
 
 /**
- * Set thinking mode natively via IronClaw's ThinkingConfig.
+ * Set thinking mode natively via ThinClaw's ThinkingConfig.
  *
  * This replaces the old localStorage hack that prepended
  * "Think step by step" to messages.
@@ -990,7 +990,7 @@ export interface MemorySearchResponse {
 }
 
 /**
- * Search workspace memory using IronClaw's hybrid BM25+vector search.
+ * Search workspace memory using ThinClaw's hybrid BM25+vector search.
  * Falls back to simple text search if vector search is unavailable.
  */
 export async function searchMemory(
@@ -1209,7 +1209,7 @@ export interface SettingsListResponse {
     settings: SettingItem[];
 }
 
-/** List all IronClaw config settings. */
+/** List all ThinClaw config settings. */
 export async function listSettings(): Promise<SettingsListResponse> {
     return invoke('thinclaw_config_get');
 }
@@ -1409,7 +1409,7 @@ export interface ClawHubEntry {
     tags: string[];
 }
 
-/** Search ClawHub plugin catalog (proxied through IronClaw). */
+/** Search ClawHub plugin catalog (proxied through ThinClaw). */
 export async function searchClawHub(query: string): Promise<{ entries: ClawHubEntry[] }> {
     return invoke('thinclaw_clawhub_search', { query });
 }
@@ -1514,7 +1514,7 @@ export interface GmailOAuthResult {
 }
 
 /**
- * Start the Gmail OAuth PKCE flow via IronClaw.
+ * Start the Gmail OAuth PKCE flow via ThinClaw.
  * Opens a browser for Google consent, waits for callback, exchanges for tokens.
  * Returns the full result — caller should check `success` field.
  */

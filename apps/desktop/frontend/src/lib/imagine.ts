@@ -42,7 +42,7 @@ export interface ImagineStats {
  * Generate an image using the Imagine mode
  */
 export async function imagineGenerate(params: ImagineParams): Promise<GeneratedImage> {
-    return invoke<GeneratedImage>('imagine_generate', {
+    return invoke<GeneratedImage>('direct_imagine_generate', {
         params: {
             prompt: params.prompt,
             provider: params.provider,
@@ -65,7 +65,7 @@ export async function imagineListImages(
     offset?: number,
     favoritesOnly?: boolean
 ): Promise<GeneratedImage[]> {
-    return invoke<GeneratedImage[]>('imagine_list_images', {
+    return invoke<GeneratedImage[]>('direct_imagine_list_images', {
         limit,
         offset,
         favoritesOnly
@@ -76,28 +76,28 @@ export async function imagineListImages(
  * Search generated images by prompt
  */
 export async function imagineSearchImages(query: string): Promise<GeneratedImage[]> {
-    return invoke<GeneratedImage[]>('imagine_search_images', { query });
+    return invoke<GeneratedImage[]>('direct_imagine_search_images', { query });
 }
 
 /**
  * Toggle favorite status for an image
  */
 export async function imagineToggleFavorite(imageId: string): Promise<boolean> {
-    return invoke<boolean>('imagine_toggle_favorite', { imageId });
+    return invoke<boolean>('direct_imagine_toggle_favorite', { imageId });
 }
 
 /**
  * Delete a generated image
  */
 export async function imagineDeleteImage(imageId: string): Promise<void> {
-    return invoke<void>('imagine_delete_image', { imageId });
+    return invoke<void>('direct_imagine_delete_image', { imageId });
 }
 
 /**
  * Get gallery statistics
  */
 export async function imagineGetStats(): Promise<ImagineStats> {
-    return invoke<ImagineStats>('imagine_get_stats');
+    return invoke<ImagineStats>('direct_imagine_get_stats');
 }
 
 /**

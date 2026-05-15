@@ -3,7 +3,7 @@
  *
  * Uses the shared `useEngineSetup` hook for setup state and actions.
  * Displays a prominent banner with a "Set Up Now" button that triggers
- * `setup_engine` and shows a progress indicator.
+ * `direct_runtime_setup_engine` and shows a progress indicator.
  *
  * Design: follows the app's card pattern (border-border/50, rounded-xl,
  * bg-card, shadow-sm) and uses design-token colours for all states.
@@ -35,7 +35,7 @@ export function EngineSetupBanner() {
     const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
 
     useEffect(() => {
-        invoke<EngineInfo>("get_active_engine_info")
+        invoke<EngineInfo>("direct_runtime_get_active_engine_info")
             .then(setEngineInfo)
             .catch((err) => console.warn("Failed to get engine info:", err));
     }, []);

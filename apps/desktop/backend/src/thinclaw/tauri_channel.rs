@@ -1,6 +1,6 @@
-//! Tauri channel adapter for IronClaw.
+//! Tauri channel adapter for ThinClaw.
 //!
-//! Implements `ironclaw::channels::Channel` to bridge the IronClaw agent
+//! Implements `thinclaw_core::channels::Channel` to bridge the ThinClaw runtime
 //! engine with Tauri's event system. StatusUpdate emissions are converted
 //! to UiEvent and emitted via `AppHandle::emit`.
 //!
@@ -9,7 +9,7 @@
 //! Session routing uses a two-tier strategy:
 //!
 //! 1. **Primary:** Read `session_key` / `thread_id` from the StatusUpdate
-//!    metadata (injected by IronClaw's agent loop).
+//!    metadata (injected by ThinClaw's agent loop).
 //! 2. **Fallback:** If a status variant carries its own thread ID (auth
 //!    events do), use that.
 //! 3. **Default:** Route unscoped status updates to `agent:main`.
@@ -26,10 +26,12 @@ use async_trait::async_trait;
 use tauri::{AppHandle, Emitter, Manager, Wry};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-use ironclaw::error::ChannelError;
+use thinclaw_core::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+};
+use thinclaw_core::error::ChannelError;
 
-use super::ironclaw_types::{routing_from_status, status_to_ui_event};
+use super::event_mapping::{routing_from_status, status_to_ui_event};
 use super::sanitizer::strip_llm_tokens;
 use super::ui_types::UiEvent;
 
@@ -39,7 +41,7 @@ const CHANNEL_NAME: &str = "tauri";
 /// Event name emitted to the frontend (matches existing `listen("thinclaw-event")`)
 const EMIT_EVENT: &str = "thinclaw-event";
 
-/// Tauri-native channel implementation for IronClaw.
+/// Tauri-native channel implementation for ThinClaw.
 ///
 /// The channel holds an `mpsc::Sender` that the bridge uses to inject
 /// messages from Tauri commands into the agent's message stream.
@@ -57,7 +59,7 @@ impl TauriChannel {
     /// Create a new TauriChannel.
     ///
     /// Returns `(channel, sender, active_sessions)` — the sender is stored in
-    /// `IronClawState` for Tauri commands to inject messages, and the
+    /// `ThinClawRuntimeState` for Tauri commands to inject messages, and the
     /// active_sessions Arc is shared so commands can register sessions.
     pub fn new(
         app_handle: AppHandle<Wry>,
@@ -199,7 +201,7 @@ impl Channel for TauriChannel {
             run_id,
             message_id: msg.id.to_string(),
             text: strip_llm_tokens(&response.content),
-            usage: None, // IronClaw doesn't pass usage through OutgoingResponse
+            usage: None, // ThinClaw doesn't pass usage through OutgoingResponse
         };
         self.emit_ui_event(&event);
 

@@ -259,7 +259,7 @@ impl ThinClawConfig {
             bedrock_region: keychain::get_key("bedrock_region"),
             bedrock_granted: identity.bedrock_granted,
         };
-        crate::thinclaw::ironclaw_secrets::update_default_secret_grants(&config);
+        crate::thinclaw::secrets_adapter::update_default_secret_grants(&config);
         config
     }
 

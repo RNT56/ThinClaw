@@ -1,7 +1,7 @@
 //! Tauri commands for ThinClaw integration.
 //!
 //! The `thinclaw_*` Tauri command names are kept as final Desktop IPC
-//! even when the implementation delegates to embedded IronClaw internals.
+//! even when the implementation delegates to embedded ThinClaw internals.
 //!
 //! Split into focused submodules:
 //! - `types`: Response/input structs
@@ -56,7 +56,7 @@ pub use types::*;
 /// After Phase 3 migration, this struct is much simpler: it only holds
 /// the config for key management and workspace path resolution.
 /// The WS client, process management, and gateway lifecycle have been
-/// replaced by `IronClawState`.
+/// replaced by `ThinClawRuntimeState`.
 pub struct ThinClawManager {
     /// App handle for paths
     pub(crate) app: AppHandle,

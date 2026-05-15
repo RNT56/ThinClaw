@@ -53,8 +53,12 @@ pub(crate) async fn hooks_register_handler(
     ))?;
     let value: serde_json::Value = serde_json::from_str(&req.bundle_json)
         .map_err(|err| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {err}")))?;
-    let bundle = crate::hooks::bundled::HookBundleConfig::from_value(&value)
-        .map_err(|err| (StatusCode::BAD_REQUEST, format!("Invalid hook bundle: {err}")))?;
+    let bundle = crate::hooks::bundled::HookBundleConfig::from_value(&value).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid hook bundle: {err}"),
+        )
+    })?;
     let source = req.source.unwrap_or_else(|| "gateway".to_string());
     let summary = crate::hooks::bundled::register_bundle(hooks, &source, bundle).await;
     Ok(Json(serde_json::json!({

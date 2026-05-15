@@ -2,6 +2,7 @@ use image::imageops::FilterType;
 use image::GenericImageView;
 use serde::Serialize;
 use specta::Type;
+use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
@@ -15,9 +16,10 @@ pub struct ImageResponse {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn upload_image(
+pub async fn direct_assets_upload_image(
     _app: AppHandle,
     file_store: State<'_, FileStore>,
+    pool: State<'_, SqlitePool>,
     image_bytes: Vec<u8>,
 ) -> Result<ImageResponse, String> {
     // Ensure images directory exists
@@ -56,6 +58,26 @@ pub async fn upload_image(
         .save(&path)
         .map_err(|e| format!("Failed to save image: {}", e))?;
 
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO direct_assets (
+            id, namespace, kind, origin, status, visibility, path,
+            mime_type, size_bytes, width, height, created_at, updated_at
+        ) VALUES (?, 'direct_workbench', 'image', 'upload', 'ready', 'private', ?, 'image/jpeg', ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(path.to_string_lossy().to_string())
+    .bind(image_bytes.len() as i64)
+    .bind(rgb_img.width() as i32)
+    .bind(rgb_img.height() as i32)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to save asset metadata: {}", e))?;
+
     println!(
         "[images] Uploaded image {} ({}x{} → {}x{}, saved as JPEG)",
         id,
@@ -74,7 +96,7 @@ pub async fn upload_image(
 // Helper to get absolute path for an image ID
 #[tauri::command]
 #[specta::specta]
-pub async fn get_image_path(
+pub async fn direct_assets_get_image_path(
     file_store: State<'_, FileStore>,
     id: String,
 ) -> Result<String, String> {
@@ -97,7 +119,7 @@ pub async fn get_image_path(
 // Helper to load and base64 encode an image by ID (Available as command)
 #[tauri::command]
 #[specta::specta]
-pub async fn load_image(app: AppHandle, id: String) -> Result<String, String> {
+pub async fn direct_assets_load_image(app: AppHandle, id: String) -> Result<String, String> {
     load_image_as_base64(&app, &id).await
 }
 
@@ -149,7 +171,7 @@ pub async fn load_image_as_base64(app: &AppHandle, image_id: &str) -> Result<Str
 
 #[tauri::command]
 #[specta::specta]
-pub async fn open_images_folder(app: AppHandle) -> Result<(), String> {
+pub async fn direct_assets_open_images_folder(app: AppHandle) -> Result<(), String> {
     let file_store = app.state::<FileStore>();
     file_store
         .create_dir_all("images")

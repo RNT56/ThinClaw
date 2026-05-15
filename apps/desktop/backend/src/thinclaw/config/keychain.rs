@@ -107,25 +107,11 @@ fn cache_loaded() -> &'static Mutex<bool> {
 /// The shorter Scrappy/ThinClaw-era provider slugs remain readable as fallback
 /// aliases so existing users do not lose credentials during the rename.
 pub(crate) fn canonical_key_name(key: &str) -> &str {
-    match key {
-        "anthropic" | "ANTHROPIC_API_KEY" => "llm_anthropic_api_key",
-        "openai" | "OPENAI_API_KEY" => "llm_openai_api_key",
-        "openrouter" | "openai_compatible" | "LLM_API_KEY" => "llm_compatible_api_key",
-        "brave" | "BRAVE_SEARCH_API_KEY" => "search_brave_api_key",
-        "huggingface" | "HUGGINGFACE_TOKEN" | "HF_TOKEN" => "hf_token",
-        other => other,
-    }
+    thinclaw_runtime_contracts::canonical_secret_name(key)
 }
 
 fn legacy_aliases_for(canonical: &str) -> &'static [&'static str] {
-    match canonical {
-        "llm_anthropic_api_key" => &["anthropic", "ANTHROPIC_API_KEY"],
-        "llm_openai_api_key" => &["openai", "OPENAI_API_KEY"],
-        "llm_compatible_api_key" => &["openrouter", "openai_compatible", "LLM_API_KEY"],
-        "search_brave_api_key" => &["brave", "BRAVE_SEARCH_API_KEY"],
-        "hf_token" => &["huggingface", "HUGGINGFACE_TOKEN", "HF_TOKEN"],
-        _ => &[],
-    }
+    thinclaw_runtime_contracts::legacy_secret_aliases(canonical)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

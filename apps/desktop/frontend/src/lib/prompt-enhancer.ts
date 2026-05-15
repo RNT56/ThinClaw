@@ -38,7 +38,7 @@ export async function enhanceImagePrompt(
         const systemPrompt = IMAGE_PROMPT_ENHANCE_SYSTEM_PROMPT.replace("{STYLE_SNIPPET}", styleSnippet);
 
         // Use the unified backend command which routes to current local/cloud provider
-        const res = await (commands as any).chatCompletion({
+        const res = await (commands as any).directChatCompletion({
             model: "auto", // Backend resolves this
             messages: [
                 { role: "system", content: systemPrompt },

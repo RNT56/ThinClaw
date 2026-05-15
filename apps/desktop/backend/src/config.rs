@@ -375,7 +375,8 @@ pub fn open_config_file(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 #[specta::specta]
 pub async fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
-    if let Some(ironclaw) = app.try_state::<crate::thinclaw::ironclaw_bridge::IronClawState>() {
+    if let Some(ironclaw) = app.try_state::<crate::thinclaw::runtime_bridge::ThinClawRuntimeState>()
+    {
         if ironclaw.remote_proxy().await.is_some() {
             return Ok(None);
         }

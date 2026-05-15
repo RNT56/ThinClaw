@@ -13,13 +13,13 @@ use futures::StreamExt;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::agent::submission::Submission;
 use crate::channels::web::identity_helpers::{
     GatewayRequestIdentity, get_or_create_gateway_assistant_conversation,
     request_identity_with_overrides, sse_event_visible_to_identity,
 };
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::agent::submission::Submission;
 use thinclaw_gateway::web::ports::RouteStatePort;
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
@@ -185,7 +185,14 @@ pub(crate) async fn chat_abort_handler(
     request_identity: GatewayRequestIdentity,
     Json(req): Json<ThreadCommandRequest>,
 ) -> Result<(StatusCode, Json<ThreadCommandResponse>), (StatusCode, String)> {
-    submit_thread_command(&state, &headers, &request_identity, req, Submission::Interrupt).await
+    submit_thread_command(
+        &state,
+        &headers,
+        &request_identity,
+        req,
+        Submission::Interrupt,
+    )
+    .await
 }
 
 pub(crate) async fn chat_thread_reset_handler(
@@ -203,7 +210,14 @@ pub(crate) async fn chat_thread_compact_handler(
     request_identity: GatewayRequestIdentity,
     Json(req): Json<ThreadCommandRequest>,
 ) -> Result<(StatusCode, Json<ThreadCommandResponse>), (StatusCode, String)> {
-    submit_thread_command(&state, &headers, &request_identity, req, Submission::Compact).await
+    submit_thread_command(
+        &state,
+        &headers,
+        &request_identity,
+        req,
+        Submission::Compact,
+    )
+    .await
 }
 
 pub(crate) fn gateway_submission_error(error: String) -> (StatusCode, String) {

@@ -60,7 +60,7 @@ export function ActiveEngineChip() {
     const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
 
     useEffect(() => {
-        invoke<EngineInfo>("get_active_engine_info")
+        invoke<EngineInfo>("direct_runtime_get_active_engine_info")
             .then(setEngineInfo)
             .catch(() => {
                 /* silently fail — chip just won't show */

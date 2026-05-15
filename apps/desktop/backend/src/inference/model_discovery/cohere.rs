@@ -60,6 +60,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
                 supports_vision: false,
                 supports_tools: matches!(category, ModelCategory::Chat),
                 supports_streaming: matches!(category, ModelCategory::Chat),
+                capabilities: Default::default(),
                 deprecated: false,
                 pricing: None,
                 embedding_dimensions: if matches!(category, ModelCategory::Embedding) {

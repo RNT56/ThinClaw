@@ -4,7 +4,7 @@
 //! for the application.  It is NOT part of the ThinClaw subsystem — it is an
 //! app-wide concern consumed by:
 //!
-//!   - **IronClaw engine** — reads keys via `SecretsStore` trait adapter
+//!   - **ThinClaw runtime** — reads keys via `SecretsStore` trait adapter
 //!   - **HF Hub**          — reads the HuggingFace token for API calls
 //!   - **Rig agent**       — reads provider keys for inference
 //!   - **Model downloader** — reads HF token for gated model downloads

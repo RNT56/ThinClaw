@@ -1,7 +1,7 @@
 /**
  * ThinClawPresence — Agent Runtime Inspector
  *
- * Displays live runtime metrics from the embedded IronClaw engine:
+ * Displays live runtime metrics from the embedded ThinClaw runtime:
  * sessions, sub-agents, tools, hooks, channels, uptime, and routine engine state.
  * Polls every 5 seconds for live updates.
  *

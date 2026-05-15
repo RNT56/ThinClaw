@@ -8,7 +8,7 @@ use tracing::info;
 use super::types::*;
 use super::ThinClawManager;
 use crate::thinclaw::config::AgentProfile;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 // ============================================================================
 // Orchestration & Canvas Commands
@@ -16,7 +16,7 @@ use crate::thinclaw::ironclaw_bridge::IronClawState;
 
 /// In-memory registry of sub-agent sessions and their parent relationships.
 ///
-/// This is separate from IronClaw's session storage — it only tracks the
+/// This is separate from ThinClaw's session storage — it only tracks the
 /// parent→child spawning relationships and task metadata needed for the
 /// SubAgentPanel UI. Sessions are evicted from this registry when the parent
 /// session is deleted or the engine is stopped.
@@ -123,7 +123,7 @@ pub(crate) mod sub_agent_registry {
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_spawn_session(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     agent_id: String,
     task: String,
     parent_session: Option<String>,
@@ -169,9 +169,10 @@ pub async fn thinclaw_spawn_session(
     // ── Non-blocking: full agent turn runs in a background task ──────────
     tokio::spawn(async move {
         // 1. Full agentic loop: workspace + memory + tools + streaming
-        let run_ok = ironclaw::api::chat::send_message(agent.clone(), &child_bg, &task_bg, true)
-            .await
-            .is_ok();
+        let run_ok =
+            thinclaw_core::api::chat::send_message(agent.clone(), &child_bg, &task_bg, true)
+                .await
+                .is_ok();
 
         let status = if run_ok { "completed" } else { "failed" };
 
@@ -246,17 +247,17 @@ pub async fn thinclaw_spawn_session(
                 status,
                 preview.as_deref().unwrap_or("(none)"),
             );
-            let _ = ironclaw::api::chat::send_message(agent, parent, &notice, false).await;
+            let _ = thinclaw_core::api::chat::send_message(agent, parent, &notice, false).await;
         }
 
         info!(
-            "[ironclaw] Sub-agent session {} finished: status={}",
+            "[thinclaw-runtime] Sub-agent session {} finished: status={}",
             child_bg, status
         );
     });
 
     info!(
-        "[ironclaw] Spawned session {} for agent {} (parent: {:?}) — non-blocking",
+        "[thinclaw-runtime] Spawned session {} for agent {} (parent: {:?}) — non-blocking",
         child_key, agent_id, parent_session
     );
 
@@ -274,7 +275,7 @@ pub async fn thinclaw_spawn_session(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_list_child_sessions(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     parent_session: String,
 ) -> Result<Vec<ChildSessionInfo>, String> {
     let mut children = sub_agent_registry::list_children(&parent_session).await;
@@ -292,7 +293,7 @@ pub async fn thinclaw_list_child_sessions(
 
             for entry in all_sessions {
                 // list_sessions() returns JSON objects: { "user_id": "...", ... }
-                // The user_id IS the session key used by IronClaw internally.
+                // The user_id IS the session key used by ThinClaw internally.
                 let key = match entry.get("user_id").and_then(|v| v.as_str()) {
                     Some(s) => s.to_string(),
                     None => continue,
@@ -322,7 +323,7 @@ pub async fn thinclaw_list_child_sessions(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_update_sub_agent_status(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     child_session: String,
     status: String,
     result_summary: Option<String>,
@@ -369,7 +370,7 @@ pub async fn thinclaw_update_sub_agent_status(
 #[specta::specta]
 pub async fn thinclaw_agents_list(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Vec<AgentProfile>, String> {
     let cfg = state.get_config().await.ok_or("Config not loaded")?;
     let mut profiles = cfg.profiles.clone();
@@ -381,7 +382,7 @@ pub async fn thinclaw_agents_list(
                 AgentProfile {
                     id: "local-core".to_string(),
                     name: "Local Core".to_string(),
-                    url: "embedded://ironclaw".to_string(),
+                    url: "embedded://thinclaw-runtime".to_string(),
                     token: None,
                     mode: "embedded".to_string(),
                     auto_connect: true,
@@ -425,7 +426,7 @@ pub async fn thinclaw_canvas_navigate(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_canvas_dispatch_event(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
     _run_id: Option<String>,
     event_type: String,
@@ -440,7 +441,7 @@ pub async fn thinclaw_canvas_dispatch_event(
     .to_string();
 
     let agent = ironclaw.agent().await?;
-    ironclaw::api::chat::send_message(
+    thinclaw_core::api::chat::send_message(
         agent,
         &session_key,
         &content,

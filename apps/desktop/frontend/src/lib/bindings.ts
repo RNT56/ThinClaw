@@ -8,95 +8,95 @@ export const commands = {
 async greet(name: string) : Promise<string> {
     return await TAURI_INVOKE("greet", { name });
 },
-async chatStream(payload: ChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Promise<Result<null, string>> {
+async directChatStream(payload: ChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("chat_stream", { payload, onEvent }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_chat_stream", { payload, onEvent }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async chatCompletion(payload: ChatPayload) : Promise<Result<string, string>> {
+async directChatCompletion(payload: ChatPayload) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("chat_completion", { payload }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_chat_completion", { payload }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async countTokens(conversationId: string) : Promise<Result<TokenUsage, string>> {
+async directChatCountTokens(conversationId: string) : Promise<Result<TokenUsage, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("count_tokens", { conversationId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_chat_count_tokens", { conversationId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async startChatServer(modelPath: string, contextSize: number, template: string | null, mmproj: string | null, exposeNetwork: boolean | null, mlock: boolean | null, quantizeKv: boolean | null) : Promise<Result<null, string>> {
+async directRuntimeStartChatServer(modelPath: string, contextSize: number, template: string | null, mmproj: string | null, exposeNetwork: boolean | null, mlock: boolean | null, quantizeKv: boolean | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_chat_server", { modelPath, contextSize, template, mmproj, exposeNetwork, mlock, quantizeKv }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_chat_server", { modelPath, contextSize, template, mmproj, exposeNetwork, mlock, quantizeKv }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async stopChatServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStopChatServer(modelPath: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("stop_chat_server", { modelPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_stop_chat_server", { modelPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async startEmbeddingServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStartEmbeddingServer(modelPath: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_embedding_server", { modelPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_embedding_server", { modelPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async startSummarizerServer(modelPath: string, contextSize: number) : Promise<Result<null, string>> {
+async directRuntimeStartSummarizerServer(modelPath: string, contextSize: number) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_summarizer_server", { modelPath, contextSize }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_summarizer_server", { modelPath, contextSize }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async getSidecarStatus() : Promise<SidecarStatus> {
-    return await TAURI_INVOKE("get_sidecar_status");
+async directRuntimeGetSidecarStatus() : Promise<SidecarStatus> {
+    return await TAURI_INVOKE("direct_runtime_get_sidecar_status");
 },
-async getChatServerConfig() : Promise<ChatServerConfig | null> {
-    return await TAURI_INVOKE("get_chat_server_config");
+async directRuntimeGetChatServerConfig() : Promise<ChatServerConfig | null> {
+    return await TAURI_INVOKE("direct_runtime_get_chat_server_config");
 },
-async startSttServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStartSttServer(modelPath: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_stt_server", { modelPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_stt_server", { modelPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async startImageServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStartImageServer(modelPath: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_image_server", { modelPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_image_server", { modelPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async startTtsServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStartTtsServer(modelPath: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_tts_server", { modelPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_tts_server", { modelPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async cancelGeneration() : Promise<Result<null, string>> {
+async directRuntimeCancelGeneration() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_generation") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_cancel_generation") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -114,9 +114,9 @@ async cancelGeneration() : Promise<Result<null, string>> {
  * The `model_path` is only used for the local Piper backend — it should point
  * to the `.onnx` file (Piper locates the companion `.onnx.json` automatically).
  */
-async ttsSynthesize(text: string, modelPath: string | null) : Promise<Result<string, string>> {
+async directMediaTtsSynthesize(text: string, modelPath: string | null) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("tts_synthesize", { text, modelPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_media_tts_synthesize", { text, modelPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -129,17 +129,17 @@ async ttsSynthesize(text: string, modelPath: string | null) : Promise<Result<str
  * for local Piper it returns a hardcoded set of bundled voices.
  * Returns an empty list if no TTS backend is active.
  */
-async ttsListVoices() : Promise<Result<VoiceInfo[], string>> {
+async directMediaTtsListVoices() : Promise<Result<VoiceInfo[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("tts_list_voices") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_media_tts_list_voices") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async transcribeAudio(audioBytes: number[]) : Promise<Result<string, string>> {
+async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("transcribe_audio", { audioBytes }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_media_transcribe_audio", { audioBytes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -153,41 +153,41 @@ async checkWebSearch(query: string) : Promise<Result<string, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async generateImage(params: ImageGenParams) : Promise<Result<ImageResponse, string>> {
+async directMediaGenerateImage(params: ImageGenParams) : Promise<Result<ImageResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_image", { params }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_media_generate_image", { params }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async ingestDocument(filePath: string, chatId: string | null, projectId: string | null, embeddingModelPath: string | null) : Promise<Result<string, string>> {
+async directRagIngestDocument(filePath: string, chatId: string | null, projectId: string | null, embeddingModelPath: string | null) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("ingest_document", { filePath, chatId, projectId, embeddingModelPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_rag_ingest_document", { filePath, chatId, projectId, embeddingModelPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async uploadDocument(fileBytes: number[], filename: string) : Promise<Result<string, string>> {
+async directRagUploadDocument(fileBytes: number[], filename: string) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("upload_document", { fileBytes, filename }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_rag_upload_document", { fileBytes, filename }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async retrieveContext(query: string, chatId: string | null, docIds: string[] | null, projectId: string | null) : Promise<Result<string[], string>> {
+async directRagRetrieveContext(query: string, chatId: string | null, docIds: string[] | null, projectId: string | null) : Promise<Result<string[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("retrieve_context", { query, chatId, docIds, projectId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_rag_retrieve_context", { query, chatId, docIds, projectId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async checkVectorIndexIntegrity() : Promise<Result<string, string>> {
+async directRagCheckVectorIndexIntegrity() : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("check_vector_index_integrity") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_rag_check_vector_index_integrity") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -292,81 +292,81 @@ async getRemoteModelCatalog() : Promise<Result<RemoteModelEntry[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async getConversations() : Promise<Result<Conversation[], string>> {
+async directHistoryGetConversations() : Promise<Result<Conversation[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_conversations") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_get_conversations") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async createConversation(title: string, projectId: string | null) : Promise<Result<Conversation, string>> {
+async directHistoryCreateConversation(title: string, projectId: string | null) : Promise<Result<Conversation, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_conversation", { title, projectId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_create_conversation", { title, projectId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async deleteConversation(id: string) : Promise<Result<null, string>> {
+async directHistoryDeleteConversation(id: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_conversation", { id }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_delete_conversation", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async getMessages(conversationId: string, limit: number | null, beforeCreatedAt: number | null) : Promise<Result<FrontendMessage[], string>> {
+async directHistoryGetMessages(conversationId: string, limit: number | null, beforeCreatedAt: number | null) : Promise<Result<FrontendMessage[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_messages", { conversationId, limit, beforeCreatedAt }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_get_messages", { conversationId, limit, beforeCreatedAt }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async saveMessage(conversationId: string, role: string, content: string, images: string[] | null, attachedDocs: AttachedDoc[] | null, webSearchResults: WebSearchResult[] | null) : Promise<Result<string, string>> {
+async directHistorySaveMessage(conversationId: string, role: string, content: string, images: string[] | null, attachedDocs: AttachedDoc[] | null, webSearchResults: WebSearchResult[] | null) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("save_message", { conversationId, role, content, images, attachedDocs, webSearchResults }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_save_message", { conversationId, role, content, images, attachedDocs, webSearchResults }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async editMessage(messageId: string, newContent: string) : Promise<Result<null, string>> {
+async directHistoryEditMessage(messageId: string, newContent: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("edit_message", { messageId, newContent }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_edit_message", { messageId, newContent }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async updateConversationTitle(id: string, title: string) : Promise<Result<null, string>> {
+async directHistoryUpdateConversationTitle(id: string, title: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_conversation_title", { id, title }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_update_conversation_title", { id, title }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async updateConversationProject(id: string, projectId: string | null) : Promise<Result<null, string>> {
+async directHistoryUpdateConversationProject(id: string, projectId: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_conversation_project", { id, projectId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_update_conversation_project", { id, projectId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async updateConversationsOrder(orders: ([string, number])[]) : Promise<Result<null, string>> {
+async directHistoryUpdateConversationsOrder(orders: ([string, number])[]) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_conversations_order", { orders }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_update_conversations_order", { orders }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async deleteAllHistory() : Promise<Result<null, string>> {
+async directHistoryDeleteAllHistory() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_all_history") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_delete_all_history") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -399,33 +399,33 @@ async getHfToken() : Promise<Result<string | null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async uploadImage(imageBytes: number[]) : Promise<Result<ImageResponse, string>> {
+async directAssetsUploadImage(imageBytes: number[]) : Promise<Result<ImageResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("upload_image", { imageBytes }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_assets_upload_image", { imageBytes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async loadImage(id: string) : Promise<Result<string, string>> {
+async directAssetsLoadImage(id: string) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("load_image", { id }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_assets_load_image", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async getImagePath(id: string) : Promise<Result<string, string>> {
+async directAssetsGetImagePath(id: string) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_image_path", { id }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_assets_get_image_path", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openImagesFolder() : Promise<Result<null, string>> {
+async directAssetsOpenImagesFolder() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("open_images_folder") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_assets_open_images_folder") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -447,9 +447,9 @@ async openImagesFolder() : Promise<Result<null, string>> {
  * - `"together"` → Together AI (via InferenceRouter)
  * - `"local"` / anything else → local sd.cpp / mflux sidecar
  */
-async imagineGenerate(params: ImagineParams) : Promise<Result<GeneratedImage, string>> {
+async directImagineGenerate(params: ImagineParams) : Promise<Result<GeneratedImage, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_generate", { params }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_imagine_generate", { params }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -458,9 +458,9 @@ async imagineGenerate(params: ImagineParams) : Promise<Result<GeneratedImage, st
 /**
  * List all generated images for the gallery
  */
-async imagineListImages(limit: number | null, offset: number | null, favoritesOnly: boolean | null) : Promise<Result<GeneratedImage[], string>> {
+async directImagineListImages(limit: number | null, offset: number | null, favoritesOnly: boolean | null) : Promise<Result<GeneratedImage[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_list_images", { limit, offset, favoritesOnly }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_imagine_list_images", { limit, offset, favoritesOnly }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -469,9 +469,9 @@ async imagineListImages(limit: number | null, offset: number | null, favoritesOn
 /**
  * Search generated images by prompt
  */
-async imagineSearchImages(query: string) : Promise<Result<GeneratedImage[], string>> {
+async directImagineSearchImages(query: string) : Promise<Result<GeneratedImage[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_search_images", { query }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_imagine_search_images", { query }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -480,9 +480,9 @@ async imagineSearchImages(query: string) : Promise<Result<GeneratedImage[], stri
 /**
  * Toggle favorite status for an image
  */
-async imagineToggleFavorite(imageId: string) : Promise<Result<boolean, string>> {
+async directImagineToggleFavorite(imageId: string) : Promise<Result<boolean, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_toggle_favorite", { imageId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_imagine_toggle_favorite", { imageId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -491,9 +491,9 @@ async imagineToggleFavorite(imageId: string) : Promise<Result<boolean, string>> 
 /**
  * Delete a generated image
  */
-async imagineDeleteImage(imageId: string) : Promise<Result<null, string>> {
+async directImagineDeleteImage(imageId: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_delete_image", { imageId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_imagine_delete_image", { imageId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -502,9 +502,9 @@ async imagineDeleteImage(imageId: string) : Promise<Result<null, string>> {
 /**
  * Get image count and stats
  */
-async imagineGetStats() : Promise<Result<JsonValue, string>> {
+async directImagineGetStats() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_get_stats") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_imagine_get_stats") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -841,7 +841,7 @@ async thinclawSwitchToProfile(profileId: string) : Promise<Result<null, string>>
 }
 },
 /**
- * Test connectivity to a remote IronClaw gateway.
+ * Test connectivity to a remote ThinClaw gateway.
  *
  * Called by the frontend's "Test Connection" button in Gateway Settings.
  * Returns Ok(true) if reachable and healthy, Err if not reachable.
@@ -874,12 +874,12 @@ async thinclawBroadcastCommand(command: string) : Promise<Result<null, string>> 
 }
 },
 /**
- * Start the IronClaw gateway.
+ * Start the ThinClaw gateway.
  *
  * Behavior depends on `identity.json:gateway_mode`:
  * "local" (default):
  * - Waits for local inference engine if configured
- * - Starts the IronClaw in-process engine via IronClawState::start()
+ * - Starts the ThinClaw in-process engine via ThinClawRuntimeState::start()
  * "remote":
  * - Reads remote_url + remote_token from config
  * - Creates a RemoteGatewayProxy, verifies health, opens SSE subscription
@@ -897,7 +897,7 @@ async thinclawStartGateway() : Promise<Result<null, string>> {
 }
 },
 /**
- * Stop the IronClaw gateway.
+ * Stop the ThinClaw gateway.
  *
  * - Local mode: shuts down in-process engine gracefully.
  * - Remote mode: closes the SSE subscription and clears the proxy.
@@ -911,10 +911,10 @@ async thinclawStopGateway() : Promise<Result<null, string>> {
 }
 },
 /**
- * Reload secrets (API keys) into the running IronClaw agent.
+ * Reload secrets (API keys) into the running ThinClaw runtime.
  *
  * Performs a graceful stop→start cycle to re-inject keys from macOS Keychain.
- * Called by the frontend after API key save/toggle operations so the IronClaw
+ * Called by the frontend after API key save/toggle operations so the ThinClaw
  * agent picks up changes without requiring manual restart by the user.
  *
  * **Flow:** stop engine → create fresh KeychainSecretsAdapter → start engine
@@ -930,7 +930,7 @@ async thinclawReloadSecrets() : Promise<Result<null, string>> {
 }
 },
 /**
- * Get sessions list from IronClaw.
+ * Get sessions list from ThinClaw.
  */
 async thinclawGetSessions() : Promise<Result<ThinClawSessionsResponse, string>> {
     try {
@@ -977,7 +977,7 @@ async thinclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Send a message to the IronClaw agent.
+ * Send a message to the ThinClaw runtime.
  *
  * Returns immediately — the actual response streams back via `thinclaw-event`
  * Tauri events (AssistantDelta, ToolUpdate, etc.).
@@ -995,7 +995,7 @@ async thinclawSendMessage(sessionKey: string, text: string, deliver: boolean) : 
 /**
  * Subscribe to a session for live updates.
  *
- * **Intentional no-op**: IronClaw sends events directly via TauriChannel.
+ * **Intentional no-op**: ThinClaw sends events directly via TauriChannel.
  */
 async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
@@ -1041,7 +1041,7 @@ async thinclawGetDiagnostics() : Promise<Result<ThinClawDiagnostics, string>> {
 }
 },
 /**
- * Clear memory or identity files in IronClaw's workspace.
+ * Clear memory or identity files in ThinClaw's workspace.
  *
  * For "memory" and "identity" targets, this exclusively uses the
  * DB-backed workspace API. For "all" (factory reset), it stops the
@@ -1056,7 +1056,7 @@ async thinclawClearMemory(target: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Get MEMORY.md content from IronClaw's DB-backed workspace.
+ * Get MEMORY.md content from ThinClaw's DB-backed workspace.
  */
 async thinclawGetMemory() : Promise<Result<string, string>> {
     try {
@@ -1067,7 +1067,7 @@ async thinclawGetMemory() : Promise<Result<string, string>> {
 }
 },
 /**
- * Get contents of a workspace file (e.g. SOUL.md) from IronClaw's DB.
+ * Get contents of a workspace file (e.g. SOUL.md) from ThinClaw's DB.
  */
 async thinclawGetFile(path: string) : Promise<Result<string, string>> {
     try {
@@ -1078,7 +1078,7 @@ async thinclawGetFile(path: string) : Promise<Result<string, string>> {
 }
 },
 /**
- * Write content to a workspace file in IronClaw's DB.
+ * Write content to a workspace file in ThinClaw's DB.
  */
 async thinclawWriteFile(path: string, content: string) : Promise<Result<null, string>> {
     try {
@@ -1089,7 +1089,7 @@ async thinclawWriteFile(path: string, content: string) : Promise<Result<null, st
 }
 },
 /**
- * Delete a workspace file from IronClaw's DB.
+ * Delete a workspace file from ThinClaw's DB.
  *
  * Protected files (core seeded workspace files) cannot be deleted.
  * Users can only delete agent-created files like daily logs, context
@@ -1105,7 +1105,7 @@ async thinclawDeleteFile(path: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Save MEMORY.md content to IronClaw's DB-backed workspace.
+ * Save MEMORY.md content to ThinClaw's DB-backed workspace.
  */
 async thinclawSaveMemory(content: string) : Promise<Result<null, string>> {
     try {
@@ -1116,7 +1116,7 @@ async thinclawSaveMemory(content: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * List all files in IronClaw's DB-backed workspace.
+ * List all files in ThinClaw's DB-backed workspace.
  *
  * Returns flat file paths (e.g., `SOUL.md`, `daily/2026-03-09.md`).
  */
@@ -1154,7 +1154,7 @@ async thinclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue
 },
 /**
  * Validates a cron expression and returns next fire times.
- * This is a frontend-facing version of `ironclaw cron lint`.
+ * This is a frontend-facing version of `thinclaw cron lint`.
  */
 async thinclawCronLint(expression: string) : Promise<Result<JsonValue, string>> {
     try {
@@ -1167,7 +1167,7 @@ async thinclawCronLint(expression: string) : Promise<Result<JsonValue, string>> 
 /**
  * Create a new scheduled routine dynamically.
  *
- * Stores the routine in IronClaw's RoutineStore so it persists
+ * Stores the routine in ThinClaw's RoutineStore so it persists
  * and is picked up by the RoutineEngine on its next tick.
  */
 async thinclawRoutineCreate(name: string, description: string, schedule: string, task: string) : Promise<Result<JsonValue, string>> {
@@ -1179,7 +1179,7 @@ async thinclawRoutineCreate(name: string, description: string, schedule: string,
 }
 },
 /**
- * Lists all registered channels from the live IronClaw agent.
+ * Lists all registered channels from the live ThinClaw runtime.
  *
  * Queries the agent's ChannelManager for actually registered channels
  * instead of reading static config/env vars.
@@ -1751,7 +1751,7 @@ async thinclawGetBedrockCredentials() : Promise<Result<[string | null, string | 
  * Sync Local LLM config (llama-server) to ThinClaw config.
  *
  * Still needed: ThinClaw Desktop manages the local llama-server sidecar and needs to
- * sync its port/model info to the config that IronClaw reads on restart.
+ * sync its port/model info to the config that ThinClaw reads on restart.
  */
 async thinclawSyncLocalLlm() : Promise<Result<null, string>> {
     try {
@@ -1762,7 +1762,7 @@ async thinclawSyncLocalLlm() : Promise<Result<null, string>> {
 }
 },
 /**
- * Deploy the IronClaw remote agent to a Linux server via SSH + Docker Compose.
+ * Deploy the ThinClaw remote agent to a Linux server via SSH + Docker Compose.
  *
  * Accepts the SSH host, user, and optional configuration for Tailscale VPN
  * and systemd service. Emits live `deploy-log` events and a final
@@ -1933,11 +1933,11 @@ async thinclawHeartbeatSetInterval(intervalMinutes: number) : Promise<Result<Jso
 }
 },
 /**
- * Set thinking mode (native IronClaw ThinkingConfig).
+ * Set thinking mode (native ThinClaw ThinkingConfig).
  *
  * This replaces the frontend localStorage hack that prepended
  * "Think step by step" to messages. Now we set the env vars
- * that IronClaw's ThinkingConfig reads natively.
+ * that ThinClaw's ThinkingConfig reads natively.
  */
 async thinclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promise<Result<ThinkingConfig, string>> {
     try {
@@ -1948,7 +1948,7 @@ async thinclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promi
 }
 },
 /**
- * Search workspace memory using IronClaw's hybrid BM25+vector search.
+ * Search workspace memory using ThinClaw's hybrid BM25+vector search.
  *
  * Falls back to simple text search across workspace files if the
  * vector search API isn't available.
@@ -2308,7 +2308,7 @@ async thinclawCompactSession(sessionKey: string) : Promise<Result<CompactSession
  * Returns total spend, daily/monthly breakdowns, per-model costs,
  * token totals, and alert status. The frontend picks what to display.
  *
- * Also auto-persists entries to the IronClaw DB on each poll (cheap, ~10s interval).
+ * Also auto-persists entries to the ThinClaw DB on each poll (cheap, ~10s interval).
  */
 async thinclawCostSummary() : Promise<Result<CostSummary, string>> {
     try {
@@ -2332,7 +2332,7 @@ async thinclawCostExportCsv() : Promise<Result<string, string>> {
 /**
  * Reset (clear) all cost tracking data.
  *
- * Clears in-memory entries and persists the empty state to the IronClaw DB.
+ * Clears in-memory entries and persists the empty state to the ThinClaw DB.
  */
 async thinclawCostReset() : Promise<Result<null, string>> {
     try {
@@ -2343,7 +2343,7 @@ async thinclawCostReset() : Promise<Result<null, string>> {
 }
 },
 /**
- * List channel statuses from the live IronClaw agent.
+ * List channel statuses from the live ThinClaw runtime.
  *
  * Queries the agent's ChannelManager for actually registered channels
  * instead of reading static config/env vars.
@@ -2368,7 +2368,7 @@ async thinclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> 
 }
 },
 /**
- * Search ClawHub plugin catalog (proxied through IronClaw).
+ * Search ClawHub plugin catalog (proxied through ThinClaw).
  */
 async thinclawClawhubSearch(query: string) : Promise<Result<JsonValue, string>> {
     try {
@@ -2393,7 +2393,7 @@ async thinclawClawhubInstall(pluginId: string) : Promise<Result<JsonValue, strin
  * List routine audit entries with optional outcome filter.
  *
  * Replaces the empty `thinclaw_cron_history` stub with actual data
- * access from IronClaw's RoutineAuditLog.
+ * access from ThinClaw's RoutineAuditLog.
  */
 async thinclawRoutineAuditList(routineKey: string, limit: number | null, outcome: string | null) : Promise<Result<RoutineAuditEntry[], string>> {
     try {
@@ -2561,7 +2561,7 @@ async thinclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<
 }
 },
 /**
- * Start the Gmail OAuth PKCE flow via IronClaw.
+ * Start the Gmail OAuth PKCE flow via ThinClaw.
  *
  * This opens the user's browser for Google consent, waits for the
  * callback, exchanges the auth code for tokens, and returns them.
@@ -2826,8 +2826,8 @@ async hideSpotlight() : Promise<void> {
  * - Know whether to show single-file (GGUF quant picker) or directory download UI
  * - Display the engine name in the status bar
  */
-async getActiveEngineInfo() : Promise<EngineInfo> {
-    return await TAURI_INVOKE("get_active_engine_info");
+async directRuntimeGetActiveEngineInfo() : Promise<EngineInfo> {
+    return await TAURI_INVOKE("direct_runtime_get_active_engine_info");
 },
 /**
  * Returns whether the active engine needs first-launch setup.
@@ -2836,8 +2836,8 @@ async getActiveEngineInfo() : Promise<EngineInfo> {
  * - `ollama`: never needs setup (external daemon)
  * - `mlx` / `vllm`: need setup if the Python venv hasn't been bootstrapped yet
  */
-async getEngineSetupStatus() : Promise<EngineSetupStatus> {
-    return await TAURI_INVOKE("get_engine_setup_status");
+async directRuntimeGetEngineSetupStatus() : Promise<EngineSetupStatus> {
+    return await TAURI_INVOKE("direct_runtime_get_engine_setup_status");
 },
 /**
  * Trigger first-launch bootstrap for the active engine (MLX/vLLM).
@@ -2845,9 +2845,17 @@ async getEngineSetupStatus() : Promise<EngineSetupStatus> {
  * Emits `engine_setup_progress` events:
  * `{ stage: "creating_venv" | "installing" | "complete" | "error", message: String }`
  */
-async setupEngine() : Promise<Result<null, string>> {
+async directRuntimeSetupEngine() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("setup_engine") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_setup_engine") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async directRuntimeSnapshot() : Promise<Result<LocalRuntimeSnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_snapshot") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2857,11 +2865,11 @@ async setupEngine() : Promise<Result<null, string>> {
  * Start the active engine with the given model.
  *
  * This is the new engine-aware entry point. For llamacpp builds, the existing
- * `start_chat_server` in sidecar.rs still works — this command is for MLX/vLLM/Ollama.
+ * `direct_runtime_start_chat_server` in sidecar.rs still works — this command is for MLX/vLLM/Ollama.
  */
-async startEngine(modelPath: string, contextSize: number) : Promise<Result<EngineStartResult, string>> {
+async directRuntimeStartEngine(modelPath: string, contextSize: number) : Promise<Result<EngineStartResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_engine", { modelPath, contextSize }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_engine", { modelPath, contextSize }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2870,9 +2878,9 @@ async startEngine(modelPath: string, contextSize: number) : Promise<Result<Engin
 /**
  * Stop the active engine.
  */
-async stopEngine() : Promise<Result<null, string>> {
+async directRuntimeStopEngine() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("stop_engine") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_stop_engine") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2881,9 +2889,9 @@ async stopEngine() : Promise<Result<null, string>> {
 /**
  * Check if the active engine is ready (health check).
  */
-async isEngineReady() : Promise<Result<boolean, string>> {
+async directRuntimeIsEngineReady() : Promise<Result<boolean, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("is_engine_ready") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_is_engine_ready") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2964,9 +2972,9 @@ async discoverEmbeddingDimension(repoId: string) : Promise<Result<number | null,
 /**
  * Returns the active and available backends for all 5 modalities.
  */
-async getInferenceBackends() : Promise<Result<ModalityBackends[], string>> {
+async directInferenceGetBackends() : Promise<Result<ModalityBackends[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_inference_backends") };
+    return { status: "ok", data: await TAURI_INVOKE("direct_inference_get_backends") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2979,9 +2987,9 @@ async getInferenceBackends() : Promise<Result<ModalityBackends[], string>> {
  * will construct the appropriate cloud backend immediately (API-key-only
  * providers) or mark local backends for deferred construction.
  */
-async updateInferenceBackend(modality: Modality, backendId: string) : Promise<Result<null, string>> {
+async directInferenceUpdateBackend(modality: Modality, backendId: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_inference_backend", { modality, backendId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_inference_update_backend", { modality, backendId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2993,9 +3001,9 @@ async updateInferenceBackend(modality: Modality, backendId: string) : Promise<Re
  * Returns models grouped by provider. Results are cached for 30 minutes.
  * Pass an empty `providers` array to discover from ALL providers with keys.
  */
-async discoverCloudModels(providers: string[]) : Promise<Result<DiscoveryResult, string>> {
+async directInferenceDiscoverCloudModels(providers: string[]) : Promise<Result<ModelDiscoveryResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("discover_cloud_models", { providers }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_inference_discover_cloud_models", { providers }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3004,9 +3012,9 @@ async discoverCloudModels(providers: string[]) : Promise<Result<DiscoveryResult,
 /**
  * Refresh models for a single provider (bypasses cache).
  */
-async refreshCloudModels(provider: string) : Promise<Result<ProviderDiscoveryResult, string>> {
+async directInferenceRefreshCloudModels(provider: string) : Promise<Result<ProviderDiscoveryResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("refresh_cloud_models", { provider }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_inference_refresh_cloud_models", { provider }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3309,66 +3317,6 @@ spawned_at: number;
  */
 result_summary: string | null }
 /**
- * A single model discovered from a cloud provider's API.
- */
-export type CloudModelEntry = {
-/**
- * Model ID as used by the provider API (e.g. `"gpt-4o"`, `"claude-3-5-sonnet-20241022"`).
- */
-id: string;
-/**
- * Human-readable display name.
- */
-displayName: string;
-/**
- * Provider slug matching `SecretStore` key (e.g. `"openai"`, `"anthropic"`, `"gemini"`).
- */
-provider: string;
-/**
- * Human-readable provider name (e.g. `"OpenAI"`, `"Anthropic"`).
- */
-providerName: string;
-/**
- * Which modality this model serves.
- */
-category: ModelCategory;
-/**
- * Context window size in tokens (chat models).
- */
-contextWindow: number | null;
-/**
- * Maximum output tokens (chat models).
- */
-maxOutputTokens: number | null;
-/**
- * Whether this model supports image/file input.
- */
-supportsVision: boolean;
-/**
- * Whether this model supports tool/function calling.
- */
-supportsTools: boolean;
-/**
- * Whether this model supports streaming responses.
- */
-supportsStreaming: boolean;
-/**
- * Whether this model is deprecated / scheduled for removal.
- */
-deprecated: boolean;
-/**
- * Pricing info (if available from the provider).
- */
-pricing: ModelPricing | null;
-/**
- * Embedding dimensions (embedding models only).
- */
-embeddingDimensions: number | null;
-/**
- * Freeform metadata from the provider (original JSON fields).
- */
-metadata?: { [key in string]: string } }
-/**
  * Cloud status response for the frontend.
  */
 export type CloudStatusResponse = { mode: string; provider_connected: boolean; provider_name: string | null; storage_used: number; storage_available: number | null; last_sync_at: number | null; has_recovery_key: boolean; migration_in_progress: boolean }
@@ -3400,22 +3348,6 @@ export type DiagnosticCheck = { name: string; status: string; detail: string }
  * Full diagnostics response
  */
 export type DiagnosticsResponse = { checks: DiagnosticCheck[]; passed: number; failed: number; skipped: number }
-/**
- * Aggregated discovery result for the frontend.
- */
-export type DiscoveryResult = {
-/**
- * Per-provider results.
- */
-providers: ProviderDiscoveryResult[];
-/**
- * Total number of models discovered.
- */
-totalModels: number;
-/**
- * Providers that had errors.
- */
-errors: string[] }
 export type Document = { id: string; path: string; status: string; created_at: number; updated_at: number; project_id: string | null }
 /**
  * Information about the active inference engine, exposed to the frontend.
@@ -3556,6 +3488,9 @@ export type LatencyEntry = { provider: string; avg_latency_ms: number }
  * Plugin lifecycle event
  */
 export type LifecycleEventItem = { timestamp: string; plugin_id: string; event_type: string; details: string | null }
+export type LocalRuntimeEndpoint = { baseUrl: string; apiKey?: string | null; modelId?: string | null; contextSize?: number | null; modelFamily?: string | null }
+export type LocalRuntimeKind = "llama_cpp" | "mlx" | "vllm" | "ollama" | "none"
+export type LocalRuntimeSnapshot = { kind: LocalRuntimeKind; displayName: string; readiness: RuntimeReadiness; endpoint?: LocalRuntimeEndpoint | null; capabilities?: RuntimeCapability[]; exposurePolicy: RuntimeExposurePolicy; unavailableReason?: string | null }
 /**
  * Manifest validation response
  */
@@ -3597,49 +3532,16 @@ active: BackendInfo | null;
  * All backends that COULD be activated (including local + cloud with keys).
  */
 available: BackendInfo[] }
-/**
- * Which modality a discovered model serves.
- *
- * This is separate from `crate::inference::Modality` because discovery
- * returns richer categories (e.g. a single model can support vision).
- */
-export type ModelCategory = "chat" | "embedding" | "tts" | "stt" | "diffusion" |
-/**
- * Model doesn't fit neatly into one category (e.g. multi-modal).
- */
-"other"
+export type ModelCapabilitySet = { streaming: boolean; tools: boolean; vision: boolean; thinking: boolean; jsonMode: boolean; systemPrompt: boolean }
+export type ModelCategory = "chat" | "embedding" | "tts" | "stt" | "diffusion" | "other"
+export type ModelDescriptor = { id: string; displayName: string; provider: string; providerName: string; category: ModelCategory; contextWindow?: number | null; maxOutputTokens?: number | null; supportsVision?: boolean; supportsTools?: boolean; supportsStreaming?: boolean; capabilities?: ModelCapabilitySet; deprecated?: boolean; pricing?: ModelPricing | null; embeddingDimensions?: number | null; metadata?: { [key in string]: string } }
+export type ModelDiscoveryResult = { providers: ProviderDiscoveryResult[]; totalModels: number; errors?: string[] }
 /**
  * Aggregated download info for a model repo, after file tree parsing.
  */
 export type ModelDownloadInfo = { repo_id: string; is_multi_file: boolean; files: HfFileInfo[]; mmproj_file: HfFileInfo | null; total_size: number; total_size_display: string }
 export type ModelFile = { name: string; size: number; path: string }
-/**
- * Pricing information for a cloud model.
- *
- * All prices are in USD.  Fields are optional because not all providers
- * expose pricing via their API.
- */
-export type ModelPricing = {
-/**
- * Cost per million input tokens (chat/embedding).
- */
-inputPerMillion: number | null;
-/**
- * Cost per million output tokens (chat).
- */
-outputPerMillion: number | null;
-/**
- * Cost per image generated (diffusion).
- */
-perImage: number | null;
-/**
- * Cost per minute of audio (STT/TTS).
- */
-perMinute: number | null;
-/**
- * Cost per 1000 characters (TTS).
- */
-per1KChars: number | null }
+export type ModelPricing = { inputPerMillion: number | null; outputPerMillion: number | null; perImage: number | null; perMinute: number | null; per1KChars: number | null }
 /**
  * OAuth flow start result for the frontend.
  */
@@ -3662,26 +3564,7 @@ export type PairingItem = { channel: string; user_id: string; paired_at: string;
 export type PairingListResponse = { pairings: PairingItem[]; total: number }
 export type PermissionStatus = { accessibility: boolean; screen_recording: boolean }
 export type Project = { id: string; name: string; description: string | null; created_at: number; updated_at: number; sort_order: number }
-/**
- * The result of a discovery call for a specific provider.
- */
-export type ProviderDiscoveryResult = {
-/**
- * Provider slug (e.g. `"openai"`, `"anthropic"`).
- */
-provider: string;
-/**
- * Discovered models.
- */
-models: CloudModelEntry[];
-/**
- * Whether this result came from cache or a fresh API call.
- */
-fromCache: boolean;
-/**
- * Error message if discovery failed (models will be empty or stale cache).
- */
-error: string | null }
+export type ProviderDiscoveryResult = { provider: string; models: ModelDescriptor[]; fromCache: boolean; error?: string | null }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 /**
  * Request payload for provider route simulation.
@@ -3741,7 +3624,7 @@ priority: number;
  */
 enabled: boolean }
 /**
- * Human-readable routing rule summary from IronClaw's RoutingPolicy.
+ * Human-readable routing rule summary from ThinClaw's RoutingPolicy.
  */
 export type RoutingRuleSummary = { index: number; kind: string; description: string; provider: string | null }
 /**
@@ -3752,6 +3635,9 @@ export type RoutingRulesResponse = { rules: RoutingRule[]; smart_routing_enabled
  * Full routing policy status for the routing UI dashboard.
  */
 export type RoutingStatusResponse = { enabled: boolean; default_provider: string; routing_mode: string; primary_model: string | null; preferred_cheap_provider: string | null; cheap_model: string | null; primary_pool_order: string[]; cheap_pool_order: string[]; fallback_chain: string[]; advisor_ready: boolean; advisor_disabled_reason: string | null; executor_target: string | null; advisor_target: string | null; diagnostics: string[]; runtime_revision: number | null; llm_select_state: string; rule_count: number; rules: RoutingRuleSummary[]; latency_data: LatencyEntry[] }
+export type RuntimeCapability = "chat" | "embedding" | "tts" | "stt" | "diffusion"
+export type RuntimeExposurePolicy = "direct_only" | "shared_when_enabled" | "network_exposed"
+export type RuntimeReadiness = "ready" | "starting" | "setup_required" | "unavailable"
 /**
  * S3 provider configuration input from the frontend.
  */

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tauri::State;
 use tracing::info;
 
-use crate::thinclaw::ironclaw_bridge::IronClawState;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 // ============================================================================
 // Cron / Routines commands
@@ -16,7 +16,7 @@ use crate::thinclaw::ironclaw_bridge::IronClawState;
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_cron_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let routines = proxy.list_routines().await?;
@@ -44,8 +44,8 @@ pub async fn thinclaw_cron_list(
         .iter()
         .map(|r| {
             let schedule = match &r.trigger {
-                ironclaw::agent::routine::Trigger::Cron { schedule } => schedule.clone(),
-                ironclaw::agent::routine::Trigger::SystemEvent { schedule, .. } => {
+                thinclaw_core::agent::routine::Trigger::Cron { schedule } => schedule.clone(),
+                thinclaw_core::agent::routine::Trigger::SystemEvent { schedule, .. } => {
                     schedule.clone().unwrap_or_default()
                 }
                 _ => String::new(),
@@ -81,7 +81,7 @@ pub async fn thinclaw_cron_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_cron_run(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -128,7 +128,7 @@ pub async fn thinclaw_cron_run(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_cron_history(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: String,
     limit: u32,
 ) -> Result<serde_json::Value, String> {
@@ -192,7 +192,7 @@ pub async fn thinclaw_cron_history(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_clear_routine_runs(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -240,14 +240,14 @@ pub async fn thinclaw_clear_routine_runs(
     }))
 }
 
-/// Lists all registered channels from the live IronClaw agent.
+/// Lists all registered channels from the live ThinClaw runtime.
 ///
 /// Queries the agent's ChannelManager for actually registered channels
 /// instead of reading static config/env vars.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_channels_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
@@ -283,12 +283,12 @@ pub async fn thinclaw_channels_list(
 
 /// Create a new scheduled routine dynamically.
 ///
-/// Stores the routine in IronClaw's RoutineStore so it persists
+/// Stores the routine in ThinClaw's RoutineStore so it persists
 /// and is picked up by the RoutineEngine on its next tick.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routine_create(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     description: String,
     schedule: String,
@@ -304,8 +304,8 @@ pub async fn thinclaw_routine_create(
     let store = agent.store().ok_or("Database not available")?;
 
     // Normalize 5/6-field cron to 7-field, then validate
-    let schedule = ironclaw::agent::routine::normalize_cron_expr(&schedule);
-    let _ = ironclaw::agent::routine::next_cron_fire(&schedule)
+    let schedule = thinclaw_core::agent::routine::normalize_cron_expr(&schedule);
+    let _ = thinclaw_core::agent::routine::next_cron_fire(&schedule)
         .map_err(|e| format!("Invalid cron expression '{}': {}", schedule, e))?;
 
     // Build a full Routine object
@@ -313,20 +313,20 @@ pub async fn thinclaw_routine_create(
     let routine_id = uuid::Uuid::new_v4();
 
     // Compute next fire time from cron schedule
-    let next_fire = ironclaw::agent::routine::next_cron_fire(&schedule)
+    let next_fire = thinclaw_core::agent::routine::next_cron_fire(&schedule)
         .map_err(|e| format!("Failed to compute next fire time: {}", e))?;
 
-    let routine = ironclaw::agent::routine::Routine {
+    let routine = thinclaw_core::agent::routine::Routine {
         id: routine_id,
         name: name.clone(),
         description: description.clone(),
         user_id: "local_user".to_string(), // Matches Tauri chat channel user_id (api/chat.rs)
         actor_id: "local_user".to_string(),
         enabled: true,
-        trigger: ironclaw::agent::routine::Trigger::Cron {
+        trigger: thinclaw_core::agent::routine::Trigger::Cron {
             schedule: schedule.clone(),
         },
-        action: ironclaw::agent::routine::RoutineAction::FullJob {
+        action: thinclaw_core::agent::routine::RoutineAction::FullJob {
             title: name.clone(),
             description: task.clone(),
             max_iterations: 10,
@@ -334,9 +334,9 @@ pub async fn thinclaw_routine_create(
             allowed_skills: None,
             tool_profile: None,
         },
-        guardrails: ironclaw::agent::routine::RoutineGuardrails::default(),
-        notify: ironclaw::agent::routine::NotifyConfig::default(),
-        policy: ironclaw::agent::routine::RoutinePolicy::default(),
+        guardrails: thinclaw_core::agent::routine::RoutineGuardrails::default(),
+        notify: thinclaw_core::agent::routine::NotifyConfig::default(),
+        policy: thinclaw_core::agent::routine::RoutinePolicy::default(),
         last_run_at: None,
         next_fire_at: next_fire,
         run_count: 0,
@@ -347,14 +347,14 @@ pub async fn thinclaw_routine_create(
         updated_at: now,
     };
 
-    // Persist to IronClaw's database
+    // Persist to ThinClaw's database
     store
         .create_routine(&routine)
         .await
         .map_err(|e| format!("Failed to create routine: {}", e))?;
 
     info!(
-        "[ironclaw] Created routine '{}' (id={}) with schedule '{}'",
+        "[thinclaw-runtime] Created routine '{}' (id={}) with schedule '{}'",
         name, routine_id, schedule
     );
 
@@ -374,14 +374,14 @@ pub async fn thinclaw_routine_create(
 // ============================================================================
 
 /// Validates a cron expression and returns next fire times.
-/// This is a frontend-facing version of `ironclaw cron lint`.
+/// This is a frontend-facing version of `thinclaw cron lint`.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_cron_lint(expression: String) -> Result<serde_json::Value, String> {
     // Normalize 5/6-field to 7-field before parsing
-    let normalized = ironclaw::agent::routine::normalize_cron_expr(&expression);
+    let normalized = thinclaw_core::agent::routine::normalize_cron_expr(&expression);
 
-    let schedule = ironclaw::agent::routine::next_cron_fire(&normalized)
+    let schedule = thinclaw_core::agent::routine::next_cron_fire(&normalized)
         .map_err(|e| format!("Invalid cron expression '{}': {}", normalized, e))?;
 
     // Also parse for the full upcoming list
@@ -414,7 +414,7 @@ pub async fn thinclaw_cron_lint(expression: String) -> Result<serde_json::Value,
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routine_delete(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     routine_id: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -446,7 +446,7 @@ pub async fn thinclaw_routine_delete(
         .await
         .map_err(|e| format!("Failed to delete routine: {}", e))?;
 
-    info!("[ironclaw] Deleted routine {}", id);
+    info!("[thinclaw-runtime] Deleted routine {}", id);
     Ok(serde_json::json!({ "ok": true, "deleted_id": id.to_string() }))
 }
 
@@ -454,7 +454,7 @@ pub async fn thinclaw_routine_delete(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routine_toggle(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     routine_id: String,
     enabled: bool,
 ) -> Result<serde_json::Value, String> {
@@ -501,18 +501,21 @@ pub async fn thinclaw_routine_toggle(
         .await
         .map_err(|e| format!("Failed to update routine: {}", e))?;
 
-    info!("[ironclaw] Toggled routine {} to enabled={}", id, enabled);
+    info!(
+        "[thinclaw-runtime] Toggled routine {} to enabled={}",
+        id, enabled
+    );
     Ok(serde_json::json!({ "ok": true, "id": id.to_string(), "enabled": enabled }))
 }
 
 /// List routine audit entries with optional outcome filter.
 ///
 /// Replaces the empty `thinclaw_cron_history` stub with actual data
-/// access from IronClaw's RoutineAuditLog.
+/// access from ThinClaw's RoutineAuditLog.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_routine_audit_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     routine_key: String,
     limit: Option<u32>,
     outcome: Option<String>,

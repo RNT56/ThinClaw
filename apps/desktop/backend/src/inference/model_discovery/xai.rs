@@ -49,6 +49,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
                 supports_vision: true,
                 supports_tools: true,
                 supports_streaming: true,
+                capabilities: Default::default(),
                 deprecated: false,
                 pricing: None,
                 embedding_dimensions: None,

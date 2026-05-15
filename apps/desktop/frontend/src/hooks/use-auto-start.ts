@@ -72,7 +72,7 @@ export function useAutoStart() {
                     }
 
                     // Start the engine server (mlx_lm.server / vllm serve / etc.)
-                    const result = await commands.startEngine(cleanPath, maxContext);
+                    const result = await commands.directRuntimeStartEngine(cleanPath, maxContext);
                     if (result.status === "error") {
                         throw new Error(result.error);
                     }
@@ -130,7 +130,7 @@ export function useAutoStart() {
                     return;
                 }
 
-                await commands.getSidecarStatus();
+                await commands.directRuntimeGetSidecarStatus();
                 const modelName = cleanPath.split(/[/\\]/).pop() ?? cleanPath;
                 const toastId = toast.loading(`Waking up ${modelName}...`, {
                     description: `Context: ${maxContext} tokens`
@@ -151,7 +151,7 @@ export function useAutoStart() {
                     }
                 }
 
-                await commands.startChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
+                await commands.directRuntimeStartChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
 
                 // Track successful start
                 lastStartedPath.current = cleanPath;

@@ -71,7 +71,7 @@ export function ModelBrowser() {
     const [topTab, setTopTab] = useState<"discover" | "library">("discover");
 
     // Cloud model discovery
-    const { models: cloudDiscovered, loading: cloudLoading, refreshAll: refreshCloudModels, totalModels: cloudTotal, providers: cloudProviders, error: cloudError } = useCloudModels();
+    const { models: cloudDiscovered, loading: cloudLoading, refreshAll: directInferenceRefreshCloudModels, totalModels: cloudTotal, providers: cloudProviders, error: cloudError } = useCloudModels();
     // Suppress unused-var warnings for values used in JSX below
     void cloudTotal;
 
@@ -449,7 +449,7 @@ export function ModelBrowser() {
                                 </span>
                             )}
                             <button
-                                onClick={() => refreshCloudModels()}
+                                onClick={() => directInferenceRefreshCloudModels()}
                                 className="p-1 hover:bg-accent rounded-md transition-colors"
                                 title="Refresh cloud models"
                             >

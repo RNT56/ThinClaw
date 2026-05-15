@@ -4,7 +4,7 @@
 //! in their output. This module provides a function to strip them before
 //! the text reaches the UI.
 //!
-//! IronClaw emits raw LLM output — ThinClaw Desktop applies this sanitizer before
+//! ThinClaw emits raw LLM output — ThinClaw Desktop applies this sanitizer before
 //! rendering in the frontend.
 
 use regex::Regex;
@@ -43,7 +43,7 @@ static NEWLINE_COLLAPSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}"
 /// Strip leaked LLM template tokens from text before it reaches the UI.
 ///
 /// Applied to all assistant text (deltas, snapshots, finals) before rendering.
-/// IronClaw emits raw LLM output; this function cleans it for display.
+/// ThinClaw emits raw LLM output; this function cleans it for display.
 pub fn strip_llm_tokens(text: &str) -> String {
     let mut result = text.to_string();
     for pattern in LLM_TOKEN_PATTERNS.iter() {

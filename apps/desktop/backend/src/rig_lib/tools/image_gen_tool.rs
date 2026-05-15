@@ -1,4 +1,4 @@
-use crate::image_gen::{generate_image, ImageGenParams};
+use crate::image_gen::{direct_media_generate_image as generate_image, ImageGenParams};
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;

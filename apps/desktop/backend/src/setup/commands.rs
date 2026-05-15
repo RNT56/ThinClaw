@@ -11,32 +11,32 @@ pub fn specta_builder() -> tauri_specta::Builder {
         // ── Core ────────────────────────────────────────────────────────
         crate::greet,
         // ── Chat ────────────────────────────────────────────────────────
-        crate::chat::chat_stream,
-        crate::chat::chat_completion,
-        crate::chat::count_tokens,
+        crate::chat::direct_chat_stream,
+        crate::chat::direct_chat_completion,
+        crate::chat::direct_chat_count_tokens,
         // ── Sidecar Management ──────────────────────────────────────────
-        crate::sidecar::start_chat_server,
-        crate::sidecar::stop_chat_server,
-        crate::sidecar::start_embedding_server,
-        crate::sidecar::start_summarizer_server,
-        crate::sidecar::get_sidecar_status,
-        crate::sidecar::get_chat_server_config,
-        crate::sidecar::start_stt_server,
-        crate::sidecar::start_image_server,
-        crate::sidecar::start_tts_server,
-        crate::sidecar::cancel_generation,
+        crate::sidecar::direct_runtime_start_chat_server,
+        crate::sidecar::direct_runtime_stop_chat_server,
+        crate::sidecar::direct_runtime_start_embedding_server,
+        crate::sidecar::direct_runtime_start_summarizer_server,
+        crate::sidecar::direct_runtime_get_sidecar_status,
+        crate::sidecar::direct_runtime_get_chat_server_config,
+        crate::sidecar::direct_runtime_start_stt_server,
+        crate::sidecar::direct_runtime_start_image_server,
+        crate::sidecar::direct_runtime_start_tts_server,
+        crate::sidecar::direct_runtime_cancel_generation,
         // ── Voice I/O ───────────────────────────────────────────────────
-        crate::tts::tts_synthesize,
-        crate::tts::tts_list_voices,
-        crate::stt::transcribe_audio,
+        crate::tts::direct_media_tts_synthesize,
+        crate::tts::direct_media_tts_list_voices,
+        crate::stt::direct_media_transcribe_audio,
         // ── Web & Image ─────────────────────────────────────────────────
         crate::web_search::check_web_search,
-        crate::image_gen::generate_image,
+        crate::image_gen::direct_media_generate_image,
         // ── RAG ─────────────────────────────────────────────────────────
-        crate::rag::ingest_document,
-        crate::rag::upload_document,
-        crate::rag::retrieve_context,
-        crate::rag::check_vector_index_integrity,
+        crate::rag::direct_rag_ingest_document,
+        crate::rag::direct_rag_upload_document,
+        crate::rag::direct_rag_retrieve_context,
+        crate::rag::direct_rag_check_vector_index_integrity,
         // ── Model Management ────────────────────────────────────────────
         crate::model_manager::list_models,
         crate::model_manager::download_model,
@@ -52,32 +52,32 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::model_manager::update_remote_model_catalog,
         crate::model_manager::get_remote_model_catalog,
         // ── History ─────────────────────────────────────────────────────
-        crate::history::get_conversations,
-        crate::history::create_conversation,
-        crate::history::delete_conversation,
-        crate::history::get_messages,
-        crate::history::save_message,
-        crate::history::edit_message,
-        crate::history::update_conversation_title,
-        crate::history::update_conversation_project,
-        crate::history::update_conversations_order,
-        crate::history::delete_all_history,
+        crate::history::direct_history_get_conversations,
+        crate::history::direct_history_create_conversation,
+        crate::history::direct_history_delete_conversation,
+        crate::history::direct_history_get_messages,
+        crate::history::direct_history_save_message,
+        crate::history::direct_history_edit_message,
+        crate::history::direct_history_update_conversation_title,
+        crate::history::direct_history_update_conversation_project,
+        crate::history::direct_history_update_conversations_order,
+        crate::history::direct_history_delete_all_history,
         // ── Config ──────────────────────────────────────────────────────
         crate::config::open_config_file,
         crate::config::get_user_config,
         crate::config::update_user_config,
         crate::config::get_hf_token,
         // ── Images & Imagine ────────────────────────────────────────────
-        crate::images::upload_image,
-        crate::images::load_image,
-        crate::images::get_image_path,
-        crate::images::open_images_folder,
-        crate::imagine::imagine_generate,
-        crate::imagine::imagine_list_images,
-        crate::imagine::imagine_search_images,
-        crate::imagine::imagine_toggle_favorite,
-        crate::imagine::imagine_delete_image,
-        crate::imagine::imagine_get_stats,
+        crate::images::direct_assets_upload_image,
+        crate::images::direct_assets_load_image,
+        crate::images::direct_assets_get_image_path,
+        crate::images::direct_assets_open_images_folder,
+        crate::imagine::direct_imagine_generate,
+        crate::imagine::direct_imagine_list_images,
+        crate::imagine::direct_imagine_search_images,
+        crate::imagine::direct_imagine_toggle_favorite,
+        crate::imagine::direct_imagine_delete_image,
+        crate::imagine::direct_imagine_get_stats,
         // ── System & Projects ───────────────────────────────────────────
         crate::system::get_system_specs,
         crate::projects::create_project,
@@ -90,7 +90,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         // ── Rig Agent ───────────────────────────────────────────────────
         crate::rig_lib::rig_check_web_search,
         crate::rig_lib::agent_chat,
-        // ── ThinClaw / IronClaw ─────────────────────────────────────────
+        // ── ThinClaw Agent Cockpit ──────────────────────────────────────
         crate::thinclaw::commands::thinclaw_get_status,
         crate::thinclaw::commands::thinclaw_save_anthropic_key,
         crate::thinclaw::commands::thinclaw_get_anthropic_key,
@@ -316,21 +316,22 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::toggle_spotlight,
         crate::hide_spotlight,
         // ── Engine & HF Hub ─────────────────────────────────────────────
-        crate::engine::get_active_engine_info,
-        crate::engine::get_engine_setup_status,
-        crate::engine::setup_engine,
-        crate::engine::start_engine,
-        crate::engine::stop_engine,
-        crate::engine::is_engine_ready,
+        crate::engine::direct_runtime_get_active_engine_info,
+        crate::engine::direct_runtime_get_engine_setup_status,
+        crate::engine::direct_runtime_setup_engine,
+        crate::engine::direct_runtime_snapshot,
+        crate::engine::direct_runtime_start_engine,
+        crate::engine::direct_runtime_stop_engine,
+        crate::engine::direct_runtime_is_engine_ready,
         crate::hf_hub::discover_hf_models,
         crate::hf_hub::get_model_files,
         crate::hf_hub::download_hf_model_files,
         crate::hf_hub::discover_embedding_dimension,
         // ── Inference Router ────────────────────────────────────────────
-        crate::inference::get_inference_backends,
-        crate::inference::update_inference_backend,
-        crate::inference::discover_cloud_models,
-        crate::inference::refresh_cloud_models,
+        crate::inference::direct_inference_get_backends,
+        crate::inference::direct_inference_update_backend,
+        crate::inference::direct_inference_discover_cloud_models,
+        crate::inference::direct_inference_refresh_cloud_models,
         // ── Cloud Storage ───────────────────────────────────────────────
         crate::cloud::commands::cloud_get_status,
         crate::cloud::commands::cloud_test_connection,
@@ -366,6 +367,15 @@ mod tests {
         );
 
         for command in [
+            "directChatStream",
+            "directChatCompletion",
+            "directHistoryGetMessages",
+            "directHistorySaveMessage",
+            "directRuntimeSnapshot",
+            "directInferenceGetBackends",
+            "directAssetsUploadImage",
+            "directMediaGenerateImage",
+            "directImagineGenerate",
             "thinclawRoutineCreate",
             "thinclawRoutineToggle",
             "thinclawRoutineAuditList",
@@ -385,6 +395,24 @@ mod tests {
             assert!(
                 bindings.contains(command),
                 "generated bindings should include {command}"
+            );
+        }
+
+        for removed_command in [
+            "chatCompletion",
+            "chatStream",
+            "countTokens",
+            "getMessages",
+            "saveMessage",
+            "getInferenceBackends",
+            "uploadImage",
+            "imagineGenerate(",
+            "generateImage",
+            "startChatServer",
+        ] {
+            assert!(
+                !bindings.contains(removed_command),
+                "generated bindings should not include removed Direct command {removed_command}"
             );
         }
 

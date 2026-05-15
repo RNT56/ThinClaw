@@ -115,7 +115,7 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
         if (id === "pending_generation") return;
         setIsLoading(true);
         try {
-            const res = await commands.getImagePath(id);
+            const res = await commands.directAssetsGetImagePath(id);
             if (res.status === "ok") {
                 const assetUrl = convertFileSrc(res.data);
                 setSrc(assetUrl);
@@ -380,7 +380,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
         if (isSpeaking) return;
         setIsSpeaking(true);
         try {
-            const res = await commands.ttsSynthesize(sanitizedContent, null);
+            const res = await commands.directMediaTtsSynthesize(sanitizedContent, null);
             if (res.status === 'error') {
                 toast.error('TTS failed', { description: res.error });
                 return;

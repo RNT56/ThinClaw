@@ -213,9 +213,9 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
 ### Backend (`backend/`)
 -   `src/thinclaw/`: ThinClaw integration layer.
     -   `commands/`: Tauri IPC command handlers (`gateway.rs`, `keys.rs`, `sessions.rs`, `rpc.rs`, etc.)
-    -   `ironclaw_bridge.rs`: ThinClaw agent lifecycle — init, config, Agent construction, shutdown.
-    -   `ironclaw_channel.rs`: `TauriChannel` bridging ThinClaw events to Tauri `emit()`.
-    -   `ironclaw_secrets.rs`: Keychain ↔ ThinClaw secrets adapter.
+    -   `runtime_bridge.rs`: ThinClaw agent lifecycle — init, config, Agent construction, shutdown.
+    -   `tauri_channel.rs`: `TauriChannel` bridging ThinClaw events to Tauri `emit()`.
+    -   `secrets_adapter.rs`: Keychain ↔ ThinClaw secrets adapter.
     -   `tool_bridge.rs`: MCP tool bridge for ThinClaw agent tool calls.
     -   `sanitizer.rs`: LLM token stripping (ChatML, Llama, Jinja markers).
     -   `ui_types.rs`: `UiEvent` enum — stable UI contract (16+ variants).

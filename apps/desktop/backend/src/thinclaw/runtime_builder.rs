@@ -1,14 +1,14 @@
-//! IronClaw engine builder — extracted from `ironclaw_bridge.rs`.
+//! ThinClaw runtime builder — extracted from `runtime_bridge.rs`.
 //!
 //! Contains `build_inner()`, the ~950-line async function that:
 //!   1. Configures bridge environment variables (IC-007)
 //!   2. Resolves the LLM backend (local sidecar / MLX / cloud)
 //!   3. Creates TauriChannel + ToolBridge
-//!   4. Builds IronClaw's AppComponents
+//!   4. Builds ThinClaw's AppComponents
 //!   5. Wires sub-agent executor + SSE broadcast + background tasks
-//!   6. Returns a fully assembled `IronClawInner`
+//!   6. Returns a fully assembled `ThinClawRuntimeInner`
 //!
-//! Separated for maintainability — the public API remains in `ironclaw_bridge.rs`.
+//! Separated for maintainability — the public API remains in `runtime_bridge.rs`.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
@@ -16,18 +16,23 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Mutex;
 
-use ironclaw::agent::{Agent, AgentDeps, AgentRegistry, AgentRouter};
-use ironclaw::app::{AppBuilder, AppBuilderFlags, PeriodicPersistencePlan};
-use ironclaw::channels::web::log_layer::LogBroadcaster;
-use ironclaw::channels::web::types::SseEvent;
-use ironclaw::channels::ChannelManager;
-use ironclaw::extensions::clawhub::CatalogCache;
-use ironclaw::extensions::manifest_validator::ManifestValidator;
+use thinclaw_core::agent::{Agent, AgentDeps, AgentRegistry, AgentRouter};
+use thinclaw_core::app::{AppBuilder, AppBuilderFlags, PeriodicPersistencePlan};
+use thinclaw_core::channels::web::log_layer::LogBroadcaster;
+use thinclaw_core::channels::web::types::SseEvent;
+use thinclaw_core::channels::ChannelManager;
+use thinclaw_core::extensions::clawhub::CatalogCache;
+use thinclaw_core::extensions::manifest_validator::ManifestValidator;
 
-use super::ironclaw_bridge::IronClawInner;
-use super::ironclaw_channel::TauriChannel;
+use super::runtime_bridge::ThinClawRuntimeInner;
+use super::tauri_channel::TauriChannel;
 use super::tool_bridge::TauriToolBridge;
 use super::ui_types::UiEvent;
+
+const RUNTIME_DB_NAME: &str = "thinclaw-runtime.db";
+const LEGACY_RUNTIME_DB_NAME: &str = "ironclaw.db";
+const RUNTIME_TOML_NAME: &str = "thinclaw.toml";
+const LEGACY_RUNTIME_TOML_NAME: &str = "ironclaw.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DesktopSendRoute {
@@ -97,39 +102,86 @@ pub(crate) fn get_resolved_workspace_root() -> Option<String> {
     }
 }
 
-/// Build a fully-configured `IronClawInner` from scratch.
+pub(crate) fn runtime_db_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join(RUNTIME_DB_NAME)
+}
+
+pub(crate) fn runtime_toml_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join(RUNTIME_TOML_NAME)
+}
+
+fn migrate_legacy_runtime_file(state_dir: &std::path::Path, legacy_name: &str, current_name: &str) {
+    let legacy_path = state_dir.join(legacy_name);
+    let current_path = state_dir.join(current_name);
+    if current_path.exists() || !legacy_path.exists() {
+        return;
+    }
+
+    match std::fs::rename(&legacy_path, &current_path) {
+        Ok(()) => tracing::info!(
+            "[thinclaw-runtime] Migrated legacy runtime file {} to {}",
+            legacy_name,
+            current_name
+        ),
+        Err(error) => tracing::warn!(
+            "[thinclaw-runtime] Failed to migrate legacy runtime file {} to {}: {}",
+            legacy_name,
+            current_name,
+            error
+        ),
+    }
+}
+
+fn migrate_legacy_runtime_files(state_dir: &std::path::Path) {
+    migrate_legacy_runtime_file(state_dir, LEGACY_RUNTIME_DB_NAME, RUNTIME_DB_NAME);
+    migrate_legacy_runtime_file(
+        state_dir,
+        &format!("{LEGACY_RUNTIME_DB_NAME}-wal"),
+        &format!("{RUNTIME_DB_NAME}-wal"),
+    );
+    migrate_legacy_runtime_file(
+        state_dir,
+        &format!("{LEGACY_RUNTIME_DB_NAME}-shm"),
+        &format!("{RUNTIME_DB_NAME}-shm"),
+    );
+    migrate_legacy_runtime_file(state_dir, LEGACY_RUNTIME_TOML_NAME, RUNTIME_TOML_NAME);
+}
+
+/// Build a fully-configured `ThinClawRuntimeInner` from scratch.
 ///
-/// This is the heavyweight initialization path — called by `IronClawState::start()`.
+/// This is the heavyweight initialization path — called by `ThinClawRuntimeState::start()`.
 /// It configures bridge vars, resolves the LLM backend, creates channels,
 /// builds engine components, and wires up all background tasks.
 pub(crate) async fn build_inner(
     app_handle: tauri::AppHandle<tauri::Wry>,
     state_dir: std::path::PathBuf,
-    secrets_store: Option<Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>>,
-) -> Result<IronClawInner, anyhow::Error> {
-    // ── 1. Configure environment for IronClaw ───────────────────────
+    secrets_store: Option<Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>>,
+) -> Result<ThinClawRuntimeInner, anyhow::Error> {
+    migrate_legacy_runtime_files(&state_dir);
+
+    // ── 1. Configure environment for ThinClaw ───────────────────────
     // IC-007: Use bridge overlay instead of unsafe set_var().
     // Build a HashMap of all config vars, then inject them atomically
-    // into IronClaw's BRIDGE_VARS overlay. optional_env() checks this
+    // into ThinClaw's BRIDGE_VARS overlay. optional_env() checks this
     // overlay first, so all config resolvers see these values.
-    use ironclaw::config::{bridge_var_exists, inject_bridge_vars};
+    use thinclaw_core::config::{bridge_var_exists, inject_bridge_vars};
     let mut bridge_config = std::collections::HashMap::<String, String>::new();
 
     // Database — only set defaults if user hasn't explicitly configured
     if !bridge_var_exists("DATABASE_BACKEND") {
         bridge_config.insert("DATABASE_BACKEND".into(), "libsql".into());
     }
-    let db_path = state_dir.join("ironclaw.db");
+    let db_path = runtime_db_path(&state_dir);
     if !bridge_var_exists("LIBSQL_PATH") {
         bridge_config.insert(
             "LIBSQL_PATH".into(),
-            db_path.to_str().unwrap_or("ironclaw.db").into(),
+            db_path.to_str().unwrap_or(RUNTIME_DB_NAME).into(),
         );
     }
 
     // ── 1a-2. Enable heartbeat for ThinClaw Desktop mode ─────────────
     // The heartbeat checks HEARTBEAT.md every 30 minutes and proactively
-    // notifies the user if any tasks need attention. This is the IronClaw
+    // notifies the user if any tasks need attention. This is the ThinClaw
     // equivalent of ThinClaw's periodic heartbeat system.
     // Route heartbeat alerts to the Tauri "local_user" channel.
     // Allow env override (e.g. HEARTBEAT_ENABLED=false for testing).
@@ -139,11 +191,11 @@ pub(crate) async fn build_inner(
         bridge_config.insert("HEARTBEAT_NOTIFY_USER".into(), "local_user".into());
         // 30 minutes — matches ThinClaw default
         bridge_config.insert("HEARTBEAT_INTERVAL_SECS".into(), "1800".into());
-        tracing::info!("[ironclaw] Heartbeat enabled (30-min interval, tauri channel)");
+        tracing::info!("[thinclaw-runtime] Heartbeat enabled (30-min interval, tauri channel)");
     }
 
-    // ── 1b. Set WHISPER_HTTP_ENDPOINT for IronClaw voice/talk mode ───
-    // ThinClaw Desktop's STT sidecar runs on port 53757 (fixed). IronClaw uses
+    // ── 1b. Set WHISPER_HTTP_ENDPOINT for ThinClaw voice/talk mode ───
+    // ThinClaw Desktop's STT sidecar runs on port 53757 (fixed). ThinClaw uses
     // this env var to call the local whisper server instead of bundling
     // its own whisper-rs. The endpoint is OpenAI-compatible.
     if !bridge_var_exists("WHISPER_HTTP_ENDPOINT") {
@@ -152,12 +204,12 @@ pub(crate) async fn build_inner(
             "http://127.0.0.1:53757/v1/audio/transcriptions".into(),
         );
         tracing::debug!(
-            "[ironclaw] Set WHISPER_HTTP_ENDPOINT=http://127.0.0.1:53757/v1/audio/transcriptions"
+            "[thinclaw-runtime] Set WHISPER_HTTP_ENDPOINT=http://127.0.0.1:53757/v1/audio/transcriptions"
         );
     }
 
-    // ── 1b-2. Set Extended Thinking env vars for IronClaw ───────────
-    // IronClaw v0.12.0 supports chain-of-thought reasoning via
+    // ── 1b-2. Set Extended Thinking env vars for ThinClaw ───────────
+    // ThinClaw v0.12.0 supports chain-of-thought reasoning via
     // AGENT_THINKING_ENABLED + AGENT_THINKING_BUDGET_TOKENS env vars.
     // Only set if not already overridden by the user.
     if !bridge_var_exists("AGENT_THINKING_ENABLED") {
@@ -165,14 +217,14 @@ pub(crate) async fn build_inner(
         // will emit StatusUpdate::Thinking() events before the response.
         // Set to "true" to enable; defaults to off.
         bridge_config.insert("AGENT_THINKING_ENABLED".into(), "false".into());
-        tracing::debug!("[ironclaw] Set AGENT_THINKING_ENABLED=false (default)");
+        tracing::debug!("[thinclaw-runtime] Set AGENT_THINKING_ENABLED=false (default)");
     }
     if !bridge_var_exists("AGENT_THINKING_BUDGET_TOKENS") {
         bridge_config.insert("AGENT_THINKING_BUDGET_TOKENS".into(), "10000".into());
     }
 
     // ── 1b-3. Enable local dev tools (file write, shell, etc.) ──────
-    // IronClaw defaults ALLOW_LOCAL_TOOLS to false (designed for SaaS where
+    // ThinClaw defaults ALLOW_LOCAL_TOOLS to false (designed for SaaS where
     // tools run in sandboxed containers). In ThinClaw Desktop's context the
     // agent should be able to create files, run commands, and edit code.
     // The setting is controlled by the user via Gateway Settings toggle.
@@ -225,12 +277,12 @@ pub(crate) async fn build_inner(
         // Create the directory if it doesn't exist yet
         if let Err(e) = std::fs::create_dir_all(&resolved_root) {
             tracing::warn!(
-                "[ironclaw] Could not create workspace root {:?}: {}",
+                "[thinclaw-runtime] Could not create workspace root {:?}: {}",
                 resolved_root,
                 e
             );
         } else {
-            tracing::info!("[ironclaw] Workspace root: {:?}", resolved_root);
+            tracing::info!("[thinclaw-runtime] Workspace root: {:?}", resolved_root);
         }
 
         set_resolved_workspace_root(&resolved_root);
@@ -255,21 +307,24 @@ pub(crate) async fn build_inner(
             .map(|c| c.auto_approve_tools)
             .unwrap_or(false);
         bridge_config.insert("AGENT_AUTO_APPROVE_TOOLS".into(), auto_approve.to_string());
-        tracing::info!("[ironclaw] Set AGENT_AUTO_APPROVE_TOOLS={}", auto_approve);
+        tracing::info!(
+            "[thinclaw-runtime] Set AGENT_AUTO_APPROVE_TOOLS={}",
+            auto_approve
+        );
 
-        // ── OS Governance: wire macOS permissions to IronClaw tool gates ──
-        // IronClaw's ScreenCaptureTool checks SCREEN_CAPTURE_ENABLED (app.rs:820).
+        // ── OS Governance: wire macOS permissions to ThinClaw tool gates ──
+        // ThinClaw's ScreenCaptureTool checks SCREEN_CAPTURE_ENABLED (app.rs:820).
         // Only enable when BOTH screen recording is granted AND dev tools are on.
         let perms = crate::permissions::get_permission_status();
         if perms.screen_recording && allow_local {
             bridge_config.insert("SCREEN_CAPTURE_ENABLED".into(), "true".into());
             tracing::info!(
-                "[ironclaw] Screen capture enabled (macOS permission granted + dev tools on)"
+                "[thinclaw-runtime] Screen capture enabled (macOS permission granted + dev tools on)"
             );
         }
 
         tracing::info!(
-            "[ironclaw] Set ALLOW_LOCAL_TOOLS={}, WORKSPACE_MODE={}, WORKSPACE_ROOT={:?}, SAFE_BINS_ONLY={}",
+            "[thinclaw-runtime] Set ALLOW_LOCAL_TOOLS={}, WORKSPACE_MODE={}, WORKSPACE_ROOT={:?}, SAFE_BINS_ONLY={}",
             allow_local,
             workspace_mode,
             resolved_root,
@@ -278,7 +333,7 @@ pub(crate) async fn build_inner(
     }
 
     // ── 1c. Set LLM_BACKEND / LLM_BASE_URL from ThinClaw Desktop config ───
-    // IronClaw's LlmConfig::resolve() defaults to openai_compatible which
+    // ThinClaw's LlmConfig::resolve() defaults to openai_compatible which
     // requires LLM_BASE_URL. We must tell it which backend to use based on
     // the user's gateway settings (local core vs cloud brain).
     //
@@ -293,127 +348,115 @@ pub(crate) async fn build_inner(
 
         if let Some(ref cfg) = oc_config {
             if cfg.local_inference_enabled {
-                // Local inference: point to llama.cpp / MLX sidecar
                 let sidecar = app_handle.state::<crate::sidecar::SidecarManager>();
-                if let Some((port, token, _ctx, _family)) = sidecar.get_chat_config() {
-                    let base_url = format!("http://127.0.0.1:{}/v1", port);
+                let engine_mgr = app_handle.state::<crate::engine::EngineManager>();
+                let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_mgr).await;
+
+                if let Some(endpoint) = snapshot.endpoint {
                     tracing::info!(
-                        "[ironclaw] Local inference (sidecar): LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
-                        base_url
+                        "[thinclaw-runtime] Local inference: LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
+                        endpoint.base_url
                     );
                     bridge_config.insert("LLM_BACKEND".into(), "openai_compatible".into());
-                    bridge_config.insert("LLM_BASE_URL".into(), base_url);
-                    if !token.is_empty() {
+                    bridge_config.insert("LLM_BASE_URL".into(), endpoint.base_url);
+                    if let Some(token) = endpoint.api_key.filter(|token| !token.is_empty()) {
                         bridge_config.insert("LLM_API_KEY".into(), token);
                     }
                 } else {
-                    // Sidecar not running yet — try engine manager (MLX/vLLM)
-                    let engine_mgr = app_handle.state::<crate::engine::EngineManager>();
-                    let guard = engine_mgr.engine.lock().await;
-                    let engine_url = guard.as_ref().and_then(|e| e.base_url());
-
-                    if let Some(url) = engine_url {
+                    // If local is preferred but unavailable and the user has a
+                    // cloud brain selected, use that explicit provider. Do not
+                    // invent an Ollama fallback: that hides runtime failures.
+                    if let Some(ref brain) = cfg.selected_cloud_brain {
                         tracing::info!(
-                            "[ironclaw] Local inference (engine): LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
-                            url
+                            "[thinclaw-runtime] Local inference not ready, falling back to cloud brain '{}'",
+                            brain
                         );
-                        bridge_config.insert("LLM_BACKEND".into(), "openai_compatible".into());
-                        bridge_config.insert("LLM_BASE_URL".into(), url);
-                    } else {
-                        // Neither sidecar nor engine running yet.
-                        // If the user has a cloud brain selected, fall back to that
-                        // instead of ollama — prevents "Provider llama3 request failed"
-                        // errors when cloud intelligence is actually configured.
-                        if let Some(ref brain) = cfg.selected_cloud_brain {
-                            tracing::info!(
-                                "[ironclaw] Local inference not ready, falling back to cloud brain '{}'",
-                                brain
-                            );
-                            let selected_model = cfg.selected_cloud_model.as_deref();
-                            match brain.as_str() {
-                                "anthropic" => {
-                                    bridge_config.insert("LLM_BACKEND".into(), "anthropic".into());
-                                    if let Some(model) = selected_model {
-                                        bridge_config
-                                            .insert("ANTHROPIC_MODEL".into(), model.to_string());
-                                    }
-                                }
-                                "openai" => {
-                                    bridge_config.insert("LLM_BACKEND".into(), "openai".into());
-                                    if let Some(model) = selected_model {
-                                        bridge_config
-                                            .insert("OPENAI_MODEL".into(), model.to_string());
-                                    }
-                                }
-                                other => {
-                                    if let Some(ep) =
-                                        crate::inference::provider_endpoints::endpoint_for(other)
-                                    {
-                                        bridge_config.insert(
-                                            "LLM_BACKEND".into(),
-                                            "openai_compatible".into(),
-                                        );
-                                        bridge_config
-                                            .insert("LLM_BASE_URL".into(), ep.base_url.to_string());
-                                        if let Some(model) = selected_model {
-                                            bridge_config
-                                                .insert("LLM_MODEL".into(), model.to_string());
-                                        }
-                                    } else {
-                                        bridge_config.insert("LLM_BACKEND".into(), "ollama".into());
-                                    }
+                        let selected_model = cfg.selected_cloud_model.as_deref();
+                        match brain.as_str() {
+                            "anthropic" => {
+                                bridge_config.insert("LLM_BACKEND".into(), "anthropic".into());
+                                if let Some(model) = selected_model {
+                                    bridge_config
+                                        .insert("ANTHROPIC_MODEL".into(), model.to_string());
                                 }
                             }
-                        } else {
-                            // No cloud brain configured either — use ollama as last resort
-                            tracing::warn!(
-                                "[ironclaw] Local inference not ready, no cloud brain configured, \
-                                 using LLM_BACKEND=ollama as placeholder"
-                            );
-                            // IC-008: Emit UiEvent::Error so the user sees a toast
-                            use tauri::Emitter;
-                            let warning = crate::thinclaw::ui_types::UiEvent::Error {
-                                message: "No LLM backend available — falling back to ollama. \
-                                         Please configure a cloud brain or start local inference."
-                                    .to_string(),
-                                code: "LLM_FALLBACK".to_string(),
-                                details: serde_json::Value::Null,
-                            };
-                            let _ = app_handle.emit("thinclaw-event", &warning);
-                            bridge_config.insert("LLM_BACKEND".into(), "ollama".into());
+                            "openai" => {
+                                bridge_config.insert("LLM_BACKEND".into(), "openai".into());
+                                if let Some(model) = selected_model {
+                                    bridge_config.insert("OPENAI_MODEL".into(), model.to_string());
+                                }
+                            }
+                            other => {
+                                if let Some(ep) =
+                                    thinclaw_config::provider_catalog::endpoint_for(other)
+                                {
+                                    bridge_config
+                                        .insert("LLM_BACKEND".into(), "openai_compatible".into());
+                                    bridge_config
+                                        .insert("LLM_BASE_URL".into(), ep.base_url.to_string());
+                                    if let Some(model) = selected_model {
+                                        bridge_config.insert("LLM_MODEL".into(), model.to_string());
+                                    }
+                                } else {
+                                    return Err(anyhow::anyhow!(
+                                        "Unknown selected cloud brain '{other}' and local inference is unavailable"
+                                    ));
+                                }
+                            }
                         }
+                    } else {
+                        use tauri::Emitter;
+                        let message = snapshot.unavailable_reason.unwrap_or_else(|| {
+                            "No local inference runtime is available".to_string()
+                        });
+                        let warning = crate::thinclaw::ui_types::UiEvent::Error {
+                            message: format!(
+                                "{message}. Configure a cloud brain or start local inference."
+                            ),
+                            code: "LLM_RUNTIME_UNAVAILABLE".to_string(),
+                            details: serde_json::Value::Null,
+                        };
+                        let _ = app_handle.emit("thinclaw-event", &warning);
+                        return Err(anyhow::anyhow!(
+                            "{message}. Configure a cloud brain or start local inference."
+                        ));
                     }
                 }
             } else if let Some(ref brain) = cfg.selected_cloud_brain {
                 // Cloud brain selected: set the matching backend + model
-                // IronClaw's LlmConfig::resolve() reads provider-specific env
+                // ThinClaw's LlmConfig::resolve() reads provider-specific env
                 // vars (OPENAI_MODEL, ANTHROPIC_MODEL, LLM_MODEL) to determine
                 // which model to use. Without setting these, it falls through
                 // to the hardcoded default (e.g. gpt-4o for OpenAI).
                 let selected_model = cfg.selected_cloud_model.as_deref();
                 match brain.as_str() {
                     "anthropic" => {
-                        tracing::info!("[ironclaw] Cloud brain: LLM_BACKEND=anthropic");
+                        tracing::info!("[thinclaw-runtime] Cloud brain: LLM_BACKEND=anthropic");
                         bridge_config.insert("LLM_BACKEND".into(), "anthropic".into());
                         if let Some(model) = selected_model {
                             bridge_config.insert("ANTHROPIC_MODEL".into(), model.to_string());
-                            tracing::info!("[ironclaw] Cloud model: ANTHROPIC_MODEL={}", model);
+                            tracing::info!(
+                                "[thinclaw-runtime] Cloud model: ANTHROPIC_MODEL={}",
+                                model
+                            );
                         }
                     }
                     "openai" => {
-                        tracing::info!("[ironclaw] Cloud brain: LLM_BACKEND=openai");
+                        tracing::info!("[thinclaw-runtime] Cloud brain: LLM_BACKEND=openai");
                         bridge_config.insert("LLM_BACKEND".into(), "openai".into());
                         if let Some(model) = selected_model {
                             bridge_config.insert("OPENAI_MODEL".into(), model.to_string());
-                            tracing::info!("[ironclaw] Cloud model: OPENAI_MODEL={}", model);
+                            tracing::info!(
+                                "[thinclaw-runtime] Cloud model: OPENAI_MODEL={}",
+                                model
+                            );
                         }
                     }
                     // All other providers use OpenAI-compatible endpoints
                     other => {
-                        if let Some(ep) = crate::inference::provider_endpoints::endpoint_for(other)
-                        {
+                        if let Some(ep) = thinclaw_config::provider_catalog::endpoint_for(other) {
                             tracing::info!(
-                                "[ironclaw] Cloud brain '{}': LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
+                                "[thinclaw-runtime] Cloud brain '{}': LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
                                 other,
                                 ep.base_url
                             );
@@ -421,11 +464,14 @@ pub(crate) async fn build_inner(
                             bridge_config.insert("LLM_BASE_URL".into(), ep.base_url.to_string());
                             if let Some(model) = selected_model {
                                 bridge_config.insert("LLM_MODEL".into(), model.to_string());
-                                tracing::info!("[ironclaw] Cloud model: LLM_MODEL={}", model);
+                                tracing::info!(
+                                    "[thinclaw-runtime] Cloud model: LLM_MODEL={}",
+                                    model
+                                );
                             }
                         } else {
                             tracing::warn!(
-                                "[ironclaw] Unknown cloud brain '{}', defaulting to ollama",
+                                "[thinclaw-runtime] Unknown cloud brain '{}', defaulting to ollama",
                                 other
                             );
                             bridge_config.insert("LLM_BACKEND".into(), "ollama".into());
@@ -435,39 +481,37 @@ pub(crate) async fn build_inner(
             }
         }
 
-        // Final safety net: if still no LLM_BACKEND is set (no ThinClaw config
-        // loaded), use ollama — it needs no API key or base URL, so config
-        // resolution always succeeds.
         if !bridge_config.contains_key("LLM_BACKEND") && !bridge_var_exists("LLM_BACKEND") {
-            tracing::info!("[ironclaw] No provider config found, defaulting LLM_BACKEND=ollama");
-            bridge_config.insert("LLM_BACKEND".into(), "ollama".into());
+            return Err(anyhow::anyhow!(
+                "No LLM backend configured. Configure a cloud brain or start local inference."
+            ));
         }
     }
 
     // ── IC-007: Inject all bridge config vars atomically ─────────────
     // This single call replaces ~47 scattered unsafe set_var() calls.
-    // All values are now visible to IronClaw's config resolvers via
+    // All values are now visible to ThinClaw's config resolvers via
     // optional_env() which checks BRIDGE_VARS before real env vars.
     let bridge_var_count = bridge_config.len();
     inject_bridge_vars(bridge_config);
     tracing::info!(
-        "[ironclaw] IC-007: Injected {} bridge config vars into overlay (no unsafe set_var)",
+        "[thinclaw-runtime] IC-007: Injected {} bridge config vars into overlay (no unsafe set_var)",
         bridge_var_count
     );
 
     // ── 2. Load config ──────────────────────────────────────────────
-    let toml_path = state_dir.join("ironclaw.toml");
+    let toml_path = runtime_toml_path(&state_dir);
     let toml_path_ref = if toml_path.exists() {
         Some(toml_path.as_path())
     } else {
         None
     };
 
-    let config = match ironclaw::Config::from_env_with_toml(toml_path_ref).await {
+    let config = match thinclaw_core::Config::from_env_with_toml(toml_path_ref).await {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("Failed to load IronClaw config, using env-only: {}", e);
-            ironclaw::Config::from_env().await?
+            tracing::warn!("Failed to load ThinClaw config, using env-only: {}", e);
+            thinclaw_core::Config::from_env().await?
         }
     };
 
@@ -484,14 +528,15 @@ pub(crate) async fn build_inner(
         .cloned()
         .unwrap_or_else(|| {
             tracing::warn!(
-                "[ironclaw] GLOBAL_LOG_BROADCASTER not set — creating standalone broadcaster. \
+                "[thinclaw-runtime] GLOBAL_LOG_BROADCASTER not set — creating standalone broadcaster. \
                  Tracing events will NOT reach the UI Logs tab."
             );
             Arc::new(LogBroadcaster::new())
         });
 
-    let toml_path_opt = if state_dir.join("ironclaw.toml").exists() {
-        Some(state_dir.join("ironclaw.toml"))
+    let runtime_toml_path = runtime_toml_path(&state_dir);
+    let toml_path_opt = if runtime_toml_path.exists() {
+        Some(runtime_toml_path)
     } else {
         None
     };
@@ -507,11 +552,11 @@ pub(crate) async fn build_inner(
         builder = builder.with_secrets_store(store);
     }
 
-    // Wire TauriToolBridge into the IronClaw engine — enables hardware
+    // Wire TauriToolBridge into the ThinClaw runtime — enables hardware
     // sensor tools (camera, mic, screen) with 3-tier user approval.
     builder = builder.with_tool_bridge(tool_bridge.clone());
 
-    // ── 4b. Translate ThinClaw Desktop's cloud intelligence config into IronClaw
+    // ── 4b. Translate ThinClaw Desktop's cloud intelligence config into ThinClaw
     //        ProvidersSettings for multi-provider failover + smart routing.
     {
         use tauri::Manager;
@@ -519,7 +564,7 @@ pub(crate) async fn build_inner(
         let oc_config = thinclaw_mgr.get_config().await;
 
         if let Some(ref cfg) = oc_config {
-            let mut providers = ironclaw::settings::ProvidersSettings::default();
+            let mut providers = thinclaw_core::settings::ProvidersSettings::default();
 
             // Map enabled cloud providers
             providers.enabled = cfg.enabled_cloud_providers.clone();
@@ -537,7 +582,7 @@ pub(crate) async fn build_inner(
 
             if !providers.enabled.is_empty() {
                 tracing::info!(
-                    "[ironclaw] Cloud intelligence config translated: {} provider(s) enabled, \
+                    "[thinclaw-runtime] Cloud intelligence config translated: {} provider(s) enabled, \
                      primary={:?}, model={:?}",
                     providers.enabled.len(),
                     providers.primary,
@@ -561,7 +606,7 @@ pub(crate) async fn build_inner(
                   recipient: String,
                   text: String,
                   thread_id: Option<String>,
-                  attachments: Vec<ironclaw::media::MediaContent>| {
+                  attachments: Vec<thinclaw_core::media::MediaContent>| {
                 let send_handle = send_handle.clone();
                 Box::pin(async move {
                     let route = desktop_send_route(
@@ -587,7 +632,9 @@ pub(crate) async fn build_inner(
                 })
             },
         )));
-        tracing::info!("[ironclaw] send_message tool registered for local Tauri/Desktop delivery");
+        tracing::info!(
+            "[thinclaw-runtime] send_message tool registered for local Tauri/Desktop delivery"
+        );
     }
 
     // ── 6. Create SSE broadcast channel + agent ─────────────────────
@@ -605,12 +652,12 @@ pub(crate) async fn build_inner(
     // results (JSON action descriptors) and calls executor.spawn() here.
     // Without this wiring the tool silently returns "not initialized".
     let (subagent_executor, subagent_result_rx) =
-        ironclaw::agent::subagent_executor::SubagentExecutor::new(
+        thinclaw_core::agent::subagent_executor::SubagentExecutor::new(
             components.llm.clone(),
             components.safety.clone(),
             components.tools.clone(),
             channel_manager.clone(),
-            ironclaw::agent::subagent_executor::SubagentConfig {
+            thinclaw_core::agent::subagent_executor::SubagentConfig {
                 max_concurrent: 5,
                 default_timeout_secs: 300, // 5 minutes
                 allow_nested: false,       // sub-agents cannot spawn sub-agents
@@ -633,7 +680,7 @@ pub(crate) async fn build_inner(
     }
     let subagent_executor = Arc::new(subagent_executor);
 
-    let model_override = ironclaw::tools::builtin::new_shared_model_override();
+    let model_override = thinclaw_core::tools::builtin::new_shared_model_override();
     components.tools.register_llm_tools(
         model_override.clone(),
         Arc::clone(&components.llm),
@@ -657,34 +704,28 @@ pub(crate) async fn build_inner(
     // Without this, the dispatcher can handle results but the LLM
     // never has spawn_subagent/list_subagents/cancel_subagent in
     // its tool definitions — it literally cannot invoke them.
-    components
-        .tools
-        .register_sync(Arc::new(ironclaw::tools::builtin::SpawnSubagentTool::new(
-            subagent_executor.clone(),
-        )));
-    components
-        .tools
-        .register_sync(Arc::new(ironclaw::tools::builtin::ListSubagentsTool::new(
-            subagent_executor.clone(),
-        )));
-    components
-        .tools
-        .register_sync(Arc::new(ironclaw::tools::builtin::CancelSubagentTool::new(
-            subagent_executor.clone(),
-        )));
-    tracing::info!("[ironclaw] Sub-agent tools registered (spawn, list, cancel)");
+    components.tools.register_sync(Arc::new(
+        thinclaw_core::tools::builtin::SpawnSubagentTool::new(subagent_executor.clone()),
+    ));
+    components.tools.register_sync(Arc::new(
+        thinclaw_core::tools::builtin::ListSubagentsTool::new(subagent_executor.clone()),
+    ));
+    components.tools.register_sync(Arc::new(
+        thinclaw_core::tools::builtin::CancelSubagentTool::new(subagent_executor.clone()),
+    ));
+    tracing::info!("[thinclaw-runtime] Sub-agent tools registered (spawn, list, cancel)");
 
     // Re-register MemoryDeleteTool with the SSE sender now that we have the channel.
     // build_all() registered it with None; we replace it here with the live sender.
     // register_sync() replaces existing entries by name, so no duplicates occur.
     if let Some(ref ws) = components.workspace {
-        use ironclaw::tools::builtin::MemoryDeleteTool;
+        use thinclaw_core::tools::builtin::MemoryDeleteTool;
         let delete_tool = MemoryDeleteTool::new(ws.clone()).with_sse_sender(sse_tx.clone());
         components
             .tools
             .register_sync(std::sync::Arc::new(delete_tool));
         tracing::info!(
-            "[ironclaw] MemoryDeleteTool re-registered with SSE sender (BOOTSTRAP.md delete detection enabled)"
+            "[thinclaw-runtime] MemoryDeleteTool re-registered with SSE sender (BOOTSTRAP.md delete detection enabled)"
         );
     }
 
@@ -696,13 +737,13 @@ pub(crate) async fn build_inner(
             match registry.load_from_db().await {
                 Ok(count) if count > 0 => {
                     tracing::info!(
-                        "[ironclaw] Loaded {} persisted agent workspace(s) into desktop router",
+                        "[thinclaw-runtime] Loaded {} persisted agent workspace(s) into desktop router",
                         count
                     );
                 }
                 Err(error) => {
                     tracing::warn!(
-                        "[ironclaw] Failed to load persisted agent workspaces: {}",
+                        "[thinclaw-runtime] Failed to load persisted agent workspaces: {}",
                         error
                     );
                 }
@@ -748,13 +789,13 @@ pub(crate) async fn build_inner(
                 }
             }
         }));
-        tracing::info!("[ironclaw] Cost persistence background task started");
+        tracing::info!("[thinclaw-runtime] Cost persistence background task started");
     }
 
-    auxiliary_tasks.push(ironclaw::llm::pricing_sync::spawn_pricing_sync(
+    auxiliary_tasks.push(thinclaw_core::llm::pricing_sync::spawn_pricing_sync(
         components.db.as_ref().map(Arc::clone),
     ));
-    tracing::info!("[ironclaw] Pricing sync background task started");
+    tracing::info!("[thinclaw-runtime] Pricing sync background task started");
 
     let agent_deps = AgentDeps {
         store: components.db.clone(),
@@ -776,7 +817,7 @@ pub(crate) async fn build_inner(
         sse_sender: Some(sse_tx.clone()), // ← wired into RoutineEngine + Dispatcher
         agent_router: Some(shared_agent_router),
         agent_registry: Some(agent_registry),
-        canvas_store: Some(ironclaw::channels::canvas_gateway::CanvasStore::new(
+        canvas_store: Some(thinclaw_core::channels::canvas_gateway::CanvasStore::new(
             std::time::Duration::from_secs(30 * 60), // 30 minute TTL
         )),
         subagent_executor: Some(subagent_executor.clone()),
@@ -808,7 +849,9 @@ pub(crate) async fn build_inner(
         None,
         components.secrets_store.clone(),
     );
-    tracing::info!("[ironclaw] Job tools registered with desktop scheduler-backed execution");
+    tracing::info!(
+        "[thinclaw-runtime] Job tools registered with desktop scheduler-backed execution"
+    );
 
     // ── 6b. Sub-agent result injector ───────────────────────────────
     // Polls the SubagentExecutor's result channel and re-injects
@@ -854,7 +897,7 @@ pub(crate) async fn build_inner(
                 );
 
                 // Build an IncomingMessage that goes through the normal pipeline
-                let incoming = ironclaw::channels::IncomingMessage::new(
+                let incoming = thinclaw_core::channels::IncomingMessage::new(
                     "subagent",
                     "system",
                     &synthetic_content,
@@ -899,11 +942,13 @@ pub(crate) async fn build_inner(
         if let Some(mut system_rx) = bg_lock.take() {
             let agent_for_sys = Arc::clone(&agent);
             tokio::spawn(async move {
-                tracing::info!("[ironclaw] System event consumer started (heartbeat → livechat)");
+                tracing::info!(
+                    "[thinclaw-runtime] System event consumer started (heartbeat → livechat)"
+                );
                 while let Some(msg) = system_rx.recv().await {
                     tracing::info!(
                         channel = %msg.channel,
-                        "[ironclaw] Processing system event in Tauri mode"
+                        "[thinclaw-runtime] Processing system event in Tauri mode"
                     );
 
                     match agent_for_sys.handle_message_external(&msg).await {
@@ -911,7 +956,7 @@ pub(crate) async fn build_inner(
                             // Suppress HEARTBEAT_OK — parity with run() loop
                             if msg.channel == "heartbeat" && response.contains("HEARTBEAT_OK") {
                                 tracing::debug!(
-                                    "[ironclaw] Heartbeat returned HEARTBEAT_OK — suppressed"
+                                    "[thinclaw-runtime] Heartbeat returned HEARTBEAT_OK — suppressed"
                                 );
                                 continue;
                             }
@@ -924,13 +969,13 @@ pub(crate) async fn build_inner(
                                 .channels()
                                 .broadcast_all(
                                     &msg.user_id,
-                                    ironclaw::channels::OutgoingResponse::text(response),
+                                    thinclaw_core::channels::OutgoingResponse::text(response),
                                 )
                                 .await;
                             for (ch, result) in results {
                                 if let Err(e) = result {
                                     tracing::error!(
-                                        "[ironclaw] System event broadcast to {} failed: {}",
+                                        "[thinclaw-runtime] System event broadcast to {} failed: {}",
                                         ch,
                                         e
                                     );
@@ -939,15 +984,18 @@ pub(crate) async fn build_inner(
                         }
                         Ok(_) => {
                             tracing::debug!(
-                                "[ironclaw] System event processed (no visible response)"
+                                "[thinclaw-runtime] System event processed (no visible response)"
                             );
                         }
                         Err(e) => {
-                            tracing::error!("[ironclaw] System event processing failed: {}", e);
+                            tracing::error!(
+                                "[thinclaw-runtime] System event processing failed: {}",
+                                e
+                            );
                         }
                     }
                 }
-                tracing::info!("[ironclaw] System event consumer ended");
+                tracing::info!("[thinclaw-runtime] System event consumer ended");
             });
         }
     }
@@ -987,8 +1035,8 @@ pub(crate) async fn build_inner(
                         // Only reap InProgress or Pending jobs (not Stuck — self-repair handles those)
                         if !matches!(
                             ctx.state,
-                            ironclaw::context::JobState::InProgress
-                                | ironclaw::context::JobState::Pending
+                            thinclaw_core::context::JobState::InProgress
+                                | thinclaw_core::context::JobState::Pending
                         ) {
                             continue;
                         }
@@ -1011,7 +1059,7 @@ pub(crate) async fn build_inner(
                             let _ = cm
                                 .update_context(job_id, |c| {
                                     let _ = c.transition_to(
-                                        ironclaw::context::JobState::Failed,
+                                        thinclaw_core::context::JobState::Failed,
                                         Some(format!(
                                             "Force-cancelled by TTL reaper (alive {}s, limit {}s)",
                                             age.num_seconds(),
@@ -1039,12 +1087,12 @@ pub(crate) async fn build_inner(
     // ── 7c. BeforeAgentStart hook ────────────────────────────────────
     // Parity with run() loop — allows hooks to inspect startup config.
     {
-        let event = ironclaw::hooks::HookEvent::AgentStart {
+        let event = thinclaw_core::hooks::HookEvent::AgentStart {
             model: "tauri-direct".to_string(),
             provider: "ironclaw".to_string(),
         };
         match agent.hooks().run(&event).await {
-            Err(ironclaw::hooks::HookError::Rejected { reason }) => {
+            Err(thinclaw_core::hooks::HookError::Rejected { reason }) => {
                 tracing::error!("BeforeAgentStart hook rejected startup: {}", reason);
                 // Don't fail the engine start — just log. The hook can still
                 // do pre-flight checks, but we don't want to prevent the UI.
@@ -1063,7 +1111,7 @@ pub(crate) async fn build_inner(
         tracing::warn!("Failed to emit Connected event: {}", e);
     }
 
-    tracing::info!("IronClaw engine initialized successfully");
+    tracing::info!("ThinClaw runtime initialized successfully");
 
     // ── 8b. Spawn SSE → Tauri forwarder ─────────────────────────────────────────────────
     // Forward RoutineLifecycle events from the SSE channel to the frontend.
@@ -1112,7 +1160,7 @@ pub(crate) async fn build_inner(
                                             .to_string()
                                     };
                                     tracing::info!(
-                                        "[ironclaw] FileCreated: {} ({} bytes)",
+                                        "[thinclaw-runtime] FileCreated: {} ({} bytes)",
                                         relative,
                                         bytes
                                     );
@@ -1184,12 +1232,12 @@ pub(crate) async fn build_inner(
     };
 
     let response_cache = components.response_cache.clone();
-    // Use AppComponents' audit hook — this is the one IronClaw's extension
+    // Use AppComponents' audit hook — this is the one ThinClaw's extension
     // lifecycle system actually writes events to.
     let audit_log_hook = components.audit_hook.clone();
     let manifest_validator = Arc::new(ManifestValidator::new());
 
-    Ok(IronClawInner {
+    Ok(ThinClawRuntimeInner {
         agent,
         bg_handle: Mutex::new(Some(bg_handle)),
         inject_tx,
@@ -1267,7 +1315,7 @@ mod tests {
 
     #[test]
     fn agent_deps_keeps_desktop_runtime_parity_handles_wired() {
-        let source = include_str!("ironclaw_builder.rs");
+        let source = include_str!("runtime_builder.rs");
         let deps_block = source
             .split("let agent_deps = AgentDeps")
             .nth(1)

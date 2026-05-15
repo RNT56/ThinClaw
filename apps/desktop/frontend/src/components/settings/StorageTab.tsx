@@ -45,7 +45,7 @@ const CATEGORY_META: Record<string, { icon: typeof Cloud; color: string }> = {
     documents: { icon: FileText, color: 'bg-blue-500' },
     images: { icon: ImageIcon, color: 'bg-emerald-500' },
     database: { icon: Database, color: 'bg-amber-500' },
-    ironclaw_db: { icon: Cpu, color: 'bg-orange-500' },
+    thinclaw_runtime_db: { icon: Cpu, color: 'bg-orange-500' },
     vectors: { icon: FolderOpen, color: 'bg-cyan-500' },
     previews: { icon: ImageIcon, color: 'bg-pink-500' },
     thinclaw: { icon: Box, color: 'bg-rose-500' },

@@ -1,7 +1,7 @@
 /**
  * useCloudModels — React hook for cloud model discovery.
  *
- * Calls `discover_cloud_models` on mount to fetch models from all providers
+ * Calls `direct_inference_discover_cloud_models` on mount to fetch models from all providers
  * that have API keys configured. Results are cached on the backend (30 min TTL)
  * and in React state.
  *
@@ -65,7 +65,7 @@ export function useCloudModels() {
         setLoading(true);
         setError(null);
         try {
-            const data = await invoke<DiscoveryResult>("discover_cloud_models", { providers });
+            const data = await invoke<DiscoveryResult>("direct_inference_discover_cloud_models", { providers });
             setResult(data);
             if (data.errors.length > 0) {
                 console.warn("[useCloudModels] Discovery errors:", data.errors);
@@ -80,7 +80,7 @@ export function useCloudModels() {
 
     const refreshProvider = useCallback(async (provider: string) => {
         try {
-            const providerResult = await invoke<ProviderDiscoveryResult>("refresh_cloud_models", { provider });
+            const providerResult = await invoke<ProviderDiscoveryResult>("direct_inference_refresh_cloud_models", { provider });
             setResult(prev => {
                 if (!prev) return prev;
                 const updated = prev.providers.map(p =>

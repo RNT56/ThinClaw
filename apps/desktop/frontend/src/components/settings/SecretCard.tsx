@@ -57,7 +57,7 @@ export function SecretCard({
             setKey('');
             setShowKey(false);
             toast.success(`${title} saved`);
-            // Trigger hot-reload so IronClaw picks up the new key (fire-and-forget)
+            // Trigger hot-reload so ThinClaw picks up the new key (fire-and-forget)
             reloadSecrets().catch(() => {/* best-effort */ });
         } catch (e) {
             toast.error(`Failed to save ${title}`);

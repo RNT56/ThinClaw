@@ -2,29 +2,17 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useModelContext, RECOMMENDED_MODELS } from '../model-context';
 import { ChevronDown, Check, Box, Sparkles, Cloud, Monitor } from 'lucide-react';
-import { commands } from '../../lib/bindings';
 import { cn } from '../../lib/utils';
 import { useConfig } from '../../hooks/use-config';
 import { useCloudModels } from '../../hooks/use-cloud-models';
+import { useInferenceBackends } from '../../hooks/use-inference-backends';
 
 export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { onManageClick: () => void, isAutoMode: boolean, toggleAutoMode: (v: boolean) => void }) {
     const { localModels, currentModelPath: modelPath, setModelPath, downloading, setIsRestarting } = useModelContext();
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
-    const [status, setStatus] = useState<any>(null);
     const { config, updateConfig } = useConfig();
-
-    useEffect(() => {
-        const loadStatus = async () => {
-            try {
-                const s = await commands.thinclawGetStatus();
-                if (s.status === 'ok') setStatus(s.data);
-            } catch (e) {
-                console.error("Failed to load status in ModelSelector", e);
-            }
-        };
-        loadStatus();
-    }, [isOpen]);
+    const { available } = useInferenceBackends();
 
     // Filter out dedicated embedding/STT/diffusion/TTS models from the chat selector.
     // Uses BOTH path-based category detection (models/{Category}/...) and filename heuristics.
@@ -85,7 +73,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         ["xai-", "xai"], ["together-", "together"],
         ["venice-", "venice"], ["cohere-", "cohere"],
         ["moonshot-", "moonshot"], ["minimax-", "minimax"],
-        ["nvidia-", "nvidia"], ["xiaomi-", "xiaomi"],
+        ["nvidia-", "nvidia"],
     ];
 
     const resolveProvider = (id: string, fallbackFamily?: string): string => {
@@ -94,28 +82,17 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         return match ? match[1] : (fallbackFamily?.toLowerCase() ?? "");
     };
 
-    const hasKeyForProvider = (provider: string): boolean => {
-        if (!status) return false;
-        const s = status as any;
-        // Core 5 providers have dedicated status keys
-        const coreKeys: Record<string, boolean> = {
-            anthropic: !!(s.has_anthropic_key || s.hasAnthropicKey),
-            openai: !!(s.has_openai_key || s.hasOpenaiKey),
-            gemini: !!(s.has_gemini_key || s.hasGeminiKey),
-            groq: !!(s.has_groq_key || s.hasGroqKey),
-            openrouter: !!(s.has_openrouter_key || s.hasOpenrouterKey),
-        };
-        if (provider in coreKeys) return coreKeys[provider];
-        // Implicit providers
-        const camel = provider.charAt(0).toUpperCase() + provider.slice(1);
-        return !!(s[`has_${provider}_key`] || s[`has${camel}Key`]);
-    };
+    const availableChatProviders = useMemo(() => new Set(
+        (available.chat ?? [])
+            .filter(backend => backend.available)
+            .map(backend => backend.id)
+    ), [available.chat]);
 
     const cloudModels = RECOMMENDED_MODELS.filter(m => {
         if ((m as any).category !== "Cloud") return false;
         const provider = resolveProvider(m.id, m.family);
         if (config?.disabled_providers?.includes(provider)) return false;
-        return hasKeyForProvider(provider);
+        return availableChatProviders.has(provider);
     });
 
     // ── Merge cloud-discovered chat models ──────────────────────────────
@@ -159,6 +136,17 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         ...allCloudModels,
     ];
 
+    const selectedChatProvider = config?.chat_backend ?? config?.selected_chat_provider ?? "local";
+    const selectedChatModel = config?.inference_models?.chat ?? null;
+
+    const modelIdForProvider = (id: string, provider: string): string => {
+        const providerPrefix = `${provider}-`;
+        if (id.toLowerCase().startsWith(providerPrefix)) {
+            return id.slice(providerPrefix.length);
+        }
+        return id.split('-').slice(1).join('-') || id;
+    };
+
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
@@ -183,7 +171,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                 if (!modelDef) return;
 
                 const brain = resolveProvider(modelDef.id, modelDef.family);
-                const modelId = modelDef.id.split('-').slice(1).join('-');
+                const modelId = modelIdForProvider(modelDef.id, brain);
 
                 // Propagate the discovered model's context window to the backend.
                 // `_contextWindow` is set for cloud-discovered models; null for hardcoded fallback entries.
@@ -192,28 +180,24 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                 const newConfig = {
                     ...config,
                     selected_chat_provider: brain,
+                    chat_backend: brain,
+                    inference_models: {
+                        ...(config?.inference_models ?? {}),
+                        chat: modelId,
+                    },
                     selected_model_context_size: contextSize ?? undefined,
                 };
 
                 await updateConfig(newConfig);
-                if (commands.thinclawSaveSelectedCloudModel) {
-                    await commands.thinclawSaveSelectedCloudModel(modelId);
-                }
-
-                // Refresh status to reflect new cloud model
-                const s = await commands.thinclawGetStatus();
-                if (s.status === 'ok') setStatus(s.data);
 
                 setIsOpen(false);
-                // We don't setModelPath for cloud models yet as it's handled by provider routing in backend
-                // but we might want to update local UI state if needed.
                 return;
             } catch (e) {
                 console.error(e);
             }
         }
 
-        if (path === modelPath && config?.selected_chat_provider === "local") {
+        if (path === modelPath && selectedChatProvider === "local") {
             setIsRestarting(false);
             setIsOpen(false);
             return;
@@ -224,13 +208,10 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
 
         // If switching from cloud to local but path is same, we need to force a trigger.
         // We'll update the config first.
-        if (type === 'local' && config?.selected_chat_provider !== "local") {
+        if (type === 'local' && selectedChatProvider !== "local") {
             try {
-                const newConfig = { ...config, selected_chat_provider: "local" };
+                const newConfig = { ...config, selected_chat_provider: "local", chat_backend: "local" };
                 await updateConfig(newConfig);
-                // Refresh status to ensure consistency
-                const s = await commands.thinclawGetStatus();
-                if (s.status === 'ok') setStatus(s.data);
             } catch (e) {
                 console.error("Failed to update config to local", e);
             }
@@ -253,14 +234,14 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                     {isAutoMode ? <Box className="w-4 h-4" /> : <Box className="w-4 h-4 text-primary" />}
                     <span className="max-w-[150px] truncate">
                         {isAutoMode ? "Auto Mode" : (
-                            config?.selected_chat_provider && config.selected_chat_provider !== "local"
-                                ? status?.selected_cloud_model || (config.selected_chat_provider.toUpperCase())
+                            selectedChatProvider !== "local"
+                                ? selectedChatModel || (selectedChatProvider.toUpperCase())
                                 : (localModels.find(m => m.path === modelPath)?.name.split(/[\\/]/).pop()) || "Select Model"
                         )}
                     </span>
                     {/* Local / Cloud badge */}
                     {!isAutoMode && (
-                        config?.selected_chat_provider && config.selected_chat_provider !== "local"
+                        selectedChatProvider !== "local"
                             ? <Cloud className="w-3 h-3 text-blue-500 shrink-0" />
                             : <Monitor className="w-3 h-3 text-emerald-500 shrink-0" />
                     )}
@@ -299,8 +280,8 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                                         const provider = resolveProvider(model.id || '', model.family);
 
                                         const isActive = model.type === 'local'
-                                            ? (model.path === modelPath && config?.selected_chat_provider === "local")
-                                            : (config?.selected_chat_provider === provider && status?.selected_cloud_model === model.id?.split('-').slice(1).join('-'));
+                                            ? (model.path === modelPath && selectedChatProvider === "local")
+                                            : (selectedChatProvider === provider && selectedChatModel === modelIdForProvider(model.id, provider));
 
                                         return (
                                             <button

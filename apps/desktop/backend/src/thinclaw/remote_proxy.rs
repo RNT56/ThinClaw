@@ -1,7 +1,7 @@
-//! RemoteGatewayProxy — HTTP/SSE client for remote IronClaw gateway.
+//! RemoteGatewayProxy — HTTP/SSE client for remote ThinClaw gateway.
 //!
 //! When ThinClaw Desktop is in "remote" mode, all agent interactions are forwarded
-//! to a remote IronClaw HTTP server instead of the embedded in-process engine.
+//! to a remote ThinClaw HTTP server instead of the embedded in-process engine.
 //!
 //! Architecture:
 //!   Frontend → Tauri IPC → Command handler → RemoteGatewayProxy → HTTP API
@@ -9,7 +9,7 @@
 //!
 //! The proxy is intentionally thin: it does not transform data but passes
 //! raw JSON responses back to the command handlers who already know the
-//! expected shape (same as local mode, since the remote IronClaw server
+//! expected shape (same as local mode, since the remote ThinClaw server
 //! and the local embedded engine share the same API definitions).
 
 use std::sync::Arc;
@@ -28,7 +28,7 @@ pub enum ConnectionState {
     Disconnected,
 }
 
-/// HTTP/SSE proxy client for a remote IronClaw gateway.
+/// HTTP/SSE proxy client for a remote ThinClaw gateway.
 ///
 /// Cheaply cloneable — all state behind Arc.
 #[derive(Clone)]
@@ -971,7 +971,7 @@ impl RemoteGatewayProxy {
     /// Subscribe to the remote gateway's SSE event stream and re-emit
     /// all events as Tauri `thinclaw-event` emissions.
     ///
-    /// This runs as a background task. Events from the remote IronClaw
+    /// This runs as a background task. Events from the remote ThinClaw
     /// are forwarded directly to the frontend — the UI sees no difference
     /// between local and remote agent events.
     ///
@@ -1136,7 +1136,7 @@ impl RemoteGatewayProxy {
                             Err(_) => match serde_json::from_str::<serde_json::Value>(data) {
                                 Ok(raw_json) => {
                                     for event in
-                                        crate::thinclaw::ironclaw_types::gateway_sse_to_ui_events(
+                                        crate::thinclaw::event_mapping::gateway_sse_to_ui_events(
                                             raw_json,
                                         )
                                     {

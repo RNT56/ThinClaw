@@ -22,7 +22,7 @@ export function TroubleshootingSettings() {
 
     const checkStatus = async () => {
         try {
-            const s = await commands.getSidecarStatus();
+            const s = await commands.directRuntimeGetSidecarStatus();
             setStatus(s);
             const cs = await thinclaw.getThinClawStatus();
             setClawStatus(cs);
@@ -93,7 +93,7 @@ export function TroubleshootingSettings() {
                             <FolderOpen className="w-4 h-4 mr-2 text-primary" /> Open Models Folder
                         </button>
                         <button
-                            onClick={async () => unwrap(await commands.openImagesFolder())}
+                            onClick={async () => unwrap(await commands.directAssetsOpenImagesFolder())}
                             className="w-full bg-background border border-border/50 hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-sm"
                         >
                             <ImageIcon className="w-4 h-4 mr-2 text-pink-500" /> Open Generated Images

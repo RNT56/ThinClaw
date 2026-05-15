@@ -10,7 +10,7 @@
 ///
 /// Frontend workflow:
 ///   1. User clicks "Read Aloud" on an assistant bubble.
-///   2. Frontend calls `tts_synthesize(text, model_path)`.
+///   2. Frontend calls `direct_media_tts_synthesize(text, model_path)`.
 ///   3. Cloud path: InferenceRouter → provider API → base64 audio (MP3/WAV).
 ///      Local path: Piper sidecar → base64 raw PCM.
 ///   4. Frontend decodes base64 → `AudioContext.decodeAudioData()` → plays.
@@ -35,7 +35,7 @@ use crate::inference::InferenceRouter;
 /// to the `.onnx` file (Piper locates the companion `.onnx.json` automatically).
 #[tauri::command]
 #[specta::specta]
-pub async fn tts_synthesize(
+pub async fn direct_media_tts_synthesize(
     app: AppHandle,
     state: State<'_, crate::sidecar::SidecarManager>,
     router: State<'_, InferenceRouter>,
@@ -179,7 +179,7 @@ pub async fn tts_synthesize(
 /// Returns an empty list if no TTS backend is active.
 #[tauri::command]
 #[specta::specta]
-pub async fn tts_list_voices(
+pub async fn direct_media_tts_list_voices(
     router: State<'_, InferenceRouter>,
 ) -> Result<Vec<crate::inference::VoiceInfo>, String> {
     if let Some(backend) = router.tts_backend().await {

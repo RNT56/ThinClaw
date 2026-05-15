@@ -37,7 +37,7 @@ interface ChatContextType {
         autoMode: boolean;
         currentEmbeddingModelPath: string | null;
     }) => Promise<string>; // returns conversationId
-    cancelGeneration: (conversationId: string) => Promise<void>;
+    directRuntimeCancelGeneration: (conversationId: string) => Promise<void>;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
@@ -72,7 +72,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // 1. Ensure Conversation exists (AWAITED so we can return ID)
         if (!conversationId) {
             const title = content.length > 30 ? content.substring(0, 30) + "..." : (content || "Image Upload");
-            const result = await commands.createConversation(title, projectId);
+            const result = await commands.directHistoryCreateConversation(title, projectId);
             if (result.status === "error") throw new Error(result.error);
             conversationId = result.data.id;
         }
@@ -91,7 +91,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
                 // Save User Message
                 const storageDocs = attachedDocs;
-                const resSave = await commands.saveMessage(id, "user", content, images.length > 0 ? images : null, storageDocs.length > 0 ? storageDocs : null, null);
+                const resSave = await commands.directHistorySaveMessage(id, "user", content, images.length > 0 ? images : null, storageDocs.length > 0 ? storageDocs : null, null);
                 if (resSave.status === "error") throw new Error(resSave.error || "Could not save user message");
 
                 let finalMessages = [...history, { role: "user", content, images: images.length > 0 ? images : null, attached_docs: storageDocs.length > 0 ? storageDocs : null }];
@@ -100,7 +100,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 if ((content.trim().length > 3 || attachedDocs.length > 0) && currentEmbeddingModelPath) {
                     updateJob(id, { isThinking: true });
                     try {
-                        const hitsRes = await commands.retrieveContext(content, id, attachedDocs.map((d: any) => d.id), projectId);
+                        const hitsRes = await commands.directRagRetrieveContext(content, id, attachedDocs.map((d: any) => d.id), projectId);
                         if (hitsRes.status === "ok" && hitsRes.data.length > 0) {
                             finalMessages = [
                                 ...history,
@@ -208,7 +208,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         // rather than `activeJobsRef` which may lag by a render cycle.
                         const currentSearchResults = activeJobsRef.current[id]?.searchResults ?? null;
                         if (fullText) {
-                            commands.saveMessage(id, "assistant", fullText, null, null, currentSearchResults)
+                            commands.directHistorySaveMessage(id, "assistant", fullText, null, null, currentSearchResults)
                                 .then((res) => {
                                     // Store the real message ID so useChat can update in-place
                                     if (res.status === 'ok') {
@@ -254,7 +254,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     scheduleFlush();
                 };
 
-                await commands.chatStream({
+                await commands.directChatStream({
                     model: "default",
                     messages: finalMessages,
                     temperature: 0.7,
@@ -279,9 +279,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         return conversationId;
     }, [updateJob, removeJob]);
 
-    const cancelGeneration = useCallback(async (id: string) => {
+    const directRuntimeCancelGeneration = useCallback(async (id: string) => {
         try {
-            await commands.cancelGeneration();
+            await commands.directRuntimeCancelGeneration();
             removeJob(id);
         } catch (e) {
             console.error("Cancel failed", e);
@@ -289,7 +289,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }, [removeJob]);
 
     return (
-        <ChatContext.Provider value={{ activeJobs, activeJobsRef, startGeneration, cancelGeneration }}>
+        <ChatContext.Provider value={{ activeJobs, activeJobsRef, startGeneration, directRuntimeCancelGeneration }}>
             {children}
         </ChatContext.Provider>
     );

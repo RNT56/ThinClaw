@@ -1,7 +1,7 @@
 //! Session management, chat, memory, and workspace file commands.
 //!
-//! **Phase 3 migration**: Commands now call IronClaw's API directly instead of
-//! routing through the WebSocket RPC bridge. `IronClawState` is the primary
+//! **Phase 3 migration**: Commands now call ThinClaw's API directly instead of
+//! routing through the WebSocket RPC bridge. `ThinClawRuntimeState` is the primary
 //! data source; `ThinClawManager` is retained for workspace path resolution
 //! until Phase 4 cleanup.
 
@@ -10,13 +10,13 @@ use tracing::{error, info, warn};
 
 use super::types::*;
 use super::ThinClawManager;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 // ============================================================================
 // Batch 1: Chat Hot-Path (send, abort, approval)
 // ============================================================================
 
-/// Send a message to the IronClaw agent.
+/// Send a message to the ThinClaw runtime.
 ///
 /// Returns immediately — the actual response streams back via `thinclaw-event`
 /// Tauri events (AssistantDelta, ToolUpdate, etc.).
@@ -25,7 +25,7 @@ use crate::thinclaw::ironclaw_bridge::IronClawState;
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_send_message(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
     text: String,
     deliver: bool,
@@ -49,10 +49,15 @@ pub async fn thinclaw_send_message(
 
     let agent = ironclaw.agent().await?;
     let routine_engine = ironclaw.routine_engine().await;
-    let result =
-        ironclaw::api::chat::send_message_full(agent, &session_key, &text, deliver, routine_engine)
-            .await
-            .map_err(|e| e.to_string())?;
+    let result = thinclaw_core::api::chat::send_message_full(
+        agent,
+        &session_key,
+        &text,
+        deliver,
+        routine_engine,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(ThinClawRpcResponse {
         ok: true,
@@ -64,7 +69,7 @@ pub async fn thinclaw_send_message(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_abort_chat(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
     _run_id: Option<String>,
 ) -> Result<ThinClawRpcResponse, String> {
@@ -79,7 +84,7 @@ pub async fn thinclaw_abort_chat(
 
     // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
-    ironclaw::api::chat::abort(&agent, &session_key)
+    thinclaw_core::api::chat::abort(&agent, &session_key)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -95,7 +100,7 @@ pub async fn thinclaw_abort_chat(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_resolve_approval(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     approval_id: String,
     approved: bool,
     allow_session: Option<bool>,
@@ -131,7 +136,7 @@ pub async fn thinclaw_resolve_approval(
     ironclaw.set_session_context(session_key).await?;
 
     let agent = ironclaw.agent().await?;
-    ironclaw::api::chat::resolve_approval(
+    thinclaw_core::api::chat::resolve_approval(
         agent,
         session_key,
         &approval_id,
@@ -157,11 +162,11 @@ pub async fn thinclaw_resolve_approval(
 // Batch 2: Session CRUD
 // ============================================================================
 
-/// Get sessions list from IronClaw.
+/// Get sessions list from ThinClaw.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_get_sessions(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<ThinClawSessionsResponse, String> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -215,7 +220,7 @@ pub async fn thinclaw_get_sessions(
 
     // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
-    let thread_list = ironclaw::api::sessions::list_threads(
+    let thread_list = thinclaw_core::api::sessions::list_threads(
         agent.session_manager(),
         agent.store(),
         "local_user",
@@ -301,7 +306,7 @@ pub async fn thinclaw_get_sessions(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_delete_session(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
 ) -> Result<(), String> {
     if session_key == "agent:main" {
@@ -311,18 +316,18 @@ pub async fn thinclaw_delete_session(
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.delete_session(&session_key).await?;
-        info!("[ironclaw] Deleted remote session: {}", session_key);
+        info!("[thinclaw-runtime] Deleted remote session: {}", session_key);
         return Ok(());
     }
 
     // ── Local mode ────────────────────────────────────────────────────────
-    info!("[ironclaw] Deleting session: {}", session_key);
+    info!("[thinclaw-runtime] Deleting session: {}", session_key);
 
     // Abort any active run first (best-effort)
     let agent = ironclaw.agent().await?;
-    let _ = ironclaw::api::chat::abort(&agent, &session_key).await;
+    let _ = thinclaw_core::api::chat::abort(&agent, &session_key).await;
 
-    ironclaw::api::sessions::delete_thread(
+    thinclaw_core::api::sessions::delete_thread(
         agent.session_manager(),
         agent.store(),
         "local_user",
@@ -331,7 +336,10 @@ pub async fn thinclaw_delete_session(
     .await
     .map_err(|e| e.to_string())?;
 
-    info!("[ironclaw] Successfully deleted session: {}", session_key);
+    info!(
+        "[thinclaw-runtime] Successfully deleted session: {}",
+        session_key
+    );
     Ok(())
 }
 
@@ -339,21 +347,21 @@ pub async fn thinclaw_delete_session(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_reset_session(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
 ) -> Result<(), String> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.reset_session(&session_key).await?;
-        info!("[ironclaw] Reset remote session: {}", session_key);
+        info!("[thinclaw-runtime] Reset remote session: {}", session_key);
         return Ok(());
     }
 
     // ── Local mode ────────────────────────────────────────────────────────
-    info!("[ironclaw] Resetting session: {}", session_key);
+    info!("[thinclaw-runtime] Resetting session: {}", session_key);
 
     let agent = ironclaw.agent().await?;
-    ironclaw::api::sessions::clear_thread(
+    thinclaw_core::api::sessions::clear_thread(
         agent.session_manager(),
         agent.store(),
         "local_user",
@@ -362,7 +370,10 @@ pub async fn thinclaw_reset_session(
     .await
     .map_err(|e| e.to_string())?;
 
-    info!("[ironclaw] Successfully reset session: {}", session_key);
+    info!(
+        "[thinclaw-runtime] Successfully reset session: {}",
+        session_key
+    );
     Ok(())
 }
 
@@ -373,7 +384,7 @@ pub async fn thinclaw_reset_session(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_get_history(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
     limit: u32,
     _before: Option<String>,
@@ -483,7 +494,7 @@ pub async fn thinclaw_get_history(
 
     // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
-    let history = ironclaw::api::sessions::get_history(
+    let history = thinclaw_core::api::sessions::get_history(
         agent.session_manager(),
         agent.store(),
         "local_user",
@@ -494,7 +505,7 @@ pub async fn thinclaw_get_history(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Map IronClaw TurnInfo → ThinClawMessage for the frontend
+    // Map ThinClaw TurnInfo → ThinClawMessage for the frontend
     let mut messages: Vec<ThinClawMessage> = Vec::new();
 
     for turn in &history.turns {
@@ -556,11 +567,11 @@ pub async fn thinclaw_get_history(
 
 /// Subscribe to a session for live updates.
 ///
-/// **Intentional no-op**: IronClaw sends events directly via TauriChannel.
+/// **Intentional no-op**: ThinClaw sends events directly via TauriChannel.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_subscribe_session(
-    _ironclaw: State<'_, IronClawState>,
+    _ironclaw: State<'_, ThinClawRuntimeState>,
     _session_key: String,
 ) -> Result<ThinClawRpcResponse, String> {
     Ok(ThinClawRpcResponse {
@@ -573,27 +584,29 @@ pub async fn thinclaw_subscribe_session(
 // Batch 3: Memory / Workspace
 // ============================================================================
 
-/// Get MEMORY.md content from IronClaw's DB-backed workspace.
+/// Get MEMORY.md content from ThinClaw's DB-backed workspace.
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_get_memory(ironclaw: State<'_, IronClawState>) -> Result<String, String> {
+pub async fn thinclaw_get_memory(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+) -> Result<String, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_file("MEMORY.md").await;
     }
 
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    match ironclaw::api::memory::get_file(workspace, "MEMORY.md").await {
+    match thinclaw_core::api::memory::get_file(workspace, "MEMORY.md").await {
         Ok(resp) => Ok(resp.content),
         Err(_) => Ok(String::new()),
     }
 }
 
-/// Save MEMORY.md content to IronClaw's DB-backed workspace.
+/// Save MEMORY.md content to ThinClaw's DB-backed workspace.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_save_memory(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     content: String,
 ) -> Result<(), String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -602,16 +615,16 @@ pub async fn thinclaw_save_memory(
 
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    ironclaw::api::memory::write_file(workspace, "MEMORY.md", &content)
+    thinclaw_core::api::memory::write_file(workspace, "MEMORY.md", &content)
         .await
         .map_err(|e| e.to_string())
 }
 
-/// Get contents of a workspace file (e.g. SOUL.md) from IronClaw's DB.
+/// Get contents of a workspace file (e.g. SOUL.md) from ThinClaw's DB.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_get_file(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     path: String,
 ) -> Result<String, String> {
     // Sanitize
@@ -625,17 +638,17 @@ pub async fn thinclaw_get_file(
 
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    match ironclaw::api::memory::get_file(workspace, &path).await {
+    match thinclaw_core::api::memory::get_file(workspace, &path).await {
         Ok(resp) => Ok(resp.content),
         Err(_) => Ok(format!("File {} not found.", path)),
     }
 }
 
-/// Write content to a workspace file in IronClaw's DB.
+/// Write content to a workspace file in ThinClaw's DB.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_write_file(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     path: String,
     content: String,
 ) -> Result<(), String> {
@@ -650,12 +663,12 @@ pub async fn thinclaw_write_file(
 
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    ironclaw::api::memory::write_file(workspace, &path, &content)
+    thinclaw_core::api::memory::write_file(workspace, &path, &content)
         .await
         .map_err(|e| e.to_string())
 }
 
-/// Delete a workspace file from IronClaw's DB.
+/// Delete a workspace file from ThinClaw's DB.
 ///
 /// Protected files (core seeded workspace files) cannot be deleted.
 /// Users can only delete agent-created files like daily logs, context
@@ -664,7 +677,7 @@ pub async fn thinclaw_write_file(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_delete_file(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     path: String,
 ) -> Result<(), String> {
     // Sanitize
@@ -695,7 +708,7 @@ pub async fn thinclaw_delete_file(
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.delete_file(&path).await?;
-        tracing::info!("[ironclaw] Deleted remote workspace file: {}", path);
+        tracing::info!("[thinclaw-runtime] Deleted remote workspace file: {}", path);
         return Ok(());
     }
 
@@ -704,9 +717,9 @@ pub async fn thinclaw_delete_file(
     let workspace = agent.workspace().ok_or("Workspace not available")?;
 
     // Try direct file deletion first
-    match ironclaw::api::memory::delete_file(workspace, &path).await {
+    match thinclaw_core::api::memory::delete_file(workspace, &path).await {
         Ok(()) => {
-            tracing::info!("[ironclaw] Deleted workspace file: {}", path);
+            tracing::info!("[thinclaw-runtime] Deleted workspace file: {}", path);
             return Ok(());
         }
         Err(_) => {
@@ -744,26 +757,30 @@ pub async fn thinclaw_delete_file(
 
     let count = children.len();
     for child_path in children {
-        if let Err(e) = ironclaw::api::memory::delete_file(workspace, child_path).await {
-            tracing::warn!("[ironclaw] Failed to delete '{}': {}", child_path, e);
+        if let Err(e) = thinclaw_core::api::memory::delete_file(workspace, child_path).await {
+            tracing::warn!(
+                "[thinclaw-runtime] Failed to delete '{}': {}",
+                child_path,
+                e
+            );
         }
     }
 
     tracing::info!(
-        "[ironclaw] Deleted {} workspace files under directory: {}",
+        "[thinclaw-runtime] Deleted {} workspace files under directory: {}",
         count,
         path
     );
     Ok(())
 }
 
-/// List all files in IronClaw's DB-backed workspace.
+/// List all files in ThinClaw's DB-backed workspace.
 ///
 /// Returns flat file paths (e.g., `SOUL.md`, `daily/2026-03-09.md`).
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_list_workspace_files(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Vec<String>, String> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -776,7 +793,7 @@ pub async fn thinclaw_list_workspace_files(
     workspace.list_all().await.map_err(|e| e.to_string())
 }
 
-/// Clear memory or identity files in IronClaw's workspace.
+/// Clear memory or identity files in ThinClaw's workspace.
 ///
 /// For "memory" and "identity" targets, this exclusively uses the
 /// DB-backed workspace API. For "all" (factory reset), it stops the
@@ -785,7 +802,7 @@ pub async fn thinclaw_list_workspace_files(
 #[specta::specta]
 pub async fn thinclaw_clear_memory(
     app_handle: tauri::AppHandle,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     legacy: State<'_, ThinClawManager>,
     target: String,
 ) -> Result<(), String> {
@@ -794,14 +811,14 @@ pub async fn thinclaw_clear_memory(
             // ── Remote mode ──────────────────────────────────────────
             if let Some(proxy) = ironclaw.remote_proxy().await {
                 proxy.write_file("MEMORY.md", "").await?;
-                info!("[ironclaw] Cleared MEMORY.md on remote agent");
+                info!("[thinclaw-runtime] Cleared MEMORY.md on remote agent");
                 return Ok(());
             }
             // ── Local mode ───────────────────────────────────────────
             let agent = ironclaw.agent().await?;
             let workspace = agent.workspace().ok_or("Workspace not available")?;
-            let _ = ironclaw::api::memory::write_file(workspace, "MEMORY.md", "").await;
-            info!("[ironclaw] Cleared MEMORY.md via workspace API");
+            let _ = thinclaw_core::api::memory::write_file(workspace, "MEMORY.md", "").await;
+            info!("[thinclaw-runtime] Cleared MEMORY.md via workspace API");
             Ok(())
         }
         "identity" => {
@@ -810,22 +827,22 @@ pub async fn thinclaw_clear_memory(
                 let _ = proxy.write_file("SOUL.md", "").await;
                 let _ = proxy.write_file("USER.md", "").await;
                 let _ = proxy.write_file("IDENTITY.md", "").await;
-                info!("[ironclaw] Cleared identity files on remote agent");
+                info!("[thinclaw-runtime] Cleared identity files on remote agent");
                 return Ok(());
             }
             // ── Local mode ───────────────────────────────────────────
             let agent = ironclaw.agent().await?;
             let workspace = agent.workspace().ok_or("Workspace not available")?;
-            let _ = ironclaw::api::memory::write_file(workspace, "SOUL.md", "").await;
-            let _ = ironclaw::api::memory::write_file(workspace, "USER.md", "").await;
-            let _ = ironclaw::api::memory::write_file(workspace, "IDENTITY.md", "").await;
-            info!("[ironclaw] Cleared identity files via workspace API");
+            let _ = thinclaw_core::api::memory::write_file(workspace, "SOUL.md", "").await;
+            let _ = thinclaw_core::api::memory::write_file(workspace, "USER.md", "").await;
+            let _ = thinclaw_core::api::memory::write_file(workspace, "IDENTITY.md", "").await;
+            info!("[thinclaw-runtime] Cleared identity files via workspace API");
             Ok(())
         }
         "all" => {
-            // Factory reset — stop engine, then wipe ALL IronClaw state.
+            // Factory reset — stop engine, then wipe ALL ThinClaw state.
             //
-            // IronClaw stores everything in a SQLite database (ironclaw.db):
+            // ThinClaw stores runtime state in a dedicated SQLite database:
             // - All sessions and chat history
             // - Workspace files (SOUL.md, MEMORY.md, USER.md, etc.)
             // - Agent settings and config
@@ -834,27 +851,29 @@ pub async fn thinclaw_clear_memory(
             // We must delete this DB file to truly reset.
             ironclaw.stop().await;
 
-            // ── 1. Delete IronClaw database (the real data store) ─────────
-            let ironclaw_db = ironclaw.state_dir().join("ironclaw.db");
-            if ironclaw_db.exists() {
-                if let Err(e) = std::fs::remove_file(&ironclaw_db) {
-                    error!("[thinclaw] Failed to delete ironclaw.db: {}", e);
-                    return Err(format!("Failed to delete ironclaw.db: {}", e));
+            // ── 1. Delete ThinClaw database (the real data store) ─────────
+            let runtime_db =
+                crate::thinclaw::runtime_builder::runtime_db_path(&ironclaw.state_dir());
+            if runtime_db.exists() {
+                if let Err(e) = std::fs::remove_file(&runtime_db) {
+                    error!("[thinclaw] Failed to delete thinclaw-runtime.db: {}", e);
+                    return Err(format!("Failed to delete thinclaw-runtime.db: {}", e));
                 }
-                info!("[thinclaw] Deleted ironclaw.db");
+                info!("[thinclaw] Deleted thinclaw-runtime.db");
             }
 
             // Also remove WAL/SHM files (SQLite journal files)
-            let wal = ironclaw.state_dir().join("ironclaw.db-wal");
-            let shm = ironclaw.state_dir().join("ironclaw.db-shm");
+            let wal = ironclaw.state_dir().join("thinclaw-runtime.db-wal");
+            let shm = ironclaw.state_dir().join("thinclaw-runtime.db-shm");
             let _ = std::fs::remove_file(&wal);
             let _ = std::fs::remove_file(&shm);
 
-            // ── 2. Delete IronClaw config (ironclaw.toml) ────────────────
-            let ironclaw_toml = ironclaw.state_dir().join("ironclaw.toml");
-            if ironclaw_toml.exists() {
-                let _ = std::fs::remove_file(&ironclaw_toml);
-                info!("[thinclaw] Deleted ironclaw.toml");
+            // ── 2. Delete ThinClaw config (thinclaw.toml) ────────────────
+            let runtime_toml =
+                crate::thinclaw::runtime_builder::runtime_toml_path(&ironclaw.state_dir());
+            if runtime_toml.exists() {
+                let _ = std::fs::remove_file(&runtime_toml);
+                info!("[thinclaw] Deleted thinclaw.toml");
             }
 
             // ── 3. Legacy filesystem cleanup (backwards compat) ──────────
@@ -959,7 +978,7 @@ pub async fn thinclaw_clear_memory(
             let _ = cfg.save_identity();
             *legacy.config.write().await = Some(cfg);
 
-            info!("[thinclaw] Factory reset complete — all IronClaw data wiped");
+            info!("[thinclaw] Factory reset complete — all ThinClaw data wiped");
 
             // Notify frontend to clear all cached state (messages, runs, etc.)
             use tauri::Emitter;
@@ -978,15 +997,15 @@ pub async fn thinclaw_clear_memory(
 // Batch 4: New Feature Commands
 // ============================================================================
 
-/// Set thinking mode (native IronClaw ThinkingConfig).
+/// Set thinking mode (native ThinClaw ThinkingConfig).
 ///
 /// This replaces the frontend localStorage hack that prepended
 /// "Think step by step" to messages. Now we set the env vars
-/// that IronClaw's ThinkingConfig reads natively.
+/// that ThinClaw's ThinkingConfig reads natively.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_set_thinking(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     enabled: bool,
     budget_tokens: Option<u32>,
 ) -> Result<super::types::ThinkingConfig, String> {
@@ -1001,7 +1020,7 @@ pub async fn thinclaw_set_thinking(
                 .await;
         }
         info!(
-            "[ironclaw] Thinking mode (remote): enabled={}, budget={:?}",
+            "[thinclaw-runtime] Thinking mode (remote): enabled={}, budget={:?}",
             enabled, budget_tokens
         );
         return Ok(super::types::ThinkingConfig {
@@ -1011,7 +1030,7 @@ pub async fn thinclaw_set_thinking(
     }
 
     // ── Local mode ────────────────────────────────────────────────────────
-    // Set environment variables that IronClaw reads for ThinkingConfig
+    // Set environment variables that ThinClaw reads for ThinkingConfig
     if enabled {
         std::env::set_var("AGENT_THINKING_ENABLED", "true");
         if let Some(budget) = budget_tokens {
@@ -1022,11 +1041,11 @@ pub async fn thinclaw_set_thinking(
         std::env::remove_var("AGENT_THINKING_BUDGET_TOKENS");
     }
 
-    // Also persist to IronClaw's config if the API is available
+    // Also persist to ThinClaw's config if the API is available
     let agent = ironclaw.agent().await.ok();
     if let Some(agent) = agent {
         if let Some(store) = agent.store() {
-            let _ = ironclaw::api::config::set_setting(
+            let _ = thinclaw_core::api::config::set_setting(
                 store,
                 "local_user",
                 "thinking_enabled",
@@ -1035,7 +1054,7 @@ pub async fn thinclaw_set_thinking(
             .await;
 
             if let Some(budget) = budget_tokens {
-                let _ = ironclaw::api::config::set_setting(
+                let _ = thinclaw_core::api::config::set_setting(
                     store,
                     "local_user",
                     "thinking_budget_tokens",
@@ -1047,7 +1066,7 @@ pub async fn thinclaw_set_thinking(
     }
 
     info!(
-        "[ironclaw] Thinking mode: enabled={}, budget={:?}",
+        "[thinclaw-runtime] Thinking mode: enabled={}, budget={:?}",
         enabled, budget_tokens
     );
 
@@ -1057,14 +1076,14 @@ pub async fn thinclaw_set_thinking(
     })
 }
 
-/// Search workspace memory using IronClaw's hybrid BM25+vector search.
+/// Search workspace memory using ThinClaw's hybrid BM25+vector search.
 ///
 /// Falls back to simple text search across workspace files if the
 /// vector search API isn't available.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_memory_search(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     query: String,
     limit: Option<u32>,
 ) -> Result<super::types::MemorySearchResponse, String> {
@@ -1105,11 +1124,11 @@ pub async fn thinclaw_memory_search(
     }
 
     // ── Local mode ────────────────────────────────────────────────────────
-    // Try IronClaw's memory search API
+    // Try ThinClaw's memory search API
     let agent = ironclaw.agent().await.ok();
     if let Some(ref agent) = agent {
         if let Some(workspace) = agent.workspace() {
-            match ironclaw::api::memory::search(workspace, &query, Some(limit)).await {
+            match thinclaw_core::api::memory::search(workspace, &query, Some(limit)).await {
                 Ok(resp) => {
                     let results: Vec<super::types::MemorySearchResult> = resp
                         .results
@@ -1129,7 +1148,7 @@ pub async fn thinclaw_memory_search(
                 }
                 Err(e) => {
                     warn!(
-                        "[ironclaw] Memory search API failed, falling back to text search: {}",
+                        "[thinclaw-runtime] Memory search API failed, falling back to text search: {}",
                         e
                     );
                 }
@@ -1137,11 +1156,11 @@ pub async fn thinclaw_memory_search(
         }
     }
 
-    // Fallback: if IronClaw's vector search isn't available but agent is accessible,
+    // Fallback: if ThinClaw's vector search isn't available but agent is accessible,
     // do simple text search over workspace files via the API
     if let Some(ref agent) = agent {
         if let Some(workspace) = agent.workspace() {
-            let files = ironclaw::api::memory::list_files(workspace, None)
+            let files = thinclaw_core::api::memory::list_files(workspace, None)
                 .await
                 .map(|resp| {
                     resp.entries
@@ -1155,7 +1174,8 @@ pub async fn thinclaw_memory_search(
             let mut results = Vec::new();
 
             for file_path in &files {
-                let content = match ironclaw::api::memory::get_file(workspace, file_path).await {
+                let content = match thinclaw_core::api::memory::get_file(workspace, file_path).await
+                {
                     Ok(resp) => resp.content,
                     Err(_) => continue,
                 };
@@ -1205,7 +1225,7 @@ pub async fn thinclaw_memory_search(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_export_session(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
     format: Option<String>,
 ) -> Result<super::types::SessionExportResponse, String> {
@@ -1235,8 +1255,8 @@ pub async fn thinclaw_export_session(
     // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
 
-    // Fetch full history directly via IronClaw API
-    let history = ironclaw::api::sessions::get_history(
+    // Fetch full history directly via ThinClaw API
+    let history = thinclaw_core::api::sessions::get_history(
         agent.session_manager(),
         agent.store(),
         "local_user",

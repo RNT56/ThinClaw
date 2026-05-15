@@ -64,6 +64,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
                 supports_vision: openai_supports_vision(&m.id),
                 supports_tools: matches!(category, ModelCategory::Chat),
                 supports_streaming: matches!(category, ModelCategory::Chat),
+                capabilities: Default::default(),
                 deprecated: false,
                 pricing: openai_pricing(&m.id),
                 embedding_dimensions: openai_embedding_dims(&m.id),

@@ -54,7 +54,9 @@ pub struct FrontendMessage {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_conversations(state: State<'_, SqlitePool>) -> Result<Vec<Conversation>, String> {
+pub async fn direct_history_get_conversations(
+    state: State<'_, SqlitePool>,
+) -> Result<Vec<Conversation>, String> {
     sqlx::query_as::<_, Conversation>(
         "SELECT * FROM conversations ORDER BY sort_order ASC, updated_at DESC",
     )
@@ -65,7 +67,7 @@ pub async fn get_conversations(state: State<'_, SqlitePool>) -> Result<Vec<Conve
 
 #[tauri::command]
 #[specta::specta]
-pub async fn create_conversation(
+pub async fn direct_history_create_conversation(
     state: State<'_, SqlitePool>,
     title: String,
     project_id: Option<String>,
@@ -103,7 +105,10 @@ pub async fn create_conversation(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_conversation(state: State<'_, SqlitePool>, id: String) -> Result<(), String> {
+pub async fn direct_history_delete_conversation(
+    state: State<'_, SqlitePool>,
+    id: String,
+) -> Result<(), String> {
     sqlx::query("DELETE FROM conversations WHERE id = ?")
         .bind(id)
         .execute(&*state)
@@ -114,7 +119,7 @@ pub async fn delete_conversation(state: State<'_, SqlitePool>, id: String) -> Re
 
 #[tauri::command]
 #[specta::specta]
-pub async fn update_conversation_title(
+pub async fn direct_history_update_conversation_title(
     state: State<'_, SqlitePool>,
     id: String,
     title: String,
@@ -130,7 +135,7 @@ pub async fn update_conversation_title(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn update_conversation_project(
+pub async fn direct_history_update_conversation_project(
     state: State<'_, SqlitePool>,
     id: String,
     project_id: Option<String>,
@@ -146,7 +151,7 @@ pub async fn update_conversation_project(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn update_conversations_order(
+pub async fn direct_history_update_conversations_order(
     state: State<'_, SqlitePool>,
     orders: Vec<(String, i32)>,
 ) -> Result<(), String> {
@@ -165,7 +170,7 @@ pub async fn update_conversations_order(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_messages(
+pub async fn direct_history_get_messages(
     state: State<'_, SqlitePool>,
     conversation_id: String,
     limit: Option<i32>,
@@ -243,7 +248,7 @@ pub async fn get_messages(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn save_message(
+pub async fn direct_history_save_message(
     state: State<'_, SqlitePool>,
     conversation_id: String,
     role: String,
@@ -291,7 +296,7 @@ pub async fn save_message(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn edit_message(
+pub async fn direct_history_edit_message(
     state: State<'_, SqlitePool>,
     message_id: String,
     new_content: String,
@@ -344,13 +349,13 @@ pub async fn edit_message(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_all_history(
+pub async fn direct_history_delete_all_history(
     _app: AppHandle,
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     file_store: State<'_, FileStore>,
 ) -> Result<(), String> {
-    println!("[history] delete_all_history: clearing database...");
+    println!("[history] direct_history_delete_all_history: clearing database...");
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     sqlx::query("DELETE FROM chunks")

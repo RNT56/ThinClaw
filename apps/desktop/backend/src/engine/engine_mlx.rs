@@ -427,7 +427,7 @@ impl MlxEngine {
     /// Patch `app/handler/mlx_vlm.py` to normalize list content in
     /// system/assistant messages to plain strings.
     ///
-    /// When IronClaw (or any OpenAI-compatible client) sends multipart content
+    /// When ThinClaw (or any OpenAI-compatible client) sends multipart content
     /// format for non-user messages, the VLM handler passes
     /// `ChatCompletionContentPartText` Pydantic objects through as-is. Downstream
     /// code then crashes with `'ChatCompletionContentPartText' object is not

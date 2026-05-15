@@ -39,7 +39,7 @@ export function useChat() {
     const { config } = useConfig();
 
     const { currentEmbeddingModelPath, maxContext, currentModelPath, currentModelTemplate, isRestarting, engineInfo } = useModelContext();
-    const { activeJobs, activeJobsRef, startGeneration, cancelGeneration: contextCancel } = useChatContext();
+    const { activeJobs, activeJobsRef, startGeneration, directRuntimeCancelGeneration: contextCancel } = useChatContext();
 
     const activeJob = currentConversationId ? activeJobs[currentConversationId] : null;
 
@@ -112,7 +112,7 @@ export function useChat() {
     // Load conversations list on mount
     const fetchConversations = useCallback(async () => {
         try {
-            const result = await commands.getConversations();
+            const result = await commands.directHistoryGetConversations();
             setConversations(unwrap(result));
         } catch (e) {
             console.error("Failed to load conversations:", e);
@@ -177,7 +177,7 @@ export function useChat() {
 
     const startServer = useCallback(async (path: string) => {
         try {
-            unwrap(await commands.startChatServer(path, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false));
+            unwrap(await commands.directRuntimeStartChatServer(path, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false));
             setModelRunning(true);
         } catch (e) {
             console.error("Server start error:", e);
@@ -187,7 +187,7 @@ export function useChat() {
 
     const stopServer = async () => {
         try {
-            unwrap(await commands.stopChatServer(currentModelPath));
+            unwrap(await commands.directRuntimeStopChatServer(currentModelPath));
             setModelRunning(false);
         } catch (e) {
             console.error("Server stop error:", e);
@@ -199,7 +199,7 @@ export function useChat() {
         fetchConversations();
         const checkStatus = async () => {
             try {
-                const s = await commands.getSidecarStatus();
+                const s = await commands.directRuntimeGetSidecarStatus();
                 // For llamacpp: modelRunning tracks whether llama-server is live
                 // For other engines (MLX, vLLM, Ollama): they manage their own server;
                 // we consider "running" if a model is selected (the engine handles startup).
@@ -271,7 +271,7 @@ export function useChat() {
             const currentCount = dbMessagesRef.current.length;
             const limit = silent ? Math.max(50, currentCount) : 50;
 
-            const result = await commands.getMessages(id, limit, null);
+            const result = await commands.directHistoryGetMessages(id, limit, null);
             const msgs = unwrap(result);
 
             setHasMore(msgs.length === limit);
@@ -338,7 +338,7 @@ export function useChat() {
 
             // Calculate tokens for loaded conversation
             try {
-                const usageResult = await commands.countTokens(id);
+                const usageResult = await commands.directChatCountTokens(id);
                 setLastTokenUsage(unwrap(usageResult));
             } catch (ignore) { }
 
@@ -357,7 +357,7 @@ export function useChat() {
             const limit = 50;
             const before = dbMessages.length > 0 ? (dbMessages[0].created_at ?? null) : null;
 
-            const result = await commands.getMessages(currentConversationId, limit, before);
+            const result = await commands.directHistoryGetMessages(currentConversationId, limit, before);
             const msgs = unwrap(result);
 
             setHasMore(msgs.length === limit);
@@ -384,15 +384,15 @@ export function useChat() {
         }
     }, [currentConversationId, hasMore, isLoadingMore, dbMessages]);
 
-    const cancelGeneration = useCallback(async () => {
+    const directRuntimeCancelGeneration = useCallback(async () => {
         if (currentConversationId) {
             await contextCancel(currentConversationId);
         }
     }, [currentConversationId, contextCancel]);
 
-    const deleteConversation = useCallback(async (id: string) => {
+    const directHistoryDeleteConversation = useCallback(async (id: string) => {
         try {
-            unwrap(await commands.deleteConversation(id));
+            unwrap(await commands.directHistoryDeleteConversation(id));
             setConversations(prev => prev.filter(c => c.id !== id));
             if (currentConversationId === id) {
                 setCurrentConversationId(null);
@@ -501,7 +501,7 @@ export function useChat() {
 
     const createNewConversation = useCallback(async (title: string, projectId: string | null = null) => {
         try {
-            const result = await commands.createConversation(title, projectId);
+            const result = await commands.directHistoryCreateConversation(title, projectId);
             const newConv = unwrap(result);
             setConversations(prev => [newConv, ...prev]);
             setCurrentConversationId(newConv.id);
@@ -522,13 +522,13 @@ export function useChat() {
         }
         if (!convId) return "";
         // Pass the embedding model path so the backend can auto-start the server if needed
-        const res = await commands.ingestDocument(path, convId, projectId, currentEmbeddingModelPath || null);
+        const res = await commands.directRagIngestDocument(path, convId, projectId, currentEmbeddingModelPath || null);
         return unwrap(res);
     }, [currentConversationId, createNewConversation, currentEmbeddingModelPath]);
 
     const moveConversation = useCallback(async (id: string, projectId: string | null) => {
         try {
-            await commands.updateConversationProject(id, projectId);
+            await commands.directHistoryUpdateConversationProject(id, projectId);
             setConversations(prev => prev.map(c => c.id === id ? { ...c, project_id: projectId } : c));
         } catch (e) {
             console.error("Failed to move conversation:", e);
@@ -592,7 +592,7 @@ export function useChat() {
 
         try {
             // Persist the user message - Corrected to 6 arguments
-            await commands.saveMessage(convId, "user", prompt, null, null, null);
+            await commands.directHistorySaveMessage(convId, "user", prompt, null, null, null);
 
             // Start generation
             const res = await (commands as any).generateImage({
@@ -603,7 +603,7 @@ export function useChat() {
             const data = unwrap(res) as any;
 
             // Persist the assistant message with the real image ID - Corrected to 6 arguments
-            await commands.saveMessage(convId, "assistant", `Generated image for: ${finalPrompt}`, [data.id], null, null);
+            await commands.directHistorySaveMessage(convId, "assistant", `Generated image for: ${finalPrompt}`, [data.id], null, null);
 
             // Refresh to get DB-synced version
             await loadConversation(convId);
@@ -627,9 +627,9 @@ export function useChat() {
         }
     }, [currentConversationId, createNewConversation, config, modelRunning, loadConversation, fetchConversations]);
 
-    const updateConversationsOrder = useCallback(async (orders: [string, number][]) => {
+    const directHistoryUpdateConversationsOrder = useCallback(async (orders: [string, number][]) => {
         try {
-            await commands.updateConversationsOrder(orders);
+            await commands.directHistoryUpdateConversationsOrder(orders);
         } catch (error) {
             console.error('Failed to update conversation order', error);
         }
@@ -649,19 +649,19 @@ export function useChat() {
         currentConversationId,
         loadConversation,
         loadMoreMessages,
-        deleteConversation,
+        directHistoryDeleteConversation,
         loadingHistory,
         hasMore,
         isLoadingMore,
         ingestFile,
         createNewConversation,
         moveConversation,
-        updateConversationsOrder,
+        directHistoryUpdateConversationsOrder,
         sendImagePrompt,
         autoMode,
         setAutoMode,
         regenerate,
-        cancelGeneration,
+        directRuntimeCancelGeneration,
         fetchConversations,
         tokenUsage
     };

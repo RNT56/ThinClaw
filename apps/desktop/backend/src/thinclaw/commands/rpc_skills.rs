@@ -6,11 +6,11 @@ use tauri::State;
 use tracing::info;
 
 use super::ThinClawManager;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
 use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
-use ironclaw::tools::Tool;
+use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
+use thinclaw_core::tools::Tool;
 
-fn action_to_json(resp: ironclaw::channels::web::types::ActionResponse) -> serde_json::Value {
+fn action_to_json(resp: thinclaw_core::channels::web::types::ActionResponse) -> serde_json::Value {
     serde_json::to_value(resp).unwrap_or_else(|err| {
         serde_json::json!({
             "success": false,
@@ -20,8 +20,8 @@ fn action_to_json(resp: ironclaw::channels::web::types::ActionResponse) -> serde
     })
 }
 
-fn desktop_quarantine() -> std::sync::Arc<ironclaw::skills::quarantine::QuarantineManager> {
-    std::sync::Arc::new(ironclaw::skills::quarantine::QuarantineManager::new(
+fn desktop_quarantine() -> std::sync::Arc<thinclaw_core::skills::quarantine::QuarantineManager> {
+    std::sync::Arc::new(thinclaw_core::skills::quarantine::QuarantineManager::new(
         std::env::temp_dir().join("thinclaw-desktop-skill-quarantine"),
     ))
 }
@@ -33,7 +33,7 @@ fn desktop_quarantine() -> std::sync::Arc<ironclaw::skills::quarantine::Quaranti
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skills_list(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.list_skills().await;
@@ -41,7 +41,7 @@ pub async fn thinclaw_skills_list(
 
     let agent = ironclaw.agent().await?;
     if let Some(registry) = agent.skill_registry() {
-        let resp = ironclaw::api::skills::list_skills(registry)
+        let resp = thinclaw_core::api::skills::list_skills(registry)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -53,7 +53,7 @@ pub async fn thinclaw_skills_list(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skills_toggle(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     key: String,
     enabled: bool,
 ) -> Result<serde_json::Value, String> {
@@ -69,7 +69,7 @@ pub async fn thinclaw_skills_toggle(
         .skill_registry()
         .ok_or("Skill registry not available")?;
 
-    // IronClaw's SkillRegistry doesn't support enable/disable.
+    // ThinClaw's SkillRegistry doesn't support enable/disable.
     // Skills are either loaded or removed. Acknowledge the intent.
     let _guard = registry.write().await;
     let action = if enabled { "enabled" } else { "disabled" };
@@ -79,7 +79,7 @@ pub async fn thinclaw_skills_toggle(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skills_status(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.list_skills().await;
@@ -87,7 +87,7 @@ pub async fn thinclaw_skills_status(
 
     let agent = ironclaw.agent().await?;
     if let Some(registry) = agent.skill_registry() {
-        let resp = ironclaw::api::skills::list_skills(registry)
+        let resp = thinclaw_core::api::skills::list_skills(registry)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -99,7 +99,7 @@ pub async fn thinclaw_skills_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skills_search(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     query: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -113,7 +113,7 @@ pub async fn thinclaw_skills_search(
         .skill_registry()
         .ok_or("Skill registry not available")?;
     let catalog = agent.skill_catalog().ok_or("Skill catalog not available")?;
-    let resp = ironclaw::api::skills::search_skills(catalog, registry, &query)
+    let resp = thinclaw_core::api::skills::search_skills(catalog, registry, &query)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(resp).map_err(|e| e.to_string())
@@ -122,7 +122,7 @@ pub async fn thinclaw_skills_search(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skill_install(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     url: Option<String>,
     content: Option<String>,
@@ -150,21 +150,21 @@ pub async fn thinclaw_skill_install(
     let raw_content = if let Some(content) = content {
         content
     } else if let Some(url) = url {
-        ironclaw::tools::builtin::skill_tools::fetch_skill_content(&url)
+        thinclaw_core::tools::builtin::skill_tools::fetch_skill_content(&url)
             .await
             .map_err(|e| format!("Failed to fetch skill from URL: {}", e))?
     } else {
         let catalog = agent.skill_catalog().ok_or("Skill catalog not available")?;
         let download_url =
-            ironclaw::skills::catalog::skill_download_url(catalog.registry_url(), &name);
-        ironclaw::tools::builtin::skill_tools::fetch_skill_content(&download_url)
+            thinclaw_core::skills::catalog::skill_download_url(catalog.registry_url(), &name);
+        thinclaw_core::tools::builtin::skill_tools::fetch_skill_content(&download_url)
             .await
             .map_err(|e| format!("Failed to fetch skill '{}': {}", name, e))?
     };
 
     if force.unwrap_or(false) {
-        let normalized = ironclaw::skills::normalize_line_endings(&raw_content);
-        let parsed = ironclaw::skills::parser::parse_skill_md(&normalized)
+        let normalized = thinclaw_core::skills::normalize_line_endings(&raw_content);
+        let parsed = thinclaw_core::skills::parser::parse_skill_md(&normalized)
             .map_err(|e| format!("Failed to parse SKILL.md: {}", e))?;
         let parsed_name = parsed.manifest.name.clone();
         let exists = {
@@ -172,11 +172,11 @@ pub async fn thinclaw_skill_install(
             guard.has(&parsed_name)
         };
         if exists {
-            let _ = ironclaw::api::skills::remove_skill(registry, &parsed_name).await;
+            let _ = thinclaw_core::api::skills::remove_skill(registry, &parsed_name).await;
         }
     }
 
-    let resp = ironclaw::api::skills::install_skill(registry, &raw_content)
+    let resp = thinclaw_core::api::skills::install_skill(registry, &raw_content)
         .await
         .map_err(|e| e.to_string())?;
     Ok(action_to_json(resp))
@@ -185,7 +185,7 @@ pub async fn thinclaw_skill_install(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skill_remove(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -198,7 +198,7 @@ pub async fn thinclaw_skill_remove(
     let registry = agent
         .skill_registry()
         .ok_or("Skill registry not available")?;
-    let resp = ironclaw::api::skills::remove_skill(registry, &name)
+    let resp = thinclaw_core::api::skills::remove_skill(registry, &name)
         .await
         .map_err(|e| e.to_string())?;
     Ok(action_to_json(resp))
@@ -207,7 +207,7 @@ pub async fn thinclaw_skill_remove(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skill_trust(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     trust: String,
 ) -> Result<serde_json::Value, String> {
@@ -221,8 +221,8 @@ pub async fn thinclaw_skill_trust(
     }
 
     let target_trust = match trust.trim().to_ascii_lowercase().as_str() {
-        "trusted" => ironclaw::skills::SkillTrust::Trusted,
-        "installed" => ironclaw::skills::SkillTrust::Installed,
+        "trusted" => thinclaw_core::skills::SkillTrust::Trusted,
+        "installed" => thinclaw_core::skills::SkillTrust::Installed,
         other => {
             return Err(format!(
                 "Invalid trust level '{}'. Must be 'trusted' or 'installed'.",
@@ -252,7 +252,7 @@ pub async fn thinclaw_skill_trust(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skill_reload(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -286,7 +286,7 @@ pub async fn thinclaw_skill_reload(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skills_reload_all(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
@@ -311,7 +311,7 @@ pub async fn thinclaw_skills_reload_all(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skill_inspect(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     include_content: Option<bool>,
     include_files: Option<bool>,
@@ -334,7 +334,7 @@ pub async fn thinclaw_skill_inspect(
     let registry = agent
         .skill_registry()
         .ok_or("Skill registry not available")?;
-    ironclaw::tools::builtin::skill_tools::inspect_skill_report(
+    thinclaw_core::tools::builtin::skill_tools::inspect_skill_report(
         registry,
         &desktop_quarantine(),
         &name,
@@ -349,7 +349,7 @@ pub async fn thinclaw_skill_inspect(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_skill_publish(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     target_repo: String,
     dry_run: Option<bool>,
@@ -377,17 +377,17 @@ pub async fn thinclaw_skill_publish(
     let registry = agent
         .skill_registry()
         .ok_or("Skill registry not available")?;
-    let tool = ironclaw::tools::builtin::SkillPublishTool::new(
+    let tool = thinclaw_core::tools::builtin::SkillPublishTool::new(
         std::sync::Arc::clone(registry),
         None,
         desktop_quarantine(),
         agent.store().cloned(),
     );
-    let ctx = ironclaw::context::JobContext {
+    let ctx = thinclaw_core::context::JobContext {
         user_id: "desktop".to_string(),
         principal_id: "desktop".to_string(),
         actor_id: Some("desktop".to_string()),
-        ..ironclaw::context::JobContext::default()
+        ..thinclaw_core::context::JobContext::default()
     };
     let output = tool
         .execute(
@@ -409,7 +409,7 @@ pub async fn thinclaw_skill_publish(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_install_skill_deps(
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     _install_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -429,16 +429,17 @@ pub async fn thinclaw_install_skill_deps(
     let catalog = agent.skill_catalog().ok_or("Skill catalog not available")?;
 
     // Fetch skill content from ClawHub
-    let download_url = ironclaw::skills::catalog::skill_download_url(catalog.registry_url(), &name);
-    let content = ironclaw::tools::builtin::skill_tools::fetch_skill_content(&download_url)
+    let download_url =
+        thinclaw_core::skills::catalog::skill_download_url(catalog.registry_url(), &name);
+    let content = thinclaw_core::tools::builtin::skill_tools::fetch_skill_content(&download_url)
         .await
         .map_err(|e| format!("Failed to fetch skill '{}': {}", name, e))?;
 
     // Check for duplicates and get install dir
     let (user_dir, skill_name) = {
         let guard = registry.read().await;
-        let normalized = ironclaw::skills::normalize_line_endings(&content);
-        let parsed = ironclaw::skills::parser::parse_skill_md(&normalized)
+        let normalized = thinclaw_core::skills::normalize_line_endings(&content);
+        let parsed = thinclaw_core::skills::parser::parse_skill_md(&normalized)
             .map_err(|e| format!("Failed to parse SKILL.md: {}", e))?;
         let sn = parsed.manifest.name.clone();
         if guard.has(&sn) {
@@ -451,9 +452,9 @@ pub async fn thinclaw_install_skill_deps(
     };
 
     // Write to disk and validate
-    let normalized = ironclaw::skills::normalize_line_endings(&content);
+    let normalized = thinclaw_core::skills::normalize_line_endings(&content);
     let (installed_name, loaded_skill) =
-        ironclaw::skills::registry::SkillRegistry::prepare_install_to_disk(
+        thinclaw_core::skills::registry::SkillRegistry::prepare_install_to_disk(
             &user_dir,
             &skill_name,
             &normalized,
@@ -469,7 +470,7 @@ pub async fn thinclaw_install_skill_deps(
             .map_err(|e| format!("Failed to commit install: {}", e))?;
     }
 
-    info!("[ironclaw] Installed skill '{}'", installed_name);
+    info!("[thinclaw-runtime] Installed skill '{}'", installed_name);
     Ok(serde_json::json!({
         "ok": true,
         "name": installed_name,
@@ -481,7 +482,7 @@ pub async fn thinclaw_install_skill_deps(
 #[specta::specta]
 pub async fn thinclaw_install_skill_repo(
     state: State<'_, ThinClawManager>,
-    ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     repo_url: String,
 ) -> Result<String, String> {
     if ironclaw.remote_proxy().await.is_some() {

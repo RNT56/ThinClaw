@@ -29,6 +29,7 @@ fn deepgram_models() -> Vec<CloudModelEntry> {
             supports_vision: false,
             supports_tools: false,
             supports_streaming: true,
+            capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
                 per_minute: Some(0.0043),
@@ -48,6 +49,7 @@ fn deepgram_models() -> Vec<CloudModelEntry> {
             supports_vision: false,
             supports_tools: false,
             supports_streaming: true,
+            capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
                 per_minute: Some(0.0043),
@@ -72,6 +74,7 @@ fn voyage_models() -> Vec<CloudModelEntry> {
             supports_vision: false,
             supports_tools: false,
             supports_streaming: false,
+            capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
                 input_per_million: Some(0.06),
@@ -91,6 +94,7 @@ fn voyage_models() -> Vec<CloudModelEntry> {
             supports_vision: false,
             supports_tools: false,
             supports_streaming: false,
+            capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
                 input_per_million: Some(0.18),
@@ -110,6 +114,7 @@ fn voyage_models() -> Vec<CloudModelEntry> {
             supports_vision: false,
             supports_tools: false,
             supports_streaming: false,
+            capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
                 input_per_million: Some(0.18),
@@ -134,6 +139,7 @@ fn fal_models() -> Vec<CloudModelEntry> {
             supports_vision: false,
             supports_tools: false,
             supports_streaming: false,
+            capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
                 per_image: Some(0.025),
@@ -153,6 +159,7 @@ fn fal_models() -> Vec<CloudModelEntry> {
             supports_vision: false,
             supports_tools: false,
             supports_streaming: false,
+            capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
                 per_image: Some(0.003),

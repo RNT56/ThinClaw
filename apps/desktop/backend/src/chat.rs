@@ -2,6 +2,7 @@ use crate::sidecar::SidecarManager;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{ipc::Channel, State};
+use thinclaw_runtime_contracts::ApiStyle;
 use tracing::info;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
@@ -62,6 +63,18 @@ pub struct ProviderConfig {
     pub model_family: Option<String>,
 }
 
+fn provider_kind_from_api_style(
+    api_style: ApiStyle,
+) -> crate::rig_lib::unified_provider::ProviderKind {
+    use crate::rig_lib::unified_provider::ProviderKind;
+    match api_style {
+        ApiStyle::OpenAi => ProviderKind::OpenAI,
+        ApiStyle::Anthropic => ProviderKind::Anthropic,
+        ApiStyle::OpenAiCompatible => ProviderKind::OpenAI,
+        ApiStyle::Ollama => ProviderKind::OpenAI,
+    }
+}
+
 pub async fn resolve_provider(
     user_config: &crate::config::UserConfig,
     secret_store: &crate::secret_store::SecretStore,
@@ -77,13 +90,13 @@ pub async fn resolve_provider(
 
     // Check if it's a known cloud provider
     if provider_id != "local" {
-        if let Some(endpoint) = crate::inference::provider_endpoints::endpoint_for(provider_id) {
+        if let Some(endpoint) = thinclaw_config::provider_catalog::endpoint_for(provider_id) {
             info!(
                 "[resolve_provider] Routing to {} ({})",
                 endpoint.display_name, provider_id
             );
 
-            let key = secret_store.get(provider_id).ok_or(format!(
+            let key = secret_store.get(&endpoint.secret_name).ok_or(format!(
                 "{} API key required. Please set it in Settings > Secrets.",
                 endpoint.display_name
             ))?;
@@ -97,7 +110,7 @@ pub async fn resolve_provider(
                 .unwrap_or_else(|| endpoint.default_model.to_string());
 
             return Ok(ProviderConfig {
-                kind: endpoint.api_compat.to_provider_kind(),
+                kind: provider_kind_from_api_style(endpoint.api_style),
                 base_url: endpoint.base_url.to_string(),
                 model_name,
                 port: 0,
@@ -121,61 +134,39 @@ pub async fn resolve_provider(
     // ── Local provider ──────────────────────────────────────────────────
     info!("[resolve_provider] Routing to Local Provider");
 
-    // Primary: llama.cpp sidecar (always present in llamacpp builds)
-    if let Some(cfg) = sidecar_manager.get_chat_config() {
+    let snapshot = crate::engine::local_runtime_snapshot(sidecar_manager, engine_manager).await;
+    if let Some(endpoint) = snapshot.endpoint {
+        let port: u16 = endpoint
+            .base_url
+            .trim_end_matches('/')
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.split('/').next())
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(8080);
+        info!(
+            "[resolve_provider] Using local runtime snapshot: {}, model: {:?}, context: {:?}",
+            endpoint.base_url, endpoint.model_id, endpoint.context_size
+        );
         return Ok(ProviderConfig {
             kind: crate::rig_lib::unified_provider::ProviderKind::Local,
-            base_url: format!("http://127.0.0.1:{}/v1", cfg.0),
-            model_name: "default".to_string(),
-            port: cfg.0,
-            token: cfg.1,
-            context_size: cfg.2,
-            model_family: Some(cfg.3),
+            base_url: endpoint.base_url,
+            model_name: endpoint.model_id.unwrap_or_else(|| "default".to_string()),
+            port,
+            token: endpoint.api_key.unwrap_or_default(),
+            context_size: endpoint.context_size.unwrap_or(4096),
+            model_family: endpoint.model_family,
         });
     }
 
-    // Fallback: non-llamacpp engine (MLX, vLLM, Ollama) running via EngineManager.
-    // start_engine() must have been called first (done by useAutoStart).
-    {
-        let guard = engine_manager.engine.lock().await;
-        if let Some(engine) = guard.as_ref() {
-            if let Some(url) = engine.base_url() {
-                let model_name = engine.model_id().unwrap_or_else(|| "default".to_string());
-                let context_size = engine.max_context().unwrap_or(4096);
-                info!(
-                    "[resolve_provider] Using EngineManager base_url: {}, model: {}, context: {}",
-                    url, model_name, context_size
-                );
-                // Parse port from URL like "http://127.0.0.1:PORT/v1"
-                let port: u16 = url
-                    .trim_end_matches('/')
-                    .rsplit(':')
-                    .next()
-                    .and_then(|p| p.split('/').next())
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(8080);
-                return Ok(ProviderConfig {
-                    kind: crate::rig_lib::unified_provider::ProviderKind::Local,
-                    base_url: url,
-                    model_name,
-                    port,
-                    // mlx_lm.server runs unauthenticated by default
-                    token: String::new(),
-                    context_size,
-                    model_family: None,
-                });
-            }
-        }
-    }
-
-    Err("No local inference server is running. \
-         Select a model in the chat tab — the engine will start automatically."
-        .to_string())
+    Err(snapshot.unavailable_reason.unwrap_or_else(|| {
+        "No local inference server is running. Select a model in the chat tab — the engine will start automatically.".to_string()
+    }))
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn chat_stream(
+pub async fn direct_chat_stream(
     app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
@@ -185,11 +176,11 @@ pub async fn chat_stream(
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
 ) -> Result<(), String> {
-    info!("[chat_stream] Starting chat_stream command...");
+    info!("[direct_chat_stream] Starting direct_chat_stream command...");
 
     // Acquisition of Global Generation Lock (Queuing)
     let _guard = state.generation_lock.lock().await;
-    info!("[chat_stream] Generation lock acquired.");
+    info!("[direct_chat_stream] Generation lock acquired.");
 
     // Reset Cancellation Token for the CURRENT active job
     state
@@ -397,7 +388,7 @@ pub async fn chat_stream(
     let enable_tools = effective_auto_mode; // Or always true? Tools are gated by permissions anyway.
 
     info!(
-        "[chat_stream] Getting RigManager for model: {}",
+        "[direct_chat_stream] Getting RigManager for model: {}",
         &model_name
     );
 
@@ -490,11 +481,11 @@ pub async fn chat_stream(
     };
     if mcp_config.sandbox_enabled {
         info!(
-            "[chat_stream] Sandbox mode ENABLED — MCP server: {}",
+            "[direct_chat_stream] Sandbox mode ENABLED — MCP server: {}",
             mcp_config.mcp_base_url.as_deref().unwrap_or("(none)")
         );
     } else {
-        info!("[chat_stream] Sandbox mode (local-only, no remote MCP)");
+        info!("[direct_chat_stream] Sandbox mode (local-only, no remote MCP)");
     }
     let orchestrator = crate::rig_lib::orchestrator::Orchestrator::new_with_mcp(
         std::sync::Arc::new(manager),
@@ -519,7 +510,7 @@ pub async fn chat_stream(
         .map(|p| p.instructions.clone())
         .unwrap_or_else(|| crate::personas::get_persona_instructions(&persona_name).to_string());
 
-    info!("[chat_stream] Starting orchestrator turn...");
+    info!("[direct_chat_stream] Starting orchestrator turn...");
     match orchestrator
         .run_turn(
             processing_messages,
@@ -531,7 +522,7 @@ pub async fn chat_stream(
         .await
     {
         Ok(mut stream) => {
-            info!("[chat_stream] Orchestrator turn started.");
+            info!("[direct_chat_stream] Orchestrator turn started.");
             // NOTE: Do NOT emit "done" status here — the stream hasn't produced
             // content yet. The frontend's onmessage handler already transitions
             // searchStatus to "done" when the first content token arrives, and
@@ -683,7 +674,7 @@ pub async fn chat_stream(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn count_tokens(
+pub async fn direct_chat_count_tokens(
     app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     conversation_id: String,
@@ -735,7 +726,7 @@ pub async fn count_tokens(
     let total_chars: u32 = messages.iter().map(|m| m.content.len() as u32).sum();
     let estimate = total_chars / 4;
     tracing::debug!(
-        "[count_tokens] Using heuristic estimate (chars/4): {} chars → ~{} tokens",
+        "[direct_chat_count_tokens] Using heuristic estimate (chars/4): {} chars → ~{} tokens",
         total_chars,
         estimate
     );
@@ -748,7 +739,7 @@ pub async fn count_tokens(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn chat_completion(
+pub async fn direct_chat_completion(
     _app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
@@ -756,7 +747,7 @@ pub async fn chat_completion(
     engine_manager: State<'_, crate::engine::EngineManager>,
     payload: ChatPayload,
 ) -> Result<String, String> {
-    info!("[chat_completion] Starting chat_completion...");
+    info!("[direct_chat_completion] Starting direct_chat_completion...");
 
     let user_config = config.get_config();
 

@@ -24,12 +24,12 @@ import { Suspense } from 'react';
 vi.mock('../../lib/bindings', () => ({
     commands: {
         getUserConfig: vi.fn().mockResolvedValue({}),
-        getSidecarStatus: vi.fn().mockResolvedValue({ chat_running: false }),
+        directRuntimeGetSidecarStatus: vi.fn().mockResolvedValue({ chat_running: false }),
         getModelMetadata: vi.fn().mockResolvedValue({ status: 'ok', data: {} }),
         updateUserConfig: vi.fn().mockResolvedValue(undefined),
-        startChatServer: vi.fn().mockResolvedValue(undefined),
+        directRuntimeStartChatServer: vi.fn().mockResolvedValue(undefined),
         thinclawGetStatus: vi.fn().mockResolvedValue({ status: 'ok', data: { engine_running: false } }),
-        getChatServerConfig: vi.fn().mockResolvedValue(null),
+        directRuntimeGetChatServerConfig: vi.fn().mockResolvedValue(null),
         thinclawStopGateway: vi.fn().mockResolvedValue(undefined),
         thinclawStartGateway: vi.fn().mockResolvedValue(undefined),
     },

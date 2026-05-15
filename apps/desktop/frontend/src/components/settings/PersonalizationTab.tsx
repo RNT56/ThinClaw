@@ -243,7 +243,7 @@ export function PersonalizationTab() {
                                     setDeleteConfirmOpen(false);
                                     const tId = toast.loading("Executing data wipe...");
                                     try {
-                                        const res = await commands.deleteAllHistory();
+                                        const res = await commands.directHistoryDeleteAllHistory();
                                         if (res.status === "error") {
                                             toast.error("Wipe failed", { id: tId, description: res.error });
                                             return;

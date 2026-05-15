@@ -9126,6 +9126,7 @@ version = "2.0.0-rc.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ccbb212565d2dc177bc15ecb7b039d66c4490da892436a4eee5b394d620c9bc"
 dependencies = [
+ "chrono",
  "paste",
  "serde",
  "serde_json",
@@ -10354,6 +10355,7 @@ dependencies = [
  "thinclaw-llm-core",
  "thinclaw-media",
  "thinclaw-platform",
+ "thinclaw-runtime-contracts",
  "thinclaw-safety",
  "thinclaw-secrets",
  "thinclaw-settings",
@@ -10500,6 +10502,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thinclaw-platform",
+ "thinclaw-runtime-contracts",
  "thinclaw-settings",
  "thinclaw-types",
  "tokio",
@@ -10592,7 +10595,9 @@ dependencies = [
  "tauri-specta",
  "tempfile",
  "thinclaw",
+ "thinclaw-config",
  "thinclaw-desktop-tools",
+ "thinclaw-runtime-contracts",
  "thiserror 2.0.17",
  "tokenizers",
  "tokio",
@@ -10763,6 +10768,16 @@ dependencies = [
  "iana-time-zone",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "thinclaw-runtime-contracts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "specta",
 ]
 
 [[package]]

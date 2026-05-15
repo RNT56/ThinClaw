@@ -236,11 +236,11 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         }
     }, [effectiveSessionKey, scrollToBottom]);
 
-    // Wake Up Handler — sends a lightweight context refresh to IronClaw.
+    // Wake Up Handler — sends a lightweight context refresh to ThinClaw.
     //
-    // IronClaw manages its own identity, memory, and workspace files internally
+    // ThinClaw manages its own identity, memory, and workspace files internally
     // via its agent system and tools. We do NOT read SOUL.md/MEMORY.md/BOOTSTRAP.md
-    // from the frontend — those are IronClaw-internal concerns.
+    // from the frontend — those are ThinClaw-internal concerns.
     //
     // This handler just:
     //  1. Syncs the local LLM config (port/token)
@@ -322,7 +322,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     }, [fetchHistory, gatewayRunning, isCoreView]);
 
     // NOTE: Bootstrap auto-trigger was removed.
-    // The backend boot inject (ironclaw_bridge.rs::start()) now handles both
+    // The backend boot inject (runtime_bridge.rs::start()) now handles both
     // BOOTSTRAP and SESSION_START injection automatically when the engine starts.
     // This eliminates the double-firing race between frontend auto-trigger and
     // backend boot inject. The manual button in Console tab remains for manual

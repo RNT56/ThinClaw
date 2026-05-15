@@ -158,7 +158,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
     // Load engine info on mount
     useEffect(() => {
-        invoke<EngineInfo>("get_active_engine_info")
+        invoke<EngineInfo>("direct_runtime_get_active_engine_info")
             .then(setEngineInfo)
             .catch(err => console.warn("Failed to get engine info:", err));
     }, []);

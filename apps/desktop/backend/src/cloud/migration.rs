@@ -177,68 +177,80 @@ pub async fn run_to_cloud(
         }
     );
 
-    // ── Phase 2b: IronClaw DB Snapshot ────────────────────────────────────
-    // Snapshot ironclaw.db (libSQL) so agent session history, routines, and
+    // ── Phase 2b: ThinClaw Runtime DB Snapshot ────────────────────────────
+    // Snapshot thinclaw-runtime.db (libSQL) so agent session history, routines, and
     // workspace state survive device switches during cloud migration.
-    let ironclaw_db_path = app_data_dir.join("ironclaw.db");
-    if ironclaw_db_path.exists() {
+    let runtime_db_path = app_data_dir.join("thinclaw-runtime.db");
+    let legacy_runtime_db_path = app_data_dir.join("ironclaw.db");
+    let runtime_db_path = if runtime_db_path.exists() {
+        runtime_db_path
+    } else {
+        legacy_runtime_db_path
+    };
+    if runtime_db_path.exists() {
         check_cancelled(&cancel_flag, &mut tracker).await?;
 
-        let ironclaw_snapshot_path = app_data_dir.join("ironclaw_snapshot.db");
-        info!("[cloud/migrate] Snapshotting ironclaw.db...");
-
-        // Open a temporary read-only connection to ironclaw.db for VACUUM INTO.
-        // ironclaw.db is a libSQL database but is wire-compatible with SQLite3,
-        // so sqlx can read it for snapshot purposes.
-        let ironclaw_url = format!(
-            "sqlite://{}?mode=rwc",
-            ironclaw_db_path.to_str().unwrap_or("ironclaw.db")
+        let runtime_snapshot_path = app_data_dir.join("thinclaw-runtime-snapshot.db");
+        info!(
+            "[cloud/migrate] Snapshotting {}...",
+            runtime_db_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("thinclaw-runtime.db")
         );
-        let ironclaw_pool = sqlx::sqlite::SqlitePoolOptions::new()
+
+        // Open a temporary read-only connection for VACUUM INTO.
+        // The runtime DB is a libSQL database but is wire-compatible with SQLite3,
+        // so sqlx can read it for snapshot purposes.
+        let runtime_url = format!(
+            "sqlite://{}?mode=rwc",
+            runtime_db_path.to_str().unwrap_or("thinclaw-runtime.db")
+        );
+        let runtime_pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
-            .connect(&ironclaw_url)
+            .connect(&runtime_url)
             .await
-            .map_err(|e| format!("Failed to open ironclaw.db for snapshot: {}", e))?;
+            .map_err(|e| format!("Failed to open ThinClaw runtime DB for snapshot: {}", e))?;
 
-        let ironclaw_snapshot_size =
-            snapshot::create_snapshot(&ironclaw_pool, ironclaw_snapshot_path.as_path())
+        let runtime_snapshot_size =
+            snapshot::create_snapshot(&runtime_pool, runtime_snapshot_path.as_path())
                 .await
-                .map_err(|e| format!("IronClaw DB snapshot failed: {}", e))?;
+                .map_err(|e| format!("ThinClaw DB snapshot failed: {}", e))?;
 
-        ironclaw_pool.close().await;
+        runtime_pool.close().await;
 
-        // Encrypt + upload ironclaw.db snapshot
-        let ironclaw_data = tokio::fs::read(&ironclaw_snapshot_path)
+        // Encrypt + upload runtime DB snapshot.
+        let runtime_data = tokio::fs::read(&runtime_snapshot_path)
             .await
-            .map_err(|e| format!("Failed to read ironclaw snapshot: {}", e))?;
+            .map_err(|e| format!("Failed to read ThinClaw runtime snapshot: {}", e))?;
 
-        let ironclaw_cloud_key = "db/ironclaw.db.enc";
-        let encrypted_ironclaw = encryption::encrypt(master_key, "ironclaw.db", &ironclaw_data)
-            .map_err(|e| format!("IronClaw DB encryption failed: {}", e))?;
+        let runtime_cloud_key = "db/thinclaw-runtime.db.enc";
+        let encrypted_runtime =
+            encryption::encrypt(master_key, "thinclaw-runtime.db", &runtime_data)
+                .map_err(|e| format!("ThinClaw DB encryption failed: {}", e))?;
 
         provider
-            .put(ironclaw_cloud_key, &encrypted_ironclaw)
+            .put(runtime_cloud_key, &encrypted_runtime)
             .await
-            .map_err(|e| format!("IronClaw DB upload failed: {}", e))?;
+            .map_err(|e| format!("ThinClaw DB upload failed: {}", e))?;
 
         manifest.add_file(
-            ironclaw_cloud_key.to_string(),
-            "ironclaw.db".to_string(),
-            &ironclaw_data,
-            encrypted_ironclaw.len() as u64,
+            runtime_cloud_key.to_string(),
+            "thinclaw-runtime.db".to_string(),
+            &runtime_data,
+            encrypted_runtime.len() as u64,
         );
-        tracker.file_done(ironclaw_snapshot_size);
+        tracker.file_done(runtime_snapshot_size);
 
         info!(
-            "[cloud/migrate] IronClaw DB uploaded: {} bytes → {} bytes",
-            ironclaw_data.len(),
-            encrypted_ironclaw.len()
+            "[cloud/migrate] ThinClaw DB uploaded: {} bytes → {} bytes",
+            runtime_data.len(),
+            encrypted_runtime.len()
         );
 
-        // Clean up ironclaw snapshot
-        let _ = snapshot::cleanup_snapshot(ironclaw_snapshot_path.as_path()).await;
+        let _ = snapshot::cleanup_snapshot(runtime_snapshot_path.as_path()).await;
     } else {
-        debug!("[cloud/migrate] No ironclaw.db found, skipping agent DB snapshot");
+        debug!("[cloud/migrate] No ThinClaw runtime DB found, skipping agent DB snapshot");
     }
 
     // Upload all other files
@@ -1008,14 +1020,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let staging_dir = restore_staging_dir(tmp.path(), "migration-test");
         let open_live = tmp.path().join("thinclaw.db");
-        let iron_live = tmp.path().join("ironclaw.db");
+        let runtime_live = tmp.path().join("thinclaw-runtime.db");
         let doc_live = tmp.path().join("documents").join("report.txt");
         let open_staged = staging_dir.join("thinclaw.db");
-        let iron_staged = staging_dir.join("ironclaw.db");
+        let runtime_staged = staging_dir.join("thinclaw-runtime.db");
         let doc_staged = staging_dir.join("documents").join("report.txt");
 
         tokio::fs::write(&open_live, b"old-open").await.unwrap();
-        tokio::fs::write(&iron_live, b"old-iron").await.unwrap();
+        tokio::fs::write(&runtime_live, b"old-runtime")
+            .await
+            .unwrap();
         tokio::fs::create_dir_all(doc_live.parent().unwrap())
             .await
             .unwrap();
@@ -1029,9 +1043,9 @@ mod tests {
             64,
         );
         manifest.add_file(
-            "db/ironclaw.db.enc".to_string(),
-            "ironclaw.db".to_string(),
-            b"new-iron",
+            "db/thinclaw-runtime.db.enc".to_string(),
+            "thinclaw-runtime.db".to_string(),
+            b"new-runtime",
             64,
         );
         manifest.add_file(
@@ -1048,7 +1062,7 @@ mod tests {
         for target in &targets {
             let data: &[u8] = match target.manifest_file.original_path.as_str() {
                 "thinclaw.db" => b"new-open",
-                "ironclaw.db" => b"new-iron",
+                "thinclaw-runtime.db" => b"new-runtime",
                 "documents/report.txt" => b"new-doc",
                 other => panic!("unexpected manifest path: {}", other),
             };
@@ -1062,13 +1076,19 @@ mod tests {
 
         assert_eq!(staged_databases.len(), 2);
         assert_eq!(tokio::fs::read(&open_live).await.unwrap(), b"old-open");
-        assert_eq!(tokio::fs::read(&iron_live).await.unwrap(), b"old-iron");
+        assert_eq!(
+            tokio::fs::read(&runtime_live).await.unwrap(),
+            b"old-runtime"
+        );
         assert_eq!(tokio::fs::read(&doc_live).await.unwrap(), b"old-doc");
         assert_eq!(tokio::fs::read(&open_staged).await.unwrap(), b"new-open");
-        assert_eq!(tokio::fs::read(&iron_staged).await.unwrap(), b"new-iron");
+        assert_eq!(
+            tokio::fs::read(&runtime_staged).await.unwrap(),
+            b"new-runtime"
+        );
         assert_eq!(tokio::fs::read(&doc_staged).await.unwrap(), b"new-doc");
         assert!(!staging_dir.join(".thinclaw.db.restoring").exists());
-        assert!(!staging_dir.join(".ironclaw.db.restoring").exists());
+        assert!(!staging_dir.join(".thinclaw-runtime.db.restoring").exists());
     }
 }
 

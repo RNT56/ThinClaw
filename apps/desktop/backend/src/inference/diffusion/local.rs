@@ -33,9 +33,9 @@ impl DiffusionBackend for LocalDiffusionBackend {
 
     async fn generate(&self, _request: DiffusionRequest) -> InferenceResult<DiffusionResult> {
         // Actual generation is delegated to the existing image_gen.rs flow
-        // which is invoked by the imagine_generate command handler.
+        // which is invoked by the direct_imagine_generate command handler.
         Err(InferenceError::other(
-            "LocalDiffusionBackend: use imagine_generate command directly",
+            "LocalDiffusionBackend: use direct_imagine_generate command directly",
         ))
     }
 
