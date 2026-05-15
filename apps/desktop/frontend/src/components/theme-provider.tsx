@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback } from "react"
 import { Monitor, Moon, Sun } from "lucide-react"
-import { DARK_SYNTAX_THEMES, LIGHT_SYNTAX_THEMES } from "../lib/syntax-themes"
+import { DARK_SYNTAX_THEMES, LIGHT_SYNTAX_THEMES, normalizeSyntaxThemeId } from "../lib/syntax-themes"
 import { APP_THEMES } from "../lib/app-themes"
 
 type Theme = "dark" | "light" | "system"
@@ -33,6 +33,16 @@ const initialState: ThemeProviderState = {
 
 const ThemeProviderContext = createContext<ThemeProviderState>(initialState)
 
+function storedSyntaxThemeId(key: string, fallback: string): string {
+    const stored = localStorage.getItem(key)
+    if (!stored) return fallback
+    const normalized = normalizeSyntaxThemeId(stored)
+    if (normalized !== stored) {
+        localStorage.setItem(key, normalized)
+    }
+    return normalized
+}
+
 export function ThemeProvider({
     children,
     defaultTheme = "system",
@@ -43,10 +53,10 @@ export function ThemeProvider({
     )
 
     const [darkSyntaxTheme, setDarkSyntaxTheme] = useState(
-        () => localStorage.getItem("syntax-theme-dark") || "tokyo-night"
+        () => storedSyntaxThemeId("syntax-theme-dark", "tokyo-night")
     )
     const [lightSyntaxTheme, setLightSyntaxTheme] = useState(
-        () => localStorage.getItem("syntax-theme-light") || "atom-one-light"
+        () => storedSyntaxThemeId("syntax-theme-light", "atom-one-light")
     )
 
     const [appThemeId, setAppThemeId] = useState(
@@ -109,11 +119,23 @@ export function ThemeProvider({
             if (storedAppTheme && storedAppTheme !== appThemeId) {
                 setAppThemeId(storedAppTheme)
             }
-            if (storedDarkSyntax && storedDarkSyntax !== darkSyntaxTheme) {
-                setDarkSyntaxTheme(storedDarkSyntax)
+            if (storedDarkSyntax) {
+                const normalized = normalizeSyntaxThemeId(storedDarkSyntax)
+                if (normalized !== storedDarkSyntax) {
+                    localStorage.setItem("syntax-theme-dark", normalized)
+                }
+                if (normalized !== darkSyntaxTheme) {
+                    setDarkSyntaxTheme(normalized)
+                }
             }
-            if (storedLightSyntax && storedLightSyntax !== lightSyntaxTheme) {
-                setLightSyntaxTheme(storedLightSyntax)
+            if (storedLightSyntax) {
+                const normalized = normalizeSyntaxThemeId(storedLightSyntax)
+                if (normalized !== storedLightSyntax) {
+                    localStorage.setItem("syntax-theme-light", normalized)
+                }
+                if (normalized !== lightSyntaxTheme) {
+                    setLightSyntaxTheme(normalized)
+                }
             }
             // Still re-apply regardless to ensure CSS vars are set
             updateTheme()
@@ -144,12 +166,13 @@ export function ThemeProvider({
         darkSyntaxTheme,
         lightSyntaxTheme,
         setSyntaxTheme: (type: 'dark' | 'light', themeId: string) => {
+            const normalizedThemeId = normalizeSyntaxThemeId(themeId)
             if (type === 'dark') {
-                setDarkSyntaxTheme(themeId)
-                localStorage.setItem("syntax-theme-dark", themeId)
+                setDarkSyntaxTheme(normalizedThemeId)
+                localStorage.setItem("syntax-theme-dark", normalizedThemeId)
             } else {
-                setLightSyntaxTheme(themeId)
-                localStorage.setItem("syntax-theme-light", themeId)
+                setLightSyntaxTheme(normalizedThemeId)
+                localStorage.setItem("syntax-theme-light", normalizedThemeId)
             }
         },
         appThemeId,

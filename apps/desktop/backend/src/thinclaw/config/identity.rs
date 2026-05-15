@@ -13,6 +13,10 @@ use std::path::PathBuf;
 use super::keychain;
 use super::types::*;
 
+fn new_desktop_device_id() -> String {
+    format!("thinclaw-{}", uuid::Uuid::new_v4())
+}
+
 /// Convert a keychain `String` error into `std::io::Error` for `?` chaining.
 fn io_err(msg: String) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, msg)
@@ -141,7 +145,7 @@ impl ThinClawConfig {
             }
 
             if !synced {
-                identity.device_id = format!("scrappy-{}", uuid::Uuid::new_v4());
+                identity.device_id = new_desktop_device_id();
             }
         }
 
@@ -726,5 +730,18 @@ impl ThinClawConfig {
         std::fs::create_dir_all(self.workspace_dir())?;
         std::fs::create_dir_all(self.logs_dir())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_desktop_device_id;
+
+    #[test]
+    fn generated_desktop_device_ids_use_thinclaw_prefix() {
+        let id = new_desktop_device_id();
+
+        assert!(id.starts_with("thinclaw-"));
+        assert!(!id.starts_with("scrappy-"));
     }
 }

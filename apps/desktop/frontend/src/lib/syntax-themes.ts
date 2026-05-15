@@ -18,6 +18,15 @@ export interface SyntaxTheme {
     };
 }
 
+const LEGACY_SYNTAX_THEME_IDS: Record<string, string> = {
+    "scrappy-dark": "thinclaw-dark",
+    "scrappy-light": "thinclaw-light",
+};
+
+export function normalizeSyntaxThemeId(themeId: string): string {
+    return LEGACY_SYNTAX_THEME_IDS[themeId] ?? themeId;
+}
+
 export const DARK_SYNTAX_THEMES: SyntaxTheme[] = [
     {
         id: "tokyo-night",
@@ -146,7 +155,7 @@ export const DARK_SYNTAX_THEMES: SyntaxTheme[] = [
         }
     },
     {
-        id: "scrappy-dark",
+        id: "thinclaw-dark",
         label: "ThinClaw Default",
         colors: {
             bg: "240 10% 4%",
@@ -257,7 +266,7 @@ export const LIGHT_SYNTAX_THEMES: SyntaxTheme[] = [
         }
     },
     {
-        id: "scrappy-light",
+        id: "thinclaw-light",
         label: "ThinClaw Default",
         colors: {
             bg: "0 0% 100%",
