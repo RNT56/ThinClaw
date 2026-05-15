@@ -8,7 +8,7 @@ pub(crate) const WINDOWS_SIDECAR_FILENAME: &str = "ThinClawDesktopBridge.ps1";
 pub(crate) const LINUX_SIDECAR_FILENAME: &str = "thinclaw_desktop_bridge.py";
 #[cfg(target_os = "macos")]
 pub(crate) const MACOS_SIDECAR_SOURCE: &str =
-    include_str!("../../swift/ThinClawDesktopBridge.swift");
+    include_str!("../../desktop-sidecars/ThinClawDesktopBridge.swift");
 #[cfg(not(target_os = "macos"))]
 pub(crate) const MACOS_SIDECAR_SOURCE: &str = "";
 #[cfg(target_os = "windows")]

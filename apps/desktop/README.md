@@ -91,6 +91,8 @@ ThinClaw Desktop includes a premium **Spotlight Bar**—a glassmorphic, system-w
 
 ThinClaw Desktop intentionally contains two AI systems. The **Direct AI Workbench** powers standard local/cloud chat, RAG, voice, and media generation without autonomous agent behavior. The **ThinClaw Agent Cockpit** embeds or remotely controls the ThinClaw autonomous runtime. Read the **[Runtime Boundaries](documentation/runtime-boundaries.md)** before changing either path.
 
+ThinClaw Desktop lives under `apps/desktop` because it is an app-level companion surface. The WebUI and gateway code remains in the ThinClaw runtime tree (`src/channels/web` and `crates/thinclaw-gateway`) and should not become the home for Desktop-specific code.
+
 ThinClaw Desktop uses a **Modular Sidecar Architecture**. The Rust core orchestrates several specialized processes to keep the main application lightweight and responsive.
 
 ```mermaid

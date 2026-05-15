@@ -127,4 +127,4 @@ strip = "symbols"
 # sqlx-sqlite calls sqlite3_config() first; the stock libsql asserts on the
 # duplicate call. Our patch checks sqlite3_threadsafe() instead of panicking.
 [patch.crates-io]
-libsql = { path = "../patches/libsql-0.6.0" }
+libsql = { path = "../../../patches/libsql-0.6.0" }
