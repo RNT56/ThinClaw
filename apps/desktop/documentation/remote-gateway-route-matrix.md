@@ -36,8 +36,11 @@ Last updated: 2026-05-15
 | Learning | learning IPC wrappers and proxy helpers | `/api/learning/*` | wired for status/history/candidates/review surfaces exposed by the gateway |
 
 Known intentional gaps are external host-policy gates, not silent desktop no-ops.
-Fixture acceptance must execute every route family in this matrix before a
-release candidate is marked route-complete.
+The backend fixture suite currently exercises the chat/session/memory/log/cache/hook
+family plus provider routing, provider vault save/delete/status shape, costs,
+jobs, autonomy, learning, experiments, MCP, and confirmed skill mutation routes
+through `RemoteGatewayProxy`. A release candidate is route-complete only when
+new route families added to this matrix are also added to that executable fixture.
 
 ## Remote Mode Rules
 
