@@ -1,4 +1,5 @@
 -- Direct Workbench asset registry.
+-- Migration: 20260301000001_direct_assets
 --
 -- This table is intentionally separate from ThinClaw agent memory/workspace
 -- state. It stores Desktop direct-chat/media assets that can later be exposed
