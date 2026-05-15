@@ -459,10 +459,6 @@ impl RemoteGatewayProxy {
     }
 
     /// Delete a workspace file.
-    ///
-    /// The root gateway currently has read/write/list/search routes but no
-    /// delete route. Return explicit unavailable instead of posting to a
-    /// non-existent endpoint.
     pub async fn delete_file(&self, path: &str) -> Result<(), String> {
         self.post_json(
             "/api/memory/delete",
@@ -1172,6 +1168,148 @@ impl RemoteGatewayProxy {
 #[cfg(test)]
 mod tests {
     use super::RemoteGatewayProxy;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    #[derive(Clone, Debug)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        authorization: Option<String>,
+        body: String,
+    }
+
+    async fn start_fixture_gateway(
+        expected_requests: usize,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture gateway");
+        let addr = listener.local_addr().expect("fixture gateway address");
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded_for_task = Arc::clone(&recorded);
+
+        let handle = tokio::spawn(async move {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().await.expect("accept fixture request");
+                let mut buffer = Vec::new();
+                let headers_end = loop {
+                    let mut chunk = [0_u8; 1024];
+                    let read = stream.read(&mut chunk).await.expect("read fixture request");
+                    assert!(read > 0, "fixture client closed before sending headers");
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if let Some(pos) = find_headers_end(&buffer) {
+                        break pos;
+                    }
+                };
+
+                let header_text = String::from_utf8_lossy(&buffer[..headers_end]).to_string();
+                let content_length = header_text
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                    })
+                    .unwrap_or(0);
+                let body_start = headers_end + 4;
+                while buffer.len() < body_start + content_length {
+                    let mut chunk = [0_u8; 1024];
+                    let read = stream.read(&mut chunk).await.expect("read fixture body");
+                    assert!(read > 0, "fixture client closed before sending body");
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+
+                let request_line = header_text.lines().next().expect("request line");
+                let mut request_parts = request_line.split_whitespace();
+                let method = request_parts.next().unwrap_or_default().to_string();
+                let path = request_parts.next().unwrap_or_default().to_string();
+                let authorization = header_text.lines().find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_string())
+                    })
+                });
+                let body =
+                    String::from_utf8_lossy(&buffer[body_start..body_start + content_length])
+                        .to_string();
+
+                recorded_for_task.lock().await.push(RecordedRequest {
+                    method: method.clone(),
+                    path: path.clone(),
+                    authorization,
+                    body: body.clone(),
+                });
+
+                let response = fixture_response(&method, &path, &body);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    response.len(),
+                    response
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write fixture response");
+            }
+        });
+
+        (format!("http://{addr}"), recorded, handle)
+    }
+
+    fn find_headers_end(buffer: &[u8]) -> Option<usize> {
+        buffer
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+    }
+
+    fn fixture_response(method: &str, path: &str, body: &str) -> String {
+        match (method, path) {
+            ("POST", "/api/chat/abort") => serde_json::json!({ "aborted": true }),
+            ("POST", "/api/chat/thread/thread-1/reset") => serde_json::json!({ "reset": true }),
+            ("POST", "/api/chat/thread/thread-1/compact") => {
+                serde_json::json!({ "compacted": true })
+            }
+            ("POST", "/api/memory/delete") => serde_json::json!({ "deleted": true }),
+            ("GET", "/api/cache/stats") => serde_json::json!({
+                "hits": 7,
+                "misses": 2,
+                "evictions": 1,
+                "size": 3,
+                "size_bytes": 3,
+                "hit_rate": 0.777
+            }),
+            ("GET", "/api/logs/recent") => {
+                serde_json::json!({ "logs": ["fixture log"], "lines": 1 })
+            }
+            ("GET", "/api/hooks") => serde_json::json!({
+                "total": 1,
+                "hooks": [{ "name": "hook-a", "kind": "BeforeAgent", "enabled": true }]
+            }),
+            ("POST", "/api/hooks") => {
+                let value: serde_json::Value = serde_json::from_str(body).expect("hook body json");
+                serde_json::json!({
+                    "hooks_registered": 1,
+                    "webhooks_registered": 0,
+                    "source": value.get("source").and_then(|v| v.as_str()).unwrap_or("unknown")
+                })
+            }
+            ("DELETE", "/api/hooks/hook-a") => serde_json::json!({ "removed": true }),
+            _ if method == "GET" && path.starts_with("/api/chat/thread/thread-1/export?") => {
+                serde_json::json!({ "format": "markdown", "content": "fixture transcript" })
+            }
+            _ => panic!("unexpected fixture route: {method} {path}"),
+        }
+        .to_string()
+    }
 
     #[test]
     fn unavailable_errors_are_explicitly_typed_by_prefix() {
@@ -1198,5 +1336,75 @@ mod tests {
         assert!(error.starts_with("unavailable:"));
         assert!(error.contains("raw secret injection is disabled"));
         assert!(error.contains("provider vault save/delete"));
+    }
+
+    #[tokio::test]
+    async fn fixture_gateway_covers_recent_remote_route_family() {
+        let (base_url, recorded, server) = start_fixture_gateway(10).await;
+        let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token");
+
+        proxy.abort_chat("thread-1").await.expect("abort chat");
+        proxy.reset_session("thread-1").await.expect("reset session");
+        let compact = proxy
+            .compact_session("thread-1")
+            .await
+            .expect("compact session");
+        assert_eq!(compact["compacted"], true);
+        let transcript = proxy
+            .export_session("thread-1", "markdown")
+            .await
+            .expect("export session");
+        assert_eq!(transcript["content"], "fixture transcript");
+        proxy
+            .delete_file("notes/one.md")
+            .await
+            .expect("memory delete");
+        let cache = proxy.cache_stats().await.expect("cache stats");
+        assert_eq!(cache["hits"], 7);
+        let logs = proxy.logs_recent().await.expect("recent logs");
+        assert_eq!(logs["logs"][0], "fixture log");
+        let hooks = proxy.list_hooks().await.expect("hooks list");
+        assert_eq!(hooks["total"], 1);
+        let registered = proxy
+            .register_hooks(r#"{"rules":[]}"#, Some("fixture"))
+            .await
+            .expect("hooks register");
+        assert_eq!(registered["hooks_registered"], 1);
+        let removed = proxy
+            .unregister_hook("hook-a")
+            .await
+            .expect("hooks unregister");
+        assert_eq!(removed["removed"], true);
+
+        server.await.expect("fixture server completes");
+        let recorded = recorded.lock().await;
+        let route_pairs = recorded
+            .iter()
+            .map(|request| (request.method.as_str(), request.path.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            route_pairs,
+            vec![
+                ("POST", "/api/chat/abort"),
+                ("POST", "/api/chat/thread/thread-1/reset"),
+                ("POST", "/api/chat/thread/thread-1/compact"),
+                ("GET", "/api/chat/thread/thread-1/export?format=markdown"),
+                ("POST", "/api/memory/delete"),
+                ("GET", "/api/cache/stats"),
+                ("GET", "/api/logs/recent"),
+                ("GET", "/api/hooks"),
+                ("POST", "/api/hooks"),
+                ("DELETE", "/api/hooks/hook-a"),
+            ]
+        );
+        assert!(
+            recorded
+                .iter()
+                .all(|request| request.authorization.as_deref() == Some("Bearer fixture-token")),
+            "every fixture request should carry bearer auth"
+        );
+        assert!(recorded[0].body.contains("\"thread_id\":\"thread-1\""));
+        assert!(recorded[4].body.contains("\"path\":\"notes/one.md\""));
+        assert!(recorded[8].body.contains("\"source\":\"fixture\""));
     }
 }
