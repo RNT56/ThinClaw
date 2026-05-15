@@ -12,8 +12,8 @@ use super::remote_provider_config::{apply_remote_selected_brain, normalize_provi
 use super::types::*;
 // ws_rpc removed — IronClaw is in-process, no remote WS gateway
 use super::ThinClawManager;
-use crate::thinclaw::ironclaw_bridge::IronClawState;
 use crate::sidecar::SidecarManager;
+use crate::thinclaw::ironclaw_bridge::IronClawState;
 
 async fn remote_secret_reads_are_opaque(ironclaw: &IronClawState) -> bool {
     ironclaw.remote_proxy().await.is_some()

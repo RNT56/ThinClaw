@@ -995,8 +995,14 @@ pub async fn thinclaw_cache_stats(
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.cache_stats().await?;
         return Ok(CacheStats {
-            hits: raw.get("hits").and_then(|value| value.as_u64()).unwrap_or(0) as u32,
-            misses: raw.get("misses").and_then(|value| value.as_u64()).unwrap_or(0) as u32,
+            hits: raw
+                .get("hits")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32,
+            misses: raw
+                .get("misses")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32,
             evictions: raw
                 .get("evictions")
                 .and_then(|value| value.as_u64())

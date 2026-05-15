@@ -8,7 +8,7 @@ ThinClaw is a Rust-based, self-hosted personal agent. It can run:
 
 - as a standalone binary
 - as a long-running service with the web gateway
-- embedded inside Scrappy
+- embedded inside ThinClaw Desktop
 
 The system combines:
 

@@ -268,7 +268,10 @@ pub async fn thinclaw_hooks_register(
             .register_hooks(&input.bundle_json, input.source.as_deref())
             .await?;
         return Ok(HookRegisterResponse {
-            ok: raw.get("ok").and_then(|value| value.as_bool()).unwrap_or(false),
+            ok: raw
+                .get("ok")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
             hooks_registered: raw
                 .get("hooks_registered")
                 .and_then(|value| value.as_u64())
@@ -331,7 +334,10 @@ pub async fn thinclaw_hooks_unregister(
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         return Ok(HookUnregisterResponse {
-            ok: raw.get("ok").and_then(|value| value.as_bool()).unwrap_or(removed),
+            ok: raw
+                .get("ok")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(removed),
             removed,
             message: raw
                 .get("message")
