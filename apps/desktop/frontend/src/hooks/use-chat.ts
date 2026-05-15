@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { commands, Message, Conversation } from "../lib/bindings";
+import { Message, Conversation, AssetRef } from "../lib/bindings";
+import { directCommands } from "../lib/generated/direct-commands";
 import { listen } from "@tauri-apps/api/event";
 import { useModelContext } from "../components/model-context";
 import { useConfig } from "./use-config";
@@ -20,6 +21,19 @@ export type ExtendedMessage = Message & {
     created_at?: number;
     // Inference speed
     tokensPerSec?: number;
+};
+
+const directAssetRef = (id: string): AssetRef => ({ namespace: "direct_workbench", id });
+
+const messageAssets = (
+    images: string[] | null | undefined,
+    docs: Array<{ id: string; assetRef?: AssetRef | null; asset_ref?: AssetRef | null }> | null | undefined,
+): AssetRef[] | null => {
+    const refs = [
+        ...(images ?? []).map(directAssetRef),
+        ...(docs ?? []).map(doc => doc.assetRef ?? doc.asset_ref ?? directAssetRef(doc.id)),
+    ];
+    return refs.length > 0 ? refs : null;
 };
 
 export function useChat() {
@@ -77,6 +91,7 @@ export function useChat() {
                     isStreaming: true,
                     created_at: Date.now(),
                     images: null,
+                    assets: null,
                     attached_docs: null,
                     is_summary: false,
                     original_messages: null
@@ -112,7 +127,7 @@ export function useChat() {
     // Load conversations list on mount
     const fetchConversations = useCallback(async () => {
         try {
-            const result = await commands.directHistoryGetConversations();
+            const result = await directCommands.directHistoryGetConversations();
             setConversations(unwrap(result));
         } catch (e) {
             console.error("Failed to load conversations:", e);
@@ -177,7 +192,7 @@ export function useChat() {
 
     const startServer = useCallback(async (path: string) => {
         try {
-            unwrap(await commands.directRuntimeStartChatServer(path, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false));
+            unwrap(await directCommands.directRuntimeStartChatServer(path, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false));
             setModelRunning(true);
         } catch (e) {
             console.error("Server start error:", e);
@@ -187,7 +202,7 @@ export function useChat() {
 
     const stopServer = async () => {
         try {
-            unwrap(await commands.directRuntimeStopChatServer(currentModelPath));
+            unwrap(await directCommands.directRuntimeStopChatServer(currentModelPath));
             setModelRunning(false);
         } catch (e) {
             console.error("Server stop error:", e);
@@ -199,7 +214,7 @@ export function useChat() {
         fetchConversations();
         const checkStatus = async () => {
             try {
-                const s = await commands.directRuntimeGetSidecarStatus();
+                const s = await directCommands.directRuntimeGetSidecarStatus();
                 // For llamacpp: modelRunning tracks whether llama-server is live
                 // For other engines (MLX, vLLM, Ollama): they manage their own server;
                 // we consider "running" if a model is selected (the engine handles startup).
@@ -271,7 +286,7 @@ export function useChat() {
             const currentCount = dbMessagesRef.current.length;
             const limit = silent ? Math.max(50, currentCount) : 50;
 
-            const result = await commands.directHistoryGetMessages(id, limit, null);
+            const result = await directCommands.directHistoryGetMessages(id, limit, null);
             const msgs = unwrap(result);
 
             setHasMore(msgs.length === limit);
@@ -307,6 +322,7 @@ export function useChat() {
                         // Prefer DB content, but fallback to existing content if DB is empty (anti-flash)
                         content: m.content || (existingTemp?.content || ""),
                         images: m.images || null,
+                        assets: m.assets || messageAssets(m.images, m.attached_docs as any),
                         attached_docs: m.attached_docs || null,
                         web_search_results: m.web_search_results || null,
                         is_summary: false,
@@ -338,7 +354,7 @@ export function useChat() {
 
             // Calculate tokens for loaded conversation
             try {
-                const usageResult = await commands.directChatCountTokens(id);
+                const usageResult = await directCommands.directChatCountTokens(id);
                 setLastTokenUsage(unwrap(usageResult));
             } catch (ignore) { }
 
@@ -357,7 +373,7 @@ export function useChat() {
             const limit = 50;
             const before = dbMessages.length > 0 ? (dbMessages[0].created_at ?? null) : null;
 
-            const result = await commands.directHistoryGetMessages(currentConversationId, limit, before);
+            const result = await directCommands.directHistoryGetMessages(currentConversationId, limit, before);
             const msgs = unwrap(result);
 
             setHasMore(msgs.length === limit);
@@ -368,6 +384,7 @@ export function useChat() {
                     role: m.role,
                     content: m.content,
                     images: m.images || null,
+                    assets: m.assets || messageAssets(m.images, m.attached_docs as any),
                     attached_docs: m.attached_docs || null,
                     web_search_results: m.web_search_results || null,
                     is_summary: false,
@@ -392,7 +409,7 @@ export function useChat() {
 
     const directHistoryDeleteConversation = useCallback(async (id: string) => {
         try {
-            unwrap(await commands.directHistoryDeleteConversation(id));
+            unwrap(await directCommands.directHistoryDeleteConversation(id));
             setConversations(prev => prev.filter(c => c.id !== id));
             if (currentConversationId === id) {
                 setCurrentConversationId(null);
@@ -413,6 +430,7 @@ export function useChat() {
             role: "user",
             content,
             images: images.length > 0 ? images : null,
+            assets: messageAssets(images, attachedDocs),
             attached_docs: attachedDocs.length > 0 ? attachedDocs : null,
             is_summary: false,
             original_messages: null,
@@ -424,6 +442,7 @@ export function useChat() {
             role: "assistant",
             content: "",
             images: null,
+            assets: null,
             attached_docs: null,
             is_summary: false,
             original_messages: null,
@@ -467,6 +486,7 @@ export function useChat() {
             role: "assistant",
             content: "",
             images: null,
+            assets: null,
             attached_docs: null,
             is_summary: false,
             original_messages: null,
@@ -501,7 +521,7 @@ export function useChat() {
 
     const createNewConversation = useCallback(async (title: string, projectId: string | null = null) => {
         try {
-            const result = await commands.directHistoryCreateConversation(title, projectId);
+            const result = await directCommands.directHistoryCreateConversation(title, projectId);
             const newConv = unwrap(result);
             setConversations(prev => [newConv, ...prev]);
             setCurrentConversationId(newConv.id);
@@ -522,13 +542,13 @@ export function useChat() {
         }
         if (!convId) return "";
         // Pass the embedding model path so the backend can auto-start the server if needed
-        const res = await commands.directRagIngestDocument(path, convId, projectId, currentEmbeddingModelPath || null);
-        return unwrap(res);
+        const res = await directCommands.directRagIngestDocument(path, convId, projectId, currentEmbeddingModelPath || null);
+        return unwrap(res).documentId;
     }, [currentConversationId, createNewConversation, currentEmbeddingModelPath]);
 
     const moveConversation = useCallback(async (id: string, projectId: string | null) => {
         try {
-            await commands.directHistoryUpdateConversationProject(id, projectId);
+            await directCommands.directHistoryUpdateConversationProject(id, projectId);
             setConversations(prev => prev.map(c => c.id === id ? { ...c, project_id: projectId } : c));
         } catch (e) {
             console.error("Failed to move conversation:", e);
@@ -561,6 +581,7 @@ export function useChat() {
             role: "assistant",
             content: config?.image_prompt_enhance_enabled ? "Enhancing prompt..." : "Generating image...",
             images: ["pending_generation"], // This triggers our new status UI
+            assets: null,
             attached_docs: null,
             is_summary: false,
             original_messages: null
@@ -592,10 +613,10 @@ export function useChat() {
 
         try {
             // Persist the user message - Corrected to 6 arguments
-            await commands.directHistorySaveMessage(convId, "user", prompt, null, null, null);
+            await directCommands.directHistorySaveMessage(convId, "user", prompt, null, null, null, null);
 
             // Start generation
-            const res = await (commands as any).generateImage({
+            const res = await directCommands.directMediaGenerateImage({
                 prompt: finalPrompt,
                 model: modelPath,
                 ...components
@@ -603,7 +624,15 @@ export function useChat() {
             const data = unwrap(res) as any;
 
             // Persist the assistant message with the real image ID - Corrected to 6 arguments
-            await commands.directHistorySaveMessage(convId, "assistant", `Generated image for: ${finalPrompt}`, [data.id], null, null);
+            await directCommands.directHistorySaveMessage(
+                convId,
+                "assistant",
+                `Generated image for: ${finalPrompt}`,
+                [data.id],
+                [directAssetRef(data.id)],
+                null,
+                null,
+            );
 
             // Refresh to get DB-synced version
             await loadConversation(convId);
@@ -629,7 +658,7 @@ export function useChat() {
 
     const directHistoryUpdateConversationsOrder = useCallback(async (orders: [string, number][]) => {
         try {
-            await commands.directHistoryUpdateConversationsOrder(orders);
+            await directCommands.directHistoryUpdateConversationsOrder(orders);
         } catch (error) {
             console.error('Failed to update conversation order', error);
         }

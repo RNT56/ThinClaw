@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
 import { commands, GGUFMetadata, Result, SidecarStatus } from '../../lib/bindings';
+import { directCommands } from '../../lib/generated/direct-commands';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { useModelContext } from '../model-context';
@@ -55,7 +56,7 @@ export function ServerSettings() {
 
     const checkStatus = async () => {
         try {
-            const s = await commands.directRuntimeGetSidecarStatus();
+            const s = await directCommands.directRuntimeGetSidecarStatus();
             setStatus(s);
         } catch (e) {
             console.error("Failed to get status", e);
@@ -64,7 +65,7 @@ export function ServerSettings() {
         // For non-llamacpp engines, also poll the EngineManager health endpoint
         if (!isLlamaCpp && !isCloudOnly) {
             try {
-                const res = await commands.directRuntimeIsEngineReady();
+                const res = await directCommands.directRuntimeIsEngineReady();
                 if (res.status === 'ok') setEngineReady(res.data);
             } catch {
                 setEngineReady(false);
@@ -93,12 +94,12 @@ export function ServerSettings() {
         try {
             if (isLlamaCpp) {
                 // llama.cpp — use the existing sidecar restart command
-                await commands.directRuntimeStartChatServer(modelPath, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false);
+                await directCommands.directRuntimeStartChatServer(modelPath, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false);
             } else if (!isCloudOnly) {
                 // MLX / vLLM / Ollama — stop then start via EngineManager
-                try { await commands.directRuntimeStopEngine(); } catch { /* may already be stopped */ }
+                try { await directCommands.directRuntimeStopEngine(); } catch { /* may already be stopped */ }
                 await new Promise(r => setTimeout(r, 500));
-                const startRes = await commands.directRuntimeStartEngine(modelPath, maxContext);
+                const startRes = await directCommands.directRuntimeStartEngine(modelPath, maxContext);
                 if (startRes.status === 'error') throw new Error(startRes.error);
             }
             await checkStatus();
@@ -110,7 +111,7 @@ export function ServerSettings() {
                     toast.loading("Syncing Agent Configuration...", { id: toastId });
 
                     // Fetch the actual running config of the chat server
-                    const chatConfig = await commands.directRuntimeGetChatServerConfig();
+                    const chatConfig = await directCommands.directRuntimeGetChatServerConfig();
 
                     const localPort = chatConfig ? chatConfig.port : 53755;
                     const usedContext = chatConfig ? chatConfig.context_size : maxContext;

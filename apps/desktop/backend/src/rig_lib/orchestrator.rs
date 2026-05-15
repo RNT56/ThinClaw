@@ -378,6 +378,7 @@ impl Orchestrator {
                             role: "assistant".into(),
                             content: format!("[Summary of earlier conversation] {}", summary_text),
                             images: None,
+                            assets: None,
                             attached_docs: None,
                             is_summary: Some(true),
                             original_messages: Some(chunk_to_summarize),

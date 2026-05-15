@@ -1,4 +1,4 @@
-import { commands } from "./bindings";
+import { directCommands } from "./generated/direct-commands";
 import { findStyle } from "./style-library";
 
 /**
@@ -38,16 +38,16 @@ export async function enhanceImagePrompt(
         const systemPrompt = IMAGE_PROMPT_ENHANCE_SYSTEM_PROMPT.replace("{STYLE_SNIPPET}", styleSnippet);
 
         // Use the unified backend command which routes to current local/cloud provider
-        const res = await (commands as any).directChatCompletion({
+        const res = await (directCommands as any).directChatCompletion({
             model: "auto", // Backend resolves this
             messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: prompt }
             ],
             temperature: 0.7,
-            top_p: 1.0,
-            web_search_enabled: false,
-            auto_mode: false
+            topP: 1.0,
+            webSearchEnabled: false,
+            autoMode: false
         });
 
         // Backend returns Result<String, String>, and our bindings might unwrap or return it raw

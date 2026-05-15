@@ -1,9 +1,11 @@
 use crate::chat::AttachedDoc;
+use crate::direct_assets::DirectAssetStore;
 use crate::file_store::FileStore;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, State};
+use thinclaw_runtime_contracts::AssetRef;
 
 fn generate_id() -> String {
     use rand::{distributions::Alphanumeric, Rng};
@@ -33,6 +35,7 @@ pub struct MessageEntry {
     pub role: String,
     pub content: String,
     pub images: Option<String>,
+    pub assets: Option<String>,
     pub attached_docs: Option<String>,
     pub web_search_results: Option<String>, // New column
     #[specta(type = f64)]
@@ -46,6 +49,7 @@ pub struct FrontendMessage {
     pub role: String,
     pub content: String,
     pub images: Option<Vec<String>>,
+    pub assets: Option<Vec<AssetRef>>,
     pub attached_docs: Option<Vec<AttachedDoc>>,
     pub web_search_results: Option<Vec<crate::web_search::WebSearchResult>>,
     #[specta(type = f64)]
@@ -180,7 +184,7 @@ pub async fn direct_history_get_messages(
     let before = before_created_at.map(|t| t as i64).unwrap_or(i64::MAX);
 
     let entries = sqlx::query_as::<_, MessageEntry>(
-        "SELECT * FROM messages WHERE conversation_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?",
+        "SELECT id, conversation_id, role, content, images, assets, attached_docs, web_search_results, created_at FROM messages WHERE conversation_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?",
     )
     .bind(conversation_id)
     .bind(before)
@@ -211,9 +215,11 @@ pub async fn direct_history_get_messages(
                                     AttachedDoc {
                                         id: parts[0].to_string(),
                                         name: parts[1].to_string(),
+                                        asset_ref: Some(DirectAssetStore::direct_ref(parts[0])),
                                     }
                                 } else {
                                     AttachedDoc {
+                                        asset_ref: Some(DirectAssetStore::direct_ref(&str_val)),
                                         id: str_val,
                                         name: "Unknown".to_string(),
                                     }
@@ -229,6 +235,16 @@ pub async fn direct_history_get_messages(
             let web_search_results = e
                 .web_search_results
                 .and_then(|s| serde_json::from_str(&s).ok());
+            let assets = e
+                .assets
+                .and_then(|s| serde_json::from_str::<Vec<AssetRef>>(&s).ok())
+                .or_else(|| {
+                    DirectAssetStore::refs_for_message(
+                        None,
+                        images.as_deref(),
+                        attached_docs.as_deref(),
+                    )
+                });
 
             FrontendMessage {
                 id: e.id,
@@ -236,6 +252,7 @@ pub async fn direct_history_get_messages(
                 role: e.role,
                 content: e.content,
                 images,
+                assets,
                 attached_docs,
                 web_search_results,
                 created_at: e.created_at,
@@ -254,6 +271,7 @@ pub async fn direct_history_save_message(
     role: String,
     content: String,
     images: Option<Vec<String>>,
+    assets: Option<Vec<AssetRef>>,
     attached_docs: Option<Vec<AttachedDoc>>,
     web_search_results: Option<Vec<crate::web_search::WebSearchResult>>,
 ) -> Result<String, String> {
@@ -263,19 +281,23 @@ pub async fn direct_history_save_message(
         .unwrap()
         .as_millis() as i64;
 
+    let merged_assets =
+        DirectAssetStore::refs_for_message(assets, images.as_deref(), attached_docs.as_deref());
     let images_json = images.map(|v| serde_json::to_string(&v).unwrap_or("[]".to_string()));
+    let assets_json = merged_assets.map(|v| serde_json::to_string(&v).unwrap_or("[]".to_string()));
     let docs_json = attached_docs.map(|v| serde_json::to_string(&v).unwrap_or("[]".to_string()));
     let search_json =
         web_search_results.map(|v| serde_json::to_string(&v).unwrap_or("[]".to_string()));
 
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, role, content, images, attached_docs, web_search_results, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO messages (id, conversation_id, role, content, images, assets, attached_docs, web_search_results, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(&conversation_id)
     .bind(&role)
     .bind(&content)
     .bind(&images_json)
+    .bind(&assets_json)
     .bind(&docs_json)
     .bind(&search_json)
     .bind(now)
@@ -394,11 +416,11 @@ pub async fn direct_history_delete_all_history(
         .map_err(|e| format!("failed to delete projects: {}", e))?;
     println!("[history] - projects cleared");
 
-    sqlx::query("DELETE FROM generated_images")
+    sqlx::query("DELETE FROM direct_assets WHERE namespace = 'direct_workbench'")
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("failed to delete generated images: {}", e))?;
-    println!("[history] - generated images cleared");
+        .map_err(|e| format!("failed to delete direct assets: {}", e))?;
+    println!("[history] - direct assets cleared");
 
     tx.commit()
         .await

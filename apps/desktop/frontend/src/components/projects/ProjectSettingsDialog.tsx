@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
 import { commands, Document as ProjectDocument } from "../../lib/bindings";
+import { directCommands } from "../../lib/generated/direct-commands";
 import { Folder, FileText, Trash2, Upload, AlertTriangle, CheckCircle2, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { useModelContext } from "../model-context";
@@ -72,12 +73,12 @@ export function ProjectSettingsDialog({
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const upRes = await commands.directRagUploadDocument(bytes, file.name);
-                    const savedPath = unwrap(upRes);
+                    const upRes = await directCommands.directRagUploadDocument(bytes, file.name);
+                    const savedPath = unwrap(upRes).path;
 
                     toast.loading(`Indexing ${file.name}...`, { id: toastId });
                     // Pass embedding model path — backend auto-starts server if needed
-                    const ingestRes = await commands.directRagIngestDocument(savedPath, null, projectId, currentEmbeddingModelPath || null);
+                    const ingestRes = await directCommands.directRagIngestDocument(savedPath, null, projectId, currentEmbeddingModelPath || null);
                     unwrap(ingestRes);
 
                     toast.success("Added to Knowledge Base", { id: toastId });

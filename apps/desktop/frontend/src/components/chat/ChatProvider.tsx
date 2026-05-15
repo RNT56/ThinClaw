@@ -14,7 +14,8 @@ import { useChat } from '../../hooks/use-chat';
 import { useDropzone } from 'react-dropzone';
 import { isVisionCapable } from '../../lib/vision';
 import { useModelContext } from '../model-context';
-import { commands } from '../../lib/bindings';
+import { commands, type AssetRef } from '../../lib/bindings';
+import { directCommands } from '../../lib/generated/direct-commands';
 import { join } from '@tauri-apps/api/path';
 import { useAutoStart } from '../../hooks/use-auto-start';
 import { useAudioRecorder } from '../../hooks/use-audio-recorder';
@@ -24,7 +25,7 @@ import { ThinClawPage } from '../thinclaw/ThinClawSidebar';
 import * as thinclawApi from '../../lib/thinclaw';
 import { AppMode } from '../navigation/ModeNavigator';
 import { ImagineTab } from '../imagine';
-import { imagineGenerate } from '../../lib/imagine';
+import { directImagineGenerate } from '../../lib/imagine';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { SettingsPage } from '../settings/SettingsSidebar';
@@ -164,8 +165,8 @@ export interface ChatLayoutState {
     // --- Attached files ---
     attachedImages: { id: string; path: string }[];
     setAttachedImages: React.Dispatch<React.SetStateAction<{ id: string; path: string }[]>>;
-    ingestedFiles: { id: string; name: string }[];
-    setIngestedFiles: React.Dispatch<React.SetStateAction<{ id: string; name: string }[]>>;
+    ingestedFiles: { id: string; name: string; assetRef?: AssetRef | null }[];
+    setIngestedFiles: React.Dispatch<React.SetStateAction<{ id: string; name: string; assetRef?: AssetRef | null }[]>>;
 
     // --- Handlers ---
     handleSend: () => void;
@@ -297,7 +298,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
     // File attachments
     const [attachedImages, setAttachedImages] = useState<{ id: string; path: string }[]>([]);
-    const [ingestedFiles, setIngestedFiles] = useState<{ id: string; name: string }[]>([]);
+    const [ingestedFiles, setIngestedFiles] = useState<{ id: string; name: string; assetRef?: AssetRef | null }[]>([]);
 
     // Projects / RAG
     const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -512,7 +513,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const handleEditMessage = useCallback(async (messageId: string, newContent: string) => {
         try {
             await directRuntimeCancelGeneration();
-            await commands.directHistoryEditMessage(messageId, newContent);
+            await directCommands.directHistoryEditMessage(messageId, newContent);
             if (currentConversationId) await loadConversation(currentConversationId);
             toast.success('Message edited. Regenerating response...');
             await regenerate();
@@ -542,7 +543,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         if (!imageRunning) {
             const tId = toast.loading('Starting Image Engine...');
             try {
-                const res = await commands.directRuntimeStartImageServer(modelPathToUse);
+                const res = await directCommands.directRuntimeStartImageServer(modelPathToUse);
                 if (res.status !== 'ok') throw new Error(res.error);
                 await new Promise(r => setTimeout(r, 4000));
                 toast.success('Image Engine Ready', { id: tId });
@@ -597,7 +598,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                         if (mDef && mDef.mmproj && modelsDir) {
                             mmproj = await join(modelsDir, mDef.mmproj.filename);
                         }
-                        await commands.directRuntimeStartChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false, false, false);
+                        await directCommands.directRuntimeStartChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false, false, false);
                         toast.success('Chat Ready', { id: tId });
                     } catch (e) {
                         console.warn('Failed to resume chat', e);
@@ -628,12 +629,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     if (sorted.length > 0) bestModel = isComplex ? sorted[sorted.length - 1] : sorted[0];
                     if (bestModel) {
                         toast.loading(`Auto-switching to ${bestModel.name}...`, { id: tId });
-                        await commands.directRuntimeStartChatServer(bestModel.path, maxContext, currentModelTemplate, null, false, false, false);
+                        await directCommands.directRuntimeStartChatServer(bestModel.path, maxContext, currentModelTemplate, null, false, false, false);
                     } else {
                         throw new Error('No local models found.');
                     }
                 } else {
-                    await commands.directRuntimeStartChatServer(modelPath, maxContext, currentModelTemplate, null, false, false, false);
+                    await directCommands.directRuntimeStartChatServer(modelPath, maxContext, currentModelTemplate, null, false, false, false);
                 }
                 toast.success('Ready', { id: tId });
             } catch (e) {
@@ -678,7 +679,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const res = await commands.directAssetsUploadImage(bytes);
+                    const res = await directCommands.directAssetsUploadImage(bytes);
                     if (res.status === 'ok') {
                         setAttachedImages(prev => [...prev, res.data]);
                         toast.success('Image attached', { id: toastId });
@@ -697,13 +698,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const res = await commands.directRagUploadDocument(bytes, file.name);
+                    const res = await directCommands.directRagUploadDocument(bytes, file.name);
                     if (res.status === 'ok') {
-                        const savedPath = res.data;
+                        const savedPath = res.data.path;
                         toast.loading(`Indexing ${file.name}...`, { id: toastId });
                         const docId = await ingestFile(savedPath, selectedProjectId);
                         toast.success('added to knowledge base', { id: toastId, description: file.name });
-                        setIngestedFiles(prev => [...prev, { id: docId, name: file.name }]);
+                        setIngestedFiles(prev => [...prev, { id: docId, name: file.name, assetRef: { namespace: 'direct_workbench', id: docId } }]);
                     } else {
                         throw new Error(res.error);
                     }
@@ -759,7 +760,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 if (currentSttModelPath) {
                     const tId = toast.loading('Starting STT Engine...');
                     try {
-                        const res = await commands.directRuntimeStartSttServer(currentSttModelPath);
+                        const res = await directCommands.directRuntimeStartSttServer(currentSttModelPath);
                         if (res.status !== 'ok') throw new Error(res.error);
                         await new Promise(r => setTimeout(r, 2000));
                         toast.success('STT Engine Ready', { id: tId });
@@ -782,9 +783,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             const bytes = Array.from(new Uint8Array(buffer));
             const toastId = toast.loading('Transcribing...');
             try {
-                const res = await commands.directMediaTranscribeAudio(bytes);
+                const res = await directCommands.directMediaTranscribeAudio(bytes);
                 if (res.status === 'ok') {
-                    setInput(prev => (prev ? prev + ' ' + res.data : res.data));
+                    setInput(prev => (prev ? prev + ' ' + res.data.text : res.data.text));
                     toast.success('Transcribed', { id: toastId });
                 } else {
                     throw new Error(res.error);
@@ -862,12 +863,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             if (options.provider === 'local' && !imageRunning) {
                 if (resolvedModelPath) {
                     setGenerationProgress({ stage: 'Initializing', progress: 0.1, text: 'Warming up diffusion engine...' } as any);
-                    await commands.directRuntimeStartImageServer(resolvedModelPath);
+                    await directCommands.directRuntimeStartImageServer(resolvedModelPath);
                     await new Promise(r => setTimeout(r, 1000));
                 }
             }
 
-            const result = await imagineGenerate({
+            const result = await directImagineGenerate({
                 prompt: finalPrompt,
                 provider: options.provider as 'local' | 'nano-banana' | 'nano-banana-pro',
                 aspectRatio: options.aspectRatio ?? '1:1',

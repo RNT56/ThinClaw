@@ -1,4 +1,5 @@
 use crate::config::ConfigManager;
+use crate::direct_assets::{DirectAssetStore, NewDirectAsset};
 use crate::images::ImageResponse;
 use crate::inference::diffusion::DiffusionRequest;
 use crate::inference::InferenceRouter;
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, State};
+use thinclaw_runtime_contracts::{AssetKind, AssetOrigin};
 
 /// Image generation parameters for the Imagine mode
 #[derive(Debug, Deserialize, Type)]
@@ -190,27 +192,30 @@ pub async fn direct_imagine_generate(
     let image_id = result.id.clone();
     let created_at = chrono::Utc::now().to_rfc3339();
 
-    sqlx::query(
-        r#"
-        INSERT INTO direct_assets (
-            id, namespace, kind, origin, status, visibility, path,
-            prompt, style_id, provider, aspect_ratio, resolution,
-            width, height, created_at, updated_at
-        ) VALUES (?, 'direct_workbench', 'generated_image', 'generated', 'ready', 'private', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
+    DirectAssetStore::upsert(
+        pool.inner(),
+        NewDirectAsset {
+            id: image_id.clone(),
+            kind: AssetKind::GeneratedImage,
+            origin: AssetOrigin::Generated,
+            path: result.path.clone(),
+            mime_type: Some("image/png".to_string()),
+            size_bytes: None,
+            sha256: None,
+            prompt: Some(params.prompt.clone()),
+            provider: Some(params.provider.clone()),
+            style_id: params.style_id.clone(),
+            aspect_ratio: Some(params.aspect_ratio.clone()),
+            resolution: params.resolution.clone(),
+            width: Some(width),
+            height: Some(height),
+            seed: None,
+            thumbnail_path: None,
+            is_favorite: false,
+            tags: None,
+            metadata: Default::default(),
+        },
     )
-    .bind(&image_id)
-    .bind(&result.path)
-    .bind(&params.prompt)
-    .bind(&params.style_id)
-    .bind(&params.provider)
-    .bind(&params.aspect_ratio)
-    .bind(&params.resolution)
-    .bind(width as i32)
-    .bind(height as i32)
-    .bind(&created_at)
-    .bind(&created_at)
-    .execute(pool.inner())
     .await
     .map_err(|e| format!("Failed to save image metadata: {}", e))?;
 

@@ -11,6 +11,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use tauri::{AppHandle, Emitter, Manager, State};
+use thinclaw_runtime_contracts::{
+    AssetKind, AssetOrigin, DirectDocumentIngestResponse, DirectDocumentUploadResponse,
+};
 
 #[derive(Deserialize, Debug)]
 struct EmbeddingResponse {
@@ -29,9 +32,10 @@ struct EmbeddingData {
 pub async fn direct_rag_upload_document(
     _app: tauri::AppHandle,
     file_store: tauri::State<'_, crate::file_store::FileStore>,
+    pool: State<'_, SqlitePool>,
     file_bytes: Vec<u8>,
     filename: String,
-) -> Result<String, String> {
+) -> Result<DirectDocumentUploadResponse, String> {
     file_store
         .create_dir_all("documents")
         .await
@@ -56,14 +60,45 @@ pub async fn direct_rag_upload_document(
         .map_err(|e| format!("Failed to save document: {}", e))?;
     let path = file_store.resolve_path(&relative_path).await;
 
-    Ok(path.to_string_lossy().to_string())
+    let mut metadata = HashMap::new();
+    metadata.insert("original_filename".to_string(), filename);
+    let asset = crate::direct_assets::DirectAssetStore::upsert(
+        pool.inner(),
+        crate::direct_assets::NewDirectAsset {
+            id,
+            kind: AssetKind::Document,
+            origin: AssetOrigin::RagDocument,
+            path: path.to_string_lossy().to_string(),
+            mime_type: None,
+            size_bytes: Some(file_bytes.len() as u64),
+            sha256: None,
+            prompt: None,
+            provider: None,
+            style_id: None,
+            aspect_ratio: None,
+            resolution: None,
+            width: None,
+            height: None,
+            seed: None,
+            thumbnail_path: None,
+            is_favorite: false,
+            tags: None,
+            metadata,
+        },
+    )
+    .await?;
+
+    Ok(DirectDocumentUploadResponse {
+        path: path.to_string_lossy().to_string(),
+        asset,
+    })
 }
 
 /// Helper function to extract content from a document, potentially using OCR for PDFs.
 /// Returns (final_content, ocr_used)
 pub async fn extract_document_content(
     app: &AppHandle,
-    sidecar: &SidecarManager,
+    _sidecar: &SidecarManager,
     file_path: &str,
     buffer: &[u8],
     hash: &str,
@@ -137,9 +172,8 @@ pub async fn extract_document_content(
         // Small wait for initial render
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-        // Resolve the vision-capable chat endpoint.
-        // Priority: 1) resolve_provider (works for any active backend — cloud, MLX, Ollama, llamacpp)
-        //           2) direct sidecar get_chat_config() as legacy fallback
+        // Resolve the vision-capable chat endpoint through the shared runtime
+        // snapshot/provider path. Do not probe sidecar state directly here.
         let ocr_endpoint: Option<(String, String, String)> = {
             use tauri::Manager;
             let config_mgr = app.state::<crate::config::ConfigManager>();
@@ -158,9 +192,6 @@ pub async fn extract_document_content(
             {
                 let url = format!("{}/chat/completions", provider_cfg.base_url);
                 Some((url, provider_cfg.token, provider_cfg.model_name))
-            } else if let Some((port, token, _, _)) = sidecar.get_chat_config() {
-                let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
-                Some((url, token, "default".to_string()))
             } else {
                 None
             }
@@ -324,7 +355,7 @@ pub async fn direct_rag_ingest_document(
     chat_id: Option<String>,
     project_id: Option<String>,
     embedding_model_path: Option<String>,
-) -> Result<String, String> {
+) -> Result<DirectDocumentIngestResponse, String> {
     println!(
         "[rag] direct_rag_ingest_document: start for {}, chat_id={:?}, project_id={:?}",
         &file_path, chat_id, project_id
@@ -354,15 +385,52 @@ pub async fn direct_rag_ingest_document(
             );
             sqlx::query("UPDATE documents SET path = ?, chat_id = ?, project_id = ?, updated_at = ? WHERE id = ?")
                 .bind(&file_path)
-                .bind(chat_id)
-                .bind(project_id)
+                .bind(&chat_id)
+                .bind(&project_id)
                 .bind(chrono::Utc::now().timestamp())
                 .bind(&id)
                 .execute(pool.inner())
                 .await
                 .map_err(|e| e.to_string())?;
 
-            return Ok(id);
+            let mut metadata = HashMap::new();
+            metadata.insert("hash".to_string(), hash);
+            if let Some(chat_id) = chat_id.as_ref() {
+                metadata.insert("chat_id".to_string(), chat_id.clone());
+            }
+            if let Some(project_id) = project_id.as_ref() {
+                metadata.insert("project_id".to_string(), project_id.clone());
+            }
+            let asset = crate::direct_assets::DirectAssetStore::upsert(
+                pool.inner(),
+                crate::direct_assets::NewDirectAsset {
+                    id: id.clone(),
+                    kind: AssetKind::Document,
+                    origin: AssetOrigin::RagDocument,
+                    path: file_path.clone(),
+                    mime_type: None,
+                    size_bytes: Some(buffer.len() as u64),
+                    sha256: Some(metadata["hash"].clone()),
+                    prompt: None,
+                    provider: None,
+                    style_id: None,
+                    aspect_ratio: None,
+                    resolution: None,
+                    width: None,
+                    height: None,
+                    seed: None,
+                    thumbnail_path: None,
+                    is_favorite: false,
+                    tags: None,
+                    metadata,
+                },
+            )
+            .await?;
+
+            return Ok(DirectDocumentIngestResponse {
+                document_id: id,
+                asset,
+            });
         }
     }
 
@@ -655,7 +723,45 @@ pub async fn direct_rag_ingest_document(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(doc_id)
+    let mut metadata = HashMap::new();
+    metadata.insert("hash".to_string(), hash.clone());
+    metadata.insert("ocr_used".to_string(), ocr_used.to_string());
+    if let Some(chat_id) = chat_id.as_ref() {
+        metadata.insert("chat_id".to_string(), chat_id.clone());
+    }
+    if let Some(project_id) = project_id.as_ref() {
+        metadata.insert("project_id".to_string(), project_id.clone());
+    }
+    let asset = crate::direct_assets::DirectAssetStore::upsert(
+        pool.inner(),
+        crate::direct_assets::NewDirectAsset {
+            id: doc_id.clone(),
+            kind: AssetKind::Document,
+            origin: AssetOrigin::RagDocument,
+            path: file_path,
+            mime_type: None,
+            size_bytes: Some(buffer.len() as u64),
+            sha256: Some(hash),
+            prompt: None,
+            provider: None,
+            style_id: None,
+            aspect_ratio: None,
+            resolution: None,
+            width: None,
+            height: None,
+            seed: None,
+            thumbnail_path: None,
+            is_favorite: false,
+            tags: None,
+            metadata,
+        },
+    )
+    .await?;
+
+    Ok(DirectDocumentIngestResponse {
+        document_id: doc_id,
+        asset,
+    })
 }
 
 #[tauri::command]

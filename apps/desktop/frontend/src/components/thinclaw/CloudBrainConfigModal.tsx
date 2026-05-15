@@ -40,7 +40,6 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
     minimax: 'MiniMax',
     nvidia: 'NVIDIA NIM',
     qianfan: 'Baidu Qianfan',
-    xiaomi: 'Xiaomi',
 };
 
 const PROVIDER_STATUS_KEYS: Record<string, { has: keyof thinclaw.ThinClawStatus; granted: keyof thinclaw.ThinClawStatus }> = {
@@ -58,7 +57,6 @@ const PROVIDER_STATUS_KEYS: Record<string, { has: keyof thinclaw.ThinClawStatus;
     minimax: { has: 'has_minimax_key', granted: 'minimax_granted' },
     nvidia: { has: 'has_nvidia_key', granted: 'nvidia_granted' },
     qianfan: { has: 'has_qianfan_key', granted: 'qianfan_granted' },
-    xiaomi: { has: 'has_xiaomi_key', granted: 'xiaomi_granted' },
 };
 
 function providerCredentialState(status: thinclaw.ThinClawStatus | null, provider: string) {
@@ -303,7 +301,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                         </label>
 
                         <div className="grid grid-cols-1 gap-2">
-	                            {['anthropic', 'openai', 'openrouter', 'groq', 'gemini', 'xai', 'mistral', 'together', 'amazon-bedrock', 'venice', 'moonshot', 'minimax', 'nvidia', 'qianfan', 'xiaomi'].map(provider => {
+	                            {['anthropic', 'openai', 'openrouter', 'groq', 'gemini', 'xai', 'mistral', 'together', 'amazon-bedrock', 'venice', 'moonshot', 'minimax', 'nvidia', 'qianfan'].map(provider => {
 	                                const isEnabled = enabledProviders.includes(provider);
 	                                const providerEnabledModels = enabledModels[provider] || [];
 	                                const providerAllModels = providerModels[provider] || [];

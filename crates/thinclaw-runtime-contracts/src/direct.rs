@@ -1,4 +1,4 @@
-use crate::asset::AssetRef;
+use crate::asset::{AssetRecord, AssetRef};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub struct DirectAttachedDocument {
     pub id: String,
     pub name: String,
+    #[serde(default, alias = "asset_ref")]
+    pub asset_ref: Option<AssetRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -21,11 +23,11 @@ pub struct DirectChatMessage {
     pub images: Option<Vec<String>>,
     #[serde(default)]
     pub assets: Option<Vec<AssetRef>>,
-    #[serde(default)]
+    #[serde(default, alias = "attached_docs")]
     pub attached_docs: Option<Vec<DirectAttachedDocument>>,
-    #[serde(default)]
+    #[serde(default, alias = "is_summary")]
     pub is_summary: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "original_messages")]
     pub original_messages: Option<Vec<DirectChatMessage>>,
 }
 
@@ -37,14 +39,15 @@ pub struct DirectChatPayload {
     pub model: String,
     pub messages: Vec<DirectChatMessage>,
     pub temperature: f32,
+    #[serde(alias = "top_p")]
     pub top_p: f32,
-    #[serde(default)]
+    #[serde(default, alias = "web_search_enabled")]
     pub web_search_enabled: bool,
     #[serde(default)]
     pub auto_mode: bool,
-    #[serde(default)]
+    #[serde(default, alias = "project_id")]
     pub project_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "conversation_id")]
     pub conversation_id: Option<String>,
 }
 
@@ -80,4 +83,41 @@ pub struct DirectConversation {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DirectDocumentUploadResponse {
+    pub path: String,
+    pub asset: AssetRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DirectDocumentIngestResponse {
+    pub document_id: String,
+    pub asset: AssetRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DirectTtsResponse {
+    /// Base64-encoded audio bytes for existing web audio playback flows.
+    pub audio_bytes: String,
+    pub asset: AssetRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DirectSttResponse {
+    pub text: String,
+    pub asset: AssetRecord,
 }

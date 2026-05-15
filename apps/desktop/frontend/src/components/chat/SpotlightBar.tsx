@@ -4,6 +4,7 @@ import { ArrowUp, Command, Copy, Pin, PinOff, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useChat } from '../../hooks/use-chat';
 import { commands } from '../../lib/bindings';
+import { directCommands } from '../../lib/generated/direct-commands';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
@@ -287,7 +288,7 @@ export function SpotlightBar() {
                     if (modelsRes.status === "ok" && modelsRes.data.length > 0) {
                         const localModels = modelsRes.data.filter(m => !m.path.startsWith('http'));
                         const best = localModels.length > 0 ? localModels.sort((a, b) => b.size - a.size)[0] : modelsRes.data[0];
-                        await commands.directRuntimeStartChatServer(best.path, maxContext, null, null, false, false, false);
+                        await directCommands.directRuntimeStartChatServer(best.path, maxContext, null, null, false, false, false);
                     } else {
                         toast.error("No models found. Please download one in settings.");
                         return;
@@ -299,7 +300,7 @@ export function SpotlightBar() {
             } else if (currentModelPath) {
                 toast.info("Waking up LLM...");
                 try {
-                    await commands.directRuntimeStartChatServer(currentModelPath, maxContext, null, null, false, false, false);
+                    await directCommands.directRuntimeStartChatServer(currentModelPath, maxContext, null, null, false, false, false);
                 } catch (e) {
                     toast.error(`Wake failed: ${String(e)}`);
                     return;

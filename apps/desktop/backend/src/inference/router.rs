@@ -67,6 +67,18 @@ impl InferenceRouter {
         }
     }
 
+    fn get_secret(&self, secret_name: &str) -> Option<String> {
+        thinclaw_runtime_contracts::descriptor_for_secret_name(secret_name)
+            .and_then(|descriptor| self.secret_store.get_descriptor_secret(&descriptor))
+            .or_else(|| self.secret_store.get(secret_name))
+    }
+
+    fn has_secret(&self, secret_name: &str) -> bool {
+        thinclaw_runtime_contracts::descriptor_for_secret_name(secret_name)
+            .map(|descriptor| self.secret_store.has_descriptor_secret(&descriptor))
+            .unwrap_or_else(|| self.secret_store.has(secret_name))
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Accessors — return the active backend for each modality
     // ─────────────────────────────────────────────────────────────────────
@@ -237,7 +249,7 @@ impl InferenceRouter {
                 display_name: display_name.to_string(),
                 is_local: false,
                 model_id: None,
-                available: self.secret_store.has(secret_name),
+                available: self.has_secret(secret_name),
             });
         }
 
@@ -274,7 +286,7 @@ impl InferenceRouter {
 
         if chat_id != "local" {
             if let Some(ep) = thinclaw_config::provider_catalog::endpoint_for(chat_id) {
-                if let Some(api_key) = self.secret_store.get(&ep.secret_name) {
+                if let Some(api_key) = self.get_secret(&ep.secret_name) {
                     let model_override = config
                         .inference_models
                         .as_ref()
@@ -310,7 +322,7 @@ impl InferenceRouter {
         tracing::info!("[inference_router] Embedding backend: {}", embed_id);
 
         if embed_id != "local" {
-            if let Some(api_key) = self.secret_store.get(embed_id) {
+            if let Some(api_key) = self.get_secret(embed_id) {
                 let model_override = config
                     .inference_models
                     .as_ref()
@@ -365,7 +377,7 @@ impl InferenceRouter {
         tracing::info!("[inference_router] TTS backend: {}", tts_id);
 
         if tts_id != "local" {
-            if let Some(api_key) = self.secret_store.get(tts_id) {
+            if let Some(api_key) = self.get_secret(tts_id) {
                 let backend: Option<Arc<dyn TtsBackend>> = match tts_id {
                     "openai" => Some(Arc::new(super::tts::cloud_openai::OpenAiTtsBackend::new(
                         api_key,
@@ -395,7 +407,7 @@ impl InferenceRouter {
         tracing::info!("[inference_router] STT backend: {}", stt_id);
 
         if stt_id != "local" {
-            if let Some(api_key) = self.secret_store.get(stt_id) {
+            if let Some(api_key) = self.get_secret(stt_id) {
                 let backend: Option<Arc<dyn SttBackend>> = match stt_id {
                     "openai" => Some(Arc::new(super::stt::cloud_openai::OpenAiSttBackend::new(
                         api_key,
@@ -425,7 +437,7 @@ impl InferenceRouter {
         tracing::info!("[inference_router] Diffusion backend: {}", diffusion_id);
 
         if diffusion_id != "local" {
-            if let Some(api_key) = self.secret_store.get(diffusion_id) {
+            if let Some(api_key) = self.get_secret(diffusion_id) {
                 let model_override = config
                     .inference_models
                     .as_ref()

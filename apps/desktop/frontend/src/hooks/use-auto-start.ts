@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { directCommands } from "../lib/generated/direct-commands";
 import { commands } from "../lib/bindings";
 import { useModelContext } from "../components/model-context";
 import { useConfig } from "./use-config";
@@ -72,7 +73,7 @@ export function useAutoStart() {
                     }
 
                     // Start the engine server (mlx_lm.server / vllm serve / etc.)
-                    const result = await commands.directRuntimeStartEngine(cleanPath, maxContext);
+                    const result = await directCommands.directRuntimeStartEngine(cleanPath, maxContext);
                     if (result.status === "error") {
                         throw new Error(result.error);
                     }
@@ -130,7 +131,7 @@ export function useAutoStart() {
                     return;
                 }
 
-                await commands.directRuntimeGetSidecarStatus();
+                await directCommands.directRuntimeGetSidecarStatus();
                 const modelName = cleanPath.split(/[/\\]/).pop() ?? cleanPath;
                 const toastId = toast.loading(`Waking up ${modelName}...`, {
                     description: `Context: ${maxContext} tokens`
@@ -151,7 +152,7 @@ export function useAutoStart() {
                     }
                 }
 
-                await commands.directRuntimeStartChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
+                await directCommands.directRuntimeStartChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
 
                 // Track successful start
                 lastStartedPath.current = cleanPath;

@@ -15,7 +15,8 @@ pub use asset::{
 };
 pub use direct::{
     DirectAttachedDocument, DirectChatMessage, DirectChatPayload, DirectConversation,
-    DirectStreamChunk, DirectTokenUsage,
+    DirectDocumentIngestResponse, DirectDocumentUploadResponse, DirectStreamChunk,
+    DirectSttResponse, DirectTokenUsage, DirectTtsResponse,
 };
 pub use model::{
     ModelCapabilitySet, ModelCategory, ModelDescriptor, ModelDiscoveryResult, ModelPricing,
@@ -28,5 +29,6 @@ pub use runtime::{
 };
 pub use secret::{
     ProviderCredentialDescriptor, SecretAccessMode, SecretConsumer, SecretDescriptor,
-    canonical_secret_name, legacy_secret_aliases,
+    canonical_secret_name, descriptor_for_secret_name, legacy_secret_aliases,
+    platform_secret_descriptors, provider_credential_descriptors, provider_secret_descriptors,
 };

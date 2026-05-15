@@ -18,13 +18,7 @@ export interface ProviderEndpoint {
   notes?: string | null;
 }
 
-export type SecretConsumer =
-  | "direct_workbench"
-  | "thin_claw_agent"
-  | "gateway_proxy"
-  | "extension"
-  | "system";
-
+export type SecretConsumer = "direct_workbench" | "thin_claw_agent" | "gateway_proxy" | "extension" | "system";
 export type SecretAccessMode = "status" | "explicit_use" | "runtime_injection";
 
 export interface SecretDescriptor {
@@ -104,15 +98,22 @@ export interface ModelDescriptor {
   metadata: Record<string, string>;
 }
 
+export interface ProviderDiscoveryResult {
+  provider: string;
+  providerName: string;
+  models: ModelDescriptor[];
+  error?: string | null;
+  fetchedAt: string;
+}
+
+export interface ModelDiscoveryResult {
+  providers: ProviderDiscoveryResult[];
+  fallbackUsed: boolean;
+}
+
 export type AssetNamespace = "direct_workbench" | "thin_claw_agent";
 export type AssetKind = "image" | "audio" | "video" | "document" | "generated_image" | "other";
-export type AssetOrigin =
-  | "upload"
-  | "generated"
-  | "downloaded_model_output"
-  | "voice_input"
-  | "voice_output"
-  | "rag_document";
+export type AssetOrigin = "upload" | "generated" | "downloaded_model_output" | "voice_input" | "voice_output" | "rag_document";
 export type AssetStatus = "ready" | "pending" | "deleted" | "error";
 export type AssetVisibility = "private" | "shared_by_explicit_handoff";
 
@@ -143,6 +144,7 @@ export interface AssetRecord {
 export interface DirectAttachedDocument {
   id: string;
   name: string;
+  assetRef?: AssetRef | null;
 }
 
 export interface DirectChatMessage {
@@ -160,8 +162,8 @@ export interface DirectChatPayload {
   messages: DirectChatMessage[];
   temperature: number;
   topP: number;
-  webSearchEnabled: boolean;
-  autoMode: boolean;
+  webSearchEnabled?: boolean;
+  autoMode?: boolean;
   projectId?: string | null;
   conversationId?: string | null;
 }
@@ -184,4 +186,24 @@ export interface DirectConversation {
   title: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface DirectDocumentUploadResponse {
+  path: string;
+  asset: AssetRecord;
+}
+
+export interface DirectDocumentIngestResponse {
+  documentId: string;
+  asset: AssetRecord;
+}
+
+export interface DirectTtsResponse {
+  audioBytes: string;
+  asset: AssetRecord;
+}
+
+export interface DirectSttResponse {
+  text: string;
+  asset: AssetRecord;
 }

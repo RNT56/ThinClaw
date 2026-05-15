@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useConfig } from '../../hooks/use-config';
-import { KnowledgeBit, commands } from '../../lib/bindings';
+import { KnowledgeBit } from '../../lib/bindings';
+import { directCommands } from '../../lib/generated/direct-commands';
 import { Plus, Trash2, Edit2, Lock, Save } from 'lucide-react';
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from '../../lib/utils';
@@ -243,7 +244,7 @@ export function PersonalizationTab() {
                                     setDeleteConfirmOpen(false);
                                     const tId = toast.loading("Executing data wipe...");
                                     try {
-                                        const res = await commands.directHistoryDeleteAllHistory();
+                                        const res = await directCommands.directHistoryDeleteAllHistory();
                                         if (res.status === "error") {
                                             toast.error("Wipe failed", { id: tId, description: res.error });
                                             return;

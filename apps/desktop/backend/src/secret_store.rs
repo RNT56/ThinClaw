@@ -38,6 +38,7 @@
 //! generating engine config.  Everyone else reads from it directly.
 
 use crate::thinclaw::config::keychain;
+use thinclaw_runtime_contracts::SecretDescriptor;
 
 /// Application-wide API key / secret store.
 ///
@@ -75,9 +76,24 @@ impl SecretStore {
         keychain::get_key(key)
     }
 
+    pub fn get_descriptor_secret(&self, descriptor: &SecretDescriptor) -> Option<String> {
+        keychain::get_key(&descriptor.canonical_name).or_else(|| {
+            descriptor
+                .legacy_aliases
+                .iter()
+                .find_map(|alias| keychain::get_key(alias))
+        })
+    }
+
     /// Check if a key exists and is non-empty.
     pub fn has(&self, key: &str) -> bool {
         keychain::get_key(key)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn has_descriptor_secret(&self, descriptor: &SecretDescriptor) -> bool {
+        self.get_descriptor_secret(descriptor)
             .map(|v| !v.is_empty())
             .unwrap_or(false)
     }
@@ -90,6 +106,14 @@ impl SecretStore {
     /// Pass `None` or empty string to delete.
     pub fn set(&self, key: &str, value: Option<&str>) -> Result<(), String> {
         keychain::set_key(key, value)
+    }
+
+    pub fn set_descriptor_secret(
+        &self,
+        descriptor: &SecretDescriptor,
+        value: Option<&str>,
+    ) -> Result<(), String> {
+        keychain::set_key(&descriptor.canonical_name, value)
     }
 
     // ─────────────────────────────────────────────────────────────────────

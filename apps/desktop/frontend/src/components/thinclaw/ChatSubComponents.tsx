@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { RefreshCw, AlertTriangle, Brain, Terminal, Loader2, CheckCircle2, XCircle, Layers, ChevronRight, ChevronDown, ExternalLink, Copy, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { ThinClawMessage } from '../../lib/thinclaw';
-import { commands } from '../../lib/bindings';
+import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -414,7 +414,7 @@ export function SystemMessageContent({ text, metadata, onViewSession }: { text: 
                 <button
                     onClick={() => {
                         // IC-009: Use typed Specta binding instead of raw __tauri__ invoke
-                        commands.thinclawRevealFile(metadata.absolute_path).catch(() => { });
+                        thinclawCommands.thinclawRevealFile(metadata.absolute_path).catch(() => { });
                     }}
                     title="Reveal in Finder"
                     className="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 transition-all border border-emerald-500/20 shrink-0"

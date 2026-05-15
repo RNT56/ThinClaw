@@ -2,7 +2,8 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
 import { Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { commands, Message, StreamChunk, WebSearchResult, TokenUsage } from "../../lib/bindings";
+import { Message, StreamChunk, WebSearchResult, TokenUsage, AssetRef } from "../../lib/bindings";
+import { directCommands } from "../../lib/generated/direct-commands";
 import { toast } from "sonner";
 
 interface ChatJob {
@@ -29,7 +30,7 @@ interface ChatContextType {
     startGeneration: (params: {
         content: string;
         images: string[];
-        attachedDocs: { id: string, name: string }[];
+        attachedDocs: { id: string, name: string, assetRef?: AssetRef | null, asset_ref?: AssetRef | null }[];
         webSearchEnabled: boolean;
         projectId: string | null;
         conversationId: string | null;
@@ -41,6 +42,19 @@ interface ChatContextType {
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
+
+const directAssetRef = (id: string): AssetRef => ({ namespace: "direct_workbench", id });
+
+const messageAssets = (
+    images: string[] | null | undefined,
+    docs: Array<{ id: string; assetRef?: AssetRef | null; asset_ref?: AssetRef | null }> | null | undefined,
+): AssetRef[] | null => {
+    const refs = [
+        ...(images ?? []).map(directAssetRef),
+        ...(docs ?? []).map(doc => doc.assetRef ?? doc.asset_ref ?? directAssetRef(doc.id)),
+    ];
+    return refs.length > 0 ? refs : null;
+};
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
     const [activeJobs, setActiveJobs] = useState<Record<string, ChatJob>>({});
@@ -72,7 +86,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // 1. Ensure Conversation exists (AWAITED so we can return ID)
         if (!conversationId) {
             const title = content.length > 30 ? content.substring(0, 30) + "..." : (content || "Image Upload");
-            const result = await commands.directHistoryCreateConversation(title, projectId);
+            const result = await directCommands.directHistoryCreateConversation(title, projectId);
             if (result.status === "error") throw new Error(result.error);
             conversationId = result.data.id;
         }
@@ -91,16 +105,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
                 // Save User Message
                 const storageDocs = attachedDocs;
-                const resSave = await commands.directHistorySaveMessage(id, "user", content, images.length > 0 ? images : null, storageDocs.length > 0 ? storageDocs : null, null);
+                const assets = messageAssets(images, storageDocs);
+                const resSave = await directCommands.directHistorySaveMessage(id, "user", content, images.length > 0 ? images : null, assets, storageDocs.length > 0 ? storageDocs : null, null);
                 if (resSave.status === "error") throw new Error(resSave.error || "Could not save user message");
 
-                let finalMessages = [...history, { role: "user", content, images: images.length > 0 ? images : null, attached_docs: storageDocs.length > 0 ? storageDocs : null }];
+                let finalMessages = [...history, { role: "user", content, images: images.length > 0 ? images : null, assets, attached_docs: storageDocs.length > 0 ? storageDocs : null }];
 
                 // RAG / Enrichment
                 if ((content.trim().length > 3 || attachedDocs.length > 0) && currentEmbeddingModelPath) {
                     updateJob(id, { isThinking: true });
                     try {
-                        const hitsRes = await commands.directRagRetrieveContext(content, id, attachedDocs.map((d: any) => d.id), projectId);
+                        const hitsRes = await directCommands.directRagRetrieveContext(content, id, attachedDocs.map((d: any) => d.id), projectId);
                         if (hitsRes.status === "ok" && hitsRes.data.length > 0) {
                             finalMessages = [
                                 ...history,
@@ -108,6 +123,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                                     role: "user",
                                     content: `Context:\n${hitsRes.data.join("\n---\n")}\n\nQuestion: ${content}`,
                                     images,
+                                    assets,
                                     attached_docs: storageDocs.length > 0 ? storageDocs : null
                                 }
                             ];
@@ -208,7 +224,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         // rather than `activeJobsRef` which may lag by a render cycle.
                         const currentSearchResults = activeJobsRef.current[id]?.searchResults ?? null;
                         if (fullText) {
-                            commands.directHistorySaveMessage(id, "assistant", fullText, null, null, currentSearchResults)
+                            directCommands.directHistorySaveMessage(id, "assistant", fullText, null, null, null, currentSearchResults)
                                 .then((res) => {
                                     // Store the real message ID so useChat can update in-place
                                     if (res.status === 'ok') {
@@ -254,15 +270,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     scheduleFlush();
                 };
 
-                await commands.directChatStream({
+                await directCommands.directChatStream({
                     model: "default",
-                    messages: finalMessages,
+                    messages: finalMessages as any,
                     temperature: 0.7,
-                    top_p: 1.0,
-                    web_search_enabled: webSearchEnabled,
-                    auto_mode: autoMode,
-                    project_id: projectId || null,
-                    conversation_id: id || null,
+                    topP: 1.0,
+                    webSearchEnabled,
+                    autoMode: autoMode,
+                    projectId: projectId || null,
+                    conversationId: id || null,
                 }, onEvent);
 
             } catch (e: any) {
@@ -281,7 +297,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
     const directRuntimeCancelGeneration = useCallback(async (id: string) => {
         try {
-            await commands.directRuntimeCancelGeneration();
+            await directCommands.directRuntimeCancelGeneration();
             removeJob(id);
         } catch (e) {
             console.error("Cancel failed", e);

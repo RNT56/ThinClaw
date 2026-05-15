@@ -247,6 +247,10 @@ fn direct_chat_contract_snapshot_is_stable() {
             attached_docs: Some(vec![DirectAttachedDocument {
                 id: "doc-1".into(),
                 name: "notes.md".into(),
+                asset_ref: Some(AssetRef {
+                    namespace: AssetNamespace::DirectWorkbench,
+                    id: "doc-1".into(),
+                }),
             }]),
             is_summary: Some(false),
             original_messages: None,
@@ -268,7 +272,11 @@ fn direct_chat_contract_snapshot_is_stable() {
                 "content": "hello",
                 "images": null,
                 "assets": [{ "namespace": "direct_workbench", "id": "asset-1" }],
-                "attachedDocs": [{ "id": "doc-1", "name": "notes.md" }],
+                "attachedDocs": [{
+                    "id": "doc-1",
+                    "name": "notes.md",
+                    "assetRef": { "namespace": "direct_workbench", "id": "doc-1" }
+                }],
                 "isSummary": false,
                 "originalMessages": null
             }],

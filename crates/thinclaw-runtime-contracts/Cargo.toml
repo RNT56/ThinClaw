@@ -16,3 +16,7 @@ specta = { version = "2.0.0-rc", features = ["derive", "serde", "serde_json", "c
 default = []
 schema = ["dep:schemars"]
 specta = ["dep:specta"]
+
+[[example]]
+name = "export_contracts"
+required-features = ["schema"]

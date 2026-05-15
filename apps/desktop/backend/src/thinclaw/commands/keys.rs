@@ -562,7 +562,7 @@ pub async fn thinclaw_set_hf_token(
 
 /// Save an implicit cloud provider API key (generic)
 /// Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral,
-/// xiaomi, cohere, voyage, deepgram, elevenlabs, stability, fal.
+/// cohere, voyage, deepgram, elevenlabs, stability, fal.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_save_implicit_provider_key(
@@ -580,7 +580,6 @@ pub async fn thinclaw_save_implicit_provider_key(
         "nvidia",
         "qianfan",
         "mistral",
-        "xiaomi",
         "cohere",
         "voyage",
         "deepgram",

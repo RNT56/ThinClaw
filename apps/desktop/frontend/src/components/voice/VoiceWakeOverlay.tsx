@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Mic, MicOff, Volume2, Loader2, Waves } from 'lucide-react';
 import { useVoiceWake } from '../../hooks/use-voice-wake';
 import { useAudioRecorder } from '../../hooks/use-audio-recorder';
-import { commands } from '../../lib/bindings';
+import { directCommands } from '../../lib/generated/direct-commands';
 import { toast } from 'sonner';
 
 type VoiceState = 'idle' | 'listening' | 'recording' | 'transcribing';
@@ -39,12 +39,12 @@ export function VoiceWakeOverlay() {
             const arrayBuffer = await blob.arrayBuffer();
             const audioBytes = Array.from(new Uint8Array(arrayBuffer));
 
-            const res = await commands.directMediaTranscribeAudio(audioBytes);
+            const res = await directCommands.directMediaTranscribeAudio(audioBytes);
 
             if (res.status === 'error') {
                 toast.error('Transcription failed', { description: res.error });
-            } else if (res.status === 'ok' && res.data.trim()) {
-                const text = res.data.trim();
+            } else if (res.status === 'ok' && res.data.text.trim()) {
+                const text = res.data.text.trim();
                 // Dispatch custom event for ChatProvider to pick up
                 window.dispatchEvent(
                     new CustomEvent('voice-wake-transcription', { detail: text.trim() })

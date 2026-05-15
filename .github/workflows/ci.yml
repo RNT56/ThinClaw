@@ -144,6 +144,16 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+      - name: Runtime contracts tests
+        run: cargo test -p thinclaw-runtime-contracts
+      - name: Provider catalog tests
+        run: cargo test -p thinclaw-config provider_catalog
+      - name: Contract drift check
+        working-directory: apps/desktop
+        run: npm run contracts:check
+      - name: Naming boundary check
+        working-directory: apps/desktop
+        run: npm run validate:naming
       - name: TypeScript check
         working-directory: apps/desktop
         run: npm run lint:ts
@@ -158,6 +168,13 @@ jobs:
       - name: Backend tests
         working-directory: apps/desktop
         run: npm run test:backend
+      - name: Swift DTO typecheck
+        run: |
+          if command -v swiftc >/dev/null 2>&1; then
+            swiftc -typecheck clients/swift/ThinClawRuntimeContracts/Sources/ThinClawRuntimeContracts/RuntimeContracts.swift
+          else
+            echo "swiftc not available; skipping Swift DTO typecheck"
+          fi
       - name: Tauri metadata smoke
         working-directory: apps/desktop
         run: npx tauri info

@@ -70,6 +70,7 @@ fn toggle_spotlight(app: tauri::AppHandle) {
 pub mod chat;
 pub mod cloud;
 pub mod config;
+pub mod direct_assets;
 pub mod engine;
 pub mod file_store;
 pub mod gguf;
@@ -106,7 +107,7 @@ use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(debug_assertions)]
-fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
+pub fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
     let mut source = std::fs::read_to_string(path)?;
     let original = source.clone();
 
@@ -144,6 +145,38 @@ fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
                 source.push('\n');
             }
         }
+    }
+
+    if source.contains("export type DirectChatMessage")
+        && !source.contains("export type Message =")
+    {
+        source.push_str(
+            r#"
+
+// Compatibility aliases for existing Desktop UI code. DirectChat* is the
+// canonical contract surface; these aliases keep older snake_case UI state
+// readable while call sites migrate to the shared DTO names.
+export type AttachedDoc = DirectAttachedDocument & { asset_ref?: AssetRef | null }
+export type Message = {
+  role: string;
+  content: string;
+  images?: string[] | null;
+  assets?: AssetRef[] | null;
+  attached_docs?: AttachedDoc[] | null;
+  attachedDocs?: DirectAttachedDocument[] | null;
+  is_summary?: boolean | null;
+  isSummary?: boolean | null;
+  original_messages?: Message[] | null;
+  originalMessages?: DirectChatMessage[] | null;
+}
+export type ChatPayload = DirectChatPayload
+export type TokenUsage = DirectTokenUsage & {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+"#,
+        );
     }
 
     let mut lines = source.lines().map(str::trim_end).collect::<Vec<_>>();

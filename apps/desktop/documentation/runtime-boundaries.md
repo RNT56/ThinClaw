@@ -36,7 +36,7 @@ Primary backend ownership:
 
 Runtime model:
 
-- Chat is initiated through Tauri commands such as `chat_stream`.
+- Chat is initiated through Tauri commands such as `direct_chat_stream`.
 - Local inference is provided by one compile-time engine family:
   `llamacpp`, `mlx`, `vllm`, `ollama`, or no local engine for cloud-only builds.
 - Engines expose OpenAI-compatible HTTP endpoints to the desktop backend.
@@ -50,7 +50,11 @@ Persistence:
 - Uses the Desktop SQLite schema in `backend/migrations`.
 - Stores local app conversations in `conversations` and `messages`.
 - Stores uploaded/indexed documents in `documents` and `chunks`.
-- Stores generated image metadata in `generated_images`.
+- Stores uploaded images, generated images, RAG documents, TTS output, and STT
+  input in `direct_assets` through `DirectAssetStore`.
+- `messages.assets` is the canonical `AssetRef[]` attachment field. Legacy
+  `messages.images`, `messages.attached_docs`, and `generated_images` stay
+  migration-readable only.
 - This history is Direct AI Workbench history, not ThinClaw agent memory.
 
 Security boundary:
@@ -121,7 +125,8 @@ These pieces may be shared, but only through explicit adapters:
 | Keychain / `SecretStore` | Stores provider credentials. Agent access still requires ThinClaw grants. |
 | Local inference engines | May serve direct chat and may be exposed to ThinClaw only through explicit provider config or local-LLM sync commands. |
 | Cloud provider catalog | May provide model discovery to both systems if the contract is provider/model metadata only. |
-| Generated bindings | May include both command families, but names and ownership must stay clear. |
+| Runtime contracts | `crates/thinclaw-runtime-contracts` is the Desktop-first DTO source for future WebUI/iOS adoption. |
+| Generated bindings | Direct Workbench uses `direct_*` command wrappers. Agent Cockpit uses `thinclaw_*` wrappers and `thinclaw-event`. |
 | OS permissions | Camera, mic, screen, filesystem, and accessibility prompts may be shared at the host level, but authority must be checked per system. |
 
 The shared pieces are platform services. They are not proof that Direct AI
@@ -134,7 +139,7 @@ These must stay distinct unless a written migration changes them:
 | State | Direct AI Workbench | ThinClaw Agent Cockpit |
 | --- | --- | --- |
 | Chat history | Desktop SQLite `conversations` / `messages` | ThinClaw runtime conversations / threads |
-| Long-term memory | Project/RAG documents and chunks | ThinClaw memory/workspace documents |
+| Long-term memory | Project/RAG documents, chunks, and `direct_assets` | ThinClaw memory/workspace documents |
 | Tool permissions | Direct feature toggles for RAG/search/media | ThinClaw policy, grants, and approvals |
 | Personas | Desktop personas for direct chat | ThinClaw identity/workspace markdown and runtime persona |
 | Routines/jobs | Not owned by direct chat | ThinClaw routines, jobs, learning, autonomy |
@@ -156,7 +161,7 @@ Correct comparison:
 
 Incorrect comparison:
 
-- WebUI agent chat vs Desktop direct `chat_stream`
+- WebUI agent chat vs Desktop direct `direct_chat_stream`
 - WebUI memory vs Desktop RAG documents
 - WebUI image/canvas/agent tools vs Imagine Studio image gallery
 - WebUI provider routing vs Direct AI Workbench model selection

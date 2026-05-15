@@ -41,7 +41,7 @@ export interface ImagineStats {
 /**
  * Generate an image using the Imagine mode
  */
-export async function imagineGenerate(params: ImagineParams): Promise<GeneratedImage> {
+export async function directImagineGenerate(params: ImagineParams): Promise<GeneratedImage> {
     return invoke<GeneratedImage>('direct_imagine_generate', {
         params: {
             prompt: params.prompt,

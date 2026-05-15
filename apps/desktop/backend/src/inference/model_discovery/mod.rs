@@ -211,7 +211,8 @@ impl CloudModelRegistry {
             .iter()
             .filter(|p| {
                 // Static providers are always available
-                matches!(*p, &"deepgram" | &"voyage" | &"fal") || self.secret_store.get(p).is_some()
+                matches!(*p, &"deepgram" | &"voyage" | &"fal")
+                    || descriptor_secret(&self.secret_store, p).is_some()
             })
             .map(|s| s.to_string())
             .collect()
@@ -223,7 +224,7 @@ async fn discover_for_provider(
     provider: &str,
     secret_store: &SecretStore,
 ) -> ProviderDiscoveryResult {
-    let api_key = secret_store.get(provider);
+    let api_key = descriptor_secret(secret_store, provider);
 
     let result = match provider {
         "openai" => {
@@ -325,4 +326,10 @@ async fn discover_for_provider(
             }
         }
     }
+}
+
+fn descriptor_secret(secret_store: &SecretStore, name: &str) -> Option<String> {
+    thinclaw_runtime_contracts::descriptor_for_secret_name(name)
+        .and_then(|descriptor| secret_store.get_descriptor_secret(&descriptor))
+        .or_else(|| secret_store.get(name))
 }

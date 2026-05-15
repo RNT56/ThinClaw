@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
 import { commands, SidecarStatus } from '../../lib/bindings';
+import { directCommands } from '../../lib/generated/direct-commands';
 import { toast } from 'sonner';
 import { cn, unwrap } from '../../lib/utils';
 import { useModelContext } from '../model-context';
@@ -22,7 +23,7 @@ export function TroubleshootingSettings() {
 
     const checkStatus = async () => {
         try {
-            const s = await commands.directRuntimeGetSidecarStatus();
+            const s = await directCommands.directRuntimeGetSidecarStatus();
             setStatus(s);
             const cs = await thinclaw.getThinClawStatus();
             setClawStatus(cs);
@@ -93,7 +94,7 @@ export function TroubleshootingSettings() {
                             <FolderOpen className="w-4 h-4 mr-2 text-primary" /> Open Models Folder
                         </button>
                         <button
-                            onClick={async () => unwrap(await commands.directAssetsOpenImagesFolder())}
+                            onClick={async () => unwrap(await directCommands.directAssetsOpenImagesFolder())}
                             className="w-full bg-background border border-border/50 hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-sm"
                         >
                             <ImageIcon className="w-4 h-4 mr-2 text-pink-500" /> Open Generated Images

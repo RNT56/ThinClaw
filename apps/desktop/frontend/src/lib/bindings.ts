@@ -8,7 +8,7 @@ export const commands = {
 async greet(name: string) : Promise<string> {
     return await TAURI_INVOKE("greet", { name });
 },
-async directChatStream(payload: ChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Promise<Result<null, string>> {
+async directChatStream(payload: DirectChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_chat_stream", { payload, onEvent }) };
 } catch (e) {
@@ -16,7 +16,7 @@ async directChatStream(payload: ChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>
     else return { status: "error", error: e  as any };
 }
 },
-async directChatCompletion(payload: ChatPayload) : Promise<Result<string, string>> {
+async directChatCompletion(payload: DirectChatPayload) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_chat_completion", { payload }) };
 } catch (e) {
@@ -24,7 +24,7 @@ async directChatCompletion(payload: ChatPayload) : Promise<Result<string, string
     else return { status: "error", error: e  as any };
 }
 },
-async directChatCountTokens(conversationId: string) : Promise<Result<TokenUsage, string>> {
+async directChatCountTokens(conversationId: string) : Promise<Result<DirectTokenUsage, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_chat_count_tokens", { conversationId }) };
 } catch (e) {
@@ -114,7 +114,7 @@ async directRuntimeCancelGeneration() : Promise<Result<null, string>> {
  * The `model_path` is only used for the local Piper backend — it should point
  * to the `.onnx` file (Piper locates the companion `.onnx.json` automatically).
  */
-async directMediaTtsSynthesize(text: string, modelPath: string | null) : Promise<Result<string, string>> {
+async directMediaTtsSynthesize(text: string, modelPath: string | null) : Promise<Result<DirectTtsResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_tts_synthesize", { text, modelPath }) };
 } catch (e) {
@@ -137,7 +137,7 @@ async directMediaTtsListVoices() : Promise<Result<VoiceInfo[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<string, string>> {
+async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<DirectSttResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_transcribe_audio", { audioBytes }) };
 } catch (e) {
@@ -161,7 +161,7 @@ async directMediaGenerateImage(params: ImageGenParams) : Promise<Result<ImageRes
     else return { status: "error", error: e  as any };
 }
 },
-async directRagIngestDocument(filePath: string, chatId: string | null, projectId: string | null, embeddingModelPath: string | null) : Promise<Result<string, string>> {
+async directRagIngestDocument(filePath: string, chatId: string | null, projectId: string | null, embeddingModelPath: string | null) : Promise<Result<DirectDocumentIngestResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_rag_ingest_document", { filePath, chatId, projectId, embeddingModelPath }) };
 } catch (e) {
@@ -169,7 +169,7 @@ async directRagIngestDocument(filePath: string, chatId: string | null, projectId
     else return { status: "error", error: e  as any };
 }
 },
-async directRagUploadDocument(fileBytes: number[], filename: string) : Promise<Result<string, string>> {
+async directRagUploadDocument(fileBytes: number[], filename: string) : Promise<Result<DirectDocumentUploadResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_rag_upload_document", { fileBytes, filename }) };
 } catch (e) {
@@ -324,9 +324,9 @@ async directHistoryGetMessages(conversationId: string, limit: number | null, bef
     else return { status: "error", error: e  as any };
 }
 },
-async directHistorySaveMessage(conversationId: string, role: string, content: string, images: string[] | null, attachedDocs: AttachedDoc[] | null, webSearchResults: WebSearchResult[] | null) : Promise<Result<string, string>> {
+async directHistorySaveMessage(conversationId: string, role: string, content: string, images: string[] | null, assets: AssetRef[] | null, attachedDocs: DirectAttachedDocument[] | null, webSearchResults: WebSearchResult[] | null) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("direct_history_save_message", { conversationId, role, content, images, attachedDocs, webSearchResults }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_history_save_message", { conversationId, role, content, images, assets, attachedDocs, webSearchResults }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1704,7 +1704,7 @@ async thinclawSetHfToken(token: string) : Promise<Result<null, string>> {
 /**
  * Save an implicit cloud provider API key (generic)
  * Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral,
- * xiaomi, cohere, voyage, deepgram, elevenlabs, stability, fal.
+ * cohere, voyage, deepgram, elevenlabs, stability, fal.
  */
 async thinclawSaveImplicitProviderKey(provider: string, key: string) : Promise<Result<null, string>> {
     try {
@@ -3257,7 +3257,13 @@ async thinclawRevealFile(path: string) : Promise<Result<null, string>> {
 
 export type AgentProfile = { id: string; name: string; url: string; token: string | null; mode: string; auto_connect?: boolean }
 export type AgentStatusSummary = { id: string; name: string; url: string; online: boolean; latency_ms: number | null; version: string | null; stats: JsonValue | null; current_task: string | null; progress: number | null; logs: string[] | null; parent_id: string | null; children_ids: string[] | null; active_session_id: string | null; active: boolean; capabilities: string[] | null; run_status: string | null; model: string | null }
-export type AttachedDoc = { id: string; name: string }
+export type AssetKind = "image" | "audio" | "video" | "document" | "generated_image" | "other"
+export type AssetNamespace = "direct_workbench" | "thin_claw_agent"
+export type AssetOrigin = "upload" | "generated" | "downloaded_model_output" | "voice_input" | "voice_output" | "rag_document"
+export type AssetRecord = { reference: AssetRef; kind: AssetKind; origin: AssetOrigin; status: AssetStatus; visibility: AssetVisibility; path: string; mimeType?: string | null; sizeBytes?: number | null; sha256?: string | null; prompt?: string | null; provider?: string | null; width?: number | null; height?: number | null; metadata?: { [key in string]: string }; createdAt: string; updatedAt: string }
+export type AssetRef = { namespace: AssetNamespace; id: string }
+export type AssetStatus = "ready" | "pending" | "deleted" | "error"
+export type AssetVisibility = "private" | "shared_by_explicit_handoff"
 /**
  * Information about an active or available inference backend.
  */
@@ -3290,7 +3296,6 @@ export type CacheStats = { hits: number; misses: number; evictions: number; size
  * Per-channel status entry with live state
  */
 export type ChannelStatusEntry = { id: string; name: string; type: string; state: string; enabled: boolean; uptime_secs: number | null; messages_sent: number; messages_received: number; last_error: string | null; stream_mode: string }
-export type ChatPayload = { model: string; messages: Message[]; temperature: number; top_p: number; web_search_enabled?: boolean; auto_mode?: boolean; project_id: string | null; conversation_id: string | null }
 export type ChatServerConfig = { port: number; token: string; context_size: number; model_family: string }
 /**
  * Information about a child session spawned by a parent session.
@@ -3348,6 +3353,18 @@ export type DiagnosticCheck = { name: string; status: string; detail: string }
  * Full diagnostics response
  */
 export type DiagnosticsResponse = { checks: DiagnosticCheck[]; passed: number; failed: number; skipped: number }
+export type DirectAttachedDocument = { id: string; name: string; assetRef?: AssetRef | null }
+export type DirectChatMessage = { role: string; content: string; images?: string[] | null; assets?: AssetRef[] | null; attachedDocs?: DirectAttachedDocument[] | null; isSummary?: boolean | null; originalMessages?: DirectChatMessage[] | null }
+export type DirectChatPayload = { model: string; messages: DirectChatMessage[]; temperature: number; topP: number; webSearchEnabled?: boolean; autoMode?: boolean; projectId?: string | null; conversationId?: string | null }
+export type DirectDocumentIngestResponse = { documentId: string; asset: AssetRecord }
+export type DirectDocumentUploadResponse = { path: string; asset: AssetRecord }
+export type DirectSttResponse = { text: string; asset: AssetRecord }
+export type DirectTokenUsage = { promptTokens: number; completionTokens: number; totalTokens: number }
+export type DirectTtsResponse = {
+/**
+ * Base64-encoded audio bytes for existing web audio playback flows.
+ */
+audioBytes: string; asset: AssetRecord }
 export type Document = { id: string; path: string; status: string; created_at: number; updated_at: number; project_id: string | null }
 /**
  * Information about the active inference engine, exposed to the frontend.
@@ -3413,7 +3430,7 @@ export type ExtensionInfoItem = { name: string; kind: string; description: strin
  * Extensions list response
  */
 export type ExtensionsListResponse = { extensions: ExtensionInfoItem[]; total: number }
-export type FrontendMessage = { id: string; conversation_id: string; role: string; content: string; images: string[] | null; attached_docs: AttachedDoc[] | null; web_search_results: WebSearchResult[] | null; created_at: number }
+export type FrontendMessage = { id: string; conversation_id: string; role: string; content: string; images: string[] | null; assets: AssetRef[] | null; attached_docs: DirectAttachedDocument[] | null; web_search_results: WebSearchResult[] | null; created_at: number }
 export type GGUFMetadata = { architecture: string; context_length: number; embedding_length: number; block_count: number; head_count: number; head_count_kv: number; file_type: number;
 /**
  * Raw chat template string from tokenizer.chat_template (Jinja2)
@@ -3515,7 +3532,6 @@ snippet: string;
  * Relevance score (0.0 - 1.0)
  */
 score: number }
-export type Message = { role: string; content: string; images: string[] | null; attached_docs: AttachedDoc[] | null; is_summary: boolean | null; original_messages: Message[] | null }
 /**
  * Which AI modality a backend serves.
  */
@@ -3692,7 +3708,7 @@ export type StandardAsset = { name: string; category: string; filename: string; 
  * A storage category for the breakdown UI.
  */
 export type StorageCategory = { id: string; label: string; size_bytes: number }
-export type StreamChunk = { content: string; done: boolean; usage: TokenUsage | null; context_update: Message[] | null }
+export type StreamChunk = { content: string; done: boolean; usage: DirectTokenUsage | null; context_update: DirectChatMessage[] | null }
 export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string; app_memory: number; memory_bandwidth_gbps: number }
 export type TAURI_CHANNEL<TSend> = import("@tauri-apps/api/core").Channel<TSend>
 /**
@@ -3739,7 +3755,6 @@ bootstrap_completed: boolean; custom_llm_url: string | null; custom_llm_key: str
  * Thinking mode configuration
  */
 export type ThinkingConfig = { enabled: boolean; budget_tokens: number | null }
-export type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
 /**
  * Info about a registered tool
  */
@@ -3993,3 +4008,28 @@ import { invoke as TAURI_INVOKE } from "@tauri-apps/api/core";
 export type Result<T, E> =
 	| { status: "ok"; data: T }
 	| { status: "error"; error: E };
+
+
+
+// Compatibility aliases for existing Desktop UI code. DirectChat* is the
+// canonical contract surface; these aliases keep older snake_case UI state
+// readable while call sites migrate to the shared DTO names.
+export type AttachedDoc = DirectAttachedDocument & { asset_ref?: AssetRef | null }
+export type Message = {
+  role: string;
+  content: string;
+  images?: string[] | null;
+  assets?: AssetRef[] | null;
+  attached_docs?: AttachedDoc[] | null;
+  attachedDocs?: DirectAttachedDocument[] | null;
+  is_summary?: boolean | null;
+  isSummary?: boolean | null;
+  original_messages?: Message[] | null;
+  originalMessages?: DirectChatMessage[] | null;
+}
+export type ChatPayload = DirectChatPayload
+export type TokenUsage = DirectTokenUsage & {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}

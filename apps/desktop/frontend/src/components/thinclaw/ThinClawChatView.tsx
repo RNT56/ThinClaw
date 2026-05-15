@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronDown, Brain, Loader2, Zap, Trash2, Download, Sliders, FileDown, PanelRight, ListChecks, CircleDollarSign, Cpu, ShieldCheck } from 'lucide-react';
-import { commands } from '../../lib/bindings';
+import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import * as thinclaw from '../../lib/thinclaw';
@@ -298,7 +298,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                 ].join('\n');
             }
 
-            await commands.thinclawSendMessage(effectiveSessionKey, contextMsg, true);
+            await thinclawCommands.thinclawSendMessage(effectiveSessionKey, contextMsg, true);
         } catch (e) {
             console.error(e);
             setIsSending(false);
@@ -369,7 +369,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             }
             if (uiEvent.kind === 'BootstrapCompleted') {
                 // Agent deleted BOOTSTRAP.md — mark done in identity.json and refresh parent.
-                commands.thinclawSetBootstrapCompleted(true).catch(() => { });
+                thinclawCommands.thinclawSetBootstrapCompleted(true).catch(() => { });
                 onBootstrapComplete?.();
                 toast.success('Identity ritual complete — agent is fully initialized! 🎉', { duration: 6000 });
                 return;
@@ -385,7 +385,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                         label: 'Reveal',
                         onClick: () => {
                             // IC-009: Use typed Specta binding
-                            commands.thinclawRevealFile(path).catch(() => { });
+                            thinclawCommands.thinclawRevealFile(path).catch(() => { });
                         },
                     },
                 });

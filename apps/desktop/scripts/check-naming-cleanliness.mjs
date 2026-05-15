@@ -120,6 +120,10 @@ function scanBoundary(roots, rules) {
 
 scanBoundary(directWorkbenchRoots, [
   {
+    pattern: /\bcommands\.direct(?:Chat|History|Runtime|Rag|Assets|Media|Imagine|Inference)[A-Z]/g,
+    reason: 'Direct Workbench UI must import the scoped directCommands surface',
+  },
+  {
     pattern: /\bcommands\.thinclaw[A-Z]/g,
     reason: 'Direct Workbench UI must not call ThinClaw Agent commands',
   },
@@ -131,6 +135,10 @@ scanBoundary(directWorkbenchRoots, [
 
 scanBoundary(agentCockpitRoots, [
   {
+    pattern: /\bcommands\.thinclaw[A-Z]/g,
+    reason: 'ThinClaw Agent UI must import the scoped thinclawCommands surface',
+  },
+  {
     pattern: /\bcommands\.direct(?:Chat|History|Runtime|Rag|Assets|Media|Imagine|Inference)[A-Z]/g,
     reason: 'ThinClaw Agent UI must not call Direct Workbench state APIs',
   },
@@ -139,6 +147,30 @@ scanBoundary(agentCockpitRoots, [
     reason: 'ThinClaw Agent UI must not invoke Direct Workbench state APIs',
   },
 ]);
+
+scanBoundary(sourceRoots, [
+  {
+    pattern: /["'`](?:chat_stream|start_chat_server|get_inference_backends|upload_image|imagine_generate)["'`]/g,
+    reason: 'old unprefixed Direct command name',
+  },
+  {
+    pattern: /\b(?:chatStream|startChatServer|getInferenceBackends|uploadImage|imagineGenerate)\b/g,
+    reason: 'old generated Direct command binding name',
+  },
+]);
+
+for (const rel of [
+  'apps/desktop/frontend/src/components/settings/SecretsTab.tsx',
+  'apps/desktop/frontend/src/components/settings/ModelBrowser.tsx',
+  'apps/desktop/frontend/src/components/thinclaw/CloudBrainConfigModal.tsx',
+]) {
+  const file = path.join(repoRoot, rel);
+  if (!fs.existsSync(file)) continue;
+  const text = fs.readFileSync(file, 'utf8');
+  if (/\bxiaomi\b/i.test(text)) {
+    failures.push(`${rel}:1: stale non-registry provider must not be selectable: xiaomi`);
+  }
+}
 
 if (failures.length > 0) {
   console.error('Naming cleanliness check failed:');

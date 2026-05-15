@@ -120,7 +120,6 @@ export function ModelBrowser() {
             ["moonshot", "moonshot"],
             ["minimax", "minimax"],
             ["nvidia", "nvidia"],
-            ["xiaomi", "xiaomi"],
         ];
         const matched = providerMap.find(([prefix]) => id.startsWith(prefix));
         const provider = matched ? matched[1] : "";
@@ -136,7 +135,7 @@ export function ModelBrowser() {
         if (provider === "openrouter") return !!(status?.has_openrouter_key || (status as any)?.hasOpenrouterKey);
 
         // Additional providers use implicit provider key pattern
-        const implicitProviders = ["mistral", "xai", "together", "venice", "cohere", "moonshot", "minimax", "nvidia", "xiaomi"];
+        const implicitProviders = ["mistral", "xai", "together", "venice", "cohere", "moonshot", "minimax", "nvidia"];
         if (implicitProviders.includes(provider)) {
             const camel = provider.charAt(0).toUpperCase() + provider.slice(1);
             return !!((status as any)?.[`has_${provider}_key`] || (status as any)?.[`has${camel}Key`]);
@@ -158,8 +157,7 @@ export function ModelBrowser() {
         (status as any)?.has_cohere_key || (status as any)?.hasCohereKey ||
         (status as any)?.has_moonshot_key || (status as any)?.hasMoonshotKey ||
         (status as any)?.has_minimax_key || (status as any)?.hasMinimaxKey ||
-        (status as any)?.has_nvidia_key || (status as any)?.hasNvidiaKey ||
-        (status as any)?.has_xiaomi_key || (status as any)?.hasXiaomiKey
+        (status as any)?.has_nvidia_key || (status as any)?.hasNvidiaKey
     );
 
     const unifiedModels = useMemo(() => {
@@ -632,7 +630,7 @@ export function ModelBrowser() {
                                                         ["xai", "xAI"], ["together", "Together"],
                                                         ["venice", "Venice"], ["cohere", "Cohere"],
                                                         ["moonshot", "Moonshot"], ["minimax", "MiniMax"],
-                                                        ["nvidia", "NVIDIA"], ["xiaomi", "Xiaomi"],
+                                                        ["nvidia", "NVIDIA"],
                                                     ];
                                                     const label = badges.find(([p]) => id.startsWith(p))?.[1] ?? "Cloud";
                                                     return (
@@ -889,7 +887,7 @@ export function ModelBrowser() {
                                                         ["xai-", "xai"], ["together-", "together"],
                                                         ["venice-", "venice"], ["cohere-", "cohere"],
                                                         ["moonshot-", "moonshot"], ["minimax-", "minimax"],
-                                                        ["nvidia-", "nvidia"], ["xiaomi-", "xiaomi"],
+                                                        ["nvidia-", "nvidia"],
                                                     ];
                                                     const brain = brainMap.find(([p]) => id.startsWith(p))?.[1] ?? model.family.toLowerCase();
                                                     const modelId = model.id.split('-').slice(1).join('-');

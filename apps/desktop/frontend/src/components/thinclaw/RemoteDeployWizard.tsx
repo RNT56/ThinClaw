@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { commands } from '../../lib/bindings';
+import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import { listen } from '@tauri-apps/api/event';
 import { Server, CheckCircle, AlertCircle, Loader2, Zap, Copy } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
@@ -102,7 +102,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                 }
             });
 
-            await commands.thinclawDeployRemote(ip, user, tailscaleKey || null, enableSystemd);
+            await thinclawCommands.thinclawDeployRemote(ip, user, tailscaleKey || null, enableSystemd);
 
         } catch (e: any) {
             setErrorMsg(typeof e === 'string' ? e : e.message);
@@ -126,7 +126,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await commands.thinclawSaveGatewaySettings('remote', deployResult.url, deployResult.token || '');
+            await thinclawCommands.thinclawSaveGatewaySettings('remote', deployResult.url, deployResult.token || '');
 
             toast.success('Remote agent saved! Connecting...');
             onCheckStatus?.();
@@ -148,7 +148,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
         // Test connection first
         setTestLoading(true);
         try {
-            const ok = await commands.thinclawTestConnection(url, existingToken || null);
+            const ok = await thinclawCommands.thinclawTestConnection(url, existingToken || null);
             if (!ok) {
                 toast.error('Cannot connect — server unreachable or auth failed');
                 setTestLoading(false);
@@ -174,7 +174,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await commands.thinclawSaveGatewaySettings('remote', url, existingToken || '');
+            await thinclawCommands.thinclawSaveGatewaySettings('remote', url, existingToken || '');
 
             toast.success('Connected to remote agent');
             onCheckStatus?.();

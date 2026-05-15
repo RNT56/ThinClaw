@@ -561,30 +561,6 @@ export function SecretsTab() {
                         />
 
                         <SecretCard
-                            title="Xiaomi MiLM API Key"
-                            description="Access Xiaomi's MiLM language models."
-                            icon={<Bot className="w-5 h-5 text-orange-500" />}
-                            placeholder="..."
-                            hasKey={!!status?.has_xiaomi_key}
-                            granted={!!status?.xiaomi_granted}
-                            onSave={async (key) => {
-                                const res = await commands.thinclawSaveImplicitProviderKey('xiaomi', key);
-                                if (res.status === 'ok') { await loadStatus(); toast.success('Xiaomi key saved'); }
-                                else toast.error('Failed to save Xiaomi key');
-                            }}
-                            onToggle={(g) => handleToggle('xiaomi', g)}
-                            onFetch={async () => {
-                                const res = await commands.thinclawGetImplicitProviderKey('xiaomi');
-                                return res.status === 'ok' ? res.data : null;
-                            }}
-                            onDelete={async () => {
-                                const res = await commands.thinclawSaveImplicitProviderKey('xiaomi', '');
-                                if (res.status === 'ok') await loadStatus();
-                                else toast.error('Failed to delete Xiaomi key');
-                            }}
-                        />
-
-                        <SecretCard
                             title="Cohere API Key"
                             description="Access Command R+ for chat and embed-multilingual for RAG embeddings."
                             icon={<Bot className="w-5 h-5 text-fuchsia-500" />}

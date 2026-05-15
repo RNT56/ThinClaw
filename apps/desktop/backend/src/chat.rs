@@ -1,47 +1,17 @@
 use crate::sidecar::SidecarManager;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use specta::Type;
+use sqlx::SqlitePool;
 use tauri::{ipc::Channel, State};
-use thinclaw_runtime_contracts::ApiStyle;
+use thinclaw_runtime_contracts::{
+    ApiStyle, DirectAttachedDocument, DirectChatMessage, DirectChatPayload, DirectTokenUsage,
+};
 use tracing::info;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct AttachedDoc {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
-    pub images: Option<Vec<String>>,
-    pub attached_docs: Option<Vec<AttachedDoc>>,
-    // New fields for summarization
-    pub is_summary: Option<bool>,
-    pub original_messages: Option<Vec<Message>>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct ChatPayload {
-    pub model: String,
-    pub messages: Vec<Message>,
-    pub temperature: f32,
-    pub top_p: f32,
-    #[serde(default)]
-    pub web_search_enabled: bool, // Legacy: Map this to auto_mode on frontend if needed
-    #[serde(default)]
-    pub auto_mode: bool, // New Flag
-    pub project_id: Option<String>,
-    pub conversation_id: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct TokenUsage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-}
+pub type AttachedDoc = DirectAttachedDocument;
+pub type Message = DirectChatMessage;
+pub type ChatPayload = DirectChatPayload;
+pub type TokenUsage = DirectTokenUsage;
 
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct StreamChunk {
@@ -96,7 +66,18 @@ pub async fn resolve_provider(
                 endpoint.display_name, provider_id
             );
 
-            let key = secret_store.get(&endpoint.secret_name).ok_or(format!(
+            let descriptor =
+                thinclaw_runtime_contracts::descriptor_for_secret_name(&endpoint.secret_name)
+                    .unwrap_or_else(|| thinclaw_runtime_contracts::SecretDescriptor {
+                        canonical_name: endpoint.secret_name.clone(),
+                        provider_slug: Some(provider_id.to_string()),
+                        env_key_name: Some(endpoint.env_key_name.clone()),
+                        legacy_aliases: vec![provider_id.to_string(), endpoint.env_key_name.clone()],
+                        allowed_consumers: vec![
+                            thinclaw_runtime_contracts::SecretConsumer::DirectWorkbench,
+                        ],
+                    });
+            let key = secret_store.get_descriptor_secret(&descriptor).ok_or(format!(
                 "{} API key required. Please set it in Settings > Secrets.",
                 endpoint.display_name
             ))?;
@@ -173,6 +154,7 @@ pub async fn direct_chat_stream(
     secret_store: State<'_, crate::secret_store::SecretStore>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     rig_cache: State<'_, crate::rig_cache::RigManagerCache>,
+    pool: State<'_, SqlitePool>,
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
 ) -> Result<(), String> {
@@ -245,63 +227,79 @@ pub async fn direct_chat_stream(
             continue;
         }
 
-        if let Some(image_ids) = &msg.images {
-            if !image_ids.is_empty() {
-                let is_current_turn = Some(idx) == last_user_idx;
-
-                if is_current_turn {
-                    // Current turn: embed full base64 image data
-                    info!(
-                        "[chat] Building multimodal parts for {} image(s) (current turn)",
-                        image_ids.len()
-                    );
-                    let mut parts = Vec::new();
-                    parts.push(serde_json::json!({
-                        "type": "text",
-                        "text": msg.content
-                    }));
-
-                    for id in image_ids {
-                        match crate::images::load_image_as_base64_with_mime(&app, id).await {
-                            Ok((b64, mime)) => {
-                                info!(
-                                    "[chat] Image {} loaded as {}, base64 length: {}",
-                                    id,
-                                    mime,
-                                    b64.len()
-                                );
-                                parts.push(serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": format!("data:{};base64,{}", mime, b64)
-                                    }
-                                }));
-                            }
-                            Err(e) => eprintln!("Failed to load image {}: {}", id, e),
-                        }
+        let mut image_ids = msg.images.clone().unwrap_or_default();
+        if let Some(asset_refs) = msg.assets.clone() {
+            for asset_ref in asset_refs {
+                if let Ok(record) =
+                    crate::direct_assets::DirectAssetStore::get(pool.inner(), &asset_ref).await
+                {
+                    if matches!(
+                        record.kind,
+                        thinclaw_runtime_contracts::AssetKind::Image
+                            | thinclaw_runtime_contracts::AssetKind::GeneratedImage
+                    ) && !image_ids.iter().any(|id| id == &record.reference.id)
+                    {
+                        image_ids.push(record.reference.id);
                     }
-
-                    info!(
-                        "[chat] Multimodal parts: {} total ({} image_url parts)",
-                        parts.len(),
-                        parts.len() - 1
-                    );
-                    if let Ok(json_str) = serde_json::to_string(&parts) {
-                        msg.content = json_str;
-                    }
-                } else {
-                    // Older turn: replace with text placeholder to save context
-                    let n = image_ids.len();
-                    let original_text = msg.content.clone();
-                    msg.content = format!(
-                        "{}\n[User shared {} image(s) in this message]",
-                        original_text, n
-                    );
-                    info!(
-                        "[chat] Stripped {} image(s) from history message (turn {})",
-                        n, idx
-                    );
                 }
+            }
+        }
+
+        if !image_ids.is_empty() {
+            let is_current_turn = Some(idx) == last_user_idx;
+
+            if is_current_turn {
+                // Current turn: embed full base64 image data
+                info!(
+                    "[chat] Building multimodal parts for {} image(s) (current turn)",
+                    image_ids.len()
+                );
+                let mut parts = Vec::new();
+                parts.push(serde_json::json!({
+                    "type": "text",
+                    "text": msg.content
+                }));
+
+                for id in &image_ids {
+                    match crate::images::load_image_as_base64_with_mime(&app, id).await {
+                        Ok((b64, mime)) => {
+                            info!(
+                                "[chat] Image {} loaded as {}, base64 length: {}",
+                                id,
+                                mime,
+                                b64.len()
+                            );
+                            parts.push(serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!("data:{};base64,{}", mime, b64)
+                                }
+                            }));
+                        }
+                        Err(e) => eprintln!("Failed to load image {}: {}", id, e),
+                    }
+                }
+
+                info!(
+                    "[chat] Multimodal parts: {} total ({} image_url parts)",
+                    parts.len(),
+                    parts.len() - 1
+                );
+                if let Ok(json_str) = serde_json::to_string(&parts) {
+                    msg.content = json_str;
+                }
+            } else {
+                // Older turn: replace with text placeholder to save context
+                let n = image_ids.len();
+                let original_text = msg.content.clone();
+                msg.content = format!(
+                    "{}\n[User shared {} image(s) in this message]",
+                    original_text, n
+                );
+                info!(
+                    "[chat] Stripped {} image(s) from history message (turn {})",
+                    n, idx
+                );
             }
         }
     }
@@ -677,6 +675,7 @@ pub async fn direct_chat_stream(
 pub async fn direct_chat_count_tokens(
     app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
     conversation_id: String,
 ) -> Result<TokenUsage, String> {
     use tauri::Manager;
@@ -698,14 +697,17 @@ pub async fn direct_chat_count_tokens(
     .await
     .map_err(|e| format!("DB Error: {}", e))?;
 
-    // 2. Try precise count via llamacpp sidecar if available
-    if let Some((port, token, _, model_family)) = state.get_chat_config() {
+    // 2. Try precise count via the shared local runtime snapshot when available.
+    let snapshot = crate::engine::local_runtime_snapshot(&state, &engine_manager).await;
+    if let Some(endpoint) = snapshot.endpoint {
         let mut check_history: Vec<serde_json::Value> = Vec::new();
         for msg in &messages {
             check_history.push(serde_json::json!({ "role": msg.role, "content": msg.content }));
         }
 
-        let base_url = format!("http://127.0.0.1:{}/v1", port);
+        let base_url = endpoint.base_url.trim_end_matches('/').to_string();
+        let token = endpoint.api_key.unwrap_or_default();
+        let model_family = endpoint.model_family.unwrap_or_else(|| "unknown".to_string());
         let provider = crate::rig_lib::llama_provider::LlamaProvider::new(
             &base_url,
             &token,

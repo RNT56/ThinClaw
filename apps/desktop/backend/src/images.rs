@@ -4,8 +4,10 @@ use serde::Serialize;
 use specta::Type;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
+use thinclaw_runtime_contracts::{AssetKind, AssetOrigin};
 use uuid::Uuid;
 
+use crate::direct_assets::{DirectAssetStore, NewDirectAsset};
 use crate::file_store::FileStore;
 
 #[derive(Serialize, Type)]
@@ -58,23 +60,30 @@ pub async fn direct_assets_upload_image(
         .save(&path)
         .map_err(|e| format!("Failed to save image: {}", e))?;
 
-    let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query(
-        r#"
-        INSERT OR REPLACE INTO direct_assets (
-            id, namespace, kind, origin, status, visibility, path,
-            mime_type, size_bytes, width, height, created_at, updated_at
-        ) VALUES (?, 'direct_workbench', 'image', 'upload', 'ready', 'private', ?, 'image/jpeg', ?, ?, ?, ?, ?)
-        "#,
+    DirectAssetStore::upsert(
+        pool.inner(),
+        NewDirectAsset {
+            id: id.clone(),
+            kind: AssetKind::Image,
+            origin: AssetOrigin::Upload,
+            path: path.to_string_lossy().to_string(),
+            mime_type: Some("image/jpeg".to_string()),
+            size_bytes: Some(image_bytes.len() as u64),
+            sha256: None,
+            prompt: None,
+            provider: None,
+            style_id: None,
+            aspect_ratio: None,
+            resolution: None,
+            width: Some(rgb_img.width()),
+            height: Some(rgb_img.height()),
+            seed: None,
+            thumbnail_path: None,
+            is_favorite: false,
+            tags: None,
+            metadata: Default::default(),
+        },
     )
-    .bind(&id)
-    .bind(path.to_string_lossy().to_string())
-    .bind(image_bytes.len() as i64)
-    .bind(rgb_img.width() as i32)
-    .bind(rgb_img.height() as i32)
-    .bind(&now)
-    .bind(&now)
-    .execute(pool.inner())
     .await
     .map_err(|e| format!("Failed to save asset metadata: {}", e))?;
 
@@ -98,8 +107,14 @@ pub async fn direct_assets_upload_image(
 #[specta::specta]
 pub async fn direct_assets_get_image_path(
     file_store: State<'_, FileStore>,
+    pool: State<'_, SqlitePool>,
     id: String,
 ) -> Result<String, String> {
+    let reference = DirectAssetStore::direct_ref(&id);
+    if let Ok(path) = DirectAssetStore::path_for(pool.inner(), &reference).await {
+        return Ok(path);
+    }
+
     // Try png first (SD output), then jpg (Upload output)
     let png_path = format!("images/{}.png", id);
     let jpg_path = format!("images/{}.jpg", id);
@@ -142,8 +157,16 @@ pub async fn load_image_as_base64_with_mime(
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let images_dir = app_data_dir.join("images");
 
-    // Try png first (SD output), then jpg (Upload output)
-    let mut path = images_dir.join(format!("{}.png", image_id));
+    let pool = app.state::<SqlitePool>();
+    let reference = DirectAssetStore::direct_ref(image_id);
+    let mut path = DirectAssetStore::path_for(pool.inner(), &reference)
+        .await
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| images_dir.join(format!("{}.png", image_id)));
+
+    if !path.exists() {
+        path = images_dir.join(format!("{}.png", image_id));
+    }
     if !path.exists() {
         path = images_dir.join(format!("{}.jpg", image_id));
     }

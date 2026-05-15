@@ -16,10 +16,15 @@
 ///   4. Frontend decodes base64 → `AudioContext.decodeAudioData()` → plays.
 ///      (decodeAudioData handles both PCM and MP3 transparently.)
 use base64::{engine::general_purpose, Engine as _};
+use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
+use thinclaw_runtime_contracts::{AssetKind, AssetOrigin, AssetRecord, DirectTtsResponse};
+use uuid::Uuid;
 
+use crate::direct_assets::{DirectAssetStore, NewDirectAsset};
+use crate::file_store::FileStore;
 use crate::inference::tts::TtsRequest;
 use crate::inference::InferenceRouter;
 
@@ -40,9 +45,10 @@ pub async fn direct_media_tts_synthesize(
     state: State<'_, crate::sidecar::SidecarManager>,
     router: State<'_, InferenceRouter>,
     config_mgr: State<'_, crate::config::ConfigManager>,
+    pool: State<'_, SqlitePool>,
     text: String,
     model_path: Option<String>,
-) -> Result<String, String> {
+) -> Result<DirectTtsResponse, String> {
     // Read user's preferred voice from config (set via InferenceModeTab voice selector)
     let user_voice = config_mgr
         .get_config()
@@ -78,7 +84,25 @@ pub async fn direct_media_tts_synthesize(
             info.display_name
         );
 
-        return Ok(general_purpose::STANDARD.encode(&audio_bytes));
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("text_length".to_string(), text.len().to_string());
+        if let Some(voice) = user_voice.as_ref() {
+            metadata.insert("voice".to_string(), voice.clone());
+        }
+        let asset = persist_voice_output(
+            &app,
+            pool.inner(),
+            &audio_bytes,
+            Some(info.display_name.to_string()),
+            "audio/mpeg",
+            metadata,
+        )
+        .await?;
+
+        return Ok(DirectTtsResponse {
+            audio_bytes: general_purpose::STANDARD.encode(&audio_bytes),
+            asset,
+        });
     }
 
     // ── Local TTS backend (Piper sidecar) ────────────────────────────────
@@ -168,8 +192,76 @@ pub async fn direct_media_tts_synthesize(
 
     tracing::info!("[tts] Synthesis complete — {} PCM bytes", pcm_bytes.len());
 
-    // Return as base64 so it travels safely over the Tauri IPC boundary
-    Ok(general_purpose::STANDARD.encode(&pcm_bytes))
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert("text_length".to_string(), text.len().to_string());
+    metadata.insert("format".to_string(), "pcm_s16le_22050_mono".to_string());
+    let asset = persist_voice_output(
+        &app,
+        pool.inner(),
+        &pcm_bytes,
+        Some("piper".to_string()),
+        "audio/L16",
+        metadata,
+    )
+    .await?;
+
+    Ok(DirectTtsResponse {
+        audio_bytes: general_purpose::STANDARD.encode(&pcm_bytes),
+        asset,
+    })
+}
+
+async fn persist_voice_output(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    audio_bytes: &[u8],
+    provider: Option<String>,
+    mime_type: &str,
+    metadata: std::collections::HashMap<String, String>,
+) -> Result<AssetRecord, String> {
+    let file_store = app.state::<FileStore>();
+    file_store
+        .create_dir_all("voice/output")
+        .await
+        .map_err(|e| e.to_string())?;
+    let id = Uuid::new_v4().to_string();
+    let extension = if mime_type == "audio/mpeg" {
+        "mp3"
+    } else {
+        "pcm"
+    };
+    let relative_path = format!("voice/output/{}.{}", id, extension);
+    file_store
+        .write(&relative_path, audio_bytes)
+        .await
+        .map_err(|e| format!("Failed to persist TTS audio: {}", e))?;
+    let path = file_store.resolve_path(&relative_path).await;
+
+    DirectAssetStore::upsert(
+        pool,
+        NewDirectAsset {
+            id,
+            kind: AssetKind::Audio,
+            origin: AssetOrigin::VoiceOutput,
+            path: path.to_string_lossy().to_string(),
+            mime_type: Some(mime_type.to_string()),
+            size_bytes: Some(audio_bytes.len() as u64),
+            sha256: None,
+            prompt: None,
+            provider,
+            style_id: None,
+            aspect_ratio: None,
+            resolution: None,
+            width: None,
+            height: None,
+            seed: None,
+            thumbnail_path: None,
+            is_favorite: false,
+            tags: None,
+            metadata,
+        },
+    )
+    .await
 }
 
 /// List available voices for the active TTS backend.

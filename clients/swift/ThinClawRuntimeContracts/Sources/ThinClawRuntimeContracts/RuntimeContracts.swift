@@ -41,6 +41,96 @@ public struct ProviderEndpoint: Codable, Sendable {
     }
 }
 
+public enum AssetNamespace: String, Codable, Sendable {
+    case directWorkbench = "direct_workbench"
+    case thinClawAgent = "thin_claw_agent"
+}
+
+public enum AssetKind: String, Codable, Sendable {
+    case image
+    case audio
+    case video
+    case document
+    case generatedImage = "generated_image"
+    case other
+}
+
+public enum AssetOrigin: String, Codable, Sendable {
+    case upload
+    case generated
+    case downloadedModelOutput = "downloaded_model_output"
+    case voiceInput = "voice_input"
+    case voiceOutput = "voice_output"
+    case ragDocument = "rag_document"
+}
+
+public enum AssetStatus: String, Codable, Sendable {
+    case ready
+    case pending
+    case deleted
+    case error
+}
+
+public enum AssetVisibility: String, Codable, Sendable {
+    case `private` = "private"
+    case sharedByExplicitHandoff = "shared_by_explicit_handoff"
+}
+
+public struct AssetRef: Codable, Sendable {
+    public let namespace: AssetNamespace
+    public let id: String
+}
+
+public struct AssetRecord: Codable, Sendable {
+    public let reference: AssetRef
+    public let kind: AssetKind
+    public let origin: AssetOrigin
+    public let status: AssetStatus
+    public let visibility: AssetVisibility
+    public let path: String
+    public let mimeType: String?
+    public let sizeBytes: UInt64?
+    public let sha256: String?
+    public let prompt: String?
+    public let provider: String?
+    public let width: UInt32?
+    public let height: UInt32?
+    public let metadata: [String: String]
+    public let createdAt: Date
+    public let updatedAt: Date
+}
+
+public enum SecretConsumer: String, Codable, Sendable {
+    case directWorkbench = "direct_workbench"
+    case thinClawAgent = "thin_claw_agent"
+    case gatewayProxy = "gateway_proxy"
+    case `extension`
+    case system
+}
+
+public enum SecretAccessMode: String, Codable, Sendable {
+    case status
+    case explicitUse = "explicit_use"
+    case runtimeInjection = "runtime_injection"
+}
+
+public struct SecretDescriptor: Codable, Sendable {
+    public let canonicalName: String
+    public let providerSlug: String?
+    public let envKeyName: String?
+    public let legacyAliases: [String]
+    public let allowedConsumers: [SecretConsumer]
+}
+
+public struct ProviderCredentialDescriptor: Codable, Sendable {
+    public let providerSlug: String
+    public let displayName: String
+    public let secretName: String
+    public let envKeyName: String
+    public let setupUrl: String?
+    public let credentialReady: Bool
+}
+
 public enum LocalRuntimeKind: String, Codable, Sendable {
     case llamaCpp = "llama_cpp"
     case mlx
@@ -86,47 +176,6 @@ public struct LocalRuntimeSnapshot: Codable, Sendable {
     public let capabilities: [RuntimeCapability]
     public let exposurePolicy: RuntimeExposurePolicy
     public let unavailableReason: String?
-}
-
-public enum AssetNamespace: String, Codable, Sendable {
-    case directWorkbench = "direct_workbench"
-    case thinClawAgent = "thin_claw_agent"
-}
-
-public struct AssetRef: Codable, Sendable {
-    public let namespace: AssetNamespace
-    public let id: String
-}
-
-public enum SecretConsumer: String, Codable, Sendable {
-    case directWorkbench = "direct_workbench"
-    case thinClawAgent = "thin_claw_agent"
-    case gatewayProxy = "gateway_proxy"
-    case `extension`
-    case system
-}
-
-public enum SecretAccessMode: String, Codable, Sendable {
-    case status
-    case explicitUse = "explicit_use"
-    case runtimeInjection = "runtime_injection"
-}
-
-public struct SecretDescriptor: Codable, Sendable {
-    public let canonicalName: String
-    public let providerSlug: String?
-    public let envKeyName: String?
-    public let legacyAliases: [String]
-    public let allowedConsumers: [SecretConsumer]
-}
-
-public struct ProviderCredentialDescriptor: Codable, Sendable {
-    public let providerSlug: String
-    public let displayName: String
-    public let secretName: String
-    public let envKeyName: String
-    public let setupUrl: String?
-    public let credentialReady: Bool
 }
 
 public enum ModelCategory: String, Codable, Sendable {
@@ -175,69 +224,21 @@ public struct ModelDescriptor: Codable, Sendable {
 
 public struct ProviderDiscoveryResult: Codable, Sendable {
     public let provider: String
+    public let providerName: String
     public let models: [ModelDescriptor]
-    public let fromCache: Bool
     public let error: String?
+    public let fetchedAt: Date
 }
 
 public struct ModelDiscoveryResult: Codable, Sendable {
     public let providers: [ProviderDiscoveryResult]
-    public let totalModels: UInt32
-    public let errors: [String]
-}
-
-public enum AssetKind: String, Codable, Sendable {
-    case image
-    case audio
-    case video
-    case document
-    case generatedImage = "generated_image"
-    case other
-}
-
-public enum AssetOrigin: String, Codable, Sendable {
-    case upload
-    case generated
-    case downloadedModelOutput = "downloaded_model_output"
-    case voiceInput = "voice_input"
-    case voiceOutput = "voice_output"
-    case ragDocument = "rag_document"
-}
-
-public enum AssetStatus: String, Codable, Sendable {
-    case ready
-    case pending
-    case deleted
-    case error
-}
-
-public enum AssetVisibility: String, Codable, Sendable {
-    case `private`
-    case sharedByExplicitHandoff = "shared_by_explicit_handoff"
-}
-
-public struct AssetRecord: Codable, Sendable {
-    public let reference: AssetRef
-    public let kind: AssetKind
-    public let origin: AssetOrigin
-    public let status: AssetStatus
-    public let visibility: AssetVisibility
-    public let path: String
-    public let mimeType: String?
-    public let sizeBytes: UInt64?
-    public let sha256: String?
-    public let prompt: String?
-    public let provider: String?
-    public let width: UInt32?
-    public let height: UInt32?
-    public let metadata: [String: String]
-    public let createdAt: Date
-    public let updatedAt: Date
+    public let fallbackUsed: Bool
 }
 
 public struct DirectAttachedDocument: Codable, Sendable {
     public let id: String
     public let name: String
+    public let assetRef: AssetRef?
 }
 
 public struct DirectChatMessage: Codable, Sendable {
@@ -279,4 +280,24 @@ public struct DirectConversation: Codable, Sendable {
     public let title: String
     public let createdAt: Int64
     public let updatedAt: Int64
+}
+
+public struct DirectDocumentUploadResponse: Codable, Sendable {
+    public let path: String
+    public let asset: AssetRecord
+}
+
+public struct DirectDocumentIngestResponse: Codable, Sendable {
+    public let documentId: String
+    public let asset: AssetRecord
+}
+
+public struct DirectTtsResponse: Codable, Sendable {
+    public let audioBytes: String
+    public let asset: AssetRecord
+}
+
+public struct DirectSttResponse: Codable, Sendable {
+    public let text: String
+    public let asset: AssetRecord
 }

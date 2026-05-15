@@ -124,22 +124,25 @@ export function ChatView() {
                             </div>
 
                             {/* Token Usage Indicator */}
-                            {tokenUsage && (
+                            {tokenUsage && (() => {
+                                const totalTokens = tokenUsage.total_tokens ?? tokenUsage.totalTokens;
+                                return (
                                 <div className="flex items-center gap-2 bg-background/60 backdrop-blur-xl px-2 py-1.5 rounded-full border border-input/50 shadow-sm animate-in fade-in transition-all">
                                     <div className="w-16 h-1.5 bg-muted rounded-full overflow-hidden">
                                         <div
                                             className={cn("h-full transition-all duration-500 rounded-full",
-                                                (tokenUsage.total_tokens / maxContext) > 0.8 ? "bg-red-500" : "bg-primary"
+                                                (totalTokens / maxContext) > 0.8 ? "bg-red-500" : "bg-primary"
                                             )}
-                                            style={{ width: `${Math.min(100, (tokenUsage.total_tokens / maxContext) * 100)}%` }}
+                                            style={{ width: `${Math.min(100, (totalTokens / maxContext) * 100)}%` }}
                                         />
                                     </div>
                                     <span className={cn(
                                         "text-[10px] font-bold tabular-nums min-w-[24px] text-right",
-                                        (tokenUsage.total_tokens / maxContext) > 0.8 ? "text-red-500" : "text-muted-foreground"
-                                    )}>{Math.round((tokenUsage.total_tokens / maxContext) * 100)}%</span>
+                                        (totalTokens / maxContext) > 0.8 ? "text-red-500" : "text-muted-foreground"
+                                    )}>{Math.round((totalTokens / maxContext) * 100)}%</span>
                                 </div>
-                            )}
+                                );
+                            })()}
                         </div>
                     </motion.div>
                 </AnimatePresence>

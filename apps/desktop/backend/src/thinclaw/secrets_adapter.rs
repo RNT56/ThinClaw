@@ -48,7 +48,6 @@ enum GrantFlag {
     Nvidia,
     Qianfan,
     Mistral,
-    Xiaomi,
     Cohere,
     Voyage,
     Deepgram,
@@ -183,13 +182,6 @@ pub const SECRET_POLICIES: &[SecretPolicy] = &[
         env_vars: &["MISTRAL_API_KEY"],
         keychain_key: "mistral",
         grant: GrantFlag::Mistral,
-    },
-    SecretPolicy {
-        thinclaw_names: &["xiaomi"],
-        provider_slug: "xiaomi",
-        env_vars: &["XIAOMI_API_KEY"],
-        keychain_key: "xiaomi",
-        grant: GrantFlag::Xiaomi,
     },
     SecretPolicy {
         thinclaw_names: &["cohere"],
@@ -539,7 +531,6 @@ struct SecretGrantSnapshot {
     nvidia: bool,
     qianfan: bool,
     mistral: bool,
-    xiaomi: bool,
     cohere: bool,
     voyage: bool,
     deepgram: bool,
@@ -570,7 +561,6 @@ impl SecretGrantSnapshot {
             nvidia: config.nvidia_granted,
             qianfan: config.qianfan_granted,
             mistral: config.mistral_granted,
-            xiaomi: config.xiaomi_granted,
             cohere: config.cohere_granted,
             voyage: config.voyage_granted,
             deepgram: config.deepgram_granted,
@@ -602,7 +592,6 @@ impl SecretGrantSnapshot {
                 GrantFlag::Nvidia => self.nvidia,
                 GrantFlag::Qianfan => self.qianfan,
                 GrantFlag::Mistral => self.mistral,
-                GrantFlag::Xiaomi => self.xiaomi,
                 GrantFlag::Cohere => self.cohere,
                 GrantFlag::Voyage => self.voyage,
                 GrantFlag::Deepgram => self.deepgram,
@@ -871,6 +860,12 @@ mod tests {
     #[test]
     fn every_keychain_provider_has_policy_mapping() {
         for provider in keychain::PROVIDERS {
+            if *provider == "xiaomi" {
+                // Legacy migration alias only. It remains readable from the
+                // keychain blob but is no longer emitted to ThinClaw runtime
+                // injection policies or selectable provider lists.
+                continue;
+            }
             assert!(
                 policy_for_name(provider).is_some(),
                 "missing policy for provider {provider}"

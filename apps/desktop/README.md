@@ -134,7 +134,7 @@ graph TD
 
     Shell --> DirectUI
     Shell --> AgentUI
-    DirectUI <-->|chat_stream / imagine_generate / history commands| DirectBackend
+    DirectUI <-->|direct_chat_* / direct_imagine_* / direct_history_* commands| DirectBackend
     AgentUI <-->|thinclaw_* commands + thinclaw-event| ThinClawBridge
     DirectBackend --> SidecarManager
     DirectBackend --> EngineManager

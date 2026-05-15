@@ -22,6 +22,8 @@
     "tauri:build:cloud": "bash scripts/generate_tauri_overrides.sh none && tauri build --config backend/tauri.override.json -- --no-default-features",
     "tauri:build:cloud:unsigned": "DISABLE_UPDATER_ARTIFACTS=1 bash scripts/generate_tauri_overrides.sh none && tauri build --config backend/tauri.override.json -- --no-default-features",
     "validate:packaging": "npm run validate:naming && bash scripts/validate_packaging_readiness.sh",
+    "contracts:generate": "cd ../.. && cargo run -p thinclaw-runtime-contracts --features schema --example export_contracts -- generate",
+    "contracts:check": "cd ../.. && cargo run -p thinclaw-runtime-contracts --features schema --example export_contracts -- check",
     "test": "cd frontend && vitest run",
     "test:watch": "cd frontend && vitest",
     "test:ui": "cd frontend && vitest --ui",

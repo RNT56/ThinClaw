@@ -3,7 +3,8 @@ import { Check, Copy, Paperclip, Download, Maximize2, Loader2, Pencil, Sparkles,
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import { cn } from '../../lib/utils';
-import { Message, commands, WebSearchResult } from '../../lib/bindings';
+import { Message, WebSearchResult } from '../../lib/bindings';
+import { directCommands } from '../../lib/generated/direct-commands';
 import { useEffect, useState, isValidElement, useRef, memo } from 'react';
 import DOMPurify from 'dompurify';
 import { listen } from '@tauri-apps/api/event';
@@ -115,7 +116,7 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
         if (id === "pending_generation") return;
         setIsLoading(true);
         try {
-            const res = await commands.directAssetsGetImagePath(id);
+            const res = await directCommands.directAssetsGetImagePath(id);
             if (res.status === "ok") {
                 const assetUrl = convertFileSrc(res.data);
                 setSrc(assetUrl);
@@ -380,13 +381,13 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
         if (isSpeaking) return;
         setIsSpeaking(true);
         try {
-            const res = await commands.directMediaTtsSynthesize(sanitizedContent, null);
+            const res = await directCommands.directMediaTtsSynthesize(sanitizedContent, null);
             if (res.status === 'error') {
                 toast.error('TTS failed', { description: res.error });
                 return;
             }
             // Decode base64 PCM → Float32 audio and play via Web Audio API
-            const binary = atob(res.data);
+            const binary = atob(res.data.audioBytes);
             const bytes = new Uint8Array(binary.length);
             for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
             const int16 = new Int16Array(bytes.buffer);

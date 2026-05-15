@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { Save, RefreshCw, FileText } from 'lucide-react';
 import { toast } from 'sonner';
-import { commands } from '../../lib/bindings';
+import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import { cn } from '../../lib/utils';
 
 export function MemoryEditor() {
@@ -16,7 +16,7 @@ export function MemoryEditor() {
         setIsLoading(true);
         try {
             // @ts-ignore - command might not be in bindings types yet
-            const res = await commands.thinclawGetMemory();
+            const res = await thinclawCommands.thinclawGetMemory();
             if (res.status === 'ok') {
                 setContent(res.data);
                 setIsDirty(false);
@@ -36,7 +36,7 @@ export function MemoryEditor() {
         setIsSaving(true);
         try {
             // @ts-ignore
-            const res = await commands.thinclawSaveMemory(content);
+            const res = await thinclawCommands.thinclawSaveMemory(content);
             if (res.status === 'ok') {
                 setIsDirty(false);
                 setLastSaved(new Date());
