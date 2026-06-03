@@ -1,7 +1,7 @@
 //! Root-independent extension presentation policy for the web gateway.
 
 use axum::http::StatusCode;
-use thinclaw_types::IntegrationSetupStatus;
+use thinclaw_types::{IntegrationSetupStatus, SetupAction, SetupAuthMode, SetupState};
 
 use crate::web::types::{
     ActionResponse, ExtensionInfo, ExtensionListResponse, ExtensionSetupResponse,
@@ -164,6 +164,72 @@ pub fn extension_auth_status_is_authenticated(status: &str) -> bool {
 
 pub fn extension_auth_status_allows_activation_retry(status: &str) -> bool {
     matches!(status, "authenticated" | "no_auth_required")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionSetupStatusInput<'a> {
+    pub installed: bool,
+    pub authenticated: bool,
+    pub auth_mode: &'a str,
+    pub auth_status: &'a str,
+    pub active: bool,
+    pub needs_setup: bool,
+    pub activation_error: Option<&'a str>,
+}
+
+pub fn setup_auth_mode_from_status(auth_mode: &str) -> SetupAuthMode {
+    match auth_mode {
+        "oauth" => SetupAuthMode::OAuth,
+        "shared_oauth" | "external_oauth_sync" => SetupAuthMode::SharedOAuth,
+        "manual_token" | "secrets" | "manual_secrets" => SetupAuthMode::ManualSecrets,
+        "native_plugin" => SetupAuthMode::NativePlugin,
+        "remote_secret_backend" => SetupAuthMode::RemoteSecretBackend,
+        _ => SetupAuthMode::None,
+    }
+}
+
+pub fn extension_setup_status(input: ExtensionSetupStatusInput<'_>) -> IntegrationSetupStatus {
+    let auth_mode = setup_auth_mode_from_status(input.auth_mode);
+    if !input.installed {
+        return IntegrationSetupStatus::not_installed(auth_mode);
+    }
+    if let Some(error) = input.activation_error {
+        return IntegrationSetupStatus::failed(auth_mode, error.to_string());
+    }
+
+    let state = if input.active && input.authenticated {
+        SetupState::Ready
+    } else if !input.authenticated {
+        SetupState::NeedsAuth
+    } else if input.authenticated && !input.active {
+        SetupState::InstalledUnconfigured
+    } else {
+        SetupState::Degraded
+    };
+
+    let mut actions = vec![SetupAction::Validate];
+    if input.needs_setup {
+        actions.push(SetupAction::ConfigureSecrets);
+    }
+    if matches!(auth_mode, SetupAuthMode::OAuth | SetupAuthMode::SharedOAuth)
+        && !input.authenticated
+    {
+        actions.push(SetupAction::StartOAuth);
+    }
+    if input.active {
+        actions.push(SetupAction::Disable);
+    } else {
+        actions.push(SetupAction::Activate);
+    }
+    actions.push(SetupAction::Remove);
+
+    IntegrationSetupStatus {
+        state,
+        auth_mode,
+        actions,
+        message: (!input.auth_status.is_empty()).then(|| input.auth_status.to_string()),
+        ..IntegrationSetupStatus::default()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -537,6 +603,27 @@ pub fn extension_setup_response(input: ExtensionSetupResponseInput) -> Extension
 mod tests {
     use super::*;
 
+    fn setup_input(
+        installed: bool,
+        authenticated: bool,
+        active: bool,
+        auth_mode: &'static str,
+    ) -> ExtensionSetupStatusInput<'static> {
+        ExtensionSetupStatusInput {
+            installed,
+            authenticated,
+            auth_mode,
+            auth_status: if authenticated {
+                "authenticated"
+            } else {
+                "awaiting_authorization"
+            },
+            active,
+            needs_setup: !authenticated,
+            activation_error: None,
+        }
+    }
+
     fn activation_input(
         kind: &'static str,
         name: &'static str,
@@ -549,6 +636,105 @@ mod tests {
             activation_error: false,
             has_paired: false,
         }
+    }
+
+    #[test]
+    fn extension_setup_status_marks_available_extension_installable() {
+        let setup = extension_setup_status(setup_input(false, false, false, "none"));
+        assert_eq!(setup.state, SetupState::NotInstalled);
+        assert_eq!(setup.actions, vec![SetupAction::Install]);
+    }
+
+    #[test]
+    fn extension_setup_status_marks_manual_secret_extension_needing_auth() {
+        let setup = extension_setup_status(setup_input(true, false, false, "secrets"));
+        assert_eq!(setup.state, SetupState::NeedsAuth);
+        assert_eq!(setup.auth_mode, SetupAuthMode::ManualSecrets);
+        assert_eq!(
+            setup.actions,
+            vec![
+                SetupAction::Validate,
+                SetupAction::ConfigureSecrets,
+                SetupAction::Activate,
+                SetupAction::Remove
+            ]
+        );
+        assert_eq!(setup.message.as_deref(), Some("awaiting_authorization"));
+    }
+
+    #[test]
+    fn extension_setup_status_marks_active_extension_ready() {
+        let setup = extension_setup_status(setup_input(true, true, true, "oauth"));
+        assert_eq!(setup.state, SetupState::Ready);
+        assert_eq!(setup.auth_mode, SetupAuthMode::OAuth);
+        assert_eq!(
+            setup.actions,
+            vec![
+                SetupAction::Validate,
+                SetupAction::Disable,
+                SetupAction::Remove
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_setup_status_starts_oauth_when_auth_missing() {
+        let setup = extension_setup_status(setup_input(true, false, false, "external_oauth_sync"));
+        assert_eq!(setup.auth_mode, SetupAuthMode::SharedOAuth);
+        assert_eq!(
+            setup.actions,
+            vec![
+                SetupAction::Validate,
+                SetupAction::ConfigureSecrets,
+                SetupAction::StartOAuth,
+                SetupAction::Activate,
+                SetupAction::Remove
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_setup_status_preserves_activation_failure() {
+        let mut input = setup_input(true, true, false, "secrets");
+        input.activation_error = Some("bad config");
+        let setup = extension_setup_status(input);
+        assert_eq!(setup.state, SetupState::Failed);
+        assert_eq!(setup.auth_mode, SetupAuthMode::ManualSecrets);
+        assert_eq!(setup.message.as_deref(), Some("bad config"));
+    }
+
+    #[test]
+    fn setup_auth_mode_from_status_maps_wire_values() {
+        assert_eq!(setup_auth_mode_from_status("oauth"), SetupAuthMode::OAuth);
+        assert_eq!(
+            setup_auth_mode_from_status("shared_oauth"),
+            SetupAuthMode::SharedOAuth
+        );
+        assert_eq!(
+            setup_auth_mode_from_status("external_oauth_sync"),
+            SetupAuthMode::SharedOAuth
+        );
+        assert_eq!(
+            setup_auth_mode_from_status("manual_token"),
+            SetupAuthMode::ManualSecrets
+        );
+        assert_eq!(
+            setup_auth_mode_from_status("secrets"),
+            SetupAuthMode::ManualSecrets
+        );
+        assert_eq!(
+            setup_auth_mode_from_status("manual_secrets"),
+            SetupAuthMode::ManualSecrets
+        );
+        assert_eq!(
+            setup_auth_mode_from_status("native_plugin"),
+            SetupAuthMode::NativePlugin
+        );
+        assert_eq!(
+            setup_auth_mode_from_status("remote_secret_backend"),
+            SetupAuthMode::RemoteSecretBackend
+        );
+        assert_eq!(setup_auth_mode_from_status("unknown"), SetupAuthMode::None);
     }
 
     #[test]

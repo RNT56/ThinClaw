@@ -107,38 +107,83 @@ pub fn gateway_status_response(input: GatewayStatusResponseInput) -> GatewayStat
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupFieldStatus {
+    pub name: String,
+    pub present: bool,
+}
+
+impl SetupFieldStatus {
+    pub fn new(name: impl Into<String>, present: bool) -> Self {
+        Self {
+            name: name.into(),
+            present,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeLifecycleSetupStatusInput {
+    pub enabled: bool,
+    pub available: bool,
+    pub required_fields: Vec<SetupFieldStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GmailSetupStatusInput {
+    pub enabled: bool,
+    pub project_id: Option<String>,
+    pub subscription_id: Option<String>,
+    pub topic_id: Option<String>,
+    pub oauth_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NostrSetupStatusInput {
+    pub enabled: bool,
+    pub private_key_present: bool,
+    pub owner_configured: bool,
+    pub social_dm_enabled: bool,
+    pub relay_count: Option<usize>,
+    pub connected_relay_count: Option<usize>,
+    pub public_key_hex: Option<String>,
+    pub public_key_npub: Option<String>,
+    pub owner_pubkey_hex: Option<String>,
+    pub owner_pubkey_npub: Option<String>,
+    pub invalid_private_key: bool,
+}
+
+fn value_present(value: &Option<String>) -> bool {
+    value.as_ref().is_some_and(|value| !value.trim().is_empty())
+}
+
 pub fn build_native_lifecycle_setup_status(
-    enabled: bool,
-    available: bool,
-    required_fields: impl IntoIterator<Item = (impl AsRef<str>, bool)>,
+    input: NativeLifecycleSetupStatusInput,
 ) -> PartialChannelSetupStatus {
-    let required_fields: Vec<(String, bool)> = required_fields
-        .into_iter()
-        .map(|(field, present)| (field.as_ref().to_string(), present))
-        .collect();
     let mut missing_fields = Vec::new();
-    if enabled {
-        if !available {
+    if input.enabled {
+        if !input.available {
             missing_fields.push("build_feature".to_string());
         }
-        for (field, present) in &required_fields {
-            if !present {
-                missing_fields.push(field.clone());
+        for field in &input.required_fields {
+            if !field.present {
+                missing_fields.push(field.name.clone());
             }
         }
     }
 
     PartialChannelSetupStatus {
-        enabled,
-        configured: enabled && available && missing_fields.is_empty(),
+        enabled: input.enabled,
+        configured: input.enabled && input.available && missing_fields.is_empty(),
         missing_fields,
         needs_oauth: false,
-        needs_private_key: required_fields
+        needs_private_key: input
+            .required_fields
             .iter()
-            .any(|(field, _)| field.contains("key")),
+            .any(|field| field.name.contains("key")),
         owner_configured: false,
-        tool_ready: enabled && available,
-        control_ready: enabled && available,
+        tool_ready: input.enabled && input.available,
+        control_ready: input.enabled && input.available,
         social_dm_enabled: false,
         relay_count: None,
         connected_relay_count: None,
@@ -151,31 +196,25 @@ pub fn build_native_lifecycle_setup_status(
     }
 }
 
-pub fn build_gmail_setup_status(
-    enabled: bool,
-    project_id_present: bool,
-    subscription_id_present: bool,
-    topic_id_present: bool,
-    has_oauth_token: bool,
-) -> PartialChannelSetupStatus {
+pub fn build_gmail_setup_status(input: GmailSetupStatusInput) -> PartialChannelSetupStatus {
     let mut missing_fields = Vec::new();
-    if enabled {
-        if !project_id_present {
+    if input.enabled {
+        if !value_present(&input.project_id) {
             missing_fields.push("project_id".to_string());
         }
-        if !subscription_id_present {
+        if !value_present(&input.subscription_id) {
             missing_fields.push("subscription_id".to_string());
         }
-        if !topic_id_present {
+        if !value_present(&input.topic_id) {
             missing_fields.push("topic_id".to_string());
         }
     }
 
-    let needs_oauth = enabled && missing_fields.is_empty() && !has_oauth_token;
+    let needs_oauth = input.enabled && missing_fields.is_empty() && input.oauth_token.is_none();
 
     PartialChannelSetupStatus {
-        enabled,
-        configured: enabled && missing_fields.is_empty() && !needs_oauth,
+        enabled: input.enabled,
+        configured: input.enabled && missing_fields.is_empty() && !needs_oauth,
         missing_fields,
         needs_oauth,
         needs_private_key: false,
@@ -192,6 +231,44 @@ pub fn build_gmail_setup_status(
         owner_pubkey_npub: None,
         invalid_private_key: false,
     }
+}
+
+pub fn build_nostr_setup_status(input: NostrSetupStatusInput) -> PartialChannelSetupStatus {
+    let mut missing_fields = Vec::new();
+    if input.enabled && !input.private_key_present {
+        missing_fields.push("private_key".to_string());
+    }
+    if input.enabled && input.private_key_present && !input.owner_configured {
+        missing_fields.push("owner_pubkey".to_string());
+    }
+    if input.enabled && input.invalid_private_key {
+        missing_fields.push("private_key".to_string());
+    }
+
+    let needs_private_key =
+        input.enabled && (!input.private_key_present || input.invalid_private_key);
+
+    let status = PartialChannelSetupStatus {
+        enabled: input.enabled,
+        configured: input.enabled && input.private_key_present,
+        missing_fields,
+        needs_oauth: false,
+        needs_private_key,
+        owner_configured: input.owner_configured,
+        tool_ready: input.enabled && input.private_key_present,
+        control_ready: input.enabled && input.private_key_present && input.owner_configured,
+        social_dm_enabled: input.social_dm_enabled,
+        relay_count: input.relay_count,
+        connected_relay_count: input.connected_relay_count,
+        relay_health: None,
+        public_key_hex: input.public_key_hex,
+        public_key_npub: input.public_key_npub,
+        owner_pubkey_hex: input.owner_pubkey_hex,
+        owner_pubkey_npub: input.owner_pubkey_npub,
+        invalid_private_key: input.invalid_private_key,
+    };
+
+    finalize_nostr_setup_status(status, input.owner_configured)
 }
 
 pub fn nostr_relay_health(
@@ -617,11 +694,14 @@ mod tests {
 
     #[test]
     fn native_lifecycle_status_reports_missing_setup_fields() {
-        let status = build_native_lifecycle_setup_status(
-            true,
-            true,
-            [("homeserver", false), ("access_token", false)],
-        );
+        let status = build_native_lifecycle_setup_status(NativeLifecycleSetupStatusInput {
+            enabled: true,
+            available: true,
+            required_fields: vec![
+                SetupFieldStatus::new("homeserver", false),
+                SetupFieldStatus::new("access_token", false),
+            ],
+        });
 
         assert!(status.enabled);
         assert!(!status.configured);
@@ -641,17 +721,17 @@ mod tests {
 
     #[test]
     fn native_lifecycle_status_reports_ready_when_required_fields_are_present() {
-        let status = build_native_lifecycle_setup_status(
-            true,
-            true,
-            [
-                ("team_id", true),
-                ("key_id", true),
-                ("bundle_id", true),
-                ("private_key", true),
-                ("registration_secret", true),
+        let status = build_native_lifecycle_setup_status(NativeLifecycleSetupStatusInput {
+            enabled: true,
+            available: true,
+            required_fields: vec![
+                SetupFieldStatus::new("team_id", true),
+                SetupFieldStatus::new("key_id", true),
+                SetupFieldStatus::new("bundle_id", true),
+                SetupFieldStatus::new("private_key", true),
+                SetupFieldStatus::new("registration_secret", true),
             ],
-        );
+        });
 
         assert!(status.enabled);
         assert!(status.configured);
@@ -660,13 +740,137 @@ mod tests {
     }
 
     #[test]
+    fn native_lifecycle_status_reports_unavailable_build_feature_when_enabled() {
+        let status = build_native_lifecycle_setup_status(NativeLifecycleSetupStatusInput {
+            enabled: true,
+            available: false,
+            required_fields: Vec::new(),
+        });
+
+        assert!(status.enabled);
+        assert!(!status.configured);
+        assert_eq!(status.missing_fields, vec!["build_feature".to_string()]);
+        assert!(!status.tool_ready);
+        assert!(!status.control_ready);
+    }
+
+    #[test]
+    fn native_lifecycle_status_ignores_missing_fields_when_disabled() {
+        let status = build_native_lifecycle_setup_status(NativeLifecycleSetupStatusInput {
+            enabled: false,
+            available: true,
+            required_fields: vec![SetupFieldStatus::new("bot_token", false)],
+        });
+
+        assert!(!status.enabled);
+        assert!(!status.configured);
+        assert!(status.missing_fields.is_empty());
+    }
+
+    #[test]
     fn gmail_status_requires_oauth_after_static_fields_are_present() {
-        let status = build_gmail_setup_status(true, true, true, true, false);
+        let status = build_gmail_setup_status(GmailSetupStatusInput {
+            enabled: true,
+            project_id: Some("project".to_string()),
+            subscription_id: Some("subscription".to_string()),
+            topic_id: Some("topic".to_string()),
+            oauth_token: None,
+        });
 
         assert!(status.enabled);
         assert!(!status.configured);
         assert!(status.needs_oauth);
         assert!(status.missing_fields.is_empty());
+    }
+
+    #[test]
+    fn gmail_status_trims_static_fields_before_marking_present() {
+        let status = build_gmail_setup_status(GmailSetupStatusInput {
+            enabled: true,
+            project_id: Some(" ".to_string()),
+            subscription_id: Some("subscription".to_string()),
+            topic_id: None,
+            oauth_token: Some(String::new()),
+        });
+
+        assert!(status.enabled);
+        assert!(!status.configured);
+        assert!(!status.needs_oauth);
+        assert_eq!(
+            status.missing_fields,
+            vec!["project_id".to_string(), "topic_id".to_string()]
+        );
+    }
+
+    #[test]
+    fn nostr_status_marks_missing_private_key_when_enabled() {
+        let status = build_nostr_setup_status(NostrSetupStatusInput {
+            enabled: true,
+            private_key_present: false,
+            owner_configured: false,
+            social_dm_enabled: true,
+            relay_count: Some(2),
+            connected_relay_count: None,
+            public_key_hex: None,
+            public_key_npub: None,
+            owner_pubkey_hex: None,
+            owner_pubkey_npub: None,
+            invalid_private_key: false,
+        });
+
+        assert!(status.enabled);
+        assert!(!status.configured);
+        assert!(status.needs_private_key);
+        assert_eq!(status.missing_fields, vec!["private_key".to_string()]);
+        assert_eq!(status.relay_health.as_deref(), Some("configured"));
+    }
+
+    #[test]
+    fn nostr_status_marks_missing_owner_when_private_key_exists() {
+        let status = build_nostr_setup_status(NostrSetupStatusInput {
+            enabled: true,
+            private_key_present: true,
+            owner_configured: false,
+            social_dm_enabled: false,
+            relay_count: Some(1),
+            connected_relay_count: Some(1),
+            public_key_hex: Some("pub".to_string()),
+            public_key_npub: Some("npub".to_string()),
+            owner_pubkey_hex: None,
+            owner_pubkey_npub: None,
+            invalid_private_key: false,
+        });
+
+        assert!(status.tool_ready);
+        assert!(!status.control_ready);
+        assert_eq!(status.missing_fields, vec!["owner_pubkey".to_string()]);
+        assert_eq!(status.relay_health.as_deref(), Some("connected:1"));
+    }
+
+    #[test]
+    fn nostr_status_marks_invalid_private_key() {
+        let status = build_nostr_setup_status(NostrSetupStatusInput {
+            enabled: true,
+            private_key_present: true,
+            owner_configured: false,
+            social_dm_enabled: false,
+            relay_count: None,
+            connected_relay_count: Some(0),
+            public_key_hex: None,
+            public_key_npub: None,
+            owner_pubkey_hex: None,
+            owner_pubkey_npub: None,
+            invalid_private_key: true,
+        });
+
+        assert!(status.invalid_private_key);
+        assert!(status.needs_private_key);
+        assert!(!status.tool_ready);
+        assert_eq!(
+            status.missing_fields,
+            vec!["owner_pubkey".to_string(), "private_key".to_string()]
+        );
+        assert_eq!(status.relay_health.as_deref(), Some("invalid_private_key"));
     }
 
     #[test]

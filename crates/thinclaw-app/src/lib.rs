@@ -31,10 +31,13 @@ pub use runtime::{
 pub use setup::{
     SetupBootstrapAgentInput, SetupBootstrapChannelInput, SetupBootstrapEnvInput,
     SetupBootstrapEnvPlan, SetupBootstrapEnvVar, SetupBootstrapProviderInput,
-    SetupBootstrapWebUiInput, SetupGuideTopic, SetupOnboardingProfile, SetupReadinessSummary,
+    SetupBootstrapWebUiInput, SetupEmbeddingsDefaultsPlan, SetupGuideTopic, SetupOnboardingProfile,
+    SetupProviderSlotDefaultsInput, SetupProviderSlotDefaultsPlan, SetupReadinessSummary,
     SetupRuntimeCommandInput, SetupRuntimeProfile, SetupStepDescriptor, SetupStepStatus,
     SetupValidationItem, SetupValidationLevel, SetupWizardPhase, SetupWizardPhaseId,
     SetupWizardPlan, SetupWizardPlanInput, SetupWizardStepId, SetupWizardUiMode,
-    setup_bootstrap_env_plan, setup_primary_runtime_command, setup_runtime_handoff_summary,
-    setup_what_next_commands, setup_wizard_plan,
+    provider_default_model, provider_display_name, setup_bootstrap_env_plan,
+    setup_primary_runtime_command, setup_provider_slot_defaults, setup_quick_embeddings_defaults,
+    setup_runtime_handoff_summary, setup_what_next_commands, setup_wizard_plan,
+    suggested_cheap_model_for_provider,
 };

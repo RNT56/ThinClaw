@@ -2417,26 +2417,36 @@ struct PublishPlan {
     source: serde_json::Value,
 }
 
-impl PublishPlan {
-    fn json(&self, status: &str) -> serde_json::Value {
-        let mut output = skill_policy::skill_publish_plan_output(
-            status,
-            &self.skill_name,
-            &self.target_repo,
-            &self.tap_path,
-            &self.package_path,
-            &self.branch,
-            self.base_branch.as_deref(),
-            &self.package_hash,
-            package_file_json(&self.files),
-            skill_finding_json(&self.findings),
-            &self.trust,
-            &self.source_tier,
-            self.source.clone(),
-        );
-        add_scan_report_fields(&mut output, &self.scan_report);
-        output
+fn publish_projection_from_plan(
+    plan: &PublishPlan,
+    status: &str,
+) -> skill_policy::SkillPublishProjection {
+    skill_policy::SkillPublishProjection {
+        status: status.to_string(),
+        name: plan.skill_name.clone(),
+        target_repo: plan.target_repo.clone(),
+        tap_path: plan.tap_path.clone(),
+        package_path: plan.package_path.clone(),
+        branch: plan.branch.clone(),
+        base_branch: plan.base_branch.clone(),
+        package_hash: plan.package_hash.clone(),
+        files: package_file_json(&plan.files),
+        findings: skill_finding_json(&plan.findings),
+        trust: plan.trust.clone(),
+        source_tier: plan.source_tier.clone(),
+        source: plan.source.clone(),
+        scan: Some(skill_policy::SkillPublishScanProjection {
+            scanner_version: plan.scan_report.scanner_version.clone(),
+            content_sha256: plan.scan_report.content_sha256.clone(),
+            finding_summary: finding_summary_policy(&plan.scan_report.summary),
+        }),
+        remote_write_plan: None,
+        metadata: None,
     }
+}
+
+fn publish_output_from_plan(plan: &PublishPlan, status: &str) -> serde_json::Value {
+    skill_policy::skill_publish_projection_output(publish_projection_from_plan(plan, status))
 }
 
 async fn build_publish_plan(
@@ -2735,7 +2745,7 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
     })
     .await?;
 
-    let mut output = plan.json("published");
+    let mut output = publish_output_from_plan(plan, "published");
     output["scratch_dir"] = serde_json::Value::String(scratch_dir.display().to_string());
     output["package_dir"] = serde_json::Value::String(package_dir.display().to_string());
     output["pr_url"] = serde_json::Value::String(pr_url);
@@ -2919,7 +2929,7 @@ impl Tool for SkillPublishTool {
         }
 
         let output = if dry_run || !remote_write {
-            plan.json("dry_run")
+            publish_output_from_plan(&plan, "dry_run")
         } else if confirm_remote_write {
             execute_publish_plan(&plan).await?
         } else {

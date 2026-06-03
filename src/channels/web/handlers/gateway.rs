@@ -8,11 +8,12 @@ use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use thinclaw_gateway::web::status::{
-    GatewayRuntimeStatusInput, GatewayStatusResponseInput, build_cache_stats_response,
-    build_gmail_setup_status as gateway_build_gmail_setup_status,
+    GatewayRuntimeStatusInput, GatewayStatusResponseInput, GmailSetupStatusInput,
+    NativeLifecycleSetupStatusInput, NostrSetupStatusInput, SetupFieldStatus,
+    build_cache_stats_response, build_gmail_setup_status as gateway_build_gmail_setup_status,
     build_native_lifecycle_setup_status as gateway_build_native_lifecycle_setup_status,
-    cost_tracker_unavailable_status, finalize_nostr_setup_status, format_budget_limit_cents,
-    format_daily_cost, gateway_restart_accepted_response,
+    build_nostr_setup_status as gateway_build_nostr_setup_status, cost_tracker_unavailable_status,
+    format_budget_limit_cents, format_daily_cost, gateway_restart_accepted_response,
     gateway_restart_already_in_progress_response, gateway_status_response, health_response,
     model_usage_entry, unavailable_cache_stats_response,
 };
@@ -243,7 +244,13 @@ fn build_native_lifecycle_setup_status(
         (*field, present)
     });
 
-    gateway_build_native_lifecycle_setup_status(enabled, available, required_fields)
+    gateway_build_native_lifecycle_setup_status(NativeLifecycleSetupStatusInput {
+        enabled,
+        available,
+        required_fields: required_fields
+            .map(|(field, present)| SetupFieldStatus::new(field, present))
+            .collect(),
+    })
 }
 
 fn build_gmail_setup_status(settings: &crate::settings::Settings) -> PartialChannelSetupStatus {
@@ -253,31 +260,27 @@ fn build_gmail_setup_status(settings: &crate::settings::Settings) -> PartialChan
     let project_id = crate::config::helpers::optional_env("GMAIL_PROJECT_ID")
         .ok()
         .flatten()
-        .or(settings.channels.gmail_project_id.clone())
-        .unwrap_or_default();
+        .or(settings.channels.gmail_project_id.clone());
     let subscription_id = crate::config::helpers::optional_env("GMAIL_SUBSCRIPTION_ID")
         .ok()
         .flatten()
-        .or(settings.channels.gmail_subscription_id.clone())
-        .unwrap_or_default();
+        .or(settings.channels.gmail_subscription_id.clone());
     let topic_id = crate::config::helpers::optional_env("GMAIL_TOPIC_ID")
         .ok()
         .flatten()
-        .or(settings.channels.gmail_topic_id.clone())
-        .unwrap_or_default();
+        .or(settings.channels.gmail_topic_id.clone());
 
-    let has_oauth_token = crate::config::helpers::optional_env("GMAIL_OAUTH_TOKEN")
+    let oauth_token = crate::config::helpers::optional_env("GMAIL_OAUTH_TOKEN")
         .ok()
-        .flatten()
-        .is_some();
+        .flatten();
 
-    gateway_build_gmail_setup_status(
+    gateway_build_gmail_setup_status(GmailSetupStatusInput {
         enabled,
-        !project_id.trim().is_empty(),
-        !subscription_id.trim().is_empty(),
-        !topic_id.trim().is_empty(),
-        has_oauth_token,
-    )
+        project_id,
+        subscription_id,
+        topic_id,
+        oauth_token,
+    })
 }
 
 fn build_nostr_setup_status(
@@ -296,11 +299,6 @@ fn build_nostr_setup_status(
                 .flatten()
         });
 
-    let mut missing_fields = Vec::new();
-    if enabled && private_key.is_none() {
-        missing_fields.push("private_key".to_string());
-    }
-
     #[cfg(feature = "nostr")]
     let resolved = crate::config::ChannelsConfig::resolve_nostr(settings)
         .ok()
@@ -312,9 +310,6 @@ fn build_nostr_setup_status(
         .is_some();
     #[cfg(not(feature = "nostr"))]
     let owner_configured = false;
-    if enabled && private_key.is_some() && !owner_configured {
-        missing_fields.push("owner_pubkey".to_string());
-    }
 
     #[cfg(feature = "nostr")]
     let social_dm_enabled = resolved
@@ -340,66 +335,49 @@ fn build_nostr_setup_status(
         .and_then(|value| value.as_u64())
         .map(|value| value as usize);
 
+    let connected_relay_count = diagnostics
+        .and_then(|value| value.get("connected_relay_count"))
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize);
     #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
-    let mut status = PartialChannelSetupStatus {
-        enabled,
-        configured: enabled && private_key.is_some(),
-        missing_fields,
-        needs_oauth: false,
-        needs_private_key: enabled && private_key.is_none(),
-        owner_configured,
-        tool_ready: enabled && private_key.is_some(),
-        control_ready: enabled && private_key.is_some() && owner_configured,
-        social_dm_enabled,
-        relay_count,
-        connected_relay_count: diagnostics
-            .and_then(|value| value.get("connected_relay_count"))
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize),
-        relay_health: None,
-        public_key_hex: diagnostics
-            .and_then(|value| value.get("public_key_hex"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        public_key_npub: diagnostics
-            .and_then(|value| value.get("public_key_npub"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        owner_pubkey_hex: diagnostics
-            .and_then(|value| value.get("owner_pubkey_hex"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        owner_pubkey_npub: diagnostics
-            .and_then(|value| value.get("owner_pubkey_npub"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        invalid_private_key: false,
-    };
+    let mut public_key_hex = diagnostics
+        .and_then(|value| value.get("public_key_hex"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
+    let mut public_key_npub = diagnostics
+        .and_then(|value| value.get("public_key_npub"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
+    let mut owner_pubkey_hex = diagnostics
+        .and_then(|value| value.get("owner_pubkey_hex"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
+    let mut owner_pubkey_npub = diagnostics
+        .and_then(|value| value.get("owner_pubkey_npub"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
+    let mut invalid_private_key = false;
 
-    if (status.public_key_hex.is_none() || status.public_key_npub.is_none())
+    if (public_key_hex.is_none() || public_key_npub.is_none())
         && let Some(secret) = private_key.as_deref()
     {
         #[cfg(feature = "nostr")]
         match Keys::parse(secret) {
             Ok(keys) => {
-                let public_key_hex = keys.public_key().to_hex();
-                let public_key_npub = keys
+                let parsed_public_key_hex = keys.public_key().to_hex();
+                let parsed_public_key_npub = keys
                     .public_key()
                     .to_bech32()
-                    .unwrap_or_else(|_| public_key_hex.clone());
-                status.public_key_hex = Some(public_key_hex);
-                status.public_key_npub = Some(public_key_npub);
+                    .unwrap_or_else(|_| parsed_public_key_hex.clone());
+                public_key_hex = Some(parsed_public_key_hex);
+                public_key_npub = Some(parsed_public_key_npub);
             }
             Err(_) => {
-                status.invalid_private_key = true;
-                status.needs_private_key = true;
-                if !status
-                    .missing_fields
-                    .iter()
-                    .any(|field| field == "private_key")
-                {
-                    status.missing_fields.push("private_key".to_string());
-                }
+                invalid_private_key = true;
             }
         }
         #[cfg(not(feature = "nostr"))]
@@ -409,24 +387,34 @@ fn build_nostr_setup_status(
     }
 
     #[cfg(feature = "nostr")]
-    if (status.owner_pubkey_hex.is_none() || status.owner_pubkey_npub.is_none())
+    if (owner_pubkey_hex.is_none() || owner_pubkey_npub.is_none())
         && let Some(owner) = resolved
             .as_ref()
             .and_then(|config| config.owner_pubkey.as_ref())
     {
-        status.owner_pubkey_hex = Some(owner.clone());
+        owner_pubkey_hex = Some(owner.clone());
         if let Ok(parsed) = crate::channels::nostr_runtime::parse_public_key(owner) {
-            status.owner_pubkey_npub = parsed.to_bech32().ok();
+            owner_pubkey_npub = parsed.to_bech32().ok();
         }
     }
 
-    finalize_nostr_setup_status(status, owner_configured)
+    gateway_build_nostr_setup_status(NostrSetupStatusInput {
+        enabled,
+        private_key_present: private_key.is_some(),
+        owner_configured,
+        social_dm_enabled,
+        relay_count,
+        connected_relay_count,
+        public_key_hex,
+        public_key_npub,
+        owner_pubkey_hex,
+        owner_pubkey_npub,
+        invalid_private_key,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_native_lifecycle_setup_status;
-
     #[test]
     #[cfg(feature = "nostr")]
     fn nostr_status_marks_missing_owner_when_secret_exists() {
@@ -458,85 +446,6 @@ mod tests {
             std::env::remove_var("NOSTR_ENABLED");
             std::env::remove_var("NOSTR_PRIVATE_KEY");
             std::env::remove_var("NOSTR_SECRET_KEY");
-        }
-    }
-
-    #[test]
-    fn native_lifecycle_status_reports_missing_setup_fields() {
-        unsafe {
-            std::env::set_var("MATRIX_ENABLED", "true");
-            std::env::remove_var("MATRIX_HOMESERVER");
-            std::env::remove_var("MATRIX_ACCESS_TOKEN");
-        }
-
-        let status = build_native_lifecycle_setup_status(
-            "MATRIX_ENABLED",
-            false,
-            true,
-            &[
-                ("homeserver", &["MATRIX_HOMESERVER"][..]),
-                ("access_token", &["MATRIX_ACCESS_TOKEN"][..]),
-            ],
-        );
-
-        assert!(status.enabled);
-        assert!(!status.configured);
-        assert!(
-            status
-                .missing_fields
-                .iter()
-                .any(|field| field == "homeserver")
-        );
-        assert!(
-            status
-                .missing_fields
-                .iter()
-                .any(|field| field == "access_token")
-        );
-
-        unsafe {
-            std::env::remove_var("MATRIX_ENABLED");
-        }
-    }
-
-    #[test]
-    fn native_lifecycle_status_reports_ready_when_required_env_is_present() {
-        unsafe {
-            std::env::set_var("APNS_ENABLED", "true");
-            std::env::set_var("APNS_TEAM_ID", "team");
-            std::env::set_var("APNS_KEY_ID", "key");
-            std::env::set_var("APNS_BUNDLE_ID", "bundle");
-            std::env::set_var("APNS_PRIVATE_KEY", "private");
-            std::env::set_var("APNS_REGISTRATION_SECRET", "registration-secret");
-        }
-
-        let status = build_native_lifecycle_setup_status(
-            "APNS_ENABLED",
-            false,
-            true,
-            &[
-                ("team_id", &["APNS_TEAM_ID"][..]),
-                ("key_id", &["APNS_KEY_ID"][..]),
-                ("bundle_id", &["APNS_BUNDLE_ID"][..]),
-                (
-                    "private_key",
-                    &["APNS_PRIVATE_KEY", "APNS_PRIVATE_KEY_PATH"][..],
-                ),
-                ("registration_secret", &["APNS_REGISTRATION_SECRET"][..]),
-            ],
-        );
-
-        assert!(status.enabled);
-        assert!(status.configured);
-        assert!(status.missing_fields.is_empty());
-
-        unsafe {
-            std::env::remove_var("APNS_ENABLED");
-            std::env::remove_var("APNS_TEAM_ID");
-            std::env::remove_var("APNS_KEY_ID");
-            std::env::remove_var("APNS_BUNDLE_ID");
-            std::env::remove_var("APNS_PRIVATE_KEY");
-            std::env::remove_var("APNS_REGISTRATION_SECRET");
         }
     }
 }

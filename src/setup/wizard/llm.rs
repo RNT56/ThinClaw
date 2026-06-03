@@ -1,6 +1,11 @@
 //! LLM wizard steps: inference provider, model selection, smart routing, fallback, embeddings.
 
 use secrecy::{ExposeSecret, SecretString};
+use thinclaw_app::{
+    SetupProviderSlotDefaultsInput, provider_default_model, provider_display_name,
+    setup_provider_slot_defaults, setup_quick_embeddings_defaults,
+    suggested_cheap_model_for_provider,
+};
 
 use crate::setup::prompts::{
     confirm, input, optional_input, print_blank_line, print_error, print_info, print_success,
@@ -15,17 +20,10 @@ use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) fn apply_quick_embeddings_defaults(&mut self) {
-        self.settings.embeddings.enabled = true;
-        match self.primary_provider_slug() {
-            Some("ollama") | Some("llama_cpp") => {
-                self.settings.embeddings.provider = "ollama".to_string();
-                self.settings.embeddings.model = "nomic-embed-text".to_string();
-            }
-            _ => {
-                self.settings.embeddings.provider = "openai".to_string();
-                self.settings.embeddings.model = "text-embedding-3-small".to_string();
-            }
-        }
+        let plan = setup_quick_embeddings_defaults(self.primary_provider_slug());
+        self.settings.embeddings.enabled = plan.enabled;
+        self.settings.embeddings.provider = plan.provider;
+        self.settings.embeddings.model = plan.model;
         self.remove_followup("embeddings");
     }
 
@@ -86,30 +84,6 @@ impl SetupWizard {
         }
     }
 
-    fn provider_default_model(provider_slug: &str) -> Option<String> {
-        crate::config::provider_catalog::endpoint_for(provider_slug)
-            .map(|endpoint| endpoint.default_model.to_string())
-            .or_else(|| match provider_slug {
-                "ollama" => Some("llama3".to_string()),
-                "openai_compatible" => Some("default".to_string()),
-                "bedrock" => Some("anthropic.claude-3-sonnet-20240229-v1:0".to_string()),
-                "llama_cpp" => Some("llama-local".to_string()),
-                _ => None,
-            })
-    }
-
-    fn provider_display_name(provider_slug: &str) -> String {
-        crate::config::provider_catalog::endpoint_for(provider_slug)
-            .map(|endpoint| endpoint.display_name.to_string())
-            .unwrap_or_else(|| match provider_slug {
-                "ollama" => "Ollama".to_string(),
-                "openai_compatible" => "OpenAI-compatible".to_string(),
-                "bedrock" => "AWS Bedrock".to_string(),
-                "llama_cpp" => "llama.cpp".to_string(),
-                other => other.to_string(),
-            })
-    }
-
     fn offer_external_auth_sync(
         &mut self,
         provider_slug: &str,
@@ -150,23 +124,6 @@ impl SetupWizard {
         Ok(false)
     }
 
-    fn suggested_cheap_model_for_provider(
-        provider_slug: &str,
-        primary_model: Option<&str>,
-    ) -> Option<String> {
-        let candidate = crate::config::provider_catalog::endpoint_for(provider_slug)
-            .and_then(|ep| ep.suggested_cheap_model.as_deref());
-
-        if let Some(candidate) = candidate
-            && primary_model != Some(candidate)
-        {
-            return Some(candidate.to_string());
-        }
-
-        Self::provider_default_model(provider_slug)
-            .filter(|model| primary_model != Some(model.as_str()))
-    }
-
     pub(super) fn ensure_provider_slot_defaults(&mut self, provider_slug: &str) {
         let current_primary = if self.primary_provider_slug() == Some(provider_slug) {
             self.settings
@@ -177,22 +134,24 @@ impl SetupWizard {
         } else {
             None
         };
-        let default_primary =
-            current_primary.or_else(|| Self::provider_default_model(provider_slug));
         let slots = self
             .settings
             .providers
             .provider_models
             .entry(provider_slug.to_string())
             .or_default();
+        let plan = setup_provider_slot_defaults(&SetupProviderSlotDefaultsInput {
+            provider_slug: provider_slug.to_string(),
+            current_primary_model: current_primary,
+            existing_primary: slots.primary.clone(),
+            existing_cheap: slots.cheap.clone(),
+        });
 
         if slots.primary.is_none() {
-            slots.primary = default_primary;
+            slots.primary = plan.primary;
         }
         if slots.cheap.is_none() {
-            slots.cheap =
-                Self::suggested_cheap_model_for_provider(provider_slug, slots.primary.as_deref())
-                    .or_else(|| slots.primary.clone());
+            slots.cheap = plan.cheap;
         }
     }
 
@@ -205,7 +164,7 @@ impl SetupWizard {
             .or_default();
         slots.primary = Some(model.clone());
         if slots.cheap.is_none() {
-            slots.cheap = Self::suggested_cheap_model_for_provider(provider_slug, Some(&model))
+            slots.cheap = suggested_cheap_model_for_provider(provider_slug, Some(&model))
                 .or_else(|| Some(model.clone()));
         }
         if self.primary_provider_slug() == Some(provider_slug)
@@ -225,7 +184,7 @@ impl SetupWizard {
             .entry(provider_slug.to_string())
             .or_default();
         if slots.primary.is_none() {
-            slots.primary = Self::provider_default_model(provider_slug);
+            slots.primary = provider_default_model(provider_slug);
         }
         slots.cheap = Some(model.clone());
         self.settings.providers.preferred_cheap_provider = Some(provider_slug.to_string());
@@ -334,13 +293,13 @@ impl SetupWizard {
             let b_score = usize::from(preferred_provider.as_deref() != Some(b.as_str()));
             a_score
                 .cmp(&b_score)
-                .then_with(|| Self::provider_display_name(a).cmp(&Self::provider_display_name(b)))
+                .then_with(|| provider_display_name(a).cmp(&provider_display_name(b)))
         });
 
         let provider_option_labels: Vec<String> = provider_choices
             .iter()
             .map(|slug| {
-                let mut label = Self::provider_display_name(slug);
+                let mut label = provider_display_name(slug);
                 if self.primary_provider_slug() == Some(slug.as_str()) {
                     label.push_str(" (current primary)");
                 }
@@ -365,15 +324,15 @@ impl SetupWizard {
                     SetupError::Config("Invalid secondary provider selection".to_string())
                 })?;
 
-        let display_name = Self::provider_display_name(&cheap_provider_slug);
+        let display_name = provider_display_name(&cheap_provider_slug);
 
         let mut model_options = self.fetch_models_for_provider(&cheap_provider_slug).await;
         if model_options.is_empty()
-            && let Some(default_model) = Self::provider_default_model(&cheap_provider_slug)
+            && let Some(default_model) = provider_default_model(&cheap_provider_slug)
         {
             model_options.push((default_model.clone(), default_model));
         }
-        let suggested_cheap = Self::suggested_cheap_model_for_provider(
+        let suggested_cheap = suggested_cheap_model_for_provider(
             &cheap_provider_slug,
             self.settings
                 .providers
@@ -490,7 +449,7 @@ impl SetupWizard {
     fn print_ai_stack_summary(&self) {
         let provider = self
             .primary_provider_slug()
-            .map(Self::provider_display_name)
+            .map(provider_display_name)
             .unwrap_or_else(|| "unconfigured".to_string());
         let primary_model = self
             .settings
@@ -544,7 +503,7 @@ impl SetupWizard {
             self.ensure_provider_slot_defaults(&current);
             print_success(&format!(
                 "Keeping provider review on {} without changing credentials.",
-                Self::provider_display_name(&current)
+                provider_display_name(&current)
             ));
             return Ok(());
         }
@@ -1044,7 +1003,7 @@ impl SetupWizard {
                     .unwrap_or_else(|| "http://localhost:11434".to_string());
                 fetch_ollama_models(&base_url).await
             }
-            _ => Self::provider_default_model(provider_slug)
+            _ => provider_default_model(provider_slug)
                 .map(|model| vec![(model.clone(), model)])
                 .unwrap_or_default(),
         }
@@ -1731,7 +1690,7 @@ impl SetupWizard {
 
         let mut models = self.fetch_models_for_provider(&provider_slug).await;
         if models.is_empty()
-            && let Some(default_model) = Self::provider_default_model(&provider_slug)
+            && let Some(default_model) = provider_default_model(&provider_slug)
         {
             models.push((default_model.clone(), default_model));
         }
@@ -2086,10 +2045,10 @@ impl SetupWizard {
                 .into_iter()
                 .map(|(id, _)| id)
                 .next()
-                .or_else(|| Self::provider_default_model(slug))
+                .or_else(|| provider_default_model(slug))
                 .unwrap_or_else(|| endpoint.default_model.to_string());
             let cheap_default =
-                Self::suggested_cheap_model_for_provider(slug, Some(discovered_primary.as_str()))
+                suggested_cheap_model_for_provider(slug, Some(discovered_primary.as_str()))
                     .unwrap_or_else(|| discovered_primary.clone());
             let slots = self
                 .settings

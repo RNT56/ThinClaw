@@ -372,6 +372,100 @@ pub fn setup_what_next_commands(input: SetupRuntimeCommandInput) -> Vec<String> 
     commands
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupEmbeddingsDefaultsPlan {
+    pub enabled: bool,
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetupProviderSlotDefaultsInput {
+    pub provider_slug: String,
+    pub current_primary_model: Option<String>,
+    pub existing_primary: Option<String>,
+    pub existing_cheap: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetupProviderSlotDefaultsPlan {
+    pub primary: Option<String>,
+    pub cheap: Option<String>,
+}
+
+pub fn provider_default_model(provider_slug: &str) -> Option<String> {
+    thinclaw_config::provider_catalog::endpoint_for(provider_slug)
+        .map(|endpoint| endpoint.default_model.to_string())
+        .or_else(|| match provider_slug {
+            "ollama" => Some("llama3".to_string()),
+            "openai_compatible" => Some("default".to_string()),
+            "bedrock" => Some("anthropic.claude-3-sonnet-20240229-v1:0".to_string()),
+            "llama_cpp" => Some("llama-local".to_string()),
+            _ => None,
+        })
+}
+
+pub fn provider_display_name(provider_slug: &str) -> String {
+    thinclaw_config::provider_catalog::endpoint_for(provider_slug)
+        .map(|endpoint| endpoint.display_name.to_string())
+        .unwrap_or_else(|| match provider_slug {
+            "ollama" => "Ollama".to_string(),
+            "openai_compatible" => "OpenAI-compatible".to_string(),
+            "bedrock" => "AWS Bedrock".to_string(),
+            "llama_cpp" => "llama.cpp".to_string(),
+            other => other.to_string(),
+        })
+}
+
+pub fn suggested_cheap_model_for_provider(
+    provider_slug: &str,
+    primary_model: Option<&str>,
+) -> Option<String> {
+    let candidate = thinclaw_config::provider_catalog::endpoint_for(provider_slug)
+        .and_then(|endpoint| endpoint.suggested_cheap_model.as_deref());
+
+    if let Some(candidate) = candidate
+        && primary_model != Some(candidate)
+    {
+        return Some(candidate.to_string());
+    }
+
+    provider_default_model(provider_slug).filter(|model| primary_model != Some(model.as_str()))
+}
+
+pub fn setup_quick_embeddings_defaults(
+    primary_provider_slug: Option<&str>,
+) -> SetupEmbeddingsDefaultsPlan {
+    match primary_provider_slug {
+        Some("ollama") | Some("llama_cpp") => SetupEmbeddingsDefaultsPlan {
+            enabled: true,
+            provider: "ollama".to_string(),
+            model: "nomic-embed-text".to_string(),
+        },
+        _ => SetupEmbeddingsDefaultsPlan {
+            enabled: true,
+            provider: "openai".to_string(),
+            model: "text-embedding-3-small".to_string(),
+        },
+    }
+}
+
+pub fn setup_provider_slot_defaults(
+    input: &SetupProviderSlotDefaultsInput,
+) -> SetupProviderSlotDefaultsPlan {
+    let primary = input
+        .existing_primary
+        .clone()
+        .or_else(|| input.current_primary_model.clone())
+        .or_else(|| provider_default_model(&input.provider_slug));
+    let cheap = input.existing_cheap.clone().or_else(|| {
+        suggested_cheap_model_for_provider(&input.provider_slug, primary.as_deref())
+            .or_else(|| primary.clone())
+    });
+
+    SetupProviderSlotDefaultsPlan { primary, cheap }
+}
+
 pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     use SetupWizardPhaseId as Phase;
     use SetupWizardStepId as Step;
@@ -1259,6 +1353,76 @@ mod tests {
                 SetupWizardStepId::Summary,
             ]
         );
+    }
+
+    #[test]
+    fn provider_planning_uses_catalog_and_legacy_fallbacks() {
+        assert_eq!(provider_display_name("openai"), "OpenAI");
+        assert_eq!(provider_default_model("openai").as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            suggested_cheap_model_for_provider("openai", Some("gpt-4o")).as_deref(),
+            Some("gpt-4o-mini")
+        );
+        assert_eq!(
+            suggested_cheap_model_for_provider("openai", Some("gpt-4o-mini")),
+            provider_default_model("openai")
+        );
+
+        assert_eq!(provider_display_name("llama_cpp"), "llama.cpp");
+        assert_eq!(
+            provider_default_model("llama_cpp").as_deref(),
+            Some("llama-local")
+        );
+        assert_eq!(provider_display_name("custom_provider"), "custom_provider");
+        assert_eq!(provider_default_model("custom_provider"), None);
+    }
+
+    #[test]
+    fn quick_embeddings_defaults_follow_primary_provider_class() {
+        let remote = setup_quick_embeddings_defaults(Some("openai"));
+        assert!(remote.enabled);
+        assert_eq!(remote.provider, "openai");
+        assert_eq!(remote.model, "text-embedding-3-small");
+
+        let local = setup_quick_embeddings_defaults(Some("llama_cpp"));
+        assert!(local.enabled);
+        assert_eq!(local.provider, "ollama");
+        assert_eq!(local.model, "nomic-embed-text");
+    }
+
+    #[test]
+    fn provider_slot_defaults_plan_fills_missing_slots_without_overwriting_existing() {
+        let empty = setup_provider_slot_defaults(&SetupProviderSlotDefaultsInput {
+            provider_slug: "openai".to_string(),
+            ..SetupProviderSlotDefaultsInput::default()
+        });
+        assert_eq!(empty.primary.as_deref(), Some("gpt-4o"));
+        assert_eq!(empty.cheap.as_deref(), Some("gpt-4o-mini"));
+
+        let from_current_primary = setup_provider_slot_defaults(&SetupProviderSlotDefaultsInput {
+            provider_slug: "openai_compatible".to_string(),
+            current_primary_model: Some("primary-from-settings".to_string()),
+            existing_primary: None,
+            existing_cheap: None,
+        });
+        assert_eq!(
+            from_current_primary.primary.as_deref(),
+            Some("primary-from-settings")
+        );
+        assert_eq!(
+            from_current_primary.cheap.as_deref(),
+            Some("default"),
+            "fallback cheap should prefer provider default when distinct from current primary"
+        );
+
+        let existing = setup_provider_slot_defaults(&SetupProviderSlotDefaultsInput {
+            provider_slug: "openai".to_string(),
+            current_primary_model: Some("ignored-current".to_string()),
+            existing_primary: Some("kept-primary".to_string()),
+            existing_cheap: Some("kept-cheap".to_string()),
+        });
+        assert_eq!(existing.primary.as_deref(), Some("kept-primary"));
+        assert_eq!(existing.cheap.as_deref(), Some("kept-cheap"));
     }
 
     #[test]

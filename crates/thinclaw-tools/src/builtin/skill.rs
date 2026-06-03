@@ -964,6 +964,99 @@ pub fn skill_publish_plan_output(
     })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillPublishScanProjection {
+    pub scanner_version: String,
+    pub content_sha256: String,
+    pub finding_summary: SkillFindingSummary,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillPublishProjection {
+    pub status: String,
+    pub name: String,
+    pub target_repo: String,
+    pub tap_path: String,
+    pub package_path: String,
+    pub branch: String,
+    pub base_branch: Option<String>,
+    pub package_hash: String,
+    pub files: Vec<serde_json::Value>,
+    pub findings: Vec<serde_json::Value>,
+    pub trust: String,
+    pub source_tier: String,
+    pub source: serde_json::Value,
+    pub scan: Option<SkillPublishScanProjection>,
+    pub remote_write_plan: Option<serde_json::Value>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+pub fn skill_publish_projection_output(projection: SkillPublishProjection) -> serde_json::Value {
+    let mut output = skill_publish_plan_output(
+        &projection.status,
+        &projection.name,
+        &projection.target_repo,
+        &projection.tap_path,
+        &projection.package_path,
+        &projection.branch,
+        projection.base_branch.as_deref(),
+        &projection.package_hash,
+        projection.files,
+        projection.findings,
+        &projection.trust,
+        &projection.source_tier,
+        projection.source,
+    );
+
+    if let Some(scan) = projection.scan {
+        add_skill_scan_report_fields(
+            &mut output,
+            &scan.scanner_version,
+            &scan.content_sha256,
+            scan.finding_summary,
+        );
+    }
+    if let Some(remote_write_plan) = projection.remote_write_plan
+        && !remote_write_plan.is_null()
+    {
+        output["remote_write_plan"] = remote_write_plan;
+    }
+    if let Some(metadata) = projection.metadata
+        && let Some(metadata_object) = metadata.as_object()
+        && let Some(output_object) = output.as_object_mut()
+    {
+        for (key, value) in metadata_object {
+            output_object.insert(key.clone(), value.clone());
+        }
+    }
+    output
+}
+
+pub fn skill_publish_result_projection(result: &ToolSkillPublishResult) -> SkillPublishProjection {
+    SkillPublishProjection {
+        status: result.status.clone(),
+        name: result.name.clone(),
+        target_repo: result.target_repo.clone(),
+        tap_path: result.tap_path.clone(),
+        package_path: result.package_path.clone(),
+        branch: result.branch.clone(),
+        base_branch: result.base_branch.clone(),
+        package_hash: result.package_hash.clone(),
+        files: result.files.clone(),
+        findings: result.findings.clone(),
+        trust: result.trust.clone(),
+        source_tier: result.source_tier.clone(),
+        source: result.source.clone(),
+        scan: None,
+        remote_write_plan: Some(result.remote_write_plan.clone()),
+        metadata: Some(result.metadata.clone()),
+    }
+}
+
+pub fn skill_publish_result_tool_output(result: &ToolSkillPublishResult) -> serde_json::Value {
+    skill_publish_projection_output(skill_publish_result_projection(result))
+}
+
 pub fn skill_publish_metadata_output<I>(
     scanner_version: &str,
     content_sha256: &str,
@@ -2021,33 +2114,7 @@ impl Tool for SkillInspectHostTool {
 }
 
 fn tool_skill_publish_output(result: &ToolSkillPublishResult) -> serde_json::Value {
-    let mut output = skill_publish_plan_output(
-        &result.status,
-        &result.name,
-        &result.target_repo,
-        &result.tap_path,
-        &result.package_path,
-        &result.branch,
-        result.base_branch.as_deref(),
-        &result.package_hash,
-        result.files.clone(),
-        result.findings.clone(),
-        &result.trust,
-        &result.source_tier,
-        result.source.clone(),
-    );
-
-    if !result.remote_write_plan.is_null() {
-        output["remote_write_plan"] = result.remote_write_plan.clone();
-    }
-    if let Some(metadata) = result.metadata.as_object()
-        && let Some(output_object) = output.as_object_mut()
-    {
-        for (key, value) in metadata {
-            output_object.insert(key.clone(), value.clone());
-        }
-    }
-    output
+    skill_publish_result_tool_output(result)
 }
 
 pub struct SkillPublishHostTool {
@@ -3959,6 +4026,55 @@ mod tests {
         assert_eq!(result.package_path, "community/docs");
         assert_eq!(result.files[0]["path"], "SKILL.md");
         assert_eq!(result.metadata["scanner_version"], "test-scanner");
+    }
+
+    #[test]
+    fn publish_projection_output_preserves_plan_scan_and_remote_shape() {
+        let output = skill_publish_projection_output(SkillPublishProjection {
+            status: "published".to_string(),
+            name: "docs".to_string(),
+            target_repo: "owner/repo".to_string(),
+            tap_path: "community".to_string(),
+            package_path: "community/docs".to_string(),
+            branch: "codex/skill-publish/docs-1234abcd".to_string(),
+            base_branch: Some("main".to_string()),
+            package_hash: "sha256:1234".to_string(),
+            files: vec![serde_json::json!({"path": "SKILL.md", "bytes": 10})],
+            findings: vec![skill_finding_output("network", "warning", "curl")],
+            trust: "trusted".to_string(),
+            source_tier: "user".to_string(),
+            source: skill_source_output("user", "/tmp/docs"),
+            scan: Some(SkillPublishScanProjection {
+                scanner_version: "test-scanner".to_string(),
+                content_sha256: "sha256:content".to_string(),
+                finding_summary: SkillFindingSummary {
+                    total: 1,
+                    warnings: 1,
+                    critical: 0,
+                    categories: vec!["network".to_string()],
+                },
+            }),
+            remote_write_plan: Some(serde_json::json!({
+                "pull_request": {
+                    "title": "custom title"
+                }
+            })),
+            metadata: Some(serde_json::json!({
+                "pr_url": "https://github.com/owner/repo/pull/1"
+            })),
+        });
+
+        assert_eq!(output["status"], "published");
+        assert_eq!(output["file_count"], 1);
+        assert_eq!(output["finding_count"], 1);
+        assert_eq!(output["scanner_version"], "test-scanner");
+        assert_eq!(output["content_sha256"], "sha256:content");
+        assert_eq!(output["finding_summary"]["warnings"], 1);
+        assert_eq!(
+            output["remote_write_plan"]["pull_request"]["title"],
+            "custom title"
+        );
+        assert_eq!(output["pr_url"], "https://github.com/owner/repo/pull/1");
     }
 
     #[tokio::test]
