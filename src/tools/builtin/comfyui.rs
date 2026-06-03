@@ -1,6 +1,6 @@
 //! ComfyUI media generation tools.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,15 +14,16 @@ use crate::context::JobContext;
 use crate::secrets::{SecretAccessContext, SecretsStore};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolApprovalClass, ToolError, ToolMetadata, ToolOutput,
-    ToolRateLimitConfig, ToolSideEffectLevel, require_str,
+    ToolRateLimitConfig, ToolSideEffectLevel,
 };
 use thinclaw_tools::builtin::comfyui::{
     COMFY_CHECK_DEPS_DESCRIPTION, COMFY_HEALTH_DESCRIPTION, COMFY_MANAGE_DESCRIPTION,
-    COMFY_RUN_WORKFLOW_DESCRIPTION, ComfyGenerationImageBytes, ComfyWorkflowJsonSource,
-    IMAGE_GENERATE_DESCRIPTION, comfy_check_deps_schema, comfy_generation_output,
-    comfy_hardware_check, comfy_health_schema, comfy_install_gpu_flag, comfy_manage_schema,
-    comfy_run_workflow_schema, image_generate_schema, optional_u32_param, parse_comfy_mode,
-    parse_workflow_json, resolve_workflow_json_source, tool_external,
+    COMFY_RUN_WORKFLOW_DESCRIPTION, ComfyGenerationImageBytes, ComfyGenerationRequestKind,
+    ComfyManageOperation, ComfyWorkflowJsonSource, IMAGE_GENERATE_DESCRIPTION,
+    comfy_check_deps_schema, comfy_generate_request, comfy_generation_output, comfy_hardware_check,
+    comfy_health_schema, comfy_manage_operation, comfy_manage_schema, comfy_run_workflow_schema,
+    comfy_workflow_name_or_default, image_generate_schema, parse_comfy_mode, parse_workflow_json,
+    require_workflow_name, resolve_workflow_json_source, tool_external,
 };
 use thinclaw_tools::ports::{
     ComfyUiToolHostPort, ToolComfyActionRequest, ToolComfyActionResult, ToolComfyStatus,
@@ -249,54 +250,20 @@ impl Tool for ImageGenerateTool {
                 ToolError::ExecutionFailed(format!("ComfyUI semaphore closed: {e}"))
             })?;
         let start = Instant::now();
-        let prompt = require_str(&params, "prompt")?;
-        if prompt.trim().is_empty() {
-            return Err(ToolError::InvalidParameters(
-                "prompt cannot be empty".to_string(),
-            ));
-        }
-
-        let workflow_name = params
-            .get("workflow")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| self.state.default_workflow_name());
+        let workflow_name =
+            comfy_workflow_name_or_default(&params, &self.state.default_workflow_name());
         let workflow =
             load_workflow(&workflow_name, self.state.config.allow_untrusted_workflows).await?;
-        let aspect_ratio = params
-            .get("aspect_ratio")
-            .and_then(Value::as_str)
-            .unwrap_or(&self.state.config.default_aspect_ratio)
-            .parse::<thinclaw_media::ComfyAspectRatio>()
-            .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
+        let request = comfy_generate_request(
+            &params,
+            workflow,
+            workflow_name,
+            &self.state.config.default_aspect_ratio,
+            ComfyGenerationRequestKind::ImageGenerate,
+        )?;
 
         let client = self.state.client().await?;
-        let generation = client
-            .generate(thinclaw_media::ComfyGenerateRequest {
-                prompt: prompt.to_string(),
-                negative_prompt: params
-                    .get("negative_prompt")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                aspect_ratio,
-                width: optional_u32_param(&params, "width")?,
-                height: optional_u32_param(&params, "height")?,
-                seed: params.get("seed").and_then(Value::as_i64),
-                steps: optional_u32_param(&params, "steps")?,
-                cfg: params.get("cfg").and_then(Value::as_f64),
-                model: params
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                workflow,
-                workflow_name: workflow_name.clone(),
-                input_image: None,
-                mask_image: None,
-                wait_for_completion: true,
-                use_websocket: true,
-            })
-            .await
-            .map_err(tool_external)?;
+        let generation = client.generate(request).await.map_err(tool_external)?;
 
         Ok(generation_output(generation, start.elapsed()).await?)
     }
@@ -397,7 +364,7 @@ impl Tool for ComfyCheckDepsTool {
 
     async fn execute(&self, params: Value, _ctx: &JobContext) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
-        let workflow_name = require_str(&params, "workflow")?;
+        let workflow_name = require_workflow_name(&params)?;
         let workflow =
             load_workflow(workflow_name, self.state.config.allow_untrusted_workflows).await?;
         let client = self.state.client().await?;
@@ -453,49 +420,18 @@ impl Tool for ComfyRunWorkflowTool {
                 ToolError::ExecutionFailed(format!("ComfyUI semaphore closed: {e}"))
             })?;
         let start = Instant::now();
-        let workflow_name = require_str(&params, "workflow")?;
-        let prompt = require_str(&params, "prompt")?;
+        let workflow_name = require_workflow_name(&params)?;
         let workflow =
             load_workflow(workflow_name, self.state.config.allow_untrusted_workflows).await?;
-        let aspect_ratio = params
-            .get("aspect_ratio")
-            .and_then(Value::as_str)
-            .unwrap_or(&self.state.config.default_aspect_ratio)
-            .parse::<thinclaw_media::ComfyAspectRatio>()
-            .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
+        let request = comfy_generate_request(
+            &params,
+            workflow,
+            workflow_name,
+            &self.state.config.default_aspect_ratio,
+            ComfyGenerationRequestKind::WorkflowRun,
+        )?;
         let client = self.state.client().await?;
-        let generation = client
-            .generate(thinclaw_media::ComfyGenerateRequest {
-                prompt: prompt.to_string(),
-                negative_prompt: params
-                    .get("negative_prompt")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                aspect_ratio,
-                width: optional_u32_param(&params, "width")?,
-                height: optional_u32_param(&params, "height")?,
-                seed: params.get("seed").and_then(Value::as_i64),
-                steps: optional_u32_param(&params, "steps")?,
-                cfg: params.get("cfg").and_then(Value::as_f64),
-                model: params
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                workflow,
-                workflow_name: workflow_name.to_string(),
-                input_image: params
-                    .get("input_image")
-                    .and_then(Value::as_str)
-                    .map(PathBuf::from),
-                mask_image: params
-                    .get("mask_image")
-                    .and_then(Value::as_str)
-                    .map(PathBuf::from),
-                wait_for_completion: params.get("wait").and_then(Value::as_bool).unwrap_or(true),
-                use_websocket: true,
-            })
-            .await
-            .map_err(tool_external)?;
+        let generation = client.generate(request).await.map_err(tool_external)?;
 
         Ok(generation_output(generation, start.elapsed()).await?)
     }
@@ -549,65 +485,14 @@ impl Tool for ComfyManageTool {
             ));
         }
         let start = Instant::now();
-        let action = require_str(&params, "action")?;
-        let result = match action {
-            "hardware_check" => comfy_hardware_check(),
-            "install_cli" => {
-                run_command(
-                    "python3",
-                    &["-m", "pip", "install", "--user", "comfy-cli"],
-                    None,
-                )
-                .await?
-            }
-            "install_comfyui" => {
-                let gpu = params.get("gpu").and_then(Value::as_str).unwrap_or("cpu");
-                let flag = comfy_install_gpu_flag(gpu)?;
-                run_command(
-                    "comfy",
-                    &["--skip-prompt", "install", flag],
-                    Some(&self.state.config.workspace_dir),
-                )
-                .await?
-            }
-            "launch" => {
-                let port = self.state.config.port.to_string();
-                run_command(
-                    "comfy",
-                    &["launch", "--background", "--", "--port", &port],
-                    Some(&self.state.config.workspace_dir),
-                )
-                .await?
-            }
-            "stop" => {
-                run_command("comfy", &["stop"], Some(&self.state.config.workspace_dir)).await?
-            }
-            "download_model" => {
-                let url = require_str(&params, "model_url")?;
-                let model_type = params
-                    .get("model_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("checkpoints");
-                run_command(
-                    "comfy",
-                    &["model", "download", "--url", url, "--type", model_type],
-                    Some(&self.state.config.workspace_dir),
-                )
-                .await?
-            }
-            "install_node" => {
-                let node = require_str(&params, "node")?;
-                run_command(
-                    "comfy",
-                    &["node", "install", node],
-                    Some(&self.state.config.workspace_dir),
-                )
-                .await?
-            }
-            other => {
-                return Err(ToolError::InvalidParameters(format!(
-                    "unknown action '{other}'"
-                )));
+        let result = match comfy_manage_operation(&params, self.state.config.port)? {
+            ComfyManageOperation::HardwareCheck => comfy_hardware_check(),
+            ComfyManageOperation::Command(command) => {
+                let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
+                let cwd = command
+                    .use_workspace_dir
+                    .then_some(self.state.config.workspace_dir.as_path());
+                run_command(&command.program, &args, cwd).await?
             }
         };
 

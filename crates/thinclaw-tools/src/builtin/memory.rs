@@ -52,6 +52,32 @@ pub struct MemoryWriteParams {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryWriteTargetKind {
+    Memory,
+    DailyLog,
+    Heartbeat,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryWriteFilePolicy {
+    AppendOnlyIdentity,
+    PromptManagedIdentity,
+    FreelyRewritableIdentity,
+    Regular,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryWritePlan {
+    pub path: String,
+    pub is_actor_scoped: bool,
+    pub normalized_path: String,
+    pub file_name: String,
+    pub target_kind: MemoryWriteTargetKind,
+    pub file_policy: MemoryWriteFilePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryReadSlice {
     pub requested: bool,
     pub start_line: usize,
@@ -750,6 +776,65 @@ pub fn resolve_memory_write_path(
     }
 }
 
+pub fn memory_write_target_kind(target: &str) -> MemoryWriteTargetKind {
+    let target = target.trim();
+    if target.eq_ignore_ascii_case("memory") {
+        MemoryWriteTargetKind::Memory
+    } else if target.eq_ignore_ascii_case("daily_log") {
+        MemoryWriteTargetKind::DailyLog
+    } else if target.eq_ignore_ascii_case("heartbeat") {
+        MemoryWriteTargetKind::Heartbeat
+    } else {
+        MemoryWriteTargetKind::Other
+    }
+}
+
+pub fn memory_write_file_policy(file_name: &str) -> MemoryWriteFilePolicy {
+    if APPEND_ONLY_IDENTITY_FILES
+        .iter()
+        .any(|p| file_name.eq_ignore_ascii_case(p))
+    {
+        MemoryWriteFilePolicy::AppendOnlyIdentity
+    } else if [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER]
+        .iter()
+        .any(|p| file_name.eq_ignore_ascii_case(p))
+    {
+        MemoryWriteFilePolicy::PromptManagedIdentity
+    } else if FREELY_REWRITABLE_IDENTITY_FILES
+        .iter()
+        .any(|p| file_name.eq_ignore_ascii_case(p))
+    {
+        MemoryWriteFilePolicy::FreelyRewritableIdentity
+    } else {
+        MemoryWriteFilePolicy::Regular
+    }
+}
+
+pub fn resolve_memory_write_plan(
+    metadata: &serde_json::Value,
+    actor_id: Option<&str>,
+    target: &str,
+) -> MemoryWritePlan {
+    let (path, is_actor_scoped) = resolve_memory_write_path(metadata, actor_id, target);
+    let normalized_path = path.trim_start_matches('/').to_string();
+    let file_name = normalized_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized_path)
+        .to_string();
+    let target_kind = memory_write_target_kind(target);
+    let file_policy = memory_write_file_policy(&file_name);
+
+    MemoryWritePlan {
+        path,
+        is_actor_scoped,
+        normalized_path,
+        file_name,
+        target_kind,
+        file_policy,
+    }
+}
+
 pub fn resolve_memory_write_path_for_context(ctx: &JobContext, target: &str) -> (String, bool) {
     let actor_id = ctx
         .metadata
@@ -758,6 +843,16 @@ pub fn resolve_memory_write_path_for_context(ctx: &JobContext, target: &str) -> 
         .and_then(|v| v.as_str())
         .or(ctx.actor_id.as_deref());
     resolve_memory_write_path(&ctx.metadata, actor_id, target)
+}
+
+pub fn resolve_memory_write_plan_for_context(ctx: &JobContext, target: &str) -> MemoryWritePlan {
+    let actor_id = ctx
+        .metadata
+        .get("actor_id")
+        .or_else(|| ctx.metadata.get("actor"))
+        .and_then(|v| v.as_str())
+        .or(ctx.actor_id.as_deref());
+    resolve_memory_write_plan(&ctx.metadata, actor_id, target)
 }
 
 async fn execute_memory_action<F, Fut>(
@@ -1088,6 +1183,38 @@ mod tests {
         assert_eq!(
             resolve_memory_write_path_for_context(&ctx, "profile"),
             (paths::actor_profile("ctx-actor"), true)
+        );
+    }
+
+    #[test]
+    fn memory_write_plan_classifies_target_and_identity_policy() {
+        let plan = resolve_memory_write_plan(
+            &serde_json::json!({ "conversation_kind": "direct" }),
+            Some("actor-1"),
+            "memory",
+        );
+
+        assert_eq!(plan.path, paths::actor_memory("actor-1"));
+        assert!(plan.is_actor_scoped);
+        assert_eq!(plan.normalized_path, paths::actor_memory("actor-1"));
+        assert_eq!(plan.file_name, paths::MEMORY);
+        assert_eq!(plan.target_kind, MemoryWriteTargetKind::Memory);
+        assert_eq!(plan.file_policy, MemoryWriteFilePolicy::Regular);
+
+        let daily = resolve_memory_write_plan(&serde_json::json!({}), None, "daily_log");
+        assert_eq!(daily.target_kind, MemoryWriteTargetKind::DailyLog);
+        assert_eq!(daily.file_policy, MemoryWriteFilePolicy::Regular);
+
+        let identity = resolve_memory_write_plan(&serde_json::json!({}), None, paths::IDENTITY);
+        assert_eq!(
+            identity.file_policy,
+            MemoryWriteFilePolicy::FreelyRewritableIdentity
+        );
+
+        let soul = resolve_memory_write_plan(&serde_json::json!({}), None, paths::SOUL);
+        assert_eq!(
+            soul.file_policy,
+            MemoryWriteFilePolicy::PromptManagedIdentity
         );
     }
 

@@ -6,7 +6,7 @@ use thinclaw_tools::execution::{
     ExecutionBackendKind, RuntimeDescriptor, local_job_runtime_descriptor,
     sandbox_job_runtime_descriptor,
 };
-use thinclaw_types::sandbox::JobMode;
+use thinclaw_types::sandbox::{JobMode, normalize_sandbox_ui_state};
 use uuid::Uuid;
 
 use crate::web::types::{
@@ -178,6 +178,119 @@ pub fn elapsed_secs(
         let end = completed_at.unwrap_or(now);
         (end - start).num_seconds().max(0) as u64
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxContainerState {
+    Creating,
+    Running,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxJobSpecProjection {
+    pub title: String,
+    pub description: String,
+    pub principal_id: String,
+    pub project_dir: Option<String>,
+    pub mode: JobMode,
+    pub interactive: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxJobLookupProjection {
+    pub live_state: Option<SandboxContainerState>,
+    pub live_created_at: Option<DateTime<Utc>>,
+    pub live_completion_status: Option<String>,
+    pub live_completion_message: Option<String>,
+    pub stored_status: Option<String>,
+    pub stored_created_at: Option<DateTime<Utc>>,
+    pub stored_started_at: Option<DateTime<Utc>>,
+    pub stored_completed_at: Option<DateTime<Utc>>,
+    pub stored_failure_reason: Option<String>,
+    pub spec: Option<SandboxJobSpecProjection>,
+}
+
+impl SandboxJobLookupProjection {
+    pub fn status(&self) -> String {
+        match self.live_state {
+            Some(SandboxContainerState::Creating) => "creating".to_string(),
+            Some(SandboxContainerState::Running) => "running".to_string(),
+            Some(SandboxContainerState::Stopped) => self
+                .live_completion_status
+                .as_deref()
+                .or(self.stored_status.as_deref())
+                .unwrap_or("completed")
+                .to_string(),
+            Some(SandboxContainerState::Failed) => self
+                .live_completion_status
+                .as_deref()
+                .unwrap_or("failed")
+                .to_string(),
+            None => self
+                .stored_status
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_string(),
+        }
+    }
+
+    pub fn ui_state(&self) -> String {
+        normalize_sandbox_ui_state(&self.status()).to_string()
+    }
+
+    pub fn created_at(&self) -> Option<DateTime<Utc>> {
+        self.live_created_at.or(self.stored_created_at)
+    }
+
+    pub fn started_at(&self) -> Option<DateTime<Utc>> {
+        self.stored_started_at.or_else(|| match self.live_state {
+            Some(
+                SandboxContainerState::Running
+                | SandboxContainerState::Stopped
+                | SandboxContainerState::Failed,
+            ) => self.live_created_at,
+            Some(SandboxContainerState::Creating) | None => None,
+        })
+    }
+
+    pub fn completed_at(&self) -> Option<DateTime<Utc>> {
+        self.stored_completed_at
+    }
+
+    pub fn failure_reason(&self) -> Option<String> {
+        self.stored_failure_reason
+            .as_deref()
+            .or(self.live_completion_message.as_deref())
+            .map(str::to_string)
+    }
+
+    pub fn accepts_prompts(&self) -> bool {
+        self.is_interactive()
+            && matches!(
+                self.live_state,
+                Some(SandboxContainerState::Creating | SandboxContainerState::Running)
+            )
+    }
+
+    pub fn is_interactive(&self) -> bool {
+        self.spec
+            .as_ref()
+            .map(|spec| spec.interactive)
+            .unwrap_or(false)
+    }
+
+    pub fn is_cancellable(&self) -> bool {
+        matches!(self.status().as_str(), "creating" | "running")
+    }
+
+    pub fn project_dir(&self) -> Option<String> {
+        self.spec
+            .as_ref()
+            .and_then(|spec| spec.project_dir.clone())
+            .filter(|path| !path.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -661,6 +774,98 @@ mod tests {
             Some(0)
         );
         assert_eq!(elapsed_secs(None, None, start), None);
+    }
+
+    fn sandbox_projection(interactive: bool) -> SandboxJobLookupProjection {
+        SandboxJobLookupProjection {
+            spec: Some(SandboxJobSpecProjection {
+                title: "Sandbox".to_string(),
+                description: "Run it".to_string(),
+                principal_id: "user-1".to_string(),
+                project_dir: Some("/tmp/project-a".to_string()),
+                mode: JobMode::Worker,
+                interactive,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sandbox_lookup_projection_shapes_status_and_ui_state() {
+        let mut lookup = sandbox_projection(true);
+        lookup.live_state = Some(SandboxContainerState::Creating);
+        lookup.stored_status = Some("failed".to_string());
+        assert_eq!(lookup.status(), "creating");
+        assert_eq!(lookup.ui_state(), "pending");
+
+        lookup.live_state = Some(SandboxContainerState::Running);
+        assert_eq!(lookup.status(), "running");
+        assert_eq!(lookup.ui_state(), "in_progress");
+
+        lookup.live_state = Some(SandboxContainerState::Stopped);
+        lookup.live_completion_status = None;
+        lookup.stored_status = Some("cancelled".to_string());
+        assert_eq!(lookup.status(), "cancelled");
+
+        lookup.stored_status = None;
+        assert_eq!(lookup.status(), "completed");
+
+        lookup.live_state = Some(SandboxContainerState::Failed);
+        lookup.live_completion_status = Some("interrupted".to_string());
+        assert_eq!(lookup.status(), "interrupted");
+
+        lookup.live_state = None;
+        lookup.live_completion_status = None;
+        assert_eq!(SandboxJobLookupProjection::default().status(), "unknown");
+    }
+
+    #[test]
+    fn sandbox_lookup_projection_projects_timestamps_and_failure_reason() {
+        let created = Utc::now();
+        let started = created + TimeDelta::seconds(1);
+        let completed = started + TimeDelta::seconds(2);
+        let mut lookup = sandbox_projection(false);
+        lookup.live_state = Some(SandboxContainerState::Running);
+        lookup.live_created_at = Some(created);
+        lookup.live_completion_message = Some("live failed".to_string());
+
+        assert_eq!(lookup.created_at(), Some(created));
+        assert_eq!(lookup.started_at(), Some(created));
+        assert_eq!(lookup.completed_at(), None);
+        assert_eq!(lookup.failure_reason(), Some("live failed".to_string()));
+
+        lookup.stored_created_at = Some(started);
+        lookup.stored_started_at = Some(started);
+        lookup.stored_completed_at = Some(completed);
+        lookup.stored_failure_reason = Some("stored failed".to_string());
+
+        assert_eq!(lookup.created_at(), Some(created));
+        assert_eq!(lookup.started_at(), Some(started));
+        assert_eq!(lookup.completed_at(), Some(completed));
+        assert_eq!(lookup.failure_reason(), Some("stored failed".to_string()));
+    }
+
+    #[test]
+    fn sandbox_lookup_projection_shapes_prompt_cancel_and_project_policy() {
+        let mut lookup = sandbox_projection(true);
+        lookup.live_state = Some(SandboxContainerState::Running);
+
+        assert!(lookup.is_interactive());
+        assert!(lookup.accepts_prompts());
+        assert!(lookup.is_cancellable());
+        assert_eq!(lookup.project_dir().as_deref(), Some("/tmp/project-a"));
+
+        lookup.live_state = Some(SandboxContainerState::Stopped);
+        assert!(!lookup.accepts_prompts());
+        assert!(!lookup.is_cancellable());
+
+        lookup.spec.as_mut().unwrap().interactive = false;
+        lookup.live_state = Some(SandboxContainerState::Creating);
+        assert!(!lookup.accepts_prompts());
+        assert!(lookup.is_cancellable());
+
+        lookup.spec.as_mut().unwrap().project_dir = Some("   ".to_string());
+        assert_eq!(lookup.project_dir(), None);
     }
 
     #[test]

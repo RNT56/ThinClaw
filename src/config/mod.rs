@@ -447,22 +447,8 @@ pub async fn resolve_provider_secret_value(
         return Some(value);
     }
 
-    match env_key {
-        "OPENROUTER_API_KEY" => {
-            if let Ok(Some(value)) = helpers::optional_env("LLM_API_KEY")
-                && !value.trim().is_empty()
-            {
-                return Some(value);
-            }
-        }
-        "BEDROCK_API_KEY" => {
-            if let Ok(Some(value)) = helpers::optional_env("AWS_BEARER_TOKEN_BEDROCK")
-                && !value.trim().is_empty()
-            {
-                return Some(value);
-            }
-        }
-        _ => {}
+    if let Ok(Some(value)) = thinclaw_config::resolve_provider_secret_legacy_env_alias(env_key) {
+        return Some(value);
     }
 
     None

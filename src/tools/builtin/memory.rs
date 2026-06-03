@@ -28,19 +28,6 @@ use thinclaw_tools::ports::{
     ToolMemoryWriteRequest, ToolOperationScope, job_context_from_tool_scope,
 };
 
-/// Files the LLM may only APPEND to — never fully overwrite.
-///
-/// Currently empty: IDENTITY.md was moved to freely-rewritable to prevent
-/// identity accretion during repeated bootstrap runs. If a file should be
-/// strictly append-only in the future, add it here.
-const APPEND_ONLY_IDENTITY_FILES: &[&str] = memory_policy::APPEND_ONLY_IDENTITY_FILES;
-
-/// Files the agent may FULLY REWRITE (replace entire content, append: false).
-///
-/// IDENTITY.md remains writable through memory_write because prompt_manage
-/// intentionally excludes it.
-const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = memory_policy::FREELY_REWRITABLE_IDENTITY_FILES;
-
 fn workspace_for_ctx(base: &Arc<Workspace>, ctx: &JobContext) -> Workspace {
     let agent_workspace_id =
         memory_policy::workspace_agent_id_from_metadata(&ctx.metadata, base.agent_id());
@@ -530,82 +517,70 @@ impl Tool for MemoryWriteTool {
         let target = parsed.target.as_str();
         let append = parsed.append;
 
-        let (path, _is_actor_scoped) =
-            memory_policy::resolve_memory_write_path_for_context(ctx, target);
-        let normalized_path = path.trim_start_matches('/');
-        let file_name = normalized_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(normalized_path);
+        let write_plan = memory_policy::resolve_memory_write_plan_for_context(ctx, target);
+        let path = write_plan.path.as_str();
 
-        // IDENTITY.md is append-only to protect the agent's established name/creature.
-        if APPEND_ONLY_IDENTITY_FILES.contains(&file_name) {
-            if !append {
+        // IDENTITY.md policy is crate-owned; root only performs the selected write.
+        match write_plan.file_policy {
+            memory_policy::MemoryWriteFilePolicy::AppendOnlyIdentity => {
+                if !append {
+                    return Err(ToolError::NotAuthorized(format!(
+                        "'{}' is append-only. Add an '## Update' section with your changes \
+                         instead of overwriting. To fully restructure SOUL.md / SOUL.local.md / \
+                         AGENTS.md / USER.md, use prompt_manage instead.",
+                        target,
+                    )));
+                }
+                workspace
+                    .append(path, content)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                let output = memory_policy::memory_write_output(
+                    "appended",
+                    path,
+                    true,
+                    content.len(),
+                    Some("Identity file updated (append-only)"),
+                );
+                return Ok(ToolOutput::success(output, start.elapsed()));
+            }
+            memory_policy::MemoryWriteFilePolicy::PromptManagedIdentity => {
                 return Err(ToolError::NotAuthorized(format!(
-                    "'{}' is append-only. Add an '## Update' section with your changes \
-                     instead of overwriting. To fully restructure SOUL.md / SOUL.local.md / \
-                     AGENTS.md / USER.md, use prompt_manage instead.",
-                    target,
+                    "'{}' must be managed through prompt_manage (bounded prompt mutation).",
+                    target
                 )));
             }
-            workspace
-                .append(&path, content)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-            let output = memory_policy::memory_write_output(
-                "appended",
-                &path,
-                true,
-                content.len(),
-                Some("Identity file updated (append-only)"),
-            );
-            return Ok(ToolOutput::success(output, start.elapsed()));
-        }
-
-        // SOUL.md / SOUL.local.md / AGENTS.md / USER.md must be mutated through prompt_manage.
-        if [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER]
-            .iter()
-            .any(|p| file_name.eq_ignore_ascii_case(p))
-        {
-            return Err(ToolError::NotAuthorized(format!(
-                "'{}' must be managed through prompt_manage (bounded prompt mutation).",
-                target
-            )));
-        }
-
-        // IDENTITY.md remains freely rewritable through memory_write.
-        if FREELY_REWRITABLE_IDENTITY_FILES
-            .iter()
-            .any(|p| file_name.eq_ignore_ascii_case(p))
-        {
-            if append {
-                workspace
-                    .append(&path, content)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-            } else {
-                workspace
-                    .write(&path, content)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-            }
-            let output = memory_policy::memory_write_output(
-                if append { "appended" } else { "rewritten" },
-                &path,
-                append,
-                content.len(),
-                Some(if append {
-                    "Personality file updated (new section appended)"
+            memory_policy::MemoryWriteFilePolicy::FreelyRewritableIdentity => {
+                if append {
+                    workspace
+                        .append(path, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 } else {
-                    "Personality file fully restructured — well-formed markdown expected"
-                }),
-            );
-            return Ok(ToolOutput::success(output, start.elapsed()));
+                    workspace
+                        .write(path, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                }
+                let output = memory_policy::memory_write_output(
+                    if append { "appended" } else { "rewritten" },
+                    path,
+                    append,
+                    content.len(),
+                    Some(if append {
+                        "Personality file updated (new section appended)"
+                    } else {
+                        "Personality file fully restructured — well-formed markdown expected"
+                    }),
+                );
+                return Ok(ToolOutput::success(output, start.elapsed()));
+            }
+            memory_policy::MemoryWriteFilePolicy::Regular => {}
         }
 
         let path =
-            match target.trim() {
-                t if t.eq_ignore_ascii_case("memory") => {
+            match write_plan.target_kind {
+                memory_policy::MemoryWriteTargetKind::Memory => {
                     if path.eq_ignore_ascii_case(paths::MEMORY) {
                         if append {
                             workspace.append_memory(content).await.map_err(|e| {
@@ -617,60 +592,60 @@ impl Tool for MemoryWriteTool {
                             })?;
                         }
                     } else if append {
-                        let doc = workspace.read(&path).await.ok();
+                        let doc = workspace.read(path).await.ok();
                         let new_content = match doc {
                             Some(doc) if !doc.content.is_empty() => {
                                 format!("{}\n\n{}", doc.content, content)
                             }
                             _ => content.to_string(),
                         };
-                        workspace.write(&path, &new_content).await.map_err(|e| {
+                        workspace.write(path, &new_content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     } else {
-                        workspace.write(&path, content).await.map_err(|e| {
+                        workspace.write(path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     }
-                    path
+                    path.to_string()
                 }
-                t if t.eq_ignore_ascii_case("daily_log") => {
+                memory_policy::MemoryWriteTargetKind::DailyLog => {
                     workspace
                         .append_daily_log(content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                     format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
                 }
-                t if t.eq_ignore_ascii_case("heartbeat") => {
+                memory_policy::MemoryWriteTargetKind::Heartbeat => {
                     if append {
-                        workspace.append(&path, content).await.map_err(|e| {
+                        workspace.append(path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     } else {
-                        workspace.write(&path, content).await.map_err(|e| {
+                        workspace.write(path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     }
-                    path
+                    path.to_string()
                 }
-                _ => {
+                memory_policy::MemoryWriteTargetKind::Other => {
                     if append {
-                        let doc = workspace.read(&path).await.ok();
+                        let doc = workspace.read(path).await.ok();
                         let new_content = match doc {
                             Some(doc) if !doc.content.is_empty() => {
                                 format!("{}\n\n{}", doc.content, content)
                             }
                             _ => content.to_string(),
                         };
-                        workspace.write(&path, &new_content).await.map_err(|e| {
+                        workspace.write(path, &new_content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     } else {
-                        workspace.write(&path, content).await.map_err(|e| {
+                        workspace.write(path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     }
-                    path
+                    path.to_string()
                 }
             };
 

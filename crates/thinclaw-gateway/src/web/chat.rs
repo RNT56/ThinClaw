@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::web::ports::{message_hidden_from_main_chat, message_is_startup_hook};
 use crate::web::types::{
-    ActionResponse, HistoryResponse, SendMessageResponse, ThreadCommandResponse,
+    ActionResponse, HistoryQuery, HistoryResponse, SendMessageResponse, ThreadCommandResponse,
     ThreadExportResponse, ThreadInfo, ThreadListResponse, ToolCallInfo, TurnInfo,
 };
 
@@ -103,6 +103,12 @@ pub struct ChatThreadDeleteResponse {
     pub thread_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatHistoryQueryOptions {
+    pub limit: usize,
+    pub before_cursor: Option<DateTime<Utc>>,
+}
+
 /// Result of a framework-agnostic send-message call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SendMessageResult {
@@ -191,6 +197,25 @@ pub fn invalid_before_timestamp_message() -> String {
     INVALID_BEFORE_TIMESTAMP_MESSAGE.to_string()
 }
 
+pub fn normalize_chat_history_query(
+    query: &HistoryQuery,
+) -> Result<ChatHistoryQueryOptions, (StatusCode, String)> {
+    let before_cursor = query
+        .before
+        .as_deref()
+        .map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| invalid_before_timestamp_error())
+        })
+        .transpose()?;
+
+    Ok(ChatHistoryQueryOptions {
+        limit: query.limit.unwrap_or(50),
+        before_cursor,
+    })
+}
+
 pub fn parse_chat_thread_uuid(id: &str) -> Result<Uuid, uuid::Error> {
     Uuid::parse_str(id)
 }
@@ -228,6 +253,17 @@ pub fn no_active_thread_error() -> (StatusCode, String) {
 
 pub fn no_active_thread_message() -> String {
     NO_ACTIVE_THREAD_MESSAGE.to_string()
+}
+
+pub fn resolve_chat_history_thread_id(
+    query_thread_id: Option<&str>,
+    active_thread: Option<Uuid>,
+) -> Result<Uuid, (StatusCode, String)> {
+    if let Some(thread_id) = query_thread_id {
+        parse_chat_thread_query_id(thread_id)
+    } else {
+        active_thread.ok_or_else(no_active_thread_error)
+    }
 }
 
 pub fn thread_not_found_error() -> (StatusCode, String) {
@@ -1059,5 +1095,73 @@ mod tests {
         ]) {
             assert_eq!(actual, (expected.0, expected.1.to_string()));
         }
+    }
+
+    #[test]
+    fn history_query_normalization_defaults_limit_and_parses_before_cursor() {
+        let query = HistoryQuery {
+            thread_id: None,
+            limit: None,
+            before: Some("2026-06-02T10:00:00Z".to_string()),
+            user_id: None,
+            actor_id: None,
+        };
+
+        let options = normalize_chat_history_query(&query).unwrap();
+
+        assert_eq!(options.limit, 50);
+        assert_eq!(
+            options.before_cursor.unwrap().to_rfc3339(),
+            "2026-06-02T10:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn history_query_normalization_preserves_limit_and_rejects_bad_cursor() {
+        let query = HistoryQuery {
+            thread_id: None,
+            limit: Some(25),
+            before: None,
+            user_id: None,
+            actor_id: None,
+        };
+        let options = normalize_chat_history_query(&query).unwrap();
+        assert_eq!(options.limit, 25);
+        assert!(options.before_cursor.is_none());
+
+        let bad_query = HistoryQuery {
+            before: Some("not-a-timestamp".to_string()),
+            ..query
+        };
+        assert_eq!(
+            normalize_chat_history_query(&bad_query),
+            Err(invalid_before_timestamp_error())
+        );
+    }
+
+    #[test]
+    fn history_thread_resolution_prefers_query_thread_and_falls_back_to_active_thread() {
+        let query_thread = Uuid::from_u128(1);
+        let active_thread = Uuid::from_u128(2);
+
+        assert_eq!(
+            resolve_chat_history_thread_id(Some(&query_thread.to_string()), Some(active_thread)),
+            Ok(query_thread)
+        );
+        assert_eq!(
+            resolve_chat_history_thread_id(None, Some(active_thread)),
+            Ok(active_thread)
+        );
+        assert_eq!(
+            resolve_chat_history_thread_id(None, None),
+            Err(no_active_thread_error())
+        );
+        assert_eq!(
+            resolve_chat_history_thread_id(Some("bad"), Some(active_thread)),
+            Err((
+                StatusCode::BAD_REQUEST,
+                INVALID_THREAD_QUERY_ID_MESSAGE.to_string()
+            ))
+        );
     }
 }

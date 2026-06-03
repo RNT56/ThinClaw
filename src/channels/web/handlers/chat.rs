@@ -25,13 +25,13 @@ use thinclaw_gateway::web::chat::{
     chat_auth_cancel_response, chat_auth_required_response, chat_auth_success_response,
     chat_database_unavailable_error, chat_rate_limit_error, chat_store_unavailable_error,
     chat_thread_delete_response, delete_assistant_thread_forbidden_error,
-    extension_manager_unavailable_error, history_response, invalid_before_timestamp_error,
-    no_active_thread_error, parse_approval_request_id, parse_chat_thread_delete_id,
-    parse_chat_thread_path_id, parse_chat_thread_query_id, send_message_response,
-    session_manager_unavailable_error, thread_command_response, thread_export_content,
-    thread_export_response, thread_info, thread_list_response, thread_list_response_from_summaries,
-    thread_not_found_error, too_many_chat_connections_error, turn_info_from_session_turn,
-    turns_from_history_messages, unknown_approval_action_error,
+    extension_manager_unavailable_error, history_response, normalize_chat_history_query,
+    parse_approval_request_id, parse_chat_thread_delete_id, parse_chat_thread_path_id,
+    resolve_chat_history_thread_id, send_message_response, session_manager_unavailable_error,
+    thread_command_response, thread_export_content, thread_export_response, thread_info,
+    thread_list_response, thread_list_response_from_summaries, thread_not_found_error,
+    too_many_chat_connections_error, turn_info_from_session_turn, turns_from_history_messages,
+    unknown_approval_action_error,
 };
 use thinclaw_gateway::web::ports::{
     RouteStatePort, request_origin_from_headers, validate_websocket_origin,
@@ -388,22 +388,8 @@ pub(crate) async fn chat_history_handler(
         .await;
     let sess = session.lock().await;
 
-    let limit = query.limit.unwrap_or(50);
-    let before_cursor = query
-        .before
-        .as_deref()
-        .map(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| invalid_before_timestamp_error())
-        })
-        .transpose()?;
-
-    let thread_id = if let Some(ref tid) = query.thread_id {
-        parse_chat_thread_query_id(tid)?
-    } else {
-        sess.active_thread.ok_or_else(no_active_thread_error)?
-    };
+    let history_options = normalize_chat_history_query(&query)?;
+    let thread_id = resolve_chat_history_thread_id(query.thread_id.as_deref(), sess.active_thread)?;
 
     if query.thread_id.is_some()
         && let Some(ref store) = state.store
@@ -417,11 +403,15 @@ pub(crate) async fn chat_history_handler(
         }
     }
 
-    if before_cursor.is_some()
+    if history_options.before_cursor.is_some()
         && let Some(ref store) = state.store
     {
         let (messages, has_more) = store
-            .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
+            .list_conversation_messages_paginated(
+                thread_id,
+                history_options.before_cursor,
+                history_options.limit as i64,
+            )
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -468,7 +458,7 @@ pub(crate) async fn chat_history_handler(
 
     if let Some(ref store) = state.store {
         let (messages, has_more) = store
-            .list_conversation_messages_paginated(thread_id, None, limit as i64)
+            .list_conversation_messages_paginated(thread_id, None, history_options.limit as i64)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

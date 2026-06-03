@@ -16,16 +16,18 @@ use axum::{
     },
 };
 use thinclaw_gateway::web::openai_compat::{
-    OpenAiChatRequest, OpenAiErrorKind, OpenAiErrorMapping, OpenAiErrorResponse,
-    build_completion_chat_response, build_finish_chunk, build_models_response, build_role_chunk,
-    build_text_chunk, build_tool_call_chunk, build_tool_call_delta_chunk,
+    OpenAiChatRequest, OpenAiChatRequestPlan, OpenAiErrorKind, OpenAiErrorMapping,
+    OpenAiErrorResponse, build_completion_chat_response, build_finish_chunk, build_models_response,
+    build_role_chunk, build_text_chunk, build_tool_call_chunk, build_tool_call_delta_chunk,
     build_tool_completion_chat_response, chat_completion_id, convert_messages, convert_tools,
-    normalize_tool_choice, openai_error, parse_stop, unix_timestamp, validate_model_name,
+    openai_error, openai_llm_provider_not_configured_error, openai_rate_limit_error,
+    plan_openai_chat_request, unix_timestamp,
 };
 #[cfg(test)]
 use thinclaw_gateway::web::openai_compat::{
     OpenAiChatResponse, OpenAiChoice, OpenAiFunction, OpenAiMessage, OpenAiTool, OpenAiUsage,
-    convert_tool_calls_to_openai, finish_reason_str, parse_role,
+    convert_tool_calls_to_openai, finish_reason_str, normalize_tool_choice, parse_role, parse_stop,
+    validate_model_name,
 };
 #[cfg(test)]
 use thinclaw_llm_core::{Role, ToolCall};
@@ -69,42 +71,19 @@ pub async fn chat_completions_handler(
     Json(req): Json<OpenAiChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<OpenAiErrorResponse>)> {
     if !state.chat_rate_limiter.check() {
-        return Err(openai_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Rate limit exceeded. Please try again later.",
-            OpenAiErrorKind::RateLimit,
-        ));
+        return Err(openai_rate_limit_error());
     }
 
-    let llm = state.llm_provider.as_ref().ok_or_else(|| {
-        openai_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM provider not configured",
-            OpenAiErrorKind::Server,
-        )
-    })?;
+    let llm = state
+        .llm_provider
+        .as_ref()
+        .ok_or_else(openai_llm_provider_not_configured_error)?;
 
-    if req.messages.is_empty() {
-        return Err(openai_error(
-            StatusCode::BAD_REQUEST,
-            "messages must not be empty",
-            OpenAiErrorKind::InvalidRequest,
-        ));
-    }
-    if let Err(e) = validate_model_name(&req.model) {
-        return Err(openai_error(
-            StatusCode::BAD_REQUEST,
-            e,
-            OpenAiErrorKind::InvalidRequest,
-        ));
-    }
+    let plan = plan_openai_chat_request(&req)
+        .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, OpenAiErrorKind::InvalidRequest))?;
 
-    let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
-    let stream = req.stream.unwrap_or(false);
-    let requested_model = req.model.clone();
-
-    if stream {
-        return handle_streaming(llm.clone(), req, has_tools)
+    if plan.stream {
+        return handle_streaming(llm.clone(), req, plan)
             .await
             .map(IntoResponse::into_response);
     }
@@ -116,7 +95,7 @@ pub async fn chat_completions_handler(
     let id = chat_completion_id();
     let created = unix_timestamp();
 
-    if has_tools {
+    if plan.has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
         let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
@@ -125,9 +104,7 @@ pub async fn chat_completions_handler(
         if let Some(mt) = req.max_tokens {
             tool_req = tool_req.with_max_tokens(mt);
         }
-        if let Some(ref tc) = req.tool_choice
-            && let Some(choice) = normalize_tool_choice(tc)
-        {
+        if let Some(choice) = plan.tool_choice {
             tool_req = tool_req.with_tool_choice(choice);
         }
 
@@ -135,7 +112,7 @@ pub async fn chat_completions_handler(
             .complete_with_tools(tool_req)
             .await
             .map_err(map_llm_error)?;
-        let model_name = llm.effective_model_name(Some(requested_model.as_str()));
+        let model_name = llm.effective_model_name(Some(plan.requested_model.as_str()));
         let response = build_tool_completion_chat_response(id, created, model_name, resp);
 
         Ok(Json(response).into_response())
@@ -147,12 +124,10 @@ pub async fn chat_completions_handler(
         if let Some(mt) = req.max_tokens {
             comp_req = comp_req.with_max_tokens(mt);
         }
-        if let Some(ref stop_val) = req.stop {
-            comp_req.stop_sequences = parse_stop(stop_val);
-        }
+        comp_req.stop_sequences = plan.stop_sequences;
 
         let resp = llm.complete(comp_req).await.map_err(map_llm_error)?;
-        let model_name = llm.effective_model_name(Some(requested_model.as_str()));
+        let model_name = llm.effective_model_name(Some(plan.requested_model.as_str()));
         let response = build_completion_chat_response(id, created, model_name, resp);
 
         Ok(Json(response).into_response())
@@ -170,7 +145,7 @@ pub async fn chat_completions_handler(
 async fn handle_streaming(
     llm: Arc<dyn crate::llm::LlmProvider>,
     req: OpenAiChatRequest,
-    has_tools: bool,
+    plan: OpenAiChatRequestPlan,
 ) -> Result<Response, (StatusCode, Json<OpenAiErrorResponse>)> {
     use crate::llm::StreamChunk;
     use futures::StreamExt;
@@ -178,13 +153,12 @@ async fn handle_streaming(
     let messages = convert_messages(&req.messages)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, OpenAiErrorKind::InvalidRequest))?;
 
-    let requested_model = req.model.clone();
     let id = chat_completion_id();
     let created = unix_timestamp();
     let is_native = llm.supports_streaming_for_model(Some(req.model.as_str()));
 
     // Obtain the streaming chunk stream from the provider.
-    let chunk_stream = if has_tools {
+    let chunk_stream = if plan.has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
         let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
@@ -193,9 +167,7 @@ async fn handle_streaming(
         if let Some(mt) = req.max_tokens {
             tool_req = tool_req.with_max_tokens(mt);
         }
-        if let Some(ref tc) = req.tool_choice
-            && let Some(choice) = normalize_tool_choice(tc)
-        {
+        if let Some(choice) = plan.tool_choice {
             tool_req = tool_req.with_tool_choice(choice);
         }
         llm.complete_stream_with_tools(tool_req)
@@ -209,13 +181,11 @@ async fn handle_streaming(
         if let Some(mt) = req.max_tokens {
             comp_req = comp_req.with_max_tokens(mt);
         }
-        if let Some(ref stop_val) = req.stop {
-            comp_req.stop_sequences = parse_stop(stop_val);
-        }
+        comp_req.stop_sequences = plan.stop_sequences;
         llm.complete_stream(comp_req).await.map_err(map_llm_error)?
     };
 
-    let model_name = llm.effective_model_name(Some(requested_model.as_str()));
+    let model_name = llm.effective_model_name(Some(plan.requested_model.as_str()));
 
     // Build the SSE stream from StreamChunks
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
@@ -312,13 +282,10 @@ async fn send_finish_chunk(
 pub async fn models_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<OpenAiErrorResponse>)> {
-    let llm = state.llm_provider.as_ref().ok_or_else(|| {
-        openai_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "LLM provider not configured",
-            OpenAiErrorKind::Server,
-        )
-    })?;
+    let llm = state
+        .llm_provider
+        .as_ref()
+        .ok_or_else(openai_llm_provider_not_configured_error)?;
 
     let active_model = llm.active_model_name();
     let created = unix_timestamp();

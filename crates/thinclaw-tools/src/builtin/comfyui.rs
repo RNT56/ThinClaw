@@ -38,6 +38,25 @@ pub struct ComfyGenerationImageBytes {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComfyGenerationRequestKind {
+    ImageGenerate,
+    WorkflowRun,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComfyManageCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub use_workspace_dir: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComfyManageOperation {
+    HardwareCheck,
+    Command(ComfyManageCommand),
+}
+
 async fn execute_comfy_action<F, Fut>(
     host: &Arc<dyn ComfyUiToolHostPort>,
     params: Value,
@@ -212,6 +231,186 @@ pub fn validate_manage_params(params: &Value) -> Result<(), ToolError> {
     validate_manage_action(action)
 }
 
+pub fn validate_image_generate_params(params: &Value) -> Result<(), ToolError> {
+    let prompt = require_str(params, "prompt")?;
+    if prompt.trim().is_empty() {
+        return Err(ToolError::InvalidParameters(
+            "prompt cannot be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn comfy_workflow_name_or_default(params: &Value, default_workflow: &str) -> String {
+    params
+        .get("workflow")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_workflow.to_string())
+}
+
+pub fn require_workflow_name(params: &Value) -> Result<&str, ToolError> {
+    require_str(params, "workflow")
+}
+
+pub fn validate_workflow_name_params(params: &Value) -> Result<(), ToolError> {
+    let _ = require_workflow_name(params)?;
+    Ok(())
+}
+
+pub fn validate_workflow_run_params(params: &Value) -> Result<(), ToolError> {
+    let _ = require_workflow_name(params)?;
+    let _ = require_str(params, "prompt")?;
+    Ok(())
+}
+
+pub fn comfy_generate_request(
+    params: &Value,
+    workflow: Value,
+    workflow_name: impl Into<String>,
+    default_aspect_ratio: &str,
+    kind: ComfyGenerationRequestKind,
+) -> Result<thinclaw_media::ComfyGenerateRequest, ToolError> {
+    match kind {
+        ComfyGenerationRequestKind::ImageGenerate => validate_image_generate_params(params)?,
+        ComfyGenerationRequestKind::WorkflowRun => validate_workflow_run_params(params)?,
+    }
+
+    let prompt = require_str(params, "prompt")?;
+    let aspect_ratio = params
+        .get("aspect_ratio")
+        .and_then(Value::as_str)
+        .unwrap_or(default_aspect_ratio)
+        .parse::<thinclaw_media::ComfyAspectRatio>()
+        .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
+    let accepts_input_images = matches!(kind, ComfyGenerationRequestKind::WorkflowRun);
+
+    Ok(thinclaw_media::ComfyGenerateRequest {
+        prompt: prompt.to_string(),
+        negative_prompt: params
+            .get("negative_prompt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        aspect_ratio,
+        width: optional_u32_param(params, "width")?,
+        height: optional_u32_param(params, "height")?,
+        seed: params.get("seed").and_then(Value::as_i64),
+        steps: optional_u32_param(params, "steps")?,
+        cfg: params.get("cfg").and_then(Value::as_f64),
+        model: params
+            .get("model")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        workflow,
+        workflow_name: workflow_name.into(),
+        input_image: accepts_input_images
+            .then(|| {
+                params
+                    .get("input_image")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+            })
+            .flatten(),
+        mask_image: accepts_input_images
+            .then(|| {
+                params
+                    .get("mask_image")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+            })
+            .flatten(),
+        wait_for_completion: if accepts_input_images {
+            params.get("wait").and_then(Value::as_bool).unwrap_or(true)
+        } else {
+            true
+        },
+        use_websocket: true,
+    })
+}
+
+pub fn comfy_manage_operation(
+    params: &Value,
+    port: u16,
+) -> Result<ComfyManageOperation, ToolError> {
+    let action = require_str(params, "action")?;
+    let command = match action {
+        "hardware_check" => return Ok(ComfyManageOperation::HardwareCheck),
+        "install_cli" => ComfyManageCommand {
+            program: "python3".to_string(),
+            args: vec![
+                "-m".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                "--user".to_string(),
+                "comfy-cli".to_string(),
+            ],
+            use_workspace_dir: false,
+        },
+        "install_comfyui" => {
+            let gpu = params.get("gpu").and_then(Value::as_str).unwrap_or("cpu");
+            ComfyManageCommand {
+                program: "comfy".to_string(),
+                args: vec![
+                    "--skip-prompt".to_string(),
+                    "install".to_string(),
+                    comfy_install_gpu_flag(gpu)?.to_string(),
+                ],
+                use_workspace_dir: true,
+            }
+        }
+        "launch" => ComfyManageCommand {
+            program: "comfy".to_string(),
+            args: vec![
+                "launch".to_string(),
+                "--background".to_string(),
+                "--".to_string(),
+                "--port".to_string(),
+                port.to_string(),
+            ],
+            use_workspace_dir: true,
+        },
+        "stop" => ComfyManageCommand {
+            program: "comfy".to_string(),
+            args: vec!["stop".to_string()],
+            use_workspace_dir: true,
+        },
+        "download_model" => {
+            let url = require_str(params, "model_url")?;
+            let model_type = params
+                .get("model_type")
+                .and_then(Value::as_str)
+                .unwrap_or("checkpoints");
+            ComfyManageCommand {
+                program: "comfy".to_string(),
+                args: vec![
+                    "model".to_string(),
+                    "download".to_string(),
+                    "--url".to_string(),
+                    url.to_string(),
+                    "--type".to_string(),
+                    model_type.to_string(),
+                ],
+                use_workspace_dir: true,
+            }
+        }
+        "install_node" => {
+            let node = require_str(params, "node")?;
+            ComfyManageCommand {
+                program: "comfy".to_string(),
+                args: vec!["node".to_string(), "install".to_string(), node.to_string()],
+                use_workspace_dir: true,
+            }
+        }
+        other => {
+            return Err(ToolError::InvalidParameters(format!(
+                "unknown action '{other}'"
+            )));
+        }
+    };
+
+    Ok(ComfyManageOperation::Command(command))
+}
+
 pub fn comfy_hardware_check() -> Value {
     let mut system = sysinfo::System::new_all();
     system.refresh_all();
@@ -310,12 +509,7 @@ impl Tool for ImageGenerateHostTool {
     }
 
     async fn execute(&self, params: Value, ctx: &JobContext) -> Result<ToolOutput, ToolError> {
-        let prompt = require_str(&params, "prompt")?;
-        if prompt.trim().is_empty() {
-            return Err(ToolError::InvalidParameters(
-                "prompt cannot be empty".to_string(),
-            ));
-        }
+        validate_image_generate_params(&params)?;
         execute_comfy_action(&self.host, params, ctx, |host, request| async move {
             host.image_generate_action(request).await
         })
@@ -410,14 +604,11 @@ fn validate_noop(params: &Value) -> Result<(), ToolError> {
 }
 
 fn validate_workflow_name(params: &Value) -> Result<(), ToolError> {
-    let _ = require_str(params, "workflow")?;
-    Ok(())
+    validate_workflow_name_params(params)
 }
 
 fn validate_workflow_run(params: &Value) -> Result<(), ToolError> {
-    let _ = require_str(params, "workflow")?;
-    let _ = require_str(params, "prompt")?;
-    Ok(())
+    validate_workflow_run_params(params)
 }
 
 fn validate_manage(params: &Value) -> Result<(), ToolError> {
@@ -673,6 +864,131 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("failed to parse workflow workflow.json")
+        );
+    }
+
+    #[test]
+    fn comfyui_generate_request_maps_image_and_workflow_params() {
+        let image_request = comfy_generate_request(
+            &json!({
+                "prompt": "cat",
+                "negative_prompt": "blur",
+                "aspect_ratio": "wide",
+                "seed": 9,
+                "steps": 12,
+                "cfg": 7.5,
+                "model": "model.safetensors",
+                "input_image": "/tmp/ignored.png",
+                "wait": false
+            }),
+            json!({ "workflow": "image" }),
+            "default",
+            "square",
+            ComfyGenerationRequestKind::ImageGenerate,
+        )
+        .unwrap();
+
+        assert_eq!(image_request.prompt, "cat");
+        assert_eq!(image_request.negative_prompt.as_deref(), Some("blur"));
+        assert_eq!(
+            image_request.aspect_ratio,
+            thinclaw_media::ComfyAspectRatio::Wide
+        );
+        assert_eq!(image_request.seed, Some(9));
+        assert_eq!(image_request.steps, Some(12));
+        assert_eq!(image_request.cfg, Some(7.5));
+        assert_eq!(image_request.model.as_deref(), Some("model.safetensors"));
+        assert_eq!(image_request.workflow_name, "default");
+        assert_eq!(image_request.input_image, None);
+        assert!(image_request.wait_for_completion);
+        assert!(image_request.use_websocket);
+
+        let workflow_request = comfy_generate_request(
+            &json!({
+                "workflow": "custom",
+                "prompt": "dog",
+                "input_image": "/tmp/input.png",
+                "mask_image": "/tmp/mask.png",
+                "wait": false
+            }),
+            json!({ "workflow": "run" }),
+            "custom",
+            "portrait",
+            ComfyGenerationRequestKind::WorkflowRun,
+        )
+        .unwrap();
+
+        assert_eq!(
+            workflow_request.aspect_ratio,
+            thinclaw_media::ComfyAspectRatio::Portrait
+        );
+        assert_eq!(
+            workflow_request.input_image.as_deref(),
+            Some(std::path::Path::new("/tmp/input.png"))
+        );
+        assert_eq!(
+            workflow_request.mask_image.as_deref(),
+            Some(std::path::Path::new("/tmp/mask.png"))
+        );
+        assert!(!workflow_request.wait_for_completion);
+
+        assert!(
+            comfy_generate_request(
+                &json!({ "prompt": "   " }),
+                json!({}),
+                "default",
+                "square",
+                ComfyGenerationRequestKind::ImageGenerate,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("prompt cannot be empty")
+        );
+    }
+
+    #[test]
+    fn comfyui_manage_operation_maps_actions_to_command_specs() {
+        assert_eq!(
+            comfy_manage_operation(&json!({ "action": "hardware_check" }), 8188).unwrap(),
+            ComfyManageOperation::HardwareCheck
+        );
+
+        let install = comfy_manage_operation(
+            &json!({ "action": "install_comfyui", "gpu": "m-series" }),
+            8188,
+        )
+        .unwrap();
+        assert_eq!(
+            install,
+            ComfyManageOperation::Command(ComfyManageCommand {
+                program: "comfy".to_string(),
+                args: vec![
+                    "--skip-prompt".to_string(),
+                    "install".to_string(),
+                    "--m-series".to_string(),
+                ],
+                use_workspace_dir: true,
+            })
+        );
+
+        let launch = comfy_manage_operation(&json!({ "action": "launch" }), 9191).unwrap();
+        match launch {
+            ComfyManageOperation::Command(command) => {
+                assert_eq!(command.program, "comfy");
+                assert_eq!(
+                    command.args,
+                    ["launch", "--background", "--", "--port", "9191"]
+                );
+                assert!(command.use_workspace_dir);
+            }
+            ComfyManageOperation::HardwareCheck => panic!("expected command"),
+        }
+
+        assert!(
+            comfy_manage_operation(&json!({ "action": "download_model" }), 8188)
+                .unwrap_err()
+                .to_string()
+                .contains("model_url")
         );
     }
 

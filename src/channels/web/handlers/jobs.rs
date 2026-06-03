@@ -13,13 +13,14 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::context::{JobContext, JobState};
 use crate::history::SandboxJobRecord;
-use crate::sandbox_jobs::{SandboxJobController, normalize_sandbox_ui_state};
+use crate::sandbox_jobs::SandboxJobController;
 use crate::sandbox_types::{ContainerHandle, ContainerState, CredentialGrant, PendingPrompt};
 use thinclaw_gateway::web::jobs::{
     GatewayLocalJobDetailInput, GatewayLocalJobListInput, GatewaySandboxJobDetailInput,
     GatewaySandboxJobListInput, JobEventInfoInput, JobEventsResponse, JobPromptQueuedResponse,
     JobPromptRequest, JobRestartResponse, JobStatusActionResponse, JobSummaryCounts,
-    JobTransitionProjection, ProjectFileEntryInput, direct_job_scheduler_unavailable_error,
+    JobTransitionProjection, ProjectFileEntryInput, SandboxContainerState,
+    SandboxJobLookupProjection, SandboxJobSpecProjection, direct_job_scheduler_unavailable_error,
     elapsed_secs as gateway_elapsed_secs, job_database_unavailable_error, job_event_info,
     job_events_response, job_list_response, job_not_found_error,
     job_prompt_queue_unavailable_error, job_prompt_queued_response, job_restart_response,
@@ -46,94 +47,46 @@ impl SandboxJobLookup {
             .or_else(|| self.stored.as_ref().map(|job| &job.spec))
     }
 
-    fn status(&self) -> String {
-        if let Some(handle) = self.live.as_ref() {
-            return match handle.state {
-                ContainerState::Creating => "creating".to_string(),
-                ContainerState::Running => "running".to_string(),
-                ContainerState::Stopped => handle
-                    .completion_result
-                    .as_ref()
-                    .map(|result| result.status.clone())
-                    .or_else(|| self.stored.as_ref().map(|job| job.status.clone()))
-                    .unwrap_or_else(|| "completed".to_string()),
-                ContainerState::Failed => handle
-                    .completion_result
-                    .as_ref()
-                    .map(|result| result.status.clone())
-                    .unwrap_or_else(|| "failed".to_string()),
-            };
-        }
-
-        self.stored
-            .as_ref()
-            .map(|job| job.status.clone())
-            .unwrap_or_else(|| "unknown".to_string())
+    fn live_state(&self) -> Option<SandboxContainerState> {
+        self.live.as_ref().map(|handle| match handle.state {
+            ContainerState::Creating => SandboxContainerState::Creating,
+            ContainerState::Running => SandboxContainerState::Running,
+            ContainerState::Stopped => SandboxContainerState::Stopped,
+            ContainerState::Failed => SandboxContainerState::Failed,
+        })
     }
 
-    fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.live
-            .as_ref()
-            .map(|handle| handle.created_at)
-            .or_else(|| self.stored.as_ref().map(|job| job.created_at))
-    }
-
-    fn started_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.stored
-            .as_ref()
-            .and_then(|job| job.started_at)
-            .or_else(|| {
-                self.live.as_ref().and_then(|handle| match handle.state {
-                    ContainerState::Creating => None,
-                    ContainerState::Running | ContainerState::Stopped | ContainerState::Failed => {
-                        Some(handle.created_at)
-                    }
-                })
-            })
-    }
-
-    fn completed_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.stored.as_ref().and_then(|job| job.completed_at)
-    }
-
-    fn failure_reason(&self) -> Option<String> {
-        self.stored
-            .as_ref()
-            .and_then(|job| job.failure_reason.clone())
-            .or_else(|| {
-                self.live
-                    .as_ref()
-                    .and_then(|handle| handle.completion_result.as_ref())
-                    .and_then(|result| result.message.clone())
-            })
-    }
-
-    fn accepts_prompts(&self) -> bool {
-        self.is_interactive()
-            && self
+    fn projection(&self) -> SandboxJobLookupProjection {
+        SandboxJobLookupProjection {
+            live_state: self.live_state(),
+            live_created_at: self.live.as_ref().map(|handle| handle.created_at),
+            live_completion_status: self
                 .live
                 .as_ref()
-                .map(|handle| {
-                    matches!(
-                        handle.state,
-                        ContainerState::Creating | ContainerState::Running
-                    )
-                })
-                .unwrap_or(false)
-    }
-
-    fn is_interactive(&self) -> bool {
-        self.spec().map(|spec| spec.interactive).unwrap_or(false)
-    }
-
-    fn is_cancellable(&self) -> bool {
-        matches!(self.status().as_str(), "creating" | "running")
-    }
-
-    fn project_dir(&self) -> Option<String> {
-        self.spec()
-            .and_then(|spec| spec.project_dir.clone())
-            .filter(|path| !path.trim().is_empty())
+                .and_then(|handle| handle.completion_result.as_ref())
+                .map(|result| result.status.clone()),
+            live_completion_message: self
+                .live
+                .as_ref()
+                .and_then(|handle| handle.completion_result.as_ref())
+                .and_then(|result| result.message.clone()),
+            stored_status: self.stored.as_ref().map(|job| job.status.clone()),
+            stored_created_at: self.stored.as_ref().map(|job| job.created_at),
+            stored_started_at: self.stored.as_ref().and_then(|job| job.started_at),
+            stored_completed_at: self.stored.as_ref().and_then(|job| job.completed_at),
+            stored_failure_reason: self
+                .stored
+                .as_ref()
+                .and_then(|job| job.failure_reason.clone()),
+            spec: self.spec().map(|spec| SandboxJobSpecProjection {
+                title: spec.title.clone(),
+                description: spec.description.clone(),
+                principal_id: spec.principal_id.clone(),
+                project_dir: spec.project_dir.clone(),
+                mode: spec.mode,
+                interactive: spec.interactive,
+            }),
+        }
     }
 }
 
@@ -289,16 +242,17 @@ pub(crate) async fn jobs_list_handler(
         }));
     }
     for (job_id, lookup) in sandbox_jobs {
-        let Some(spec) = lookup.spec() else {
+        let projection = lookup.projection();
+        let Some(spec) = projection.spec.as_ref() else {
             continue;
         };
         jobs.push(sandbox_job_info(GatewaySandboxJobListInput {
             id: job_id,
             title: spec.title.clone(),
-            state: normalize_sandbox_ui_state(&lookup.status()).to_string(),
+            state: projection.ui_state(),
             user_id: spec.principal_id.clone(),
-            created_at: lookup.created_at().unwrap_or_else(chrono::Utc::now),
-            started_at: lookup.started_at(),
+            created_at: projection.created_at().unwrap_or_else(chrono::Utc::now),
+            started_at: projection.started_at(),
             mode: spec.mode,
         }));
     }
@@ -317,7 +271,7 @@ pub(crate) async fn jobs_summary_handler(
         summary.record_direct_state(job.state.to_string());
     }
     for lookup in sandbox_jobs.values() {
-        summary.record_sandbox_status(lookup.status());
+        summary.record_sandbox_status(lookup.projection().status());
     }
 
     Ok(Json(job_summary_response(&summary)))
@@ -365,30 +319,31 @@ pub(crate) async fn jobs_detail_handler(
     else {
         return Err(job_not_found_error());
     };
-    let Some(spec) = lookup.spec() else {
+    let projection = lookup.projection();
+    let Some(spec) = projection.spec.as_ref() else {
         return Err(sandbox_job_metadata_unavailable_error());
     };
 
-    let started_at = lookup.started_at();
-    let completed_at = lookup.completed_at();
-    let project_dir = lookup.project_dir();
+    let started_at = projection.started_at();
+    let completed_at = projection.completed_at();
+    let project_dir = projection.project_dir();
     let elapsed_secs = gateway_elapsed_secs(started_at, completed_at, chrono::Utc::now());
     Ok(Json(sandbox_job_detail_response(
         GatewaySandboxJobDetailInput {
             id: job_id,
             title: spec.title.clone(),
             description: spec.description.clone(),
-            state: normalize_sandbox_ui_state(&lookup.status()).to_string(),
+            state: projection.ui_state(),
             user_id: spec.principal_id.clone(),
-            created_at: lookup.created_at().unwrap_or_else(chrono::Utc::now),
+            created_at: projection.created_at().unwrap_or_else(chrono::Utc::now),
             started_at,
             completed_at,
             elapsed_secs,
             project_dir,
             mode: spec.mode,
-            interactive: lookup.accepts_prompts(),
-            final_status: lookup.status(),
-            failure_reason: lookup.failure_reason(),
+            interactive: projection.accepts_prompts(),
+            final_status: projection.status(),
+            failure_reason: projection.failure_reason(),
         },
     )))
 }
@@ -457,10 +412,11 @@ pub(crate) async fn jobs_cancel_handler(
         return Err(job_not_found_error());
     };
 
-    if !lookup.is_cancellable() {
+    let projection = lookup.projection();
+    if !projection.is_cancellable() {
         return Err((
             StatusCode::CONFLICT,
-            format!("Cannot cancel job in state '{}'", lookup.status()),
+            format!("Cannot cancel job in state '{}'", projection.status()),
         ));
     }
 
@@ -575,13 +531,14 @@ pub(crate) async fn jobs_prompt_handler(
     else {
         return Err(job_not_found_error());
     };
-    if !lookup.is_interactive() {
+    let projection = lookup.projection();
+    if !projection.is_interactive() {
         return Err((
             StatusCode::CONFLICT,
             "This job does not accept follow-up prompts".to_string(),
         ));
     }
-    if !lookup.accepts_prompts() {
+    if !projection.accepts_prompts() {
         return Err((
             StatusCode::CONFLICT,
             "This job is no longer accepting prompts".to_string(),
@@ -660,6 +617,7 @@ pub(crate) async fn job_files_list_handler(
 
     let base = std::path::PathBuf::from(
         lookup
+            .projection()
             .project_dir()
             .ok_or_else(project_dir_not_found_error)?,
     );
@@ -723,6 +681,7 @@ pub(crate) async fn job_files_read_handler(
 
     let base = std::path::PathBuf::from(
         lookup
+            .projection()
             .project_dir()
             .ok_or_else(project_dir_not_found_error)?,
     );

@@ -8,6 +8,9 @@ use thinclaw_llm_core::{
 };
 
 pub const MAX_MODEL_NAME_BYTES: usize = 256;
+pub const OPENAI_RATE_LIMIT_MESSAGE: &str = "Rate limit exceeded. Please try again later.";
+pub const OPENAI_LLM_PROVIDER_NOT_CONFIGURED_MESSAGE: &str = "LLM provider not configured";
+pub const OPENAI_MESSAGES_EMPTY_MESSAGE: &str = "messages must not be empty";
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAiChatRequest {
@@ -157,6 +160,15 @@ pub struct OpenAiErrorDetail {
     pub code: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenAiChatRequestPlan {
+    pub has_tools: bool,
+    pub stream: bool,
+    pub requested_model: String,
+    pub tool_choice: Option<String>,
+    pub stop_sequences: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiErrorKind {
     Authentication,
@@ -230,6 +242,41 @@ pub fn openai_error(
     kind: OpenAiErrorKind,
 ) -> (StatusCode, Json<OpenAiErrorResponse>) {
     OpenAiErrorMapping::new(status, kind).into_axum_response(message)
+}
+
+pub fn openai_rate_limit_error() -> (StatusCode, Json<OpenAiErrorResponse>) {
+    openai_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        OPENAI_RATE_LIMIT_MESSAGE,
+        OpenAiErrorKind::RateLimit,
+    )
+}
+
+pub fn openai_llm_provider_not_configured_error() -> (StatusCode, Json<OpenAiErrorResponse>) {
+    openai_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        OPENAI_LLM_PROVIDER_NOT_CONFIGURED_MESSAGE,
+        OpenAiErrorKind::Server,
+    )
+}
+
+pub fn validate_openai_chat_request(req: &OpenAiChatRequest) -> Result<(), String> {
+    if req.messages.is_empty() {
+        return Err(OPENAI_MESSAGES_EMPTY_MESSAGE.to_string());
+    }
+    validate_model_name(&req.model)
+}
+
+pub fn plan_openai_chat_request(req: &OpenAiChatRequest) -> Result<OpenAiChatRequestPlan, String> {
+    validate_openai_chat_request(req)?;
+
+    Ok(OpenAiChatRequestPlan {
+        has_tools: req.tools.as_ref().is_some_and(|tools| !tools.is_empty()),
+        stream: req.stream.unwrap_or(false),
+        requested_model: req.model.clone(),
+        tool_choice: req.tool_choice.as_ref().and_then(normalize_tool_choice),
+        stop_sequences: req.stop.as_ref().and_then(parse_stop),
+    })
 }
 
 pub fn chat_completion_id() -> String {
@@ -673,6 +720,24 @@ mod tests {
     }
 
     #[test]
+    fn openai_boundary_error_helpers_preserve_statuses_and_messages() {
+        let (status, Json(response)) = openai_rate_limit_error();
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(json["error"]["message"], OPENAI_RATE_LIMIT_MESSAGE);
+        assert_eq!(json["error"]["type"], "rate_limit_error");
+
+        let (status, Json(response)) = openai_llm_provider_not_configured_error();
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json["error"]["message"],
+            OPENAI_LLM_PROVIDER_NOT_CONFIGURED_MESSAGE
+        );
+        assert_eq!(json["error"]["type"], "server_error");
+    }
+
+    #[test]
     fn chat_completion_id_matches_openai_prefix_and_uuid_payload() {
         let id = chat_completion_id();
         let uuid_payload = id.strip_prefix("chatcmpl-").unwrap();
@@ -846,6 +911,56 @@ mod tests {
         let req: OpenAiChatRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.stream, Some(true));
         assert_eq!(req.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn chat_request_plan_validates_and_normalizes_openai_options() {
+        let req: OpenAiChatRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "search"}
+            }],
+            "tool_choice": {"type": "function", "function": {"name": "search"}},
+            "stop": ["STOP", "END"]
+        }))
+        .unwrap();
+
+        let plan = plan_openai_chat_request(&req).unwrap();
+
+        assert!(plan.has_tools);
+        assert!(!plan.stream);
+        assert_eq!(plan.requested_model, "gpt-4");
+        assert_eq!(plan.tool_choice.as_deref(), Some("required"));
+        assert_eq!(
+            plan.stop_sequences,
+            Some(vec!["STOP".to_string(), "END".to_string()])
+        );
+    }
+
+    #[test]
+    fn chat_request_plan_rejects_empty_messages_and_invalid_model() {
+        let empty_messages: OpenAiChatRequest = serde_json::from_value(serde_json::json!({
+            "model": "gpt-4",
+            "messages": []
+        }))
+        .unwrap();
+        assert_eq!(
+            plan_openai_chat_request(&empty_messages),
+            Err(OPENAI_MESSAGES_EMPTY_MESSAGE.to_string())
+        );
+
+        let invalid_model: OpenAiChatRequest = serde_json::from_value(serde_json::json!({
+            "model": " gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}]
+        }))
+        .unwrap();
+        assert!(
+            plan_openai_chat_request(&invalid_model)
+                .unwrap_err()
+                .contains("leading or trailing whitespace")
+        );
     }
 
     #[test]
