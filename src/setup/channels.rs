@@ -17,8 +17,8 @@ use std::{
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use thinclaw_channels::setup as channel_setup;
 use url::Url;
-use uuid::Uuid;
 
 use crate::pairing::PairingStore;
 #[cfg(feature = "postgres")]
@@ -173,32 +173,8 @@ struct TelegramUpdateChat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TelegramOwnerCandidate {
-    user_id: i64,
-    display_name: String,
-    username: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TelegramOwnerCapture {
-    candidate: TelegramOwnerCandidate,
-    acknowledged_offset: i64,
-    ignored_update_upper_bound: i64,
-}
-
-impl TelegramOwnerCandidate {
-    fn summary(&self) -> String {
-        if let Some(username) = self.username.as_deref() {
-            format!("@{} (ID: {})", username, self.user_id)
-        } else {
-            format!("{} (ID: {})", self.display_name, self.user_id)
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum TelegramBindingOutcome {
-    Bound(TelegramOwnerCandidate),
+    Bound(channel_setup::TelegramOwnerCandidate),
     TimedOut,
     ManualEntryRequested,
     Skipped,
@@ -555,43 +531,45 @@ fn prompt_manual_telegram_owner_id(
     }
 }
 
-fn extract_telegram_owner_capture(updates: &[TelegramUpdate]) -> Option<TelegramOwnerCapture> {
-    updates.iter().find_map(|update| {
-        let message = update.message.as_ref()?;
-        let from = message.from.as_ref()?;
-        let chat = message.chat.as_ref()?;
-        if from.is_bot || chat.chat_type != "private" {
-            return None;
-        }
-
-        let display_name = from
-            .username
-            .as_ref()
-            .map(|username| format!("@{}", username))
-            .unwrap_or_else(|| from.first_name.clone());
-
-        let candidate = TelegramOwnerCandidate {
-            user_id: from.id,
-            display_name,
-            username: from.username.clone(),
-        };
-        let acknowledged_offset = next_telegram_update_offset(updates)
-            .unwrap_or_else(|| update.update_id.saturating_add(1));
-        let ignored_update_upper_bound = acknowledged_offset.saturating_sub(1);
-
-        Some(TelegramOwnerCapture {
-            candidate,
-            acknowledged_offset,
-            ignored_update_upper_bound,
-        })
-    })
+fn extract_telegram_owner_capture(
+    updates: &[TelegramUpdate],
+) -> Option<channel_setup::TelegramOwnerCapture> {
+    let setup_updates = telegram_setup_updates(updates);
+    channel_setup::extract_telegram_owner_capture(&setup_updates)
 }
 
 fn next_telegram_update_offset(updates: &[TelegramUpdate]) -> Option<i64> {
+    let setup_updates = telegram_setup_updates(updates);
+    channel_setup::next_telegram_update_offset(&setup_updates)
+}
+
+fn telegram_setup_updates(updates: &[TelegramUpdate]) -> Vec<channel_setup::TelegramSetupUpdate> {
     updates
         .iter()
-        .map(|update| update.update_id.saturating_add(1))
-        .max()
+        .map(|update| channel_setup::TelegramSetupUpdate {
+            update_id: update.update_id,
+            message: update
+                .message
+                .as_ref()
+                .map(|message| channel_setup::TelegramSetupMessage {
+                    from: message
+                        .from
+                        .as_ref()
+                        .map(|from| channel_setup::TelegramSetupUser {
+                            id: from.id,
+                            first_name: from.first_name.clone(),
+                            username: from.username.clone(),
+                            is_bot: from.is_bot,
+                        }),
+                    chat: message
+                        .chat
+                        .as_ref()
+                        .map(|chat| channel_setup::TelegramSetupChat {
+                            chat_type: chat.chat_type.clone(),
+                        }),
+                }),
+        })
+        .collect()
 }
 
 async fn fetch_telegram_updates(
@@ -641,7 +619,7 @@ async fn fetch_telegram_updates(
 
 async fn capture_telegram_owner_candidate(
     token: &SecretString,
-) -> Result<Option<TelegramOwnerCandidate>, ChannelSetupError> {
+) -> Result<Option<channel_setup::TelegramOwnerCandidate>, ChannelSetupError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(35))
         .build()
@@ -1093,7 +1071,7 @@ pub async fn setup_tunnel(
             false
         };
         match t.provider.as_deref() {
-            Some("ngrok") => {
+            Some(channel_setup::TUNNEL_PROVIDER_NGROK) => {
                 print_info("  Provider:  ngrok");
                 if let Some(ref domain) = t.ngrok_domain {
                     print_info(&format!("  Domain:    {}", domain));
@@ -1102,13 +1080,13 @@ pub async fn setup_tunnel(
                     print_info("  Auth:      token configured");
                 }
             }
-            Some("cloudflare") => {
+            Some(channel_setup::TUNNEL_PROVIDER_CLOUDFLARE) => {
                 print_info("  Provider:  Cloudflare Tunnel");
                 if t.cf_token.is_some() || has_cf_secret {
                     print_info("  Auth:      token configured");
                 }
             }
-            Some("tailscale") => {
+            Some(channel_setup::TUNNEL_PROVIDER_TAILSCALE) => {
                 let mode = if t.ts_funnel {
                     "Funnel (public)"
                 } else {
@@ -1119,7 +1097,7 @@ pub async fn setup_tunnel(
                     print_info(&format!("  Hostname:  {}", hostname));
                 }
             }
-            Some("custom") => {
+            Some(channel_setup::TUNNEL_PROVIDER_CUSTOM) => {
                 print_info("  Provider:  Custom command");
                 if let Some(ref cmd) = t.custom_command {
                     print_info(&format!("  Command:   {}", cmd));
@@ -1226,7 +1204,7 @@ async fn setup_tunnel_ngrok(
     }
 
     Ok(TunnelSettings {
-        provider: Some("ngrok".to_string()),
+        provider: Some(channel_setup::TUNNEL_PROVIDER_NGROK.to_string()),
         ngrok_token,
         ngrok_domain: domain,
         ..Default::default()
@@ -1273,7 +1251,7 @@ async fn setup_tunnel_cloudflare(
     }
 
     Ok(TunnelSettings {
-        provider: Some("cloudflare".to_string()),
+        provider: Some(channel_setup::TUNNEL_PROVIDER_CLOUDFLARE.to_string()),
         cf_token,
         ..Default::default()
     })
@@ -1464,7 +1442,7 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
     }
 
     Ok(TunnelSettings {
-        provider: Some("tailscale".to_string()),
+        provider: Some(channel_setup::TUNNEL_PROVIDER_TAILSCALE.to_string()),
         ts_funnel: funnel,
         ts_hostname: hostname,
         ..Default::default()
@@ -1493,7 +1471,7 @@ fn setup_tunnel_custom() -> Result<TunnelSettings, ChannelSetupError> {
     print_success("Custom tunnel configured.");
 
     Ok(TunnelSettings {
-        provider: Some("custom".to_string()),
+        provider: Some(channel_setup::TUNNEL_PROVIDER_CUSTOM.to_string()),
         custom_command: Some(command),
         custom_health_url: health_url,
         custom_url_pattern: url_pattern,
@@ -1507,14 +1485,13 @@ fn setup_tunnel_static() -> Result<TunnelSettings, ChannelSetupError> {
 
     let tunnel_url = input("Tunnel URL (e.g., https://abc123.ngrok.io)")?;
 
-    if !tunnel_url.starts_with("https://") {
-        print_error("URL must start with https:// (webhooks require HTTPS)");
-        return Err(ChannelSetupError::Validation(
-            "Invalid tunnel URL: must use HTTPS".to_string(),
-        ));
-    }
-
-    let tunnel_url = tunnel_url.trim_end_matches('/').to_string();
+    let tunnel_url = match channel_setup::normalize_static_tunnel_url(&tunnel_url) {
+        Ok(tunnel_url) => tunnel_url,
+        Err(error) => {
+            print_error("URL must start with https:// (webhooks require HTTPS)");
+            return Err(ChannelSetupError::Validation(error));
+        }
+    };
 
     print_success(&format!("Static tunnel URL configured: {}", tunnel_url));
     print_info("Make sure your tunnel is running before starting the agent.");
@@ -1587,7 +1564,7 @@ async fn setup_telegram_webhook_secret(
         return Ok(None);
     }
 
-    let secret = generate_webhook_secret();
+    let secret = channel_setup::generate_webhook_secret();
     secrets
         .save_secret(
             "telegram_webhook_secret",
@@ -1686,7 +1663,7 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
 
     // Generate a webhook secret
     if confirm("Generate a webhook secret for authentication?", true)? {
-        let secret = generate_webhook_secret();
+        let secret = channel_setup::generate_webhook_secret();
         secrets
             .save_secret("http_webhook_secret", &SecretString::from(secret))
             .await?;
@@ -1701,76 +1678,6 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
         port,
         host,
     })
-}
-
-/// Generate a random webhook secret.
-pub fn generate_webhook_secret() -> String {
-    generate_secret_with_length(32)
-}
-
-fn validate_e164(account: &str) -> Result<(), String> {
-    if !account.starts_with('+') {
-        return Err("E.164 account must start with '+'".to_string());
-    }
-    let digits = &account[1..];
-    if digits.is_empty() {
-        return Err("E.164 account must have digits after '+'".to_string());
-    }
-    if !digits.chars().all(|c| c.is_ascii_digit()) {
-        return Err("E.164 account must contain only digits after '+'".to_string());
-    }
-    if digits.len() < 7 || digits.len() > 15 {
-        return Err("E.164 account must be 7-15 digits after '+'".to_string());
-    }
-    Ok(())
-}
-
-fn validate_allow_from_list(list: &str) -> Result<(), String> {
-    if list.is_empty() {
-        return Ok(());
-    }
-    for (i, item) in list.split(',').enumerate() {
-        let trimmed = item.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed == "*" {
-            continue;
-        }
-        if let Some(uuid_part) = trimmed.strip_prefix("uuid:") {
-            if Uuid::parse_str(uuid_part).is_err() {
-                return Err(format!(
-                    "allow_from[{}]: '{}' is not a valid UUID (after 'uuid:' prefix)",
-                    i, trimmed
-                ));
-            }
-            continue;
-        }
-        if validate_e164(trimmed).is_ok() {
-            continue;
-        }
-        if Uuid::parse_str(trimmed).is_ok() {
-            continue;
-        }
-        return Err(format!(
-            "allow_from[{}]: '{}' must be '*', E.164 phone number, UUID, or 'uuid:<id>'",
-            i, trimmed
-        ));
-    }
-    Ok(())
-}
-
-fn validate_allow_from_groups_list(list: &str) -> Result<(), String> {
-    if list.is_empty() {
-        return Ok(());
-    }
-    for item in list.split(',') {
-        let trimmed = item.trim();
-        if trimmed.is_empty() || trimmed == "*" {
-            continue;
-        }
-    }
-    Ok(())
 }
 
 /// Set up Signal channel.
@@ -1800,7 +1707,7 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
     }
 
     let account = input("Signal account (E.164)")?;
-    if let Err(e) = validate_e164(&account) {
+    if let Err(e) = channel_setup::validate_e164_account(&account) {
         print_error(&e);
         return Err(ChannelSetupError::Validation(e));
     }
@@ -1835,12 +1742,12 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
     )?
     .unwrap_or_default();
 
-    if let Err(e) = validate_allow_from_list(&allow_from) {
+    if let Err(e) = channel_setup::validate_allow_from_list(&allow_from) {
         print_error(&e);
         return Err(ChannelSetupError::Validation(e));
     }
 
-    if let Err(e) = validate_allow_from_groups_list(&allow_from_groups) {
+    if let Err(e) = channel_setup::validate_allow_from_groups_list(&allow_from_groups) {
         print_error(&e);
         return Err(ChannelSetupError::Validation(e));
     }
@@ -1921,7 +1828,7 @@ pub async fn setup_wasm_channel(
                 if !v.is_empty() {
                     SecretString::from(v)
                 } else if let Some(ref auto_gen) = secret_config.auto_generate {
-                    let generated = generate_secret_with_length(auto_gen.length);
+                    let generated = channel_setup::generate_secret_with_length(auto_gen.length);
                     print_info(&format!(
                         "Auto-generated {} ({} bytes)",
                         secret_config.name, auto_gen.length
@@ -1931,7 +1838,7 @@ pub async fn setup_wasm_channel(
                     continue; // Skip optional secret with no auto-generate
                 }
             } else if let Some(ref auto_gen) = secret_config.auto_generate {
-                let generated = generate_secret_with_length(auto_gen.length);
+                let generated = channel_setup::generate_secret_with_length(auto_gen.length);
                 print_info(&format!(
                     "Auto-generated {} ({} bytes)",
                     secret_config.name, auto_gen.length
@@ -2037,40 +1944,13 @@ pub async fn setup_wasm_channel(
     })
 }
 
-/// Generate a random secret of specified length (in bytes).
-fn generate_secret_with_length(length: usize) -> String {
-    use rand::RngCore;
-    let mut rng = rand::thread_rng();
-    let mut bytes = vec![0u8; length];
-    rng.fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::setup::channels::{
-        TelegramOwnerCandidate, TelegramUpdate, TelegramUpdateChat, TelegramUpdateMessage,
-        TelegramUpdateUser, extract_telegram_owner_capture, generate_webhook_secret,
-        next_telegram_update_offset,
+        TelegramUpdate, TelegramUpdateChat, TelegramUpdateMessage, TelegramUpdateUser,
+        extract_telegram_owner_capture, next_telegram_update_offset,
     };
-
-    #[test]
-    fn test_generate_webhook_secret() {
-        let secret = generate_webhook_secret();
-        assert_eq!(secret.len(), 64); // 32 bytes = 64 hex chars
-    }
-
-    #[test]
-    fn test_generate_secret_with_length() {
-        use super::generate_secret_with_length;
-
-        let s = generate_secret_with_length(16);
-        assert_eq!(s.len(), 32); // 16 bytes = 32 hex chars
-        assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
-
-        let s2 = generate_secret_with_length(1);
-        assert_eq!(s2.len(), 2);
-    }
+    use thinclaw_channels::setup::TelegramOwnerCandidate;
 
     #[test]
     fn test_extract_telegram_owner_candidate_uses_first_private_human_message() {

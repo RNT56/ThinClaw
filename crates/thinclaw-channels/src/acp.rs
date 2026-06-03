@@ -1302,6 +1302,206 @@ pub fn transcript_replay_updates(session: &AcpSessionState) -> Vec<Value> {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+pub enum AcpStatusUpdate {
+    Thinking {
+        content: String,
+    },
+    Status {
+        tool_call_id: String,
+        content: String,
+    },
+    Plan {
+        entries: Vec<Value>,
+    },
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: Option<f64>,
+        model: Option<String>,
+    },
+    StreamChunk {
+        content: String,
+    },
+    ToolStarted {
+        tool_call_id: String,
+        name: String,
+        parameters: Option<Value>,
+    },
+    ToolCompleted {
+        tool_call_id: String,
+        success: bool,
+        result_preview: Option<String>,
+    },
+    ToolResult {
+        tool_call_id: String,
+        preview: String,
+    },
+    ApprovalNeeded {
+        client_request_id: Value,
+        tool_call_id: String,
+        tool_name: String,
+        description: String,
+        parameters: Value,
+    },
+    AgentMessage {
+        content: String,
+    },
+    Error {
+        message: String,
+        code: Option<String>,
+    },
+    SubagentSpawned {
+        agent_id: String,
+        name: String,
+        task: String,
+    },
+    SubagentProgress {
+        agent_id: String,
+        message: String,
+        category: String,
+    },
+    SubagentCompleted {
+        agent_id: String,
+        success: bool,
+        response: String,
+        duration_ms: u64,
+        iterations: u64,
+    },
+}
+
+pub fn status_to_acp_messages(session_id: &str, status: AcpStatusUpdate) -> Vec<Value> {
+    match status {
+        AcpStatusUpdate::Thinking { content } => {
+            vec![session_update(session_id, agent_thought_chunk(content))]
+        }
+        AcpStatusUpdate::Status {
+            tool_call_id,
+            content,
+        } => vec![session_update(
+            session_id,
+            tool_call_update(&tool_call_id, "in_progress", Some(&content)),
+        )],
+        AcpStatusUpdate::Plan { entries } => vec![session_update(session_id, plan_update(entries))],
+        AcpStatusUpdate::Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            model,
+        } => vec![session_update(
+            session_id,
+            usage_update(input_tokens, output_tokens, cost_usd, model),
+        )],
+        AcpStatusUpdate::StreamChunk { content } => {
+            vec![session_update(session_id, agent_message_chunk(&content))]
+        }
+        AcpStatusUpdate::ToolStarted {
+            tool_call_id,
+            name,
+            parameters,
+        } => vec![session_update(
+            session_id,
+            tool_call(
+                &tool_call_id,
+                name.clone(),
+                tool_kind(&name),
+                "pending",
+                parameters.clone().unwrap_or(Value::Null),
+                Some(json!({ "parameters": parameters })),
+            ),
+        )],
+        AcpStatusUpdate::ToolCompleted {
+            tool_call_id,
+            success,
+            result_preview,
+        } => vec![session_update(
+            session_id,
+            tool_call_update(
+                &tool_call_id,
+                if success { "completed" } else { "failed" },
+                result_preview.as_deref(),
+            ),
+        )],
+        AcpStatusUpdate::ToolResult {
+            tool_call_id,
+            preview,
+        } => vec![session_update(
+            session_id,
+            tool_call_update(&tool_call_id, "in_progress", Some(&preview)),
+        )],
+        AcpStatusUpdate::ApprovalNeeded {
+            client_request_id,
+            tool_call_id,
+            tool_name,
+            description,
+            parameters,
+        } => vec![
+            session_update(
+                session_id,
+                tool_call(
+                    &tool_call_id,
+                    format!("Approval needed: {tool_name}"),
+                    tool_kind(&tool_name),
+                    "pending",
+                    parameters.clone(),
+                    Some(json!({
+                        "approvalNeeded": true,
+                        "description": description,
+                        "parameters": parameters
+                    })),
+                ),
+            ),
+            client_request(
+                client_request_id,
+                "session/request_permission",
+                request_permission_params(
+                    session_id,
+                    permission_tool_call_update(
+                        &tool_call_id,
+                        format!("Approval needed: {tool_name}"),
+                        tool_kind(&tool_name),
+                        parameters,
+                        description,
+                    ),
+                ),
+            ),
+        ],
+        AcpStatusUpdate::AgentMessage { content } => {
+            vec![session_update(session_id, agent_message_chunk(&content))]
+        }
+        AcpStatusUpdate::Error { message, code } => vec![session_update(
+            session_id,
+            agent_error_message_chunk(&message, code),
+        )],
+        AcpStatusUpdate::SubagentSpawned {
+            agent_id,
+            name,
+            task,
+        } => vec![session_update(
+            session_id,
+            subagent_tool_call(agent_id, &name, &task),
+        )],
+        AcpStatusUpdate::SubagentProgress {
+            agent_id,
+            message,
+            category,
+        } => vec![session_update(
+            session_id,
+            subagent_progress_update(agent_id, &message, json!(category)),
+        )],
+        AcpStatusUpdate::SubagentCompleted {
+            agent_id,
+            success,
+            response,
+            duration_ms,
+            iterations,
+        } => vec![session_update(
+            session_id,
+            subagent_completed_update(agent_id, success, &response, duration_ms, iterations),
+        )],
+    }
+}
+
 pub fn parse_json_rpc_line(line: &str) -> Result<wire::JsonRpcMessage, Value> {
     serde_json::from_str::<wire::JsonRpcMessage>(line)
         .map_err(|error| error_response(None, -32700, format!("Parse error: {error}"), None))
@@ -2233,6 +2433,155 @@ mod tests {
             updates[1]["params"]["update"]["sessionUpdate"],
             json!("agent_message_chunk")
         );
+    }
+
+    #[test]
+    fn status_projection_round_trips_through_typed_session_update_variants() {
+        let session_id = "sess_test";
+        let cases = vec![
+            (
+                AcpStatusUpdate::Thinking {
+                    content: "thinking".to_string(),
+                },
+                "agent_thought_chunk",
+            ),
+            (
+                AcpStatusUpdate::Status {
+                    tool_call_id: "status_1".to_string(),
+                    content: "running".to_string(),
+                },
+                "tool_call_update",
+            ),
+            (
+                AcpStatusUpdate::Plan {
+                    entries: vec![json!({ "content": "Inspect files", "status": "pending" })],
+                },
+                "plan",
+            ),
+            (
+                AcpStatusUpdate::Usage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                    cost_usd: Some(0.0001),
+                    model: Some("test-model".to_string()),
+                },
+                "usage_update",
+            ),
+            (
+                AcpStatusUpdate::StreamChunk {
+                    content: "chunk".to_string(),
+                },
+                "agent_message_chunk",
+            ),
+            (
+                AcpStatusUpdate::ToolStarted {
+                    tool_call_id: "tool_1".to_string(),
+                    name: "shell".to_string(),
+                    parameters: Some(json!({ "command": "true" })),
+                },
+                "tool_call",
+            ),
+            (
+                AcpStatusUpdate::ToolResult {
+                    tool_call_id: "tool_1".to_string(),
+                    preview: "stdout".to_string(),
+                },
+                "tool_call_update",
+            ),
+            (
+                AcpStatusUpdate::ToolCompleted {
+                    tool_call_id: "tool_1".to_string(),
+                    success: true,
+                    result_preview: Some("done".to_string()),
+                },
+                "tool_call_update",
+            ),
+            (
+                AcpStatusUpdate::AgentMessage {
+                    content: "persistent".to_string(),
+                },
+                "agent_message_chunk",
+            ),
+            (
+                AcpStatusUpdate::Error {
+                    message: "failed".to_string(),
+                    code: Some("llm".to_string()),
+                },
+                "agent_message_chunk",
+            ),
+            (
+                AcpStatusUpdate::SubagentSpawned {
+                    agent_id: "sub_1".to_string(),
+                    name: "researcher".to_string(),
+                    task: "look".to_string(),
+                },
+                "tool_call",
+            ),
+            (
+                AcpStatusUpdate::SubagentProgress {
+                    agent_id: "sub_1".to_string(),
+                    message: "working".to_string(),
+                    category: "thinking".to_string(),
+                },
+                "tool_call_update",
+            ),
+            (
+                AcpStatusUpdate::SubagentCompleted {
+                    agent_id: "sub_1".to_string(),
+                    success: true,
+                    response: "done".to_string(),
+                    duration_ms: 12,
+                    iterations: 1,
+                },
+                "tool_call_update",
+            ),
+        ];
+
+        for (status, expected_update) in cases {
+            let messages = status_to_acp_messages(session_id, status);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["method"], json!("session/update"));
+            assert_eq!(
+                messages[0]["params"]["update"]["sessionUpdate"],
+                json!(expected_update)
+            );
+            let params: wire::SessionUpdateParams =
+                serde_json::from_value(messages[0]["params"].clone())
+                    .expect("status update should match typed wire shape");
+            assert_eq!(params.session_id, session_id);
+        }
+    }
+
+    #[test]
+    fn approval_status_projection_emits_permission_request() {
+        let messages = status_to_acp_messages(
+            "sess_test",
+            AcpStatusUpdate::ApprovalNeeded {
+                client_request_id: json!(7),
+                tool_call_id: "tool_approval".to_string(),
+                tool_name: "shell".to_string(),
+                description: "approve shell".to_string(),
+                parameters: json!({ "command": "true" }),
+            },
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["method"], json!("session/update"));
+        assert_eq!(messages[1]["method"], json!("session/request_permission"));
+        let update_params: wire::SessionUpdateParams =
+            serde_json::from_value(messages[0]["params"].clone()).expect("approval update");
+        assert!(matches!(
+            update_params.update,
+            wire::SessionUpdate::ToolCall { .. }
+        ));
+        let permission_params: wire::RequestPermissionParams =
+            serde_json::from_value(messages[1]["params"].clone()).expect("approval request");
+        assert_eq!(permission_params.session_id, "sess_test");
+        assert_eq!(
+            permission_params.tool_call["toolCallId"],
+            json!("tool_approval")
+        );
+        assert_eq!(permission_params.options[0].option_id, "allow-once");
     }
 
     #[test]

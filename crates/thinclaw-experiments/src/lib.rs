@@ -2076,6 +2076,27 @@ pub fn is_stale_lease(
     }
 }
 
+pub fn lease_runner_trial_status(
+    runner_status: &str,
+    current_status: ExperimentTrialStatus,
+) -> ExperimentTrialStatus {
+    match runner_status {
+        "runner_started" | "running_prepare" | "running_benchmark" => {
+            ExperimentTrialStatus::Running
+        }
+        "evaluating" | "uploading_artifacts" | "completing" => ExperimentTrialStatus::Evaluating,
+        _ => current_status,
+    }
+}
+
+pub fn validate_lease_completion_status(status: ExperimentLeaseStatus) -> Result<(), &'static str> {
+    if status == ExperimentLeaseStatus::Claimed {
+        Ok(())
+    } else {
+        Err(lease_completion_rejection_message(status))
+    }
+}
+
 pub fn lease_completion_rejection_message(status: ExperimentLeaseStatus) -> &'static str {
     match status {
         ExperimentLeaseStatus::Claimed => "lease is already claimed",
@@ -3106,6 +3127,50 @@ mod tests {
         assert_eq!(
             lease_completion_rejection_message(ExperimentLeaseStatus::Revoked),
             "lease was revoked before completion and can no longer transition to terminal"
+        );
+    }
+
+    #[test]
+    fn lease_runner_trial_status_maps_runner_progress_strings() {
+        for status in ["runner_started", "running_prepare", "running_benchmark"] {
+            assert_eq!(
+                lease_runner_trial_status(status, ExperimentTrialStatus::Preparing),
+                ExperimentTrialStatus::Running
+            );
+        }
+        for status in ["evaluating", "uploading_artifacts", "completing"] {
+            assert_eq!(
+                lease_runner_trial_status(status, ExperimentTrialStatus::Running),
+                ExperimentTrialStatus::Evaluating
+            );
+        }
+    }
+
+    #[test]
+    fn lease_runner_trial_status_preserves_unknown_statuses() {
+        assert_eq!(
+            lease_runner_trial_status("runner_started ", ExperimentTrialStatus::Preparing),
+            ExperimentTrialStatus::Preparing
+        );
+        assert_eq!(
+            lease_runner_trial_status("custom_status", ExperimentTrialStatus::Accepted),
+            ExperimentTrialStatus::Accepted
+        );
+    }
+
+    #[test]
+    fn validate_lease_completion_status_requires_claimed_lease() {
+        assert_eq!(
+            validate_lease_completion_status(ExperimentLeaseStatus::Claimed),
+            Ok(())
+        );
+        assert_eq!(
+            validate_lease_completion_status(ExperimentLeaseStatus::Pending),
+            Err("lease must be claimed before completion can be recorded")
+        );
+        assert_eq!(
+            validate_lease_completion_status(ExperimentLeaseStatus::Completed),
+            Err("lease completion was already recorded; repeated terminal completions are ignored")
         );
     }
 

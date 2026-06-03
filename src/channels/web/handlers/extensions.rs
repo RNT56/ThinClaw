@@ -11,20 +11,20 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::extensions::manager::AuthRequestContext;
 use thinclaw_gateway::web::extensions::{
-    ExtensionAuthRequiredResponseInput, ExtensionInfoInput, ExtensionInstallFallbackInput,
-    ExtensionReconnectSupportInput, ExtensionRegistryEntrySource, ExtensionSetupResponseInput,
-    RegistryEntryInfoInput, RegistryEntrySearchInput, WasmChannelActivationStatusInput,
-    activation_error_needs_auth, channel_manager_unavailable_error,
-    classify_extension_reconnect_support, classify_wasm_channel_activation_status,
-    extension_action_error_response, extension_action_success_response,
-    extension_auth_required_response, extension_auth_status_allows_activation_retry,
-    extension_authentication_failed_response, extension_info, extension_internal_error,
-    extension_list_response, extension_manager_unavailable_error,
+    ExtensionAuthRequiredResponseInput, ExtensionInstallFallbackInput,
+    ExtensionRegistryEntrySource, ExtensionSetupResponseInput, InstalledExtensionInfoInput,
+    InstalledExtensionRegistryKey, RegistryEntryProjectionInput, ToolInfoInput,
+    WasmChannelActivationStatusInput, activation_error_needs_auth,
+    channel_manager_unavailable_error, extension_action_error_response,
+    extension_action_success_response, extension_auth_required_response,
+    extension_auth_status_allows_activation_retry, extension_authentication_failed_response,
+    extension_info_needs_channel_diagnostics, extension_internal_error,
+    extension_list_response_from_installed_inputs, extension_manager_unavailable_error,
     extension_manager_unavailable_install_response, extension_reconnect_failed_response,
     extension_reconnect_refresh_failed_response, extension_reconnect_success_response,
-    extension_setup_response, extension_setup_save_response, registry_entry_info,
-    registry_entry_matches_query, registry_search_response, tool_info, tool_list_response,
-    tool_registry_unavailable_error, wasm_channel_activation_status_needs_pairing_state,
+    extension_setup_response, extension_setup_save_response, registry_search_response_from_inputs,
+    tool_list_response_from_inputs, tool_registry_unavailable_error,
+    wasm_channel_activation_status_needs_pairing_state,
 };
 use thinclaw_gateway::web::ports::request_origin_from_headers;
 
@@ -45,7 +45,7 @@ pub(crate) async fn extensions_list_handler(
     let mut extensions = Vec::with_capacity(installed.len());
     for ext in installed {
         let kind = ext.kind.to_string();
-        let mut activation_status_input = WasmChannelActivationStatusInput {
+        let pairing_status_input = WasmChannelActivationStatusInput {
             kind: &kind,
             name: &ext.name,
             authenticated: ext.authenticated,
@@ -53,15 +53,16 @@ pub(crate) async fn extensions_list_handler(
             activation_error: ext.activation_error.is_some(),
             has_paired: false,
         };
-        if wasm_channel_activation_status_needs_pairing_state(activation_status_input) {
-            activation_status_input.has_paired = pairing_store
+        let has_paired = if wasm_channel_activation_status_needs_pairing_state(pairing_status_input)
+        {
+            pairing_store
                 .read_allow_from(&ext.name)
                 .map(|list| !list.is_empty())
-                .unwrap_or(false);
-        }
-        let activation_status =
-            classify_wasm_channel_activation_status(activation_status_input).map(str::to_string);
-        let channel_diagnostics = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let channel_diagnostics = if extension_info_needs_channel_diagnostics(&kind) {
             if let Some(channel_manager) = state.channel_manager.as_ref() {
                 channel_manager.channel_diagnostics(&ext.name).await
             } else {
@@ -70,15 +71,10 @@ pub(crate) async fn extensions_list_handler(
         } else {
             None
         };
-        let reconnect_supported =
-            classify_extension_reconnect_support(ExtensionReconnectSupportInput {
-                kind: &kind,
-                name: &ext.name,
-            });
         let setup = ext_mgr
             .integration_setup_status(&ext, AuthRequestContext::default())
             .await;
-        extensions.push(extension_info(ExtensionInfoInput {
+        extensions.push(InstalledExtensionInfoInput {
             name: ext.name,
             kind,
             description: ext.description,
@@ -91,15 +87,16 @@ pub(crate) async fn extensions_list_handler(
             needs_setup: ext.needs_setup,
             shared_auth_provider: ext.shared_auth_provider,
             missing_scopes: ext.missing_scopes,
-            activation_status,
             activation_error: ext.activation_error,
+            has_paired,
             channel_diagnostics,
-            reconnect_supported,
             setup,
-        }));
+        });
     }
 
-    Ok(Json(extension_list_response(extensions)))
+    Ok(Json(extension_list_response_from_installed_inputs(
+        extensions,
+    )))
 }
 
 pub(crate) async fn extensions_tools_handler(
@@ -116,12 +113,12 @@ pub(crate) async fn extensions_tools_handler(
     });
     let definitions = tool_policies
         .filter_tool_definitions_for_metadata(registry.tool_definitions().await, &metadata);
-    let tools = definitions
-        .into_iter()
-        .map(|td| tool_info(td.name, td.description))
-        .collect();
+    let tools = definitions.into_iter().map(|td| ToolInfoInput {
+        name: td.name,
+        description: td.description,
+    });
 
-    Ok(Json(tool_list_response(tools)))
+    Ok(Json(tool_list_response_from_inputs(tools)))
 }
 
 pub(crate) async fn extensions_install_handler(
@@ -299,51 +296,36 @@ pub(crate) async fn extensions_registry_handler(
 ) -> Json<RegistrySearchResponse> {
     let query = params.query.unwrap_or_default();
 
-    let matching: Vec<&crate::extensions::RegistryEntry> = state
+    let entries = state
         .registry_entries
         .iter()
-        .filter(|e| {
-            registry_entry_matches_query(
-                RegistryEntrySearchInput {
-                    name: &e.name,
-                    display_name: &e.display_name,
-                    description: &e.description,
-                    keywords: &e.keywords,
-                },
-                &query,
-            )
+        .map(|entry| RegistryEntryProjectionInput {
+            name: entry.name.clone(),
+            display_name: entry.display_name.clone(),
+            kind: entry.kind.to_string(),
+            description: entry.description.clone(),
+            keywords: entry.keywords.clone(),
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    let installed: std::collections::HashSet<(String, String)> =
-        if let Some(ext_mgr) = state.extension_manager.as_ref() {
-            ext_mgr
-                .list(None, false)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|ext| (ext.name, ext.kind.to_string()))
-                .collect()
-        } else {
-            std::collections::HashSet::new()
-        };
-
-    let entries = matching
-        .into_iter()
-        .map(|e| {
-            let kind_str = e.kind.to_string();
-            registry_entry_info(RegistryEntryInfoInput {
-                name: e.name.clone(),
-                display_name: e.display_name.clone(),
-                installed: installed.contains(&(e.name.clone(), kind_str.clone())),
-                kind: kind_str,
-                description: e.description.clone(),
-                keywords: e.keywords.clone(),
+    let installed = if let Some(ext_mgr) = state.extension_manager.as_ref() {
+        ext_mgr
+            .list(None, false)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|ext| InstalledExtensionRegistryKey {
+                name: ext.name,
+                kind: ext.kind.to_string(),
             })
-        })
-        .collect();
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
 
-    Json(registry_search_response(entries))
+    Json(registry_search_response_from_inputs(
+        entries, &installed, &query,
+    ))
 }
 
 pub(crate) async fn extensions_setup_handler(

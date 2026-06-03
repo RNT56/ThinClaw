@@ -281,8 +281,87 @@ pub fn extension_info(input: ExtensionInfoInput) -> ExtensionInfo {
     }
 }
 
+#[derive(Debug)]
+pub struct InstalledExtensionInfoInput {
+    pub name: String,
+    pub kind: String,
+    pub description: Option<String>,
+    pub url: Option<String>,
+    pub authenticated: bool,
+    pub auth_mode: String,
+    pub auth_status: String,
+    pub active: bool,
+    pub tools: Vec<String>,
+    pub needs_setup: bool,
+    pub shared_auth_provider: Option<String>,
+    pub missing_scopes: Vec<String>,
+    pub activation_error: Option<String>,
+    pub has_paired: bool,
+    pub channel_diagnostics: Option<serde_json::Value>,
+    pub setup: IntegrationSetupStatus,
+}
+
+pub fn extension_info_needs_channel_diagnostics(kind: &str) -> bool {
+    kind == EXTENSION_KIND_WASM_CHANNEL
+}
+
+pub fn installed_extension_info(input: InstalledExtensionInfoInput) -> ExtensionInfo {
+    let activation_status =
+        classify_wasm_channel_activation_status(WasmChannelActivationStatusInput {
+            kind: &input.kind,
+            name: &input.name,
+            authenticated: input.authenticated,
+            active: input.active,
+            activation_error: input.activation_error.is_some(),
+            has_paired: input.has_paired,
+        })
+        .map(str::to_string);
+    let reconnect_supported =
+        classify_extension_reconnect_support(ExtensionReconnectSupportInput {
+            kind: &input.kind,
+            name: &input.name,
+        });
+
+    extension_info(ExtensionInfoInput {
+        name: input.name,
+        kind: input.kind,
+        description: input.description,
+        url: input.url,
+        authenticated: input.authenticated,
+        auth_mode: input.auth_mode,
+        auth_status: input.auth_status,
+        active: input.active,
+        tools: input.tools,
+        needs_setup: input.needs_setup,
+        shared_auth_provider: input.shared_auth_provider,
+        missing_scopes: input.missing_scopes,
+        activation_status,
+        activation_error: input.activation_error,
+        channel_diagnostics: input.channel_diagnostics,
+        reconnect_supported,
+        setup: input.setup,
+    })
+}
+
 pub fn extension_list_response(extensions: Vec<ExtensionInfo>) -> ExtensionListResponse {
     ExtensionListResponse { extensions }
+}
+
+pub fn extension_list_response_from_installed_inputs(
+    extensions: impl IntoIterator<Item = InstalledExtensionInfoInput>,
+) -> ExtensionListResponse {
+    extension_list_response(
+        extensions
+            .into_iter()
+            .map(installed_extension_info)
+            .collect(),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolInfoInput {
+    pub name: String,
+    pub description: String,
 }
 
 pub fn tool_info(name: impl Into<String>, description: impl Into<String>) -> ToolInfo {
@@ -292,8 +371,18 @@ pub fn tool_info(name: impl Into<String>, description: impl Into<String>) -> Too
     }
 }
 
+pub fn tool_info_from_input(input: ToolInfoInput) -> ToolInfo {
+    tool_info(input.name, input.description)
+}
+
 pub fn tool_list_response(tools: Vec<ToolInfo>) -> ToolListResponse {
     ToolListResponse { tools }
+}
+
+pub fn tool_list_response_from_inputs(
+    tools: impl IntoIterator<Item = ToolInfoInput>,
+) -> ToolListResponse {
+    tool_list_response(tools.into_iter().map(tool_info_from_input).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +424,30 @@ pub struct RegistryEntryInfoInput {
     pub installed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryEntryProjectionInput {
+    pub name: String,
+    pub display_name: String,
+    pub kind: String,
+    pub description: String,
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledExtensionRegistryKey {
+    pub name: String,
+    pub kind: String,
+}
+
+pub fn registry_entry_is_installed(
+    entry: &RegistryEntryProjectionInput,
+    installed: &[InstalledExtensionRegistryKey],
+) -> bool {
+    installed
+        .iter()
+        .any(|installed| installed.name == entry.name && installed.kind == entry.kind)
+}
+
 pub fn registry_entry_info(input: RegistryEntryInfoInput) -> RegistryEntryInfo {
     RegistryEntryInfo {
         name: input.name,
@@ -346,8 +459,47 @@ pub fn registry_entry_info(input: RegistryEntryInfoInput) -> RegistryEntryInfo {
     }
 }
 
+pub fn registry_entry_info_from_projection(
+    input: RegistryEntryProjectionInput,
+    installed: &[InstalledExtensionRegistryKey],
+) -> RegistryEntryInfo {
+    let installed = registry_entry_is_installed(&input, installed);
+    registry_entry_info(RegistryEntryInfoInput {
+        name: input.name,
+        display_name: input.display_name,
+        kind: input.kind,
+        description: input.description,
+        keywords: input.keywords,
+        installed,
+    })
+}
+
 pub fn registry_search_response(entries: Vec<RegistryEntryInfo>) -> RegistrySearchResponse {
     RegistrySearchResponse { entries }
+}
+
+pub fn registry_search_response_from_inputs(
+    entries: impl IntoIterator<Item = RegistryEntryProjectionInput>,
+    installed: &[InstalledExtensionRegistryKey],
+    query: &str,
+) -> RegistrySearchResponse {
+    registry_search_response(
+        entries
+            .into_iter()
+            .filter(|entry| {
+                registry_entry_matches_query(
+                    RegistryEntrySearchInput {
+                        name: &entry.name,
+                        display_name: &entry.display_name,
+                        description: &entry.description,
+                        keywords: &entry.keywords,
+                    },
+                    query,
+                )
+            })
+            .map(|entry| registry_entry_info_from_projection(entry, installed))
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -621,6 +773,65 @@ mod tests {
     }
 
     #[test]
+    fn installed_extension_projection_derives_wasm_channel_policy() {
+        let response =
+            extension_list_response_from_installed_inputs(vec![InstalledExtensionInfoInput {
+                name: TELEGRAM_EXTENSION_NAME.to_string(),
+                kind: EXTENSION_KIND_WASM_CHANNEL.to_string(),
+                description: Some("Chat bridge".to_string()),
+                url: Some("https://example.test/telegram.wasm".to_string()),
+                authenticated: true,
+                auth_mode: "oauth".to_string(),
+                auth_status: "authenticated".to_string(),
+                active: true,
+                tools: vec!["telegram.send".to_string()],
+                needs_setup: true,
+                shared_auth_provider: Some("telegram".to_string()),
+                missing_scopes: vec!["messages.write".to_string()],
+                activation_error: None,
+                has_paired: false,
+                channel_diagnostics: Some(serde_json::json!({"connected": true})),
+                setup: IntegrationSetupStatus::default(),
+            }]);
+
+        let extension = response.extensions.first().expect("projected extension");
+        assert_eq!(extension.name, TELEGRAM_EXTENSION_NAME);
+        assert_eq!(extension.activation_status.as_deref(), Some("pairing"));
+        assert!(extension.reconnect_supported);
+        assert_eq!(
+            extension.channel_diagnostics,
+            Some(serde_json::json!({"connected": true}))
+        );
+        assert_eq!(
+            serde_json::to_value(&response).expect("serialize extension list"),
+            serde_json::json!({
+                "extensions": [{
+                    "name": TELEGRAM_EXTENSION_NAME,
+                    "kind": EXTENSION_KIND_WASM_CHANNEL,
+                    "description": "Chat bridge",
+                    "url": "https://example.test/telegram.wasm",
+                    "authenticated": true,
+                    "auth_mode": "oauth",
+                    "auth_status": "authenticated",
+                    "active": true,
+                    "tools": ["telegram.send"],
+                    "needs_setup": true,
+                    "shared_auth_provider": "telegram",
+                    "missing_scopes": ["messages.write"],
+                    "activation_status": "pairing",
+                    "channel_diagnostics": {"connected": true},
+                    "reconnect_supported": true,
+                    "setup": {
+                        "state": "installed_unconfigured",
+                        "auth_mode": "none",
+                        "actions": ["validate"]
+                    }
+                }]
+            })
+        );
+    }
+
+    #[test]
     fn registry_search_matches_any_token_across_entry_fields() {
         let keywords = vec!["oauth".to_string(), "chat".to_string()];
         let entry = RegistryEntrySearchInput {
@@ -640,7 +851,10 @@ mod tests {
 
     #[test]
     fn extension_projection_responses_preserve_json_shapes() {
-        let tools = tool_list_response(vec![tool_info("memory.search", "Search memory")]);
+        let tools = tool_list_response_from_inputs(vec![ToolInfoInput {
+            name: "memory.search".to_string(),
+            description: "Search memory".to_string(),
+        }]);
         let tools_value = serde_json::to_value(tools).expect("serialize tools");
         assert_eq!(
             tools_value,
@@ -652,15 +866,29 @@ mod tests {
             })
         );
 
-        let registry =
-            registry_search_response(vec![registry_entry_info(RegistryEntryInfoInput {
+        let registry = registry_search_response_from_inputs(
+            vec![
+                RegistryEntryProjectionInput {
+                    name: "telegram".to_string(),
+                    display_name: "Telegram".to_string(),
+                    kind: EXTENSION_KIND_WASM_CHANNEL.to_string(),
+                    description: "Chat bridge".to_string(),
+                    keywords: vec!["chat".to_string()],
+                },
+                RegistryEntryProjectionInput {
+                    name: "notes".to_string(),
+                    display_name: "Notes".to_string(),
+                    kind: EXTENSION_KIND_WASM_TOOL.to_string(),
+                    description: "Capture notes".to_string(),
+                    keywords: vec!["writing".to_string()],
+                },
+            ],
+            &[InstalledExtensionRegistryKey {
                 name: "telegram".to_string(),
-                display_name: "Telegram".to_string(),
                 kind: EXTENSION_KIND_WASM_CHANNEL.to_string(),
-                description: "Chat bridge".to_string(),
-                keywords: vec!["chat".to_string()],
-                installed: true,
-            })]);
+            }],
+            "chat",
+        );
         let registry_value = serde_json::to_value(registry).expect("serialize registry");
         assert_eq!(
             registry_value,

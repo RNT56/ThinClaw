@@ -57,11 +57,12 @@ use crate::experiments::{
     experiment_workspace_path_missing_with_error_message, experiments_feature_disabled_message,
     experiments_worktree_path, extract_metrics, filtered_changed_files, hash_lease_token,
     invalid_experiment_lease_token_message, is_stale_lease as is_stale_lease_policy,
-    lease_completion_rejection_message, merge_json, metadata_string_field, next_campaign_status,
+    lease_runner_trial_status, merge_json, metadata_string_field, next_campaign_status,
     normalize_trial_completion, parse_research_json_response, parse_secret_reference,
     ready_project_status as ready_project_status_policy, recent_trial_context,
     research_subagent_executor_unavailable_message, runner_cost_breakdown, short_id,
     sort_experiment_opportunities, summarize_llm_usage, truncate_for_prompt,
+    validate_lease_completion_status,
     validate_project_workdir_fragment as validate_project_workdir_fragment_policy,
 };
 use crate::history::OutcomeContractQuery;
@@ -2616,13 +2617,7 @@ pub async fn lease_status(
             ApiError::SessionNotFound(experiment_trial_not_found_message(lease.trial_id))
         })?;
     trial.summary = Some(req.status.clone());
-    trial.status = match req.status.as_str() {
-        "runner_started" | "running_prepare" | "running_benchmark" => {
-            ExperimentTrialStatus::Running
-        }
-        "evaluating" | "uploading_artifacts" | "completing" => ExperimentTrialStatus::Evaluating,
-        _ => trial.status,
-    };
+    trial.status = lease_runner_trial_status(&req.status, trial.status);
     if matches!(
         trial.status,
         ExperimentTrialStatus::Running | ExperimentTrialStatus::Evaluating
@@ -2864,10 +2859,6 @@ async fn launch_trial(
     })
 }
 
-fn lease_completion_rejection(status: ExperimentLeaseStatus) -> ApiError {
-    ApiError::InvalidInput(lease_completion_rejection_message(status).to_string())
-}
-
 async fn complete_trial_terminal(
     store: &Arc<dyn Database>,
     project: &ExperimentProject,
@@ -2877,9 +2868,9 @@ async fn complete_trial_terminal(
     completion: ExperimentRunnerCompletion,
 ) -> ApiResult<()> {
     if let Some(lease) = lease.as_ref()
-        && lease.status != ExperimentLeaseStatus::Claimed
+        && let Err(message) = validate_lease_completion_status(lease.status)
     {
-        return Err(lease_completion_rejection(lease.status));
+        return Err(ApiError::InvalidInput(message.to_string()));
     }
 
     let completion = normalize_trial_completion(completion);
