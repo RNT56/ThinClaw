@@ -53,79 +53,63 @@ fn ensure_skill_admin_available(ctx: &JobContext, tool_name: &str) -> Result<(),
     skill_policy::ensure_skill_admin_available(&ctx.metadata, tool_name)
 }
 
-fn summarize_findings(findings: &[SecurityFinding]) -> String {
-    skill_policy::skill_findings_summary(findings.iter().map(|finding| {
-        skill_policy::skill_finding_summary(
-            &finding.kind,
-            &format!("{:?}", finding.severity).to_lowercase(),
-            &finding.excerpt,
-        )
-    }))
+fn finding_severity_label(severity: FindingSeverity) -> &'static str {
+    match severity {
+        FindingSeverity::Info => "info",
+        FindingSeverity::Warning => "warning",
+        FindingSeverity::Critical => "critical",
+    }
 }
 
-fn skill_finding_json(findings: &[SecurityFinding]) -> Vec<serde_json::Value> {
+fn skill_policy_findings(
+    findings: &[SecurityFinding],
+) -> Vec<skill_policy::SkillFindingPolicy<'_>> {
     findings
         .iter()
-        .map(|finding| {
-            let mut value = skill_policy::skill_finding_output(
-                &finding.kind,
-                &format!("{:?}", finding.severity).to_lowercase(),
-                &finding.excerpt,
-            );
-            if let Some(obj) = value.as_object_mut() {
-                if let Some(rule_id) = finding.rule_id.as_ref() {
-                    obj.insert(
-                        "rule_id".to_string(),
-                        serde_json::Value::String(rule_id.clone()),
-                    );
-                }
-                if let Some(file) = finding.file.as_ref() {
-                    obj.insert("file".to_string(), serde_json::Value::String(file.clone()));
-                }
-                if let Some(line) = finding.line {
-                    obj.insert("line".to_string(), serde_json::json!(line));
-                }
-                if let Some(recommendation) = finding.recommendation.as_ref() {
-                    obj.insert(
-                        "recommendation".to_string(),
-                        serde_json::Value::String(recommendation.clone()),
-                    );
-                }
-                if let Some(scanner_version) = finding.scanner_version.as_ref() {
-                    obj.insert(
-                        "scanner_version".to_string(),
-                        serde_json::Value::String(scanner_version.clone()),
-                    );
-                }
-            }
-            value
+        .map(|finding| skill_policy::SkillFindingPolicy {
+            kind: &finding.kind,
+            severity: finding_severity_label(finding.severity),
+            excerpt: &finding.excerpt,
+            rule_id: finding.rule_id.as_deref(),
+            file: finding.file.as_deref(),
+            line: finding.line,
+            recommendation: finding.recommendation.as_deref(),
+            scanner_version: finding.scanner_version.as_deref(),
         })
         .collect()
 }
 
-fn finding_summary_json(summary: &FindingSummary) -> serde_json::Value {
-    serde_json::json!({
-        "total": summary.total,
-        "warnings": summary.warnings,
-        "critical": summary.critical,
-        "categories": summary.categories.clone(),
-    })
+fn skill_finding_json(findings: &[SecurityFinding]) -> Vec<serde_json::Value> {
+    skill_policy::skill_finding_detail_outputs(skill_policy_findings(findings))
+}
+
+fn summarize_findings(findings: &[SecurityFinding]) -> String {
+    skill_policy::skill_findings_detail_summary(skill_policy_findings(findings))
+}
+
+fn finding_summary_policy(summary: &FindingSummary) -> skill_policy::SkillFindingSummary {
+    skill_policy::SkillFindingSummary {
+        total: summary.total,
+        warnings: summary.warnings,
+        critical: summary.critical,
+        categories: summary.categories.clone(),
+    }
 }
 
 fn add_scan_report_fields(output: &mut serde_json::Value, report: &SkillScanReport) {
-    if let Some(obj) = output.as_object_mut() {
-        obj.insert(
-            "scanner_version".to_string(),
-            serde_json::Value::String(report.scanner_version.clone()),
-        );
-        obj.insert(
-            "content_sha256".to_string(),
-            serde_json::Value::String(report.content_sha256.clone()),
-        );
-        obj.insert(
-            "finding_summary".to_string(),
-            finding_summary_json(&report.summary),
-        );
+    skill_policy::add_skill_scan_report_fields(
+        output,
+        &report.scanner_version,
+        &report.content_sha256,
+        finding_summary_policy(&report.summary),
+    );
+}
+
+fn tap_trust_label(value: SkillTapTrustLevel) -> &'static str {
+    match value {
+        SkillTapTrustLevel::Community => "community",
+        SkillTapTrustLevel::Trusted => "trusted",
+        SkillTapTrustLevel::Builtin => "builtin",
     }
 }
 
@@ -133,24 +117,14 @@ fn findings_require_approval(
     trust_level: SkillTapTrustLevel,
     findings: &[SecurityFinding],
 ) -> bool {
-    let critical = findings
-        .iter()
-        .filter(|finding| finding.severity == FindingSeverity::Critical)
-        .count();
-    let warnings = findings
-        .iter()
-        .filter(|finding| finding.severity == FindingSeverity::Warning)
-        .count();
-    match trust_level {
-        SkillTapTrustLevel::Community => critical > 0 || warnings > 1,
-        SkillTapTrustLevel::Trusted | SkillTapTrustLevel::Builtin => critical > 0,
-    }
+    skill_policy::skill_findings_require_approval_for_details(
+        tap_trust_label(trust_level),
+        skill_policy_findings(findings),
+    )
 }
 
 fn findings_require_rejection(findings: &[SecurityFinding]) -> bool {
-    findings.iter().any(|finding| {
-        finding.severity == FindingSeverity::Critical && finding.kind == "path_traversal"
-    })
+    skill_policy::skill_findings_require_rejection_for_details(skill_policy_findings(findings))
 }
 
 fn source_path_for_skill(skill: &crate::skills::LoadedSkill) -> Option<PathBuf> {
@@ -345,23 +319,11 @@ fn normalize_tap_path(path: &str) -> String {
     skill_policy::normalize_tap_path(path)
 }
 
-fn validate_github_repo(repo: &str) -> Result<(), ToolError> {
-    skill_policy::validate_github_repo(repo)
-}
-
-fn validate_repo_relative_path(path: &str, field: &str) -> Result<(), ToolError> {
-    skill_policy::validate_repo_relative_path(path, field)
-}
-
-fn validate_repo_path_component(value: &str, field: &str) -> Result<(), ToolError> {
-    skill_policy::validate_repo_path_component(value, field)
-}
-
 fn parse_tap_trust_level(value: &str) -> Result<SkillTapTrustLevel, ToolError> {
-    match value.trim().to_ascii_lowercase().as_str() {
+    match skill_policy::parse_skill_tap_trust_level(value)?.as_str() {
         "builtin" => Ok(SkillTapTrustLevel::Builtin),
         "trusted" => Ok(SkillTapTrustLevel::Trusted),
-        "community" | "" => Ok(SkillTapTrustLevel::Community),
+        "community" => Ok(SkillTapTrustLevel::Community),
         other => Err(ToolError::InvalidParameters(format!(
             "Unsupported trust_level '{}'",
             other
@@ -2485,7 +2447,7 @@ async fn build_publish_plan(
     name: &str,
     target_repo: &str,
 ) -> Result<PublishPlan, ToolError> {
-    validate_github_repo(target_repo)?;
+    skill_policy::validate_github_repo(target_repo)?;
     let (skill, source_path) = {
         let guard = registry.read().await;
         let skill = guard
@@ -2531,15 +2493,15 @@ async fn build_publish_plan(
         .chars()
         .take(8)
         .collect::<String>();
-    validate_repo_path_component(&skill.manifest.name, "skill name")?;
+    skill_policy::validate_repo_path_component(&skill.manifest.name, "skill name")?;
     let tap_path = normalize_tap_path(&tap.path);
-    validate_repo_relative_path(&tap_path, "tap.path")?;
+    skill_policy::validate_repo_relative_path(&tap_path, "tap.path")?;
     let package_path = if tap_path.is_empty() {
         skill.manifest.name.clone()
     } else {
         format!("{}/{}", tap_path, skill.manifest.name)
     };
-    validate_repo_relative_path(&package_path, "package_path")?;
+    skill_policy::validate_repo_relative_path(&package_path, "package_path")?;
     let branch = format!("codex/skill-publish/{}-{}", skill.manifest.name, hash8);
     let package_files = package_scan_files(&files);
     let scan_report = scan_report_for_content(
@@ -2782,26 +2744,26 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
 }
 
 fn publish_metadata_from_plan(plan: &PublishPlan) -> serde_json::Value {
-    serde_json::json!({
-        "scanner_version": plan.scan_report.scanner_version,
-        "content_sha256": plan.scan_report.content_sha256,
-        "finding_summary": finding_summary_json(&plan.scan_report.summary),
-    })
+    skill_policy::skill_publish_metadata_output(
+        &plan.scan_report.scanner_version,
+        &plan.scan_report.content_sha256,
+        finding_summary_policy(&plan.scan_report.summary),
+        std::iter::empty::<(&'static str, serde_json::Value)>(),
+    )
 }
 
 fn publish_metadata_from_output(
     plan: &PublishPlan,
     output: &serde_json::Value,
 ) -> serde_json::Value {
-    let mut metadata = publish_metadata_from_plan(plan);
-    if let Some(object) = metadata.as_object_mut() {
-        for key in ["scratch_dir", "package_dir", "pr_url", "base_branch"] {
-            if let Some(value) = output.get(key) {
-                object.insert(key.to_string(), value.clone());
-            }
-        }
-    }
-    metadata
+    skill_policy::skill_publish_metadata_output(
+        &plan.scan_report.scanner_version,
+        &plan.scan_report.content_sha256,
+        finding_summary_policy(&plan.scan_report.summary),
+        ["scratch_dir", "package_dir", "pr_url", "base_branch"]
+            .into_iter()
+            .filter_map(|key| output.get(key).cloned().map(|value| (key, value))),
+    )
 }
 
 fn publish_result_from_plan(
@@ -2809,23 +2771,23 @@ fn publish_result_from_plan(
     status: &str,
     metadata: serde_json::Value,
 ) -> ToolSkillPublishResult {
-    ToolSkillPublishResult {
-        status: status.to_string(),
-        name: plan.skill_name.clone(),
-        target_repo: plan.target_repo.clone(),
-        tap_path: plan.tap_path.clone(),
-        package_path: plan.package_path.clone(),
-        branch: plan.branch.clone(),
-        base_branch: plan.base_branch.clone(),
-        package_hash: plan.package_hash.clone(),
-        files: package_file_json(&plan.files),
-        findings: skill_finding_json(&plan.findings),
-        trust: plan.trust.clone(),
-        source_tier: plan.source_tier.clone(),
-        source: plan.source.clone(),
-        remote_write_plan: serde_json::Value::Null,
+    skill_policy::skill_publish_result_output(
+        status,
+        &plan.skill_name,
+        &plan.target_repo,
+        &plan.tap_path,
+        &plan.package_path,
+        &plan.branch,
+        plan.base_branch.clone(),
+        &plan.package_hash,
+        package_file_json(&plan.files),
+        skill_finding_json(&plan.findings),
+        &plan.trust,
+        &plan.source_tier,
+        plan.source.clone(),
+        serde_json::Value::Null,
         metadata,
-    }
+    )
 }
 
 #[async_trait]
@@ -3764,11 +3726,11 @@ mod tests {
 
     #[test]
     fn test_skill_tap_path_validation_rejects_traversal() {
-        assert!(validate_repo_relative_path("skills/community", "path").is_ok());
-        assert!(validate_repo_relative_path("../outside", "path").is_err());
-        assert!(validate_repo_relative_path("skills/../outside", "path").is_err());
-        assert!(validate_github_repo("owner/repo").is_ok());
-        assert!(validate_github_repo("owner/repo/extra").is_err());
+        assert!(skill_policy::validate_repo_relative_path("skills/community", "path").is_ok());
+        assert!(skill_policy::validate_repo_relative_path("../outside", "path").is_err());
+        assert!(skill_policy::validate_repo_relative_path("skills/../outside", "path").is_err());
+        assert!(skill_policy::validate_github_repo("owner/repo").is_ok());
+        assert!(skill_policy::validate_github_repo("owner/repo/extra").is_err());
     }
 
     #[tokio::test]

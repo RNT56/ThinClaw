@@ -31,5 +31,10 @@ pub use runtime::{
 pub use setup::{
     SetupBootstrapAgentInput, SetupBootstrapChannelInput, SetupBootstrapEnvInput,
     SetupBootstrapEnvPlan, SetupBootstrapEnvVar, SetupBootstrapProviderInput,
-    SetupBootstrapWebUiInput, SetupRuntimeProfile, setup_bootstrap_env_plan,
+    SetupBootstrapWebUiInput, SetupGuideTopic, SetupOnboardingProfile, SetupReadinessSummary,
+    SetupRuntimeCommandInput, SetupRuntimeProfile, SetupStepDescriptor, SetupStepStatus,
+    SetupValidationItem, SetupValidationLevel, SetupWizardPhase, SetupWizardPhaseId,
+    SetupWizardPlan, SetupWizardPlanInput, SetupWizardStepId, SetupWizardUiMode,
+    setup_bootstrap_env_plan, setup_primary_runtime_command, setup_runtime_handoff_summary,
+    setup_what_next_commands, setup_wizard_plan,
 };

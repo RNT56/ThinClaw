@@ -257,6 +257,23 @@ struct SandboxJobLookup {
 }
 
 impl SandboxJobLookup {
+    fn live_state(&self) -> Option<job_policy::SandboxContainerState> {
+        self.live.as_ref().map(|handle| match handle.state {
+            crate::sandbox_types::ContainerState::Creating => {
+                job_policy::SandboxContainerState::Creating
+            }
+            crate::sandbox_types::ContainerState::Running => {
+                job_policy::SandboxContainerState::Running
+            }
+            crate::sandbox_types::ContainerState::Stopped => {
+                job_policy::SandboxContainerState::Stopped
+            }
+            crate::sandbox_types::ContainerState::Failed => {
+                job_policy::SandboxContainerState::Failed
+            }
+        })
+    }
+
     fn spec(&self) -> Option<&crate::sandbox_jobs::SandboxJobSpec> {
         self.live
             .as_ref()
@@ -265,27 +282,15 @@ impl SandboxJobLookup {
     }
 
     fn status(&self) -> String {
-        if let Some(handle) = self.live.as_ref() {
-            return match handle.state {
-                crate::sandbox_types::ContainerState::Creating => "creating".to_string(),
-                crate::sandbox_types::ContainerState::Running => "running".to_string(),
-                crate::sandbox_types::ContainerState::Stopped => handle
-                    .completion_result
-                    .as_ref()
-                    .map(|result| result.status.clone())
-                    .or_else(|| self.stored.as_ref().map(|job| job.status.clone()))
-                    .unwrap_or_else(|| "completed".to_string()),
-                crate::sandbox_types::ContainerState::Failed => handle
-                    .completion_result
-                    .as_ref()
-                    .map(|result| result.status.clone())
-                    .unwrap_or_else(|| "failed".to_string()),
-            };
-        }
-        self.stored
-            .as_ref()
-            .map(|job| job.status.clone())
-            .unwrap_or_else(|| "unknown".to_string())
+        job_policy::sandbox_lookup_status(job_policy::SandboxJobLookupStatusInput {
+            live_state: self.live_state(),
+            live_completion_status: self
+                .live
+                .as_ref()
+                .and_then(|handle| handle.completion_result.as_ref())
+                .map(|result| result.status.as_str()),
+            stored_status: self.stored.as_ref().map(|job| job.status.as_str()),
+        })
     }
 
     fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -304,15 +309,15 @@ impl SandboxJobLookup {
     }
 
     fn failure_reason(&self) -> Option<String> {
-        self.stored
-            .as_ref()
-            .and_then(|job| job.failure_reason.clone())
-            .or_else(|| {
-                self.live
-                    .as_ref()
-                    .and_then(|handle| handle.completion_result.as_ref())
-                    .and_then(|result| result.message.clone())
-            })
+        job_policy::sandbox_lookup_failure_reason(
+            self.stored
+                .as_ref()
+                .and_then(|job| job.failure_reason.as_deref()),
+            self.live
+                .as_ref()
+                .and_then(|handle| handle.completion_result.as_ref())
+                .and_then(|result| result.message.as_deref()),
+        )
     }
 
     fn is_interactive(&self) -> bool {
@@ -320,18 +325,7 @@ impl SandboxJobLookup {
     }
 
     fn accepts_prompts(&self) -> bool {
-        self.is_interactive()
-            && self
-                .live
-                .as_ref()
-                .map(|handle| {
-                    matches!(
-                        handle.state,
-                        crate::sandbox_types::ContainerState::Creating
-                            | crate::sandbox_types::ContainerState::Running
-                    )
-                })
-                .unwrap_or(false)
+        job_policy::sandbox_lookup_accepts_prompts(self.is_interactive(), self.live_state())
     }
 }
 
@@ -880,7 +874,7 @@ impl Tool for ListJobsTool {
                 jobs.push(job_policy::sandbox_job_list_entry(
                     job_id,
                     &spec.title,
-                    &crate::sandbox_jobs::normalize_sandbox_ui_state(&status),
+                    job_policy::sandbox_ui_status(&status),
                     lookup.created_at().map(|value| value.to_rfc3339()),
                     spec.mode.as_str(),
                 ));
@@ -969,8 +963,7 @@ impl Tool for JobStatusTool {
                     job_policy::SandboxJobStatusOutput {
                         title: lookup.spec().map(|spec| spec.title.clone()),
                         description: lookup.spec().map(|spec| spec.description.clone()),
-                        status: crate::sandbox_jobs::normalize_sandbox_ui_state(&lookup.status())
-                            .to_string(),
+                        status: job_policy::sandbox_ui_status(&lookup.status()).to_string(),
                         created_at: lookup.created_at().map(|value| value.to_rfc3339()),
                         started_at: lookup.started_at().map(|value| value.to_rfc3339()),
                         completed_at: lookup.completed_at().map(|value| value.to_rfc3339()),

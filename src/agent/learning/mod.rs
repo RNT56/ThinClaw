@@ -37,7 +37,4 @@ pub use trajectory::*;
 pub use types::*;
 
 #[cfg(test)]
-use providers::{parse_custom_http_hits, parse_provider_hits};
-
-#[cfg(test)]
 mod tests;

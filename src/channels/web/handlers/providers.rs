@@ -12,25 +12,27 @@ use crate::channels::web::server::GatewayState;
 use thinclaw_gateway::web::providers::{
     DiscoveredProviderModel, ProviderCredentialMetadata, ProviderCredentialSpec, ProviderIdentity,
     ProviderInfoInput, ProviderKeyMutationResponse, ProviderKeyRequest, ProviderModelOption,
-    ProviderModelsResponse, ProviderModelsResponseInput, ProvidersConfigResponse,
-    ProvidersConfigWriteRequest, ProvidersListResponse, RouteSimulateRequest,
-    RouteSimulateResponse, RouteSimulateResponseInput, RouteSimulateScoreInput,
-    SyntheticProviderEntryInput, apply_providers_config_write, fallback_provider_credential_spec,
+    ProviderModelsResponse, ProviderModelsResponseInput, ProviderOauthUiSourceInput,
+    ProvidersConfigResponse, ProvidersConfigWriteRequest, ProvidersListResponse,
+    RouteSimulateRequest, RouteSimulateResponse, RouteSimulateResponseInput,
+    RouteSimulateScoreInput, SyntheticProviderEntryInput, apply_providers_config_write,
+    fallback_provider_credential_spec,
     fallback_provider_model_options as gateway_fallback_provider_model_options, mask_provider_key,
     provider_auth_mode, provider_auto_disable_setting_updates,
     provider_auto_enable_setting_updates, provider_cheap_model_for_slug,
     provider_credential_spec_not_found_status, provider_credentials_not_configured_message,
+    provider_fallback_model_catalog as gateway_provider_fallback_model_catalog,
     provider_identity as gateway_provider_identity, provider_info,
     provider_key_delete_partial_failure_response, provider_key_deleted_response,
     provider_key_fingerprint, provider_key_save_partial_failure_response,
     provider_key_saved_response,
     provider_model_options_from_discovery as gateway_provider_model_options_from_discovery,
-    provider_models_response, provider_primary_model_for_slug, provider_runtime_unavailable_status,
+    provider_models_response, provider_oauth_ui_state as gateway_provider_oauth_ui_state,
+    provider_primary_model_for_slug, provider_runtime_unavailable_status,
     provider_secrets_store_unavailable_status, provider_sensitive_route_forbidden_status,
     provider_store_unavailable_status,
     provider_supports_model_discovery as gateway_provider_supports_model_discovery,
     providers_list_response, route_simulate_response,
-    static_fallback_provider_models as gateway_static_fallback_provider_models,
     suggested_cheap_model_from_catalog as gateway_suggested_cheap_model_from_catalog,
     synthetic_provider_entry as gateway_synthetic_provider_entry, validate_provider_api_key,
 };
@@ -39,31 +41,13 @@ pub(crate) use thinclaw_gateway::web::providers::{
     stale_provider_namespace_keys, sync_legacy_llm_settings,
 };
 
-struct ProviderOauthUiState {
-    supported: bool,
-    available: bool,
-    source_label: Option<String>,
-    source_location: Option<String>,
-}
-
-fn provider_oauth_ui_state(slug: &str) -> ProviderOauthUiState {
-    if let Some(kind) = crate::llm::credential_sync::provider_oauth_source_kind(slug) {
-        return ProviderOauthUiState {
-            supported: true,
-            available: crate::llm::credential_sync::oauth_source_available(kind),
-            source_label: Some(crate::llm::credential_sync::oauth_source_label(kind).to_string()),
-            source_location: Some(crate::llm::credential_sync::oauth_source_location_hint(
-                kind,
-            )),
-        };
-    }
-
-    ProviderOauthUiState {
-        supported: false,
-        available: false,
-        source_label: None,
-        source_location: None,
-    }
+fn provider_oauth_ui_source(slug: &str) -> Option<ProviderOauthUiSourceInput> {
+    let kind = crate::llm::credential_sync::provider_oauth_source_kind(slug)?;
+    Some(ProviderOauthUiSourceInput {
+        available: crate::llm::credential_sync::oauth_source_available(kind),
+        source_label: crate::llm::credential_sync::oauth_source_label(kind).to_string(),
+        source_location: crate::llm::credential_sync::oauth_source_location_hint(kind),
+    })
 }
 
 pub(crate) async fn providers_list_handler(
@@ -96,7 +80,7 @@ pub(crate) async fn providers_list_handler(
             &endpoint.env_key_name,
         )
         .await;
-        let oauth = provider_oauth_ui_state(slug);
+        let oauth = gateway_provider_oauth_ui_state(provider_oauth_ui_source(slug));
 
         let api_style_str = match endpoint.api_style {
             crate::config::provider_catalog::ApiStyle::OpenAi => "openai",
@@ -313,7 +297,7 @@ pub(crate) async fn build_routing_provider_entries(
             .is_some();
         let has_secret = secret_exists(secrets, user_id, &endpoint.secret_name).await;
         let auth_mode = provider_auth_mode(providers_settings, slug);
-        let oauth = provider_oauth_ui_state(slug);
+        let oauth = gateway_provider_oauth_ui_state(provider_oauth_ui_source(slug));
         let primary_model = provider_primary_model_for_slug(
             settings,
             providers_settings,
@@ -546,13 +530,13 @@ pub(crate) async fn build_provider_models_response(
             current_cheap_model: current_cheap_model.clone(),
             suggested_primary_model: suggested_primary_model.clone(),
             suggested_cheap_model: suggested_cheap_model.clone(),
-            models: fallback_provider_model_options(
-                slug,
+            models: gateway_fallback_provider_model_options(
                 default_model.as_str(),
                 current_primary_model.as_deref(),
                 current_cheap_model.as_deref(),
                 suggested_primary_model.as_deref(),
                 suggested_cheap_model.as_deref(),
+                fallback_provider_model_catalog(slug),
             ),
         });
     }
@@ -588,13 +572,13 @@ pub(crate) async fn build_provider_models_response(
                     current_cheap_model: current_cheap_model.clone(),
                     suggested_primary_model: fallback_primary_model.clone(),
                     suggested_cheap_model: fallback_cheap_model.clone(),
-                    models: fallback_provider_model_options(
-                        slug,
+                    models: gateway_fallback_provider_model_options(
                         default_model.as_str(),
                         current_primary_model.as_deref(),
                         current_cheap_model.as_deref(),
                         fallback_primary_model.as_deref(),
                         fallback_cheap_model.as_deref(),
+                        fallback_provider_model_catalog(slug),
                     ),
                 })
             } else {
@@ -629,13 +613,13 @@ pub(crate) async fn build_provider_models_response(
                 current_cheap_model: current_cheap_model.clone(),
                 suggested_primary_model: suggested_primary_model.clone(),
                 suggested_cheap_model: suggested_cheap_model.clone(),
-                models: fallback_provider_model_options(
-                    slug,
+                models: gateway_fallback_provider_model_options(
                     default_model.as_str(),
                     current_primary_model.as_deref(),
                     current_cheap_model.as_deref(),
                     suggested_primary_model.as_deref(),
                     suggested_cheap_model.as_deref(),
+                    fallback_provider_model_catalog(slug),
                 ),
             })
         }
@@ -881,25 +865,7 @@ pub(crate) fn provider_model_options_from_discovery(
     )
 }
 
-fn fallback_provider_model_options(
-    slug: &str,
-    default_model: &str,
-    current_primary_model: Option<&str>,
-    current_cheap_model: Option<&str>,
-    suggested_primary_model: Option<&str>,
-    suggested_cheap_model: Option<&str>,
-) -> Vec<ProviderModelOption> {
-    gateway_fallback_provider_model_options(
-        default_model,
-        current_primary_model,
-        current_cheap_model,
-        suggested_primary_model,
-        suggested_cheap_model,
-        static_fallback_models(slug),
-    )
-}
-
-fn static_fallback_models(slug: &str) -> Vec<(String, String)> {
+fn fallback_provider_model_catalog(slug: &str) -> Vec<(String, String)> {
     let dynamic: Vec<(String, String)> = crate::config::model_compat::models_by_provider(slug)
         .into_iter()
         .map(|model| {
@@ -911,11 +877,7 @@ fn static_fallback_models(slug: &str) -> Vec<(String, String)> {
             (model.model_id, label)
         })
         .collect();
-    if !dynamic.is_empty() {
-        return dynamic;
-    }
-
-    gateway_static_fallback_provider_models(slug)
+    gateway_provider_fallback_model_catalog(slug, dynamic)
 }
 
 pub(crate) async fn secret_exists(

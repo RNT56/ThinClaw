@@ -478,6 +478,31 @@ pub fn parse_learning_history_params(params: &serde_json::Value) -> LearningHist
     LearningHistoryParams { kind, limit }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearningHistoryKind {
+    All,
+    Events,
+    Evaluations,
+    Candidates,
+    ArtifactVersions,
+    Feedback,
+    Rollbacks,
+    CodeProposals,
+}
+
+pub fn learning_history_kind(kind: &str) -> LearningHistoryKind {
+    match kind {
+        "events" => LearningHistoryKind::Events,
+        "evaluations" => LearningHistoryKind::Evaluations,
+        "candidates" => LearningHistoryKind::Candidates,
+        "artifact_versions" => LearningHistoryKind::ArtifactVersions,
+        "feedback" => LearningHistoryKind::Feedback,
+        "rollbacks" => LearningHistoryKind::Rollbacks,
+        "code_proposals" => LearningHistoryKind::CodeProposals,
+        _ => LearningHistoryKind::All,
+    }
+}
+
 pub fn serialize_value<T: serde::Serialize>(value: T) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -686,6 +711,25 @@ pub fn learning_proposal_review_output(
         "status": status,
         "proposal": serialize_value(proposal),
     })
+}
+
+pub fn learning_proposal_review_result<T, F>(
+    proposal_id: Uuid,
+    proposal: Option<T>,
+    status: F,
+) -> Result<serde_json::Value, ToolError>
+where
+    T: serde::Serialize,
+    F: FnOnce(&T) -> String,
+{
+    let Some(proposal) = proposal else {
+        return Err(ToolError::ExecutionFailed(format!(
+            "proposal '{}' was not found",
+            proposal_id
+        )));
+    };
+
+    Ok(learning_proposal_review_output(status(&proposal), proposal))
 }
 
 pub fn validate_prompt_content(content: &str) -> Result<(), ToolError> {
@@ -1447,6 +1491,46 @@ mod tests {
                 "proposal_id": "bad",
                 "decision": "approve"
             }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn learning_history_kind_and_proposal_review_output_are_root_independent() {
+        assert_eq!(learning_history_kind("events"), LearningHistoryKind::Events);
+        assert_eq!(
+            learning_history_kind("artifact_versions"),
+            LearningHistoryKind::ArtifactVersions
+        );
+        assert_eq!(
+            learning_history_kind("code_proposals"),
+            LearningHistoryKind::CodeProposals
+        );
+        assert_eq!(learning_history_kind("unknown"), LearningHistoryKind::All);
+
+        #[derive(serde::Serialize)]
+        struct Proposal {
+            status: String,
+            title: String,
+        }
+
+        let proposal_id = Uuid::new_v4();
+        let output = learning_proposal_review_result(
+            proposal_id,
+            Some(Proposal {
+                status: "approved".to_string(),
+                title: "Patch".to_string(),
+            }),
+            |proposal| proposal.status.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(output["status"], "approved");
+        assert_eq!(output["proposal"]["title"], "Patch");
+        assert!(
+            learning_proposal_review_result::<Proposal, _>(proposal_id, None, |proposal| proposal
+                .status
+                .clone(),)
             .is_err()
         );
     }

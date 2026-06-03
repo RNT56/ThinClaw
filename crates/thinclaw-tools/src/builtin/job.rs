@@ -496,6 +496,61 @@ pub fn sandbox_status_summary_bucket(status: &str) -> JobSummaryBucket {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxContainerState {
+    Creating,
+    Running,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SandboxJobLookupStatusInput<'a> {
+    pub live_state: Option<SandboxContainerState>,
+    pub live_completion_status: Option<&'a str>,
+    pub stored_status: Option<&'a str>,
+}
+
+pub fn sandbox_lookup_status(input: SandboxJobLookupStatusInput<'_>) -> String {
+    match input.live_state {
+        Some(SandboxContainerState::Creating) => "creating".to_string(),
+        Some(SandboxContainerState::Running) => "running".to_string(),
+        Some(SandboxContainerState::Stopped) => input
+            .live_completion_status
+            .or(input.stored_status)
+            .unwrap_or("completed")
+            .to_string(),
+        Some(SandboxContainerState::Failed) => {
+            input.live_completion_status.unwrap_or("failed").to_string()
+        }
+        None => input.stored_status.unwrap_or("unknown").to_string(),
+    }
+}
+
+pub fn sandbox_lookup_failure_reason(
+    stored_failure_reason: Option<&str>,
+    live_completion_message: Option<&str>,
+) -> Option<String> {
+    stored_failure_reason
+        .or(live_completion_message)
+        .map(str::to_string)
+}
+
+pub fn sandbox_lookup_accepts_prompts(
+    interactive: bool,
+    live_state: Option<SandboxContainerState>,
+) -> bool {
+    interactive
+        && matches!(
+            live_state,
+            Some(SandboxContainerState::Creating | SandboxContainerState::Running)
+        )
+}
+
+pub fn sandbox_ui_status(status: &str) -> &str {
+    thinclaw_types::normalize_sandbox_ui_state(status)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JobSummaryCounts {
     pub total: usize,
@@ -1451,6 +1506,68 @@ mod tests {
         assert_eq!(summary.pending, 1);
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.interrupted, 1);
+    }
+
+    #[test]
+    fn sandbox_lookup_policy_shapes_status_failure_and_prompt_acceptance() {
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: Some(SandboxContainerState::Creating),
+                live_completion_status: None,
+                stored_status: Some("failed"),
+            }),
+            "creating"
+        );
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: Some(SandboxContainerState::Stopped),
+                live_completion_status: None,
+                stored_status: Some("cancelled"),
+            }),
+            "cancelled"
+        );
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: Some(SandboxContainerState::Stopped),
+                live_completion_status: None,
+                stored_status: None,
+            }),
+            "completed"
+        );
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: Some(SandboxContainerState::Failed),
+                live_completion_status: None,
+                stored_status: Some("running"),
+            }),
+            "failed"
+        );
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: None,
+                live_completion_status: None,
+                stored_status: None,
+            }),
+            "unknown"
+        );
+        assert_eq!(sandbox_ui_status("creating"), "pending");
+        assert_eq!(sandbox_ui_status("running"), "in_progress");
+        assert_eq!(
+            sandbox_lookup_failure_reason(Some("stored"), Some("live")),
+            Some("stored".to_string())
+        );
+        assert!(sandbox_lookup_accepts_prompts(
+            true,
+            Some(SandboxContainerState::Running)
+        ));
+        assert!(!sandbox_lookup_accepts_prompts(
+            false,
+            Some(SandboxContainerState::Running)
+        ));
+        assert!(!sandbox_lookup_accepts_prompts(
+            true,
+            Some(SandboxContainerState::Stopped)
+        ));
     }
 
     #[test]

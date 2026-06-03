@@ -340,6 +340,7 @@ fn build_nostr_setup_status(
         .and_then(|value| value.as_u64())
         .map(|value| value as usize);
 
+    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
     let mut status = PartialChannelSetupStatus {
         enabled,
         configured: enabled && private_key.is_some(),

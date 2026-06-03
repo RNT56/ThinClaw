@@ -202,6 +202,38 @@ pub fn providers_list_response(mut providers: Vec<ProviderInfo>) -> ProvidersLis
     ProvidersListResponse { providers }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderOauthUiSourceInput {
+    pub available: bool,
+    pub source_label: String,
+    pub source_location: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderOauthUiState {
+    pub supported: bool,
+    pub available: bool,
+    pub source_label: Option<String>,
+    pub source_location: Option<String>,
+}
+
+pub fn provider_oauth_ui_state(source: Option<ProviderOauthUiSourceInput>) -> ProviderOauthUiState {
+    match source {
+        Some(source) => ProviderOauthUiState {
+            supported: true,
+            available: source.available,
+            source_label: Some(source.source_label),
+            source_location: Some(source.source_location),
+        },
+        None => ProviderOauthUiState {
+            supported: false,
+            available: false,
+            source_label: None,
+            source_location: None,
+        },
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct ProviderConfigEntry {
     pub slug: String,
@@ -1360,6 +1392,18 @@ pub fn static_fallback_provider_models(slug: &str) -> Vec<(String, String)> {
     }
 }
 
+pub fn provider_fallback_model_catalog(
+    slug: &str,
+    dynamic_models: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let dynamic: Vec<_> = dynamic_models.into_iter().collect();
+    if dynamic.is_empty() {
+        static_fallback_provider_models(slug)
+    } else {
+        dynamic
+    }
+}
+
 pub fn trimmed_optional_model(value: Option<&String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -1940,6 +1984,34 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&response).unwrap()["providers"][0]["display_name"],
             serde_json::json!("Alpha")
+        );
+    }
+
+    #[test]
+    fn provider_oauth_ui_state_shapes_supported_and_unsupported_sources() {
+        let supported = provider_oauth_ui_state(Some(ProviderOauthUiSourceInput {
+            available: true,
+            source_label: "Codex".to_string(),
+            source_location: "~/.codex/auth.json".to_string(),
+        }));
+
+        assert_eq!(
+            supported,
+            ProviderOauthUiState {
+                supported: true,
+                available: true,
+                source_label: Some("Codex".to_string()),
+                source_location: Some("~/.codex/auth.json".to_string()),
+            }
+        );
+        assert_eq!(
+            provider_oauth_ui_state(None),
+            ProviderOauthUiState {
+                supported: false,
+                available: false,
+                source_label: None,
+                source_location: None,
+            }
         );
     }
 
@@ -2537,6 +2609,25 @@ mod tests {
         );
         assert!(openai.iter().any(|entry| entry.0 == "gpt-5-mini"));
         assert!(static_fallback_provider_models("unknown").is_empty());
+    }
+
+    #[test]
+    fn provider_fallback_model_catalog_prefers_dynamic_models() {
+        let dynamic = provider_fallback_model_catalog(
+            "openai",
+            vec![("custom-model".to_string(), "Custom Model".to_string())],
+        );
+        assert_eq!(
+            dynamic,
+            vec![("custom-model".to_string(), "Custom Model".to_string())]
+        );
+
+        let static_fallback =
+            provider_fallback_model_catalog("openai", Vec::<(String, String)>::new());
+        assert_eq!(
+            static_fallback.first().map(|entry| entry.0.as_str()),
+            Some("gpt-5.3-codex")
+        );
     }
 
     #[test]

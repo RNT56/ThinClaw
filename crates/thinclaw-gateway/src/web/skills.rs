@@ -113,6 +113,13 @@ pub fn invalid_skill_trust_level_error(level: impl AsRef<str>) -> (StatusCode, S
     )
 }
 
+pub fn has_confirm_action_header(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-confirm-action")
+        .and_then(|value| value.to_str().ok())
+        == Some("true")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInfoInput {
     pub name: String,
@@ -407,6 +414,24 @@ mod tests {
                 "Invalid trust level 'owner'. Must be 'trusted' or 'installed'.".to_string()
             )
         );
+    }
+
+    #[test]
+    fn confirm_action_header_requires_literal_true() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!has_confirm_action_header(&headers));
+
+        headers.insert(
+            "x-confirm-action",
+            axum::http::HeaderValue::from_static("true"),
+        );
+        assert!(has_confirm_action_header(&headers));
+
+        headers.insert(
+            "x-confirm-action",
+            axum::http::HeaderValue::from_static("TRUE"),
+        );
+        assert!(!has_confirm_action_header(&headers));
     }
 
     #[test]

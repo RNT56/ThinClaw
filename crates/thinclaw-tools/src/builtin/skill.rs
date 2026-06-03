@@ -491,6 +491,62 @@ pub fn skill_finding_output(kind: &str, severity: &str, excerpt: &str) -> serde_
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SkillFindingPolicy<'a> {
+    pub kind: &'a str,
+    pub severity: &'a str,
+    pub excerpt: &'a str,
+    pub rule_id: Option<&'a str>,
+    pub file: Option<&'a str>,
+    pub line: Option<usize>,
+    pub recommendation: Option<&'a str>,
+    pub scanner_version: Option<&'a str>,
+}
+
+pub fn skill_finding_detail_output(finding: SkillFindingPolicy<'_>) -> serde_json::Value {
+    let mut value = skill_finding_output(finding.kind, finding.severity, finding.excerpt);
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(rule_id) = finding.rule_id {
+            obj.insert(
+                "rule_id".to_string(),
+                serde_json::Value::String(rule_id.to_string()),
+            );
+        }
+        if let Some(file) = finding.file {
+            obj.insert(
+                "file".to_string(),
+                serde_json::Value::String(file.to_string()),
+            );
+        }
+        if let Some(line) = finding.line {
+            obj.insert("line".to_string(), serde_json::json!(line));
+        }
+        if let Some(recommendation) = finding.recommendation {
+            obj.insert(
+                "recommendation".to_string(),
+                serde_json::Value::String(recommendation.to_string()),
+            );
+        }
+        if let Some(scanner_version) = finding.scanner_version {
+            obj.insert(
+                "scanner_version".to_string(),
+                serde_json::Value::String(scanner_version.to_string()),
+            );
+        }
+    }
+    value
+}
+
+pub fn skill_finding_detail_outputs<'a, I>(findings: I) -> Vec<serde_json::Value>
+where
+    I: IntoIterator<Item = SkillFindingPolicy<'a>>,
+{
+    findings
+        .into_iter()
+        .map(skill_finding_detail_output)
+        .collect()
+}
+
 pub fn skill_finding_summary(kind: &str, severity: &str, excerpt: &str) -> String {
     format!("{} ({}): {}", kind, severity, excerpt)
 }
@@ -502,8 +558,99 @@ where
     findings.into_iter().collect::<Vec<_>>().join("; ")
 }
 
+pub fn skill_findings_detail_summary<'a, I>(findings: I) -> String
+where
+    I: IntoIterator<Item = SkillFindingPolicy<'a>>,
+{
+    skill_findings_summary(
+        findings
+            .into_iter()
+            .map(|finding| skill_finding_summary(finding.kind, finding.severity, finding.excerpt)),
+    )
+}
+
 pub fn skill_findings_require_approval(trust_level: &str, finding_count: usize) -> bool {
     trust_level.eq_ignore_ascii_case("community") && finding_count > 0
+}
+
+pub fn skill_findings_require_approval_by_counts(
+    trust_level: &str,
+    critical: usize,
+    warnings: usize,
+) -> bool {
+    match trust_level.to_ascii_lowercase().as_str() {
+        "community" => critical > 0 || warnings > 1,
+        "trusted" | "builtin" => critical > 0,
+        _ => critical > 0,
+    }
+}
+
+pub fn skill_findings_require_approval_for_details<'a, I>(trust_level: &str, findings: I) -> bool
+where
+    I: IntoIterator<Item = SkillFindingPolicy<'a>>,
+{
+    let mut critical = 0;
+    let mut warnings = 0;
+    for finding in findings {
+        match finding.severity {
+            severity if severity.eq_ignore_ascii_case("critical") => critical += 1,
+            severity if severity.eq_ignore_ascii_case("warning") => warnings += 1,
+            _ => {}
+        }
+    }
+    skill_findings_require_approval_by_counts(trust_level, critical, warnings)
+}
+
+pub fn skill_finding_requires_rejection(kind: &str, severity: &str) -> bool {
+    severity.eq_ignore_ascii_case("critical") && kind == "path_traversal"
+}
+
+pub fn skill_findings_require_rejection_for_details<'a, I>(findings: I) -> bool
+where
+    I: IntoIterator<Item = SkillFindingPolicy<'a>>,
+{
+    findings
+        .into_iter()
+        .any(|finding| skill_finding_requires_rejection(finding.kind, finding.severity))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFindingSummary {
+    pub total: usize,
+    pub warnings: usize,
+    pub critical: usize,
+    pub categories: Vec<String>,
+}
+
+pub fn skill_finding_summary_output(summary: SkillFindingSummary) -> serde_json::Value {
+    serde_json::json!({
+        "total": summary.total,
+        "warnings": summary.warnings,
+        "critical": summary.critical,
+        "categories": summary.categories,
+    })
+}
+
+pub fn add_skill_scan_report_fields(
+    output: &mut serde_json::Value,
+    scanner_version: &str,
+    content_sha256: &str,
+    summary: SkillFindingSummary,
+) {
+    if let Some(obj) = output.as_object_mut() {
+        obj.insert(
+            "scanner_version".to_string(),
+            serde_json::Value::String(scanner_version.to_string()),
+        );
+        obj.insert(
+            "content_sha256".to_string(),
+            serde_json::Value::String(content_sha256.to_string()),
+        );
+        obj.insert(
+            "finding_summary".to_string(),
+            skill_finding_summary_output(summary),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -815,6 +962,65 @@ pub fn skill_publish_plan_output(
             },
         },
     })
+}
+
+pub fn skill_publish_metadata_output<I>(
+    scanner_version: &str,
+    content_sha256: &str,
+    finding_summary: SkillFindingSummary,
+    extras: I,
+) -> serde_json::Value
+where
+    I: IntoIterator<Item = (&'static str, serde_json::Value)>,
+{
+    let mut metadata = serde_json::json!({
+        "scanner_version": scanner_version,
+        "content_sha256": content_sha256,
+        "finding_summary": skill_finding_summary_output(finding_summary),
+    });
+    if let Some(object) = metadata.as_object_mut() {
+        for (key, value) in extras {
+            object.insert(key.to_string(), value);
+        }
+    }
+    metadata
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn skill_publish_result_output(
+    status: &str,
+    name: &str,
+    target_repo: &str,
+    tap_path: &str,
+    package_path: &str,
+    branch: &str,
+    base_branch: Option<String>,
+    package_hash: &str,
+    files: Vec<serde_json::Value>,
+    findings: Vec<serde_json::Value>,
+    trust: &str,
+    source_tier: &str,
+    source: serde_json::Value,
+    remote_write_plan: serde_json::Value,
+    metadata: serde_json::Value,
+) -> ToolSkillPublishResult {
+    ToolSkillPublishResult {
+        status: status.to_string(),
+        name: name.to_string(),
+        target_repo: target_repo.to_string(),
+        tap_path: tap_path.to_string(),
+        package_path: package_path.to_string(),
+        branch: branch.to_string(),
+        base_branch,
+        package_hash: package_hash.to_string(),
+        files,
+        findings,
+        trust: trust.to_string(),
+        source_tier: source_tier.to_string(),
+        source,
+        remote_write_plan,
+        metadata,
+    }
 }
 
 pub fn skill_tap_list_parameters_schema() -> serde_json::Value {
@@ -3631,6 +3837,128 @@ mod tests {
             skill_findings_summary([skill_finding_summary("network", "high", "curl")]),
             "network (high): curl"
         );
+    }
+
+    #[test]
+    fn finding_policy_outputs_details_and_scan_metadata() {
+        let finding = SkillFindingPolicy {
+            kind: "network",
+            severity: "warning",
+            excerpt: "curl example.com",
+            rule_id: Some("net-001"),
+            file: Some("SKILL.md"),
+            line: Some(12),
+            recommendation: Some("Review network access"),
+            scanner_version: Some("test-scanner"),
+        };
+
+        let outputs = skill_finding_detail_outputs([finding]);
+        assert_eq!(outputs[0]["kind"], "network");
+        assert_eq!(outputs[0]["severity"], "warning");
+        assert_eq!(outputs[0]["rule_id"], "net-001");
+        assert_eq!(outputs[0]["line"], 12);
+        assert_eq!(
+            skill_findings_detail_summary([finding]),
+            "network (warning): curl example.com"
+        );
+
+        let mut output = serde_json::json!({"ok": true});
+        add_skill_scan_report_fields(
+            &mut output,
+            "test-scanner",
+            "sha256:content",
+            SkillFindingSummary {
+                total: 1,
+                warnings: 1,
+                critical: 0,
+                categories: vec!["network".to_string()],
+            },
+        );
+        assert_eq!(output["scanner_version"], "test-scanner");
+        assert_eq!(output["finding_summary"]["categories"][0], "network");
+    }
+
+    #[test]
+    fn finding_policy_applies_approval_and_rejection_thresholds() {
+        let warning = SkillFindingPolicy {
+            kind: "network",
+            severity: "warning",
+            excerpt: "curl",
+            rule_id: None,
+            file: None,
+            line: None,
+            recommendation: None,
+            scanner_version: None,
+        };
+        let critical = SkillFindingPolicy {
+            severity: "critical",
+            ..warning
+        };
+        let traversal = SkillFindingPolicy {
+            kind: "path_traversal",
+            ..critical
+        };
+
+        assert!(!skill_findings_require_approval_for_details(
+            "community",
+            [warning]
+        ));
+        assert!(skill_findings_require_approval_for_details(
+            "community",
+            [warning, warning]
+        ));
+        assert!(skill_findings_require_approval_for_details(
+            "trusted",
+            [critical]
+        ));
+        assert!(!skill_findings_require_approval_for_details(
+            "builtin",
+            [warning]
+        ));
+        assert!(skill_findings_require_rejection_for_details([traversal]));
+        assert!(!skill_findings_require_rejection_for_details([critical]));
+    }
+
+    #[test]
+    fn publish_metadata_and_result_helpers_preserve_policy_shape() {
+        let metadata = skill_publish_metadata_output(
+            "test-scanner",
+            "sha256:content",
+            SkillFindingSummary {
+                total: 0,
+                warnings: 0,
+                critical: 0,
+                categories: Vec::new(),
+            },
+            [(
+                "pr_url",
+                serde_json::json!("https://github.com/owner/repo/pull/1"),
+            )],
+        );
+        assert_eq!(metadata["scanner_version"], "test-scanner");
+        assert_eq!(metadata["pr_url"], "https://github.com/owner/repo/pull/1");
+
+        let result = skill_publish_result_output(
+            "published",
+            "docs",
+            "owner/repo",
+            "community",
+            "community/docs",
+            "codex/skill-publish/docs-1234abcd",
+            Some("main".to_string()),
+            "sha256:1234",
+            vec![serde_json::json!({"path": "SKILL.md", "bytes": 10})],
+            Vec::new(),
+            "trusted",
+            "user",
+            skill_source_output("user", "/tmp/docs"),
+            serde_json::Value::Null,
+            metadata,
+        );
+        assert_eq!(result.status, "published");
+        assert_eq!(result.package_path, "community/docs");
+        assert_eq!(result.files[0]["path"], "SKILL.md");
+        assert_eq!(result.metadata["scanner_version"], "test-scanner");
     }
 
     #[tokio::test]

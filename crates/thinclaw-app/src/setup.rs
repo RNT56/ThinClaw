@@ -1,5 +1,106 @@
 //! Root-independent setup/onboarding planning contracts.
 
+use std::collections::BTreeSet;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SetupWizardUiMode {
+    #[default]
+    Auto,
+    Cli,
+    Tui,
+}
+
+impl SetupWizardUiMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Cli => "cli",
+            Self::Tui => "tui",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupGuideTopic {
+    Menu,
+    Ai,
+    Channels,
+    Agent,
+    Tools,
+    Automation,
+    Runtime,
+}
+
+impl SetupGuideTopic {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Menu => "Guided Settings",
+            Self::Ai => "AI & Models",
+            Self::Channels => "Channels & Notifications",
+            Self::Agent => "Agent & Experience",
+            Self::Tools => "Tools & Safety",
+            Self::Automation => "Automation & Skills",
+            Self::Runtime => "Runtime & Diagnostics",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SetupOnboardingProfile {
+    #[default]
+    Balanced,
+    LocalAndPrivate,
+    BuilderAndCoding,
+    ChannelFirst,
+    RemoteServer,
+    PiOsLite64,
+    CustomAdvanced,
+}
+
+impl SetupOnboardingProfile {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Balanced => "Balanced",
+            Self::LocalAndPrivate => "Local & Private",
+            Self::BuilderAndCoding => "Builder & Coding",
+            Self::ChannelFirst => "Channel-First",
+            Self::RemoteServer => "Remote / SSH Host",
+            Self::PiOsLite64 => "Pi OS Lite 64-bit",
+            Self::CustomAdvanced => "Custom / Advanced",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Balanced => {
+                "A steady first-flight profile: one reliable model path, smart routing, safe approvals, and minimal day-one friction."
+            }
+            Self::LocalAndPrivate => {
+                "Bias toward local inference and a smaller trust surface, with conservative defaults and fewer outbound dependencies."
+            }
+            Self::BuilderAndCoding => {
+                "Favor coding, tool use, and stronger planning with advisor/executor-style routing."
+            }
+            Self::ChannelFirst => {
+                "Prioritize inbound and outbound channels so ThinClaw can meet you where you already work."
+            }
+            Self::RemoteServer => {
+                "Run ThinClaw as a safe headless/service runtime on a Raspberry Pi, Mac Mini, VPS, or SSH-managed host with WebUI access through a tunnel by default."
+            }
+            Self::PiOsLite64 => {
+                "Run ThinClaw on Raspberry Pi OS Lite as a headless remote service with WebUI access, Docker Chromium fallback, and desktop autonomy explicitly blocked."
+            }
+            Self::CustomAdvanced => {
+                "Start from a neutral baseline with minimal profile assumptions so you can choose the stack, routing, and trust boundaries step by step."
+            }
+        }
+    }
+
+    pub const fn is_headless_remote(self) -> bool {
+        matches!(self, Self::RemoteServer | Self::PiOsLite64)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupRuntimeProfile {
     Remote,
@@ -16,6 +117,627 @@ impl SetupRuntimeProfile {
 
     pub const fn is_headless(self) -> bool {
         true
+    }
+}
+
+impl SetupOnboardingProfile {
+    pub const fn runtime_profile(self) -> Option<SetupRuntimeProfile> {
+        match self {
+            Self::RemoteServer => Some(SetupRuntimeProfile::Remote),
+            Self::PiOsLite64 => Some(SetupRuntimeProfile::PiOsLite64),
+            _ => None,
+        }
+    }
+
+    pub const fn runtime_profile_env_value(self) -> Option<&'static str> {
+        match self.runtime_profile() {
+            Some(profile) => Some(profile.env_value()),
+            None => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SetupWizardPhaseId {
+    WelcomeProfile,
+    CoreRuntime,
+    AiStack,
+    IdentityPresence,
+    ChannelsContinuity,
+    CapabilitiesAutomation,
+    ExperienceOperations,
+    Finish,
+}
+
+impl SetupWizardPhaseId {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::WelcomeProfile => "Skin & Profile",
+            Self::CoreRuntime => "Core Runtime",
+            Self::AiStack => "AI Stack",
+            Self::IdentityPresence => "Identity & Presence",
+            Self::ChannelsContinuity => "Channels & Continuity",
+            Self::CapabilitiesAutomation => "Capabilities & Automation",
+            Self::ExperienceOperations => "Experience & Operations",
+            Self::Finish => "Finish",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::WelcomeProfile => {
+                "Choose the cockpit look first, then pick the onboarding lane that fits your setup."
+            }
+            Self::CoreRuntime => "Establish storage, secrets, and the base operating posture.",
+            Self::AiStack => "Configure providers, models, routing, fallback, and memory search.",
+            Self::IdentityPresence => "Confirm how the agent presents itself and keeps time.",
+            Self::ChannelsContinuity => {
+                "Enable channels, explain continuity, and verify what is truly launch-ready."
+            }
+            Self::CapabilitiesAutomation => {
+                "Choose tools, trust boundaries, and background behavior with intention."
+            }
+            Self::ExperienceOperations => "Tune the operator cockpit and the visibility you want.",
+            Self::Finish => "Review readiness, capture follow-ups, and hand off to runtime.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SetupWizardStepId {
+    CliSkin,
+    Profile,
+    Database,
+    Security,
+    InferenceProvider,
+    ModelSelection,
+    SmartRouting,
+    FallbackProviders,
+    Embeddings,
+    AgentIdentity,
+    Timezone,
+    Channels,
+    ChannelContinuity,
+    ChannelVerification,
+    Notifications,
+    Extensions,
+    DockerSandbox,
+    CodingWorkers,
+    ClaudeCode,
+    CodexCode,
+    ToolApproval,
+    Routines,
+    Skills,
+    Heartbeat,
+    WebUi,
+    Observability,
+    Summary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupStepDescriptor {
+    pub id: SetupWizardStepId,
+    pub phase_id: SetupWizardPhaseId,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub why_this_matters: &'static str,
+    pub recommended: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupWizardPhase {
+    pub id: SetupWizardPhaseId,
+    pub step_ids: Vec<SetupWizardStepId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupWizardPlan {
+    pub phases: Vec<SetupWizardPhase>,
+    pub steps: Vec<SetupStepDescriptor>,
+}
+
+impl SetupWizardPlan {
+    pub fn total_steps(&self) -> usize {
+        self.steps.len()
+    }
+
+    pub fn phase(&self, id: SetupWizardPhaseId) -> Option<&SetupWizardPhase> {
+        self.phases.iter().find(|phase| phase.id == id)
+    }
+
+    pub fn phase_index(&self, id: SetupWizardPhaseId) -> Option<usize> {
+        self.phases.iter().position(|phase| phase.id == id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Skipped,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupValidationLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupValidationItem {
+    pub level: SetupValidationLevel,
+    pub title: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetupReadinessSummary {
+    pub ready_now: usize,
+    pub needs_attention: usize,
+    pub followups: usize,
+    pub headline: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SetupWizardPlanInput {
+    pub channels_only: bool,
+    pub guide_topic: Option<SetupGuideTopic>,
+}
+
+impl SetupWizardPlanInput {
+    pub const fn is_guide_mode(self) -> bool {
+        self.guide_topic.is_some()
+    }
+
+    pub const fn is_quick_setup(self) -> bool {
+        !self.channels_only && !self.is_guide_mode()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupRuntimeCommandInput {
+    pub profile: SetupOnboardingProfile,
+    pub ui_mode: SetupWizardUiMode,
+    pub continue_to_runtime: bool,
+    pub pause_after_completion: bool,
+}
+
+pub fn setup_primary_runtime_command(input: SetupRuntimeCommandInput) -> &'static str {
+    if input.profile.is_headless_remote() {
+        return "thinclaw run --no-onboard";
+    }
+    match input.ui_mode {
+        SetupWizardUiMode::Tui => "thinclaw tui",
+        SetupWizardUiMode::Cli | SetupWizardUiMode::Auto => "thinclaw",
+    }
+}
+
+pub fn setup_runtime_handoff_summary(input: SetupRuntimeCommandInput) -> String {
+    if input.profile.is_headless_remote() {
+        return if input.continue_to_runtime {
+            format!(
+                "ThinClaw will now continue into `thinclaw run --no-onboard` with the service-safe {} runtime settings from this run.",
+                input.profile.title()
+            )
+        } else {
+            "Settings are saved. Start the headless runtime with `thinclaw run --no-onboard` or install/start the OS service.".to_string()
+        };
+    }
+    if input.continue_to_runtime {
+        format!(
+            "ThinClaw will now continue into `{}` using the settings from this run.",
+            setup_primary_runtime_command(input)
+        )
+    } else {
+        "Settings are saved. This pass stops here so you can launch runtime later on your own."
+            .to_string()
+    }
+}
+
+pub fn setup_what_next_commands(input: SetupRuntimeCommandInput) -> Vec<String> {
+    if input.profile.is_headless_remote() {
+        let mut commands = vec![
+            "Service-safe runtime: thinclaw run --no-onboard".to_string(),
+            "Install OS service: thinclaw service install".to_string(),
+            "Start OS service: thinclaw service start".to_string(),
+            "Show WebUI access: thinclaw gateway access".to_string(),
+            "Show full token URL: thinclaw gateway access --show-token".to_string(),
+        ];
+        if input.profile == SetupOnboardingProfile::PiOsLite64 {
+            commands.push("Pi diagnostics: thinclaw doctor --profile pi-os-lite-64".to_string());
+            commands
+                .push("Reopen Pi onboarding: thinclaw onboard --profile pi-os-lite-64".to_string());
+        } else {
+            commands.push("Remote diagnostics: thinclaw doctor --profile remote".to_string());
+            commands
+                .push("Reopen remote onboarding: thinclaw onboard --profile remote".to_string());
+        }
+        return commands;
+    }
+    let mut commands = vec![
+        format!("Primary runtime: {}", setup_primary_runtime_command(input)),
+        "Standard CLI runtime: thinclaw".to_string(),
+        "Full-screen TUI runtime: thinclaw tui".to_string(),
+        "Reopen onboarding: thinclaw onboard".to_string(),
+        "Revisit channels only: thinclaw onboard --channels-only".to_string(),
+    ];
+
+    if input.pause_after_completion {
+        commands.push("Topic guide: thinclaw onboard --guide".to_string());
+    }
+
+    commands
+}
+
+pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
+    use SetupWizardPhaseId as Phase;
+    use SetupWizardStepId as Step;
+
+    let mut phases = Vec::new();
+    let mut steps = Vec::new();
+
+    let mut push_step = |id, phase_id, title, description, why_this_matters, recommended| {
+        steps.push(SetupStepDescriptor {
+            id,
+            phase_id,
+            title,
+            description,
+            why_this_matters,
+            recommended,
+        });
+    };
+
+    if input.channels_only {
+        phases.push(SetupWizardPhase {
+            id: Phase::ChannelsContinuity,
+            step_ids: vec![Step::Channels, Step::ChannelVerification],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::Finish,
+            step_ids: vec![Step::Summary],
+        });
+
+        push_step(
+            Step::Channels,
+            Phase::ChannelsContinuity,
+            "Channel Configuration",
+            "Choose where ThinClaw should receive and send messages.",
+            "A working channel is what turns configuration into a usable agent.",
+            Some("Start with one channel you can verify right now."),
+        );
+        push_step(
+            Step::ChannelVerification,
+            Phase::ChannelsContinuity,
+            "Channel Verification",
+            "Run safe checks against every enabled channel and capture any gaps.",
+            "It is better to leave with one confirmed route than several unverified ones.",
+            Some("Treat verification as the release gate for channel setup."),
+        );
+        push_step(
+            Step::Summary,
+            Phase::Finish,
+            "Finish",
+            "Review readiness, deferred tasks, and what happens next.",
+            "The goal is a confident handoff into normal startup, not more guesswork.",
+            None,
+        );
+
+        return SetupWizardPlan { phases, steps };
+    }
+
+    if let Some(topic) = input.guide_topic {
+        let step_ids = match topic {
+            SetupGuideTopic::Menu => vec![Step::Summary],
+            SetupGuideTopic::Ai => vec![
+                Step::InferenceProvider,
+                Step::ModelSelection,
+                Step::SmartRouting,
+                Step::FallbackProviders,
+                Step::Embeddings,
+            ],
+            SetupGuideTopic::Channels => vec![
+                Step::Channels,
+                Step::ChannelContinuity,
+                Step::ChannelVerification,
+                Step::Notifications,
+            ],
+            SetupGuideTopic::Agent => {
+                vec![
+                    Step::CliSkin,
+                    Step::AgentIdentity,
+                    Step::Timezone,
+                    Step::WebUi,
+                ]
+            }
+            SetupGuideTopic::Tools => vec![
+                Step::ToolApproval,
+                Step::DockerSandbox,
+                Step::Extensions,
+                Step::ClaudeCode,
+                Step::CodexCode,
+            ],
+            SetupGuideTopic::Automation => vec![Step::Routines, Step::Skills, Step::Heartbeat],
+            SetupGuideTopic::Runtime => vec![Step::Database, Step::Security, Step::Observability],
+        };
+
+        let phase_id = match topic {
+            SetupGuideTopic::Menu => Phase::Finish,
+            SetupGuideTopic::Ai => Phase::AiStack,
+            SetupGuideTopic::Channels => Phase::ChannelsContinuity,
+            SetupGuideTopic::Agent => Phase::WelcomeProfile,
+            SetupGuideTopic::Tools => Phase::CapabilitiesAutomation,
+            SetupGuideTopic::Automation => Phase::CapabilitiesAutomation,
+            SetupGuideTopic::Runtime => Phase::CoreRuntime,
+        };
+        phases.push(SetupWizardPhase {
+            id: phase_id,
+            step_ids,
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::Finish,
+            step_ids: vec![Step::Summary],
+        });
+    } else {
+        phases.push(SetupWizardPhase {
+            id: Phase::WelcomeProfile,
+            step_ids: vec![Step::CliSkin, Step::Profile, Step::AgentIdentity],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::AiStack,
+            step_ids: vec![Step::InferenceProvider, Step::ModelSelection],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::ChannelsContinuity,
+            step_ids: vec![Step::Channels, Step::ChannelVerification],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::CapabilitiesAutomation,
+            step_ids: vec![Step::ToolApproval, Step::DockerSandbox, Step::CodingWorkers],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::ExperienceOperations,
+            step_ids: vec![Step::WebUi],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::Finish,
+            step_ids: vec![Step::Summary],
+        });
+    }
+
+    push_step(
+        Step::CliSkin,
+        Phase::WelcomeProfile,
+        "Choose Your Cockpit Skin",
+        "Pick the skin you want onboarding, the CLI, and the default web experience to use.",
+        "The first visual choice sets the tone for the whole operator experience.",
+        Some("Pick the one that feels easiest to read for a long session."),
+    );
+    push_step(
+        Step::Profile,
+        Phase::WelcomeProfile,
+        "Choose Your Setup Lane",
+        "Pick a profile to prefill practical defaults for your environment.",
+        "Profiles speed up setup without taking away your ability to review each section.",
+        Some("Balanced is the best default for most operators."),
+    );
+    push_step(
+        Step::Database,
+        Phase::CoreRuntime,
+        "Storage Foundation",
+        "Review where ThinClaw stores settings, history, and runtime state.",
+        "This storage path underpins everything else in onboarding.",
+        Some("libSQL + local file is the fastest reliable path for day one."),
+    );
+    push_step(
+        Step::Security,
+        Phase::CoreRuntime,
+        "Secret Protection",
+        "Review how API keys and sensitive values are protected.",
+        "Trust boundaries should be explicit before provider credentials are stored.",
+        Some("Use your OS secure store when available."),
+    );
+    push_step(
+        Step::InferenceProvider,
+        Phase::AiStack,
+        "Primary Model Provider",
+        "Choose the provider ThinClaw should rely on for its primary advisor model.",
+        "This choice impacts quality, latency, auth, and operating cost.",
+        Some("Start with one reliable provider, then add fallback later."),
+    );
+    push_step(
+        Step::ModelSelection,
+        Phase::AiStack,
+        "Advisor Model (Primary)",
+        "Choose the stronger primary model used for strategic guidance and high-quality reasoning.",
+        "This model defines the quality ceiling for everyday operation.",
+        None,
+    );
+    push_step(
+        Step::SmartRouting,
+        Phase::AiStack,
+        "Executor Model (Fast)",
+        "Choose the fast execution model used in advisor/executor routing.",
+        "A strong executor keeps everyday work responsive while the advisor stays available for escalation.",
+        Some("Pick a fast model that lives next to your primary provider when possible."),
+    );
+    push_step(
+        Step::FallbackProviders,
+        Phase::AiStack,
+        "Resilience Fallbacks",
+        "Add secondary providers so routing can recover when the primary path is unavailable.",
+        "Fallbacks improve uptime and reduce single-provider risk.",
+        Some("Add one fallback after the primary route is confirmed."),
+    );
+    push_step(
+        Step::Embeddings,
+        Phase::AiStack,
+        "Memory & Semantic Search",
+        "Configure embeddings so ThinClaw can search memory semantically.",
+        "Good embeddings improve recall quality and reduce repetitive prompting.",
+        Some("Enable this once local or remote embeddings are actually reachable."),
+    );
+    push_step(
+        Step::AgentIdentity,
+        Phase::IdentityPresence,
+        "Agent Name & Personality",
+        "Set the agent name and the personality pack that seeds the canonical home soul.",
+        "Identity details shape trust and consistency across channels.",
+        None,
+    );
+    push_step(
+        Step::Timezone,
+        Phase::IdentityPresence,
+        "Timezone",
+        "Confirm the local timezone for schedules and time-aware logic.",
+        "Timezone errors cause confusing routine timing and alert windows.",
+        None,
+    );
+    push_step(
+        Step::Channels,
+        Phase::ChannelsContinuity,
+        "Primary Channel",
+        "Choose the main channel users should use to reach ThinClaw and configure only what is needed for that path.",
+        "Channels are the interface where users will actually meet the agent.",
+        Some("Pick only channels you can verify today."),
+    );
+    push_step(
+        Step::ChannelContinuity,
+        Phase::ChannelsContinuity,
+        "Cross-Channel Session Continuity",
+        "Review how direct sessions synchronize across channels and devices.",
+        "Understanding continuity prevents confusion when conversations move channels.",
+        None,
+    );
+    push_step(
+        Step::ChannelVerification,
+        Phase::ChannelsContinuity,
+        "Channel Verification",
+        "Run non-destructive checks for the selected channel and capture any follow-ups.",
+        "Known gaps are manageable; hidden gaps break trust in production.",
+        Some("Leave onboarding with at least one fully verified path."),
+    );
+    push_step(
+        Step::Notifications,
+        Phase::ChannelsContinuity,
+        "Notification Preferences",
+        "Choose where proactive alerts and routine results should be delivered.",
+        "Useful automation depends on a destination users actually watch.",
+        Some("Pick a verified channel whenever possible."),
+    );
+    push_step(
+        Step::Extensions,
+        Phase::CapabilitiesAutomation,
+        "Tools & Extensions",
+        "Select capability bundles and optional tools from the registry.",
+        "Tooling determines what ThinClaw can do beyond chat responses.",
+        Some("Use the Balanced bundle unless you need strict minimalism."),
+    );
+    push_step(
+        Step::ToolApproval,
+        Phase::CapabilitiesAutomation,
+        "Autonomy Level",
+        "Choose how much local autonomy ThinClaw has when running tools on your machine.",
+        "Autonomy level defines the default operator trust posture on day one.",
+        Some("Standard keeps approvals on. Autonomous and Full Autonomous enable local tools."),
+    );
+    push_step(
+        Step::DockerSandbox,
+        Phase::CapabilitiesAutomation,
+        "Worker Sandbox",
+        "Decide whether ThinClaw should isolate worker processes such as coding delegates in Docker.",
+        "Early boundary choices reduce surprise and security drift later.",
+        Some(
+            "Keep the worker sandbox on unless you already know you do not want container isolation.",
+        ),
+    );
+    push_step(
+        Step::CodingWorkers,
+        Phase::CapabilitiesAutomation,
+        "Coding Workers",
+        "Optionally enable Claude Code and Codex after the sandbox is configured.",
+        "Coding workers add power, but only matter if you want delegated coding help right away.",
+        Some("Leave them off unless you already know you want coding delegates today."),
+    );
+    push_step(
+        Step::ClaudeCode,
+        Phase::CapabilitiesAutomation,
+        "Claude Code Sandbox",
+        "Configure optional Claude Code worker integration.",
+        "Only required if your workflow depends on Claude sandbox execution.",
+        None,
+    );
+    push_step(
+        Step::CodexCode,
+        Phase::CapabilitiesAutomation,
+        "Codex Sandbox",
+        "Configure optional Codex CLI worker integration.",
+        "Only required if your workflow depends on Codex sandbox execution.",
+        None,
+    );
+    push_step(
+        Step::Routines,
+        Phase::CapabilitiesAutomation,
+        "Routines",
+        "Enable or defer scheduled automation tasks.",
+        "Routines are optional at launch but powerful once channels are stable.",
+        None,
+    );
+    push_step(
+        Step::Skills,
+        Phase::CapabilitiesAutomation,
+        "Skills",
+        "Enable reusable capability packs for specialized behavior.",
+        "Skills increase adaptability without modifying core runtime code.",
+        Some("Keep skills enabled unless you need a minimal locked-down install."),
+    );
+    push_step(
+        Step::Heartbeat,
+        Phase::CapabilitiesAutomation,
+        "Background Tasks",
+        "Choose whether ThinClaw runs periodic background heartbeat tasks.",
+        "Heartbeat adds value after alerts and channels are fully configured.",
+        Some("Keep it off on day one unless notification delivery is already verified."),
+    );
+    push_step(
+        Step::WebUi,
+        Phase::ExperienceOperations,
+        "Web UI",
+        "Tune the operator-facing dashboard experience.",
+        "Clear UI defaults reduce operator friction and support load.",
+        None,
+    );
+    push_step(
+        Step::Observability,
+        Phase::ExperienceOperations,
+        "Observability",
+        "Decide how much runtime telemetry and diagnostics should be emitted.",
+        "Good visibility helps debugging without flooding operators with noise.",
+        Some("Start lean, then raise observability once core flows are stable."),
+    );
+    push_step(
+        Step::Summary,
+        Phase::Finish,
+        "Finish",
+        "Review readiness, deferred tasks, and the bootstrap handoff into normal startup.",
+        "A strong finish gives operators confidence to launch immediately.",
+        None,
+    );
+
+    let allowed_ids: BTreeSet<_> = phases
+        .iter()
+        .flat_map(|phase| phase.step_ids.iter().copied())
+        .collect();
+    let filtered_steps = steps
+        .into_iter()
+        .filter(|descriptor| allowed_ids.contains(&descriptor.id))
+        .collect();
+
+    SetupWizardPlan {
+        phases,
+        steps: filtered_steps,
     }
 }
 
@@ -473,5 +1195,132 @@ mod tests {
         assert_eq!(value_for(&plan, "CLI_ENABLED"), Some("false"));
         assert_eq!(value_for(&plan, "WEBCHAT_SHOW_BRANDING"), Some("false"));
         assert_eq!(value_for(&plan, "WEBCHAT_THEME"), None);
+    }
+
+    #[test]
+    fn quick_setup_plan_uses_documented_twelve_steps() {
+        let plan = setup_wizard_plan(SetupWizardPlanInput::default());
+
+        assert_eq!(plan.steps.len(), 12);
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| step.id == SetupWizardStepId::SmartRouting)
+        );
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| step.id == SetupWizardStepId::CodingWorkers)
+        );
+        assert_eq!(
+            plan.phase(SetupWizardPhaseId::WelcomeProfile)
+                .map(|phase| phase.step_ids.as_slice()),
+            Some(
+                [
+                    SetupWizardStepId::CliSkin,
+                    SetupWizardStepId::Profile,
+                    SetupWizardStepId::AgentIdentity
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn guided_and_channels_only_plans_keep_expected_shape() {
+        let ai_plan = setup_wizard_plan(SetupWizardPlanInput {
+            channels_only: false,
+            guide_topic: Some(SetupGuideTopic::Ai),
+        });
+        let ai_step_ids: Vec<_> = ai_plan.steps.iter().map(|step| step.id).collect();
+        assert_eq!(
+            ai_step_ids,
+            vec![
+                SetupWizardStepId::InferenceProvider,
+                SetupWizardStepId::ModelSelection,
+                SetupWizardStepId::SmartRouting,
+                SetupWizardStepId::FallbackProviders,
+                SetupWizardStepId::Embeddings,
+                SetupWizardStepId::Summary,
+            ]
+        );
+
+        let channels_plan = setup_wizard_plan(SetupWizardPlanInput {
+            channels_only: true,
+            guide_topic: Some(SetupGuideTopic::Ai),
+        });
+        let channel_step_ids: Vec<_> = channels_plan.steps.iter().map(|step| step.id).collect();
+        assert_eq!(
+            channel_step_ids,
+            vec![
+                SetupWizardStepId::Channels,
+                SetupWizardStepId::ChannelVerification,
+                SetupWizardStepId::Summary,
+            ]
+        );
+    }
+
+    #[test]
+    fn profile_metadata_maps_headless_runtime_profiles() {
+        assert_eq!(
+            SetupOnboardingProfile::CustomAdvanced.title(),
+            "Custom / Advanced"
+        );
+        assert!(
+            SetupOnboardingProfile::CustomAdvanced
+                .description()
+                .contains("neutral baseline")
+        );
+        assert_eq!(
+            SetupOnboardingProfile::RemoteServer.runtime_profile(),
+            Some(SetupRuntimeProfile::Remote)
+        );
+        assert_eq!(
+            SetupOnboardingProfile::PiOsLite64.runtime_profile_env_value(),
+            Some("pi-os-lite-64")
+        );
+        assert!(SetupOnboardingProfile::RemoteServer.is_headless_remote());
+        assert!(!SetupOnboardingProfile::Balanced.is_headless_remote());
+    }
+
+    #[test]
+    fn runtime_command_policy_distinguishes_desktop_and_headless_profiles() {
+        let desktop = SetupRuntimeCommandInput {
+            profile: SetupOnboardingProfile::Balanced,
+            ui_mode: SetupWizardUiMode::Tui,
+            continue_to_runtime: true,
+            pause_after_completion: true,
+        };
+        assert_eq!(setup_primary_runtime_command(desktop), "thinclaw tui");
+        assert!(
+            setup_runtime_handoff_summary(desktop).contains("`thinclaw tui`"),
+            "desktop handoff should name the selected UI command"
+        );
+        assert!(
+            setup_what_next_commands(desktop)
+                .iter()
+                .any(|command| command == "Topic guide: thinclaw onboard --guide")
+        );
+
+        let headless = SetupRuntimeCommandInput {
+            profile: SetupOnboardingProfile::PiOsLite64,
+            ui_mode: SetupWizardUiMode::Tui,
+            continue_to_runtime: false,
+            pause_after_completion: false,
+        };
+        assert_eq!(
+            setup_primary_runtime_command(headless),
+            "thinclaw run --no-onboard"
+        );
+        assert!(
+            setup_runtime_handoff_summary(headless).contains("install/start the OS service"),
+            "paused headless handoff should point at service startup"
+        );
+        assert!(
+            setup_what_next_commands(headless)
+                .iter()
+                .any(|command| command == "Pi diagnostics: thinclaw doctor --profile pi-os-lite-64")
+        );
     }
 }

@@ -18,9 +18,9 @@ use crate::tools::builtin::{
 };
 use thinclaw_gateway::web::skills::{
     SkillCatalogSearchResultInput, SkillInfoInput, SkillSearchMatchInput,
-    invalid_skill_trust_level_error, skill_action_error_response, skill_catalog_search_result,
-    skill_catalog_unavailable_error, skill_duplicate_response, skill_info,
-    skill_install_commit_response, skill_install_confirmation_error,
+    has_confirm_action_header, invalid_skill_trust_level_error, skill_action_error_response,
+    skill_catalog_search_result, skill_catalog_unavailable_error, skill_duplicate_response,
+    skill_info, skill_install_commit_response, skill_install_confirmation_error,
     skill_install_missing_source_response, skill_list_response, skill_matches_query,
     skill_publish_remote_write_confirmation_error, skill_quarantine_unavailable_error,
     skill_reload_all_response, skill_reload_confirmation_error, skill_reload_response,
@@ -33,13 +33,6 @@ use thinclaw_tools::builtin::{
     SkillInspectHostTool, SkillPublishHostTool, SkillTapAddHostTool, SkillTapListHostTool,
     SkillTapRefreshHostTool, SkillTapRemoveHostTool,
 };
-
-fn confirmed(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        == Some("true")
-}
 
 fn api_job_context(identity: &GatewayRequestIdentity) -> JobContext {
     JobContext {
@@ -196,7 +189,7 @@ pub async fn skills_publish_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let remote_write = req.remote_write.unwrap_or(false);
     let confirm_remote_write = req.confirm_remote_write.unwrap_or(false);
-    if remote_write && !confirmed(&headers) {
+    if remote_write && !has_confirm_action_header(&headers) {
         return Err(skill_publish_remote_write_confirmation_error());
     }
 
@@ -251,7 +244,7 @@ pub async fn skill_taps_add_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SkillTapAddRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !confirmed(&headers) {
+    if !has_confirm_action_header(&headers) {
         return Err(skill_tap_add_confirmation_error());
     }
     let tool = SkillTapAddHostTool::new(root_skill_tap_tool_host(
@@ -280,7 +273,7 @@ pub async fn skill_taps_remove_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SkillTapRemoveRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !confirmed(&headers) {
+    if !has_confirm_action_header(&headers) {
         return Err(skill_tap_remove_confirmation_error());
     }
     let tool = SkillTapRemoveHostTool::new(root_skill_tap_tool_host(
@@ -307,7 +300,7 @@ pub async fn skill_taps_refresh_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SkillTapRefreshRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !confirmed(&headers) {
+    if !has_confirm_action_header(&headers) {
         return Err(skill_tap_refresh_confirmation_error());
     }
     let tool = SkillTapRefreshHostTool::new(root_skill_tap_tool_host(
@@ -334,11 +327,7 @@ pub async fn skills_install_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     // Require explicit confirmation header to prevent accidental installs.
     // Chat tools have requires_approval(); this is the equivalent for the web API.
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
+    if !has_confirm_action_header(&headers) {
         return Err(skill_install_confirmation_error());
     }
 
@@ -444,11 +433,7 @@ pub async fn skills_remove_handler(
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     // Require explicit confirmation header to prevent accidental removals.
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
+    if !has_confirm_action_header(&headers) {
         return Err(skill_removal_confirmation_error());
     }
 
@@ -486,11 +471,7 @@ pub async fn skills_trust_handler(
     Json(req): Json<SkillTrustRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     // Require explicit confirmation — changing trust is a security-sensitive action.
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
+    if !has_confirm_action_header(&headers) {
         return Err(skill_trust_confirmation_error());
     }
 
@@ -529,11 +510,7 @@ pub async fn skills_reload_handler(
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
+    if !has_confirm_action_header(&headers) {
         return Err(skill_reload_confirmation_error());
     }
 
@@ -557,11 +534,7 @@ pub async fn skills_reload_all_handler(
     State(state): State<Arc<GatewayState>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
+    if !has_confirm_action_header(&headers) {
         return Err(skill_reload_confirmation_error());
     }
 
