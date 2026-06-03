@@ -9,11 +9,13 @@ publish = false
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
+base64 = "0.22.1"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.13"
 dirs = "6"
+mime_guess = "2.0.5"
 rand = "0.8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
@@ -27,6 +29,7 @@ thinclaw-history = { version = "0.1.0", path = "../thinclaw-history" }
 thinclaw-identity = { version = "0.1.0", path = "../thinclaw-identity" }
 thinclaw-llm = { version = "0.1.0", path = "../thinclaw-llm" }
 thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }
+thinclaw-media = { version = "0.1.0", path = "../thinclaw-media" }
 thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
 thinclaw-safety = { version = "0.1.0", path = "../thinclaw-safety" }
 thinclaw-soul = { version = "0.1.0", path = "../thinclaw-soul" }

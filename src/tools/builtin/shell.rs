@@ -12,10 +12,7 @@ use thinclaw_tools::builtin::shell as runtime_shell;
 use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::execution_backend::{
-    CommandExecutionRequest, ExecutionBackend, ExecutionBackendKind, ExecutionResult,
-    LocalHostExecutionBackend, ProcessStartRequest, ScriptExecutionRequest, StartedProcess,
-};
+use crate::tools::execution_backend::{LocalHostExecutionBackend, RootExecutionBackendAdapter};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig,
 };
@@ -25,44 +22,6 @@ pub use runtime_shell::{
     AcpTerminalExecution, AcpTerminalExecutor, ShellSafetyOptions, ShellSmartApprover,
     detect_command_injection, detect_library_injection, requires_explicit_approval,
 };
-
-struct RootExecutionBackendAdapter {
-    inner: Arc<dyn ExecutionBackend>,
-}
-
-impl RootExecutionBackendAdapter {
-    fn new(inner: Arc<dyn ExecutionBackend>) -> Arc<Self> {
-        Arc::new(Self { inner })
-    }
-}
-
-#[async_trait]
-impl thinclaw_tools::execution::LocalExecutionBackend for RootExecutionBackendAdapter {
-    fn kind(&self) -> ExecutionBackendKind {
-        self.inner.kind()
-    }
-
-    async fn run_shell(
-        &self,
-        request: CommandExecutionRequest,
-    ) -> Result<ExecutionResult, ToolError> {
-        self.inner.run_shell(request).await
-    }
-
-    async fn start_process(
-        &self,
-        request: ProcessStartRequest,
-    ) -> Result<StartedProcess, ToolError> {
-        self.inner.start_process(request).await
-    }
-
-    async fn run_script(
-        &self,
-        request: ScriptExecutionRequest,
-    ) -> Result<ExecutionResult, ToolError> {
-        self.inner.run_script(request).await
-    }
-}
 
 struct RootSmartApprover;
 
@@ -203,7 +162,7 @@ impl ShellTool {
                 );
             self.inner = self
                 .inner
-                .with_sandbox_backend(RootExecutionBackendAdapter::new(backend));
+                .with_sandbox_backend(RootExecutionBackendAdapter::shared(backend));
         }
         self
     }

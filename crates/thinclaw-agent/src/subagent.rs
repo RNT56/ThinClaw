@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 use thinclaw_identity::ResolvedIdentity;
 use thinclaw_types::{
     SubagentMemoryMode, SubagentSkillMode, SubagentTaskPacket, SubagentToolMode, ToolProfile,
@@ -112,6 +113,12 @@ pub struct SubagentRoutineCompletion {
     pub lifecycle_event: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentLearningRiskTier {
+    Low,
+    Medium,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SubagentSystemPromptSections<'a> {
     pub workspace_prompt: Option<&'a str>,
@@ -124,6 +131,83 @@ pub struct SubagentSystemPromptSections<'a> {
     pub tool_mode: &'a SubagentToolMode,
     pub skill_mode: &'a SubagentSkillMode,
     pub tool_profile_label: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubagentConcurrency {
+    pub running: usize,
+    pub max_concurrent: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentSpawnAdmission {
+    Admitted,
+    Rejected { reason: String },
+}
+
+impl SubagentConcurrency {
+    pub fn new(running: usize, max_concurrent: usize) -> Self {
+        Self {
+            running,
+            max_concurrent,
+        }
+    }
+
+    pub fn allows_spawn(self) -> bool {
+        matches!(self.admission(), SubagentSpawnAdmission::Admitted)
+    }
+
+    pub fn rejection_reason(self) -> String {
+        format!(
+            "Maximum concurrent sub-agents reached ({}/{})",
+            self.running, self.max_concurrent
+        )
+    }
+
+    pub fn admission(self) -> SubagentSpawnAdmission {
+        if self.running < self.max_concurrent {
+            SubagentSpawnAdmission::Admitted
+        } else {
+            SubagentSpawnAdmission::Rejected {
+                reason: self.rejection_reason(),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SubagentJobMetadataInput<'a> {
+    pub channel_metadata: &'a serde_json::Value,
+    pub principal_id: &'a str,
+    pub actor_id: &'a str,
+    pub agent_workspace_id: Option<Uuid>,
+    pub allowed_tools: Option<&'a [String]>,
+    pub allowed_skills: Option<&'a [String]>,
+    pub tool_profile: ToolProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentExecutionGrants {
+    pub allowed_tools: Option<Vec<String>>,
+    pub allowed_skills: Option<Vec<String>>,
+    pub event_allowed_tools: Vec<String>,
+    pub event_allowed_skills: Vec<String>,
+    pub memory_mode_label: &'static str,
+    pub tool_mode_label: &'static str,
+    pub skill_mode_label: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubagentIdentityDefaults<'a> {
+    pub principal_id: &'a str,
+    pub actor_id: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentCompletionOutcome {
+    Success { response: String, iterations: usize },
+    Error(String),
+    TimedOut,
 }
 
 /// Request to spawn a sub-agent.
@@ -248,6 +332,153 @@ pub fn truncate_progress_preview(value: &str, max_len: usize) -> String {
     format!("{truncated}...")
 }
 
+pub fn subagent_default_system_prompt(name: &str) -> String {
+    format!(
+        "You are a focused sub-agent named '{}'. \
+         You have been delegated a specific task by the main agent.\n\n\
+         Complete the task thoroughly and concisely. \
+         Return a clear, actionable summary when done.\n\n\
+         Use `emit_user_message` only for meaningful checkpoints, interim findings, \
+         blockers, or clarifying questions that help the user stay oriented. \
+         Do not narrate every routine tool call unless detailed progress is explicitly requested.",
+        name
+    )
+}
+
+pub fn resolve_parent_thread_id(
+    explicit_parent_thread_id: Option<&str>,
+    channel_metadata: &serde_json::Value,
+) -> String {
+    explicit_parent_thread_id
+        .map(str::to_string)
+        .or_else(|| {
+            channel_metadata
+                .get("thread_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "agent:main".to_string())
+}
+
+pub fn subagent_spawned_response(agent_id: Uuid) -> String {
+    format!(
+        "Sub-agent spawned (id: {}). Results will arrive when complete.",
+        agent_id
+    )
+}
+
+pub fn subagent_heartbeat_message(agent_name: &str) -> String {
+    format!("sub-agent '{agent_name}' still working")
+}
+
+pub fn should_emit_subagent_heartbeat(
+    elapsed_since_activity: Duration,
+    interval: Duration,
+) -> bool {
+    elapsed_since_activity >= interval
+}
+
+pub fn subagent_activity_category() -> &'static str {
+    "activity"
+}
+
+pub fn subagent_warning_category() -> &'static str {
+    "warning"
+}
+
+pub fn subagent_parent_message(parent_message: &str) -> String {
+    format!("[Message from main agent]: {parent_message}")
+}
+
+pub fn should_force_subagent_text(iteration: usize, max_iterations: usize) -> bool {
+    iteration >= max_iterations.saturating_sub(2)
+}
+
+pub fn subagent_iteration_limit_reason(max_iterations: usize) -> String {
+    format!("Exceeded maximum iterations ({})", max_iterations)
+}
+
+pub fn subagent_job_metadata(input: SubagentJobMetadataInput<'_>) -> serde_json::Value {
+    let mut metadata = if input.channel_metadata.is_object() {
+        input.channel_metadata.clone()
+    } else {
+        serde_json::json!({})
+    };
+
+    if let Some(object) = metadata.as_object_mut() {
+        object
+            .entry("conversation_kind".to_string())
+            .or_insert_with(|| serde_json::json!("direct"));
+        object
+            .entry("principal_id".to_string())
+            .or_insert_with(|| serde_json::json!(input.principal_id));
+        object
+            .entry("actor_id".to_string())
+            .or_insert_with(|| serde_json::json!(input.actor_id));
+        if let Some(agent_workspace_id) = input.agent_workspace_id {
+            object.insert(
+                "agent_workspace_id".to_string(),
+                serde_json::json!(agent_workspace_id.to_string()),
+            );
+        }
+        if let Some(allowed_tools) = input.allowed_tools {
+            object.insert(
+                "allowed_tools".to_string(),
+                serde_json::json!(allowed_tools),
+            );
+        }
+        if let Some(allowed_skills) = input.allowed_skills {
+            object.insert(
+                "allowed_skills".to_string(),
+                serde_json::json!(allowed_skills),
+            );
+        }
+        object.insert(
+            "tool_profile".to_string(),
+            serde_json::json!(input.tool_profile.as_str()),
+        );
+    }
+
+    metadata
+}
+
+pub fn subagent_identity_defaults<'a>(
+    principal_id: Option<&'a str>,
+    actor_id: Option<&'a str>,
+) -> SubagentIdentityDefaults<'a> {
+    let principal_id = principal_id.unwrap_or("subagent");
+    SubagentIdentityDefaults {
+        principal_id,
+        actor_id: actor_id.unwrap_or(principal_id),
+    }
+}
+
+pub fn subagent_execution_grants(
+    allowed_tools: Option<&[String]>,
+    allowed_skills: Option<&[String]>,
+    memory_mode: &SubagentMemoryMode,
+    tool_mode: &SubagentToolMode,
+    skill_mode: &SubagentSkillMode,
+) -> SubagentExecutionGrants {
+    let allowed_tools = Some(filter_tools_for_memory_mode(
+        allowed_tools.map(<[String]>::to_vec).unwrap_or_default(),
+        memory_mode,
+    ));
+    let allowed_skills = allowed_skills.map(<[String]>::to_vec);
+    let event_allowed_tools = allowed_tools.clone().unwrap_or_default();
+    let event_allowed_skills = allowed_skills.clone().unwrap_or_default();
+
+    SubagentExecutionGrants {
+        allowed_tools,
+        allowed_skills,
+        event_allowed_tools,
+        event_allowed_skills,
+        memory_mode_label: subagent_memory_mode_label(memory_mode),
+        tool_mode_label: subagent_tool_mode_label(tool_mode),
+        skill_mode_label: subagent_skill_mode_label(skill_mode),
+    }
+}
+
 pub fn extract_subagent_message(arguments: &serde_json::Value) -> Option<String> {
     ["message", "content"]
         .into_iter()
@@ -315,11 +546,25 @@ pub fn normalize_subagent_progress_category(message_type: &str) -> &'static str 
     }
 }
 
+pub fn subagent_status_after_mark_completed(success: bool, error: Option<&str>) -> SubagentStatus {
+    if success {
+        SubagentStatus::Completed
+    } else if error == Some("Timed out") {
+        SubagentStatus::TimedOut
+    } else if error == Some("Cancelled") {
+        SubagentStatus::Cancelled
+    } else {
+        SubagentStatus::Failed(error.unwrap_or_default().to_string())
+    }
+}
+
 pub fn subagent_status_from_result(result: &SubagentResult) -> SubagentStatus {
     if result.success {
         SubagentStatus::Completed
     } else if result.error.as_deref() == Some("Timed out") {
         SubagentStatus::TimedOut
+    } else if result.error.as_deref() == Some("Cancelled") {
+        SubagentStatus::Cancelled
     } else {
         SubagentStatus::Failed(
             result
@@ -327,6 +572,65 @@ pub fn subagent_status_from_result(result: &SubagentResult) -> SubagentStatus {
                 .clone()
                 .unwrap_or_else(|| "Unknown error".to_string()),
         )
+    }
+}
+
+pub fn should_cancel_subagent(status: &SubagentStatus) -> bool {
+    *status == SubagentStatus::Running
+}
+
+pub fn subagent_cancelled_status() -> SubagentStatus {
+    SubagentStatus::Cancelled
+}
+
+pub fn subagent_result_from_completion(
+    agent_id: Uuid,
+    name: impl Into<String>,
+    duration_ms: u64,
+    outcome: SubagentCompletionOutcome,
+) -> SubagentResult {
+    match outcome {
+        SubagentCompletionOutcome::Success {
+            response,
+            iterations,
+        } => SubagentResult {
+            agent_id,
+            name: name.into(),
+            response,
+            iterations,
+            duration_ms,
+            success: true,
+            error: None,
+        },
+        SubagentCompletionOutcome::Error(error) => SubagentResult {
+            agent_id,
+            name: name.into(),
+            response: String::new(),
+            iterations: 0,
+            duration_ms,
+            success: false,
+            error: Some(error),
+        },
+        SubagentCompletionOutcome::TimedOut => SubagentResult {
+            agent_id,
+            name: name.into(),
+            response: String::new(),
+            iterations: 0,
+            duration_ms,
+            success: false,
+            error: Some("Timed out".to_string()),
+        },
+    }
+}
+
+pub fn subagent_completion_status_response(result: &SubagentResult) -> String {
+    if result.success {
+        result.response.clone()
+    } else {
+        result
+            .error
+            .clone()
+            .unwrap_or_else(|| "Unknown error".to_string())
     }
 }
 
@@ -353,6 +657,14 @@ pub fn subagent_learning_completion(result: &SubagentResult) -> SubagentLearning
             "correction_count": if result.success { 0 } else { 1 },
             "repeated_failures": if result.success { 0 } else { 1 },
         }),
+    }
+}
+
+pub fn subagent_learning_risk_tier(result: &SubagentResult) -> SubagentLearningRiskTier {
+    if result.success {
+        SubagentLearningRiskTier::Low
+    } else {
+        SubagentLearningRiskTier::Medium
     }
 }
 
@@ -395,6 +707,10 @@ pub fn should_reinject_subagent_result(metadata: &serde_json::Value) -> bool {
         .get("reinject_result")
         .and_then(|value| value.as_bool())
         .unwrap_or(true)
+}
+
+pub fn subagent_allows_skill(allowed_skills: Option<&[String]>, skill_name: &str) -> bool {
+    allowed_skills.is_none_or(|allowed| allowed.iter().any(|allowed| allowed == skill_name))
 }
 
 pub fn render_subagent_system_prompt(sections: SubagentSystemPromptSections<'_>) -> String {
@@ -681,6 +997,87 @@ mod tests {
     }
 
     #[test]
+    fn subagent_spawn_policy_uses_legacy_messages_and_thread_fallbacks() {
+        let concurrency = SubagentConcurrency::new(5, 5);
+        assert!(!concurrency.allows_spawn());
+        assert_eq!(
+            concurrency.rejection_reason(),
+            "Maximum concurrent sub-agents reached (5/5)"
+        );
+
+        let metadata = serde_json::json!({ "thread_id": "from-metadata" });
+        assert_eq!(
+            resolve_parent_thread_id(Some("explicit"), &metadata),
+            "explicit"
+        );
+        assert_eq!(resolve_parent_thread_id(None, &metadata), "from-metadata");
+        assert_eq!(
+            resolve_parent_thread_id(None, &serde_json::Value::Null),
+            "agent:main"
+        );
+
+        let id = Uuid::nil();
+        assert_eq!(
+            subagent_spawned_response(id),
+            "Sub-agent spawned (id: 00000000-0000-0000-0000-000000000000). Results will arrive when complete."
+        );
+    }
+
+    #[test]
+    fn subagent_loop_policy_formats_prompt_parent_message_and_limits() {
+        let prompt = subagent_default_system_prompt("researcher");
+        assert!(prompt.contains("researcher"));
+        assert!(prompt.contains("emit_user_message"));
+
+        assert_eq!(
+            subagent_heartbeat_message("researcher"),
+            "sub-agent 'researcher' still working"
+        );
+        assert_eq!(
+            subagent_parent_message("Need more detail"),
+            "[Message from main agent]: Need more detail"
+        );
+        assert!(!should_force_subagent_text(27, 30));
+        assert!(should_force_subagent_text(28, 30));
+        assert!(should_force_subagent_text(0, 0));
+        assert_eq!(
+            subagent_iteration_limit_reason(30),
+            "Exceeded maximum iterations (30)"
+        );
+    }
+
+    #[test]
+    fn subagent_job_metadata_preserves_existing_scope_and_adds_capabilities() {
+        let workspace_id = Uuid::nil();
+        let allowed_tools = vec!["read_file".to_string()];
+        let allowed_skills = vec!["github".to_string()];
+        let metadata = subagent_job_metadata(SubagentJobMetadataInput {
+            channel_metadata: &serde_json::json!({
+                "conversation_kind": "group",
+                "principal_id": "existing-principal",
+                "thread_id": "thread-1"
+            }),
+            principal_id: "fallback-principal",
+            actor_id: "actor-1",
+            agent_workspace_id: Some(workspace_id),
+            allowed_tools: Some(&allowed_tools),
+            allowed_skills: Some(&allowed_skills),
+            tool_profile: ToolProfile::ExplicitOnly,
+        });
+
+        assert_eq!(metadata["conversation_kind"], "group");
+        assert_eq!(metadata["principal_id"], "existing-principal");
+        assert_eq!(metadata["actor_id"], "actor-1");
+        assert_eq!(
+            metadata["agent_workspace_id"],
+            "00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(metadata["allowed_tools"], serde_json::json!(["read_file"]));
+        assert_eq!(metadata["allowed_skills"], serde_json::json!(["github"]));
+        assert_eq!(metadata["tool_profile"], "explicit_only");
+    }
+
+    #[test]
     fn subagent_status_and_completion_policy_follow_result() {
         let success = SubagentResult {
             agent_id: Uuid::new_v4(),
@@ -711,6 +1108,127 @@ mod tests {
             SubagentStatus::TimedOut
         );
         assert_eq!(subagent_routine_completion(&timeout).summary, "Timed out");
+    }
+
+    #[test]
+    fn subagent_lifecycle_policy_maps_admission_cancellation_and_completion_results() {
+        assert_eq!(
+            SubagentConcurrency::new(1, 2).admission(),
+            SubagentSpawnAdmission::Admitted
+        );
+        assert_eq!(
+            SubagentConcurrency::new(2, 2).admission(),
+            SubagentSpawnAdmission::Rejected {
+                reason: "Maximum concurrent sub-agents reached (2/2)".to_string()
+            }
+        );
+
+        assert!(should_cancel_subagent(&SubagentStatus::Running));
+        assert!(!should_cancel_subagent(&SubagentStatus::Completed));
+        assert_eq!(subagent_cancelled_status(), SubagentStatus::Cancelled);
+        assert_eq!(
+            subagent_status_after_mark_completed(false, Some("Cancelled")),
+            SubagentStatus::Cancelled
+        );
+
+        let cancelled = subagent_result_from_completion(
+            Uuid::nil(),
+            "worker",
+            12,
+            SubagentCompletionOutcome::Error("Cancelled".to_string()),
+        );
+        assert_eq!(
+            subagent_status_from_result(&cancelled),
+            SubagentStatus::Cancelled
+        );
+        assert_eq!(subagent_completion_status_response(&cancelled), "Cancelled");
+
+        let completed = subagent_result_from_completion(
+            Uuid::nil(),
+            "worker",
+            34,
+            SubagentCompletionOutcome::Success {
+                response: "done".to_string(),
+                iterations: 4,
+            },
+        );
+        assert!(completed.success);
+        assert_eq!(completed.iterations, 4);
+        assert_eq!(subagent_completion_status_response(&completed), "done");
+    }
+
+    #[test]
+    fn subagent_grant_and_identity_policy_defaults_and_filters() {
+        let allowed_tools = vec![
+            "memory_search".to_string(),
+            "read_file".to_string(),
+            "session_search".to_string(),
+        ];
+        let allowed_skills = vec!["github".to_string()];
+        let grants = subagent_execution_grants(
+            Some(&allowed_tools),
+            Some(&allowed_skills),
+            &SubagentMemoryMode::ProvidedContextOnly,
+            &SubagentToolMode::ExplicitOnly,
+            &SubagentSkillMode::ExplicitOnly,
+        );
+
+        assert_eq!(grants.allowed_tools, Some(vec!["read_file".to_string()]));
+        assert_eq!(grants.event_allowed_tools, vec!["read_file".to_string()]);
+        assert_eq!(grants.allowed_skills, Some(vec!["github".to_string()]));
+        assert_eq!(grants.memory_mode_label, "provided_context_only");
+        assert!(subagent_allows_skill(
+            grants.allowed_skills.as_deref(),
+            "github"
+        ));
+        assert!(!subagent_allows_skill(
+            grants.allowed_skills.as_deref(),
+            "openai-docs"
+        ));
+        assert!(subagent_allows_skill(None, "openai-docs"));
+
+        let defaults = subagent_identity_defaults(None, None);
+        assert_eq!(defaults.principal_id, "subagent");
+        assert_eq!(defaults.actor_id, "subagent");
+        let inherited_actor = subagent_identity_defaults(Some("principal"), None);
+        assert_eq!(inherited_actor.actor_id, "principal");
+    }
+
+    #[test]
+    fn subagent_activity_and_learning_policy_are_stable() {
+        assert!(!should_emit_subagent_heartbeat(
+            Duration::from_secs(29),
+            Duration::from_secs(30)
+        ));
+        assert!(should_emit_subagent_heartbeat(
+            Duration::from_secs(30),
+            Duration::from_secs(30)
+        ));
+        assert_eq!(subagent_activity_category(), "activity");
+        assert_eq!(subagent_warning_category(), "warning");
+
+        let success = SubagentResult {
+            agent_id: Uuid::new_v4(),
+            name: "worker".to_string(),
+            response: "done".to_string(),
+            iterations: 1,
+            duration_ms: 10,
+            success: true,
+            error: None,
+        };
+        let failure = SubagentResult {
+            success: false,
+            error: Some("failed".to_string()),
+            ..success.clone()
+        };
+        assert_eq!(
+            subagent_learning_risk_tier(&success),
+            SubagentLearningRiskTier::Low
+        );
+        assert_eq!(
+            subagent_learning_risk_tier(&failure),
+            SubagentLearningRiskTier::Medium
+        );
     }
 
     #[test]

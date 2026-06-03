@@ -49,95 +49,19 @@ pub(super) struct LlmTurnResult {
     pub(super) streamed_text: bool,
 }
 
-pub(super) const TOOL_PHASE_SYNTHESIS_PROMPT: &str = "Provide the final user-facing answer using the conversation and any tool results above. Do not call tools in this phase.";
-pub(super) const TOOL_PHASE_NO_TOOLS_SENTINEL: &str = "NO_TOOLS_NEEDED";
-pub(super) const TOOL_PHASE_PLANNING_PROMPT: &str = "Planner mode: decide which tools to call next. If tools are needed, call them directly. If no more tools are needed, do not draft the final answer here. Reply with only: NO_TOOLS_NEEDED";
-pub(super) const TOOL_PHASE_PLANNING_MAX_TOKENS: u32 = 512;
-pub(super) const STUCK_LOOP_FINALIZATION_PROMPT: &str = "STOP. You have called the same tool repeatedly without making progress. Do NOT call any more tools. Summarize what you have done so far and provide your best answer with the information you already have.";
-pub(super) const TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE: &str =
-    "I was unable to prepare the final answer cleanly. Please try again.";
-pub(super) const STUCK_LOOP_FINALIZATION_FAILURE_RESPONSE: &str =
-    "I was unable to make further progress. Please try rephrasing your request.";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ToolPhaseTextOutcome {
-    NoToolsSignal,
-    PrimaryFinalText,
-    PrimaryNeedsFinalization,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum AdvisorAutoTrigger {
-    ToolFailure,
-    StuckLoop,
-    VisionInput,
-    LargeContext,
-    ComplexFinalPass,
-}
-
-impl AdvisorAutoTrigger {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::ToolFailure => "tool_failure",
-            Self::StuckLoop => "stuck_loop",
-            Self::VisionInput => "vision_input",
-            Self::LargeContext => "large_context",
-            Self::ComplexFinalPass => "complex_final_pass",
-        }
-    }
-
-    pub(super) fn reason(self) -> &'static str {
-        match self {
-            Self::ToolFailure => "a non-auth tool failed during the current turn",
-            Self::StuckLoop => "the executor appears stuck in a repeated tool-call loop",
-            Self::VisionInput => {
-                "the request includes vision input and benefits from an early strategic check"
-            }
-            Self::LargeContext => {
-                "the request carries a large context window and benefits from an early strategic check"
-            }
-            Self::ComplexFinalPass => {
-                "this is a complex or planning-heavy turn and needs a final-pass advisor check before the answer is returned"
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct AdvisorFailureContext {
-    pub(super) tool_name: String,
-    pub(super) message: String,
-    pub(super) signature: Option<u64>,
-    pub(super) checkpoint: u32,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct AdvisorTurnState {
-    pub(super) real_tool_result_count: u32,
-    pub(super) blocked_tool_signatures: HashSet<u64>,
-    pub(super) auto_consult_checkpoints: HashSet<String>,
-    pub(super) last_failure: Option<AdvisorFailureContext>,
-}
-
-impl AdvisorTurnState {
-    pub(super) fn checkpoint_for(
-        &self,
-        trigger: AdvisorAutoTrigger,
-        detail: impl Into<String>,
-    ) -> String {
-        format!(
-            "{}:{}:{}",
-            trigger.as_str(),
-            self.real_tool_result_count,
-            detail.into()
-        )
-    }
-
-    pub(super) fn should_fire(&self, checkpoint: &str) -> bool {
-        !self.auto_consult_checkpoints.contains(checkpoint)
-    }
-
-    pub(super) fn mark_fired(&mut self, checkpoint: String) {
-        self.auto_consult_checkpoints.insert(checkpoint);
-    }
-}
+#[cfg(test)]
+pub(super) use thinclaw_agent::dispatcher_policy::TOOL_PHASE_NO_TOOLS_SENTINEL;
+pub(super) use thinclaw_agent::dispatcher_policy::{
+    ADVISOR_BLOCKED_SYSTEM_PROMPT, ADVISOR_BLOCKED_TOOL_RESULT_MESSAGE,
+    AdvisorAutoEscalationPolicyMode, AdvisorAutoTrigger, AdvisorFailureContext, AdvisorTurnState,
+    DispatcherRuntimePolicyStatus, FinalizationFailureKind, ITERATION_LIMIT_NUDGE_PROMPT,
+    IterationLimitPolicy, ModelOverrideActivationDecision, STUCK_LOOP_FINALIZATION_PROMPT,
+    STUCK_LOOP_NUDGE_PROMPT, StuckLoopDecision, TOOL_PHASE_PLANNING_MAX_TOKENS,
+    TOOL_PHASE_PLANNING_PROMPT, TOOL_PHASE_SYNTHESIS_PROMPT, TOOL_RESULT_KEEP_TURNS,
+    ToolPhaseTextOutcome, decide_model_override_activation, failed_model_override_reset_note,
+    finalization_failure_response,
+    should_hold_complex_final_pass as policy_should_hold_complex_final_pass,
+    should_merge_tool_output_attachments, stuck_loop_decision, tool_call_signature,
+    tool_result_indicates_failure, tool_result_prune_boundary, unsupported_model_override_note,
+    update_stuck_loop_signature,
+};

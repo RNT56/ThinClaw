@@ -15,413 +15,49 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
-use serde::{Deserialize, Serialize};
-
-use crate::llm::{
-    ChatMessage, CompletionRequest, FinishReason, Role, ToolCall, ToolCompletionRequest,
-    ToolDefinition,
+use thinclaw_gateway::web::openai_compat::{
+    OpenAiChatRequest, OpenAiErrorKind, OpenAiErrorMapping, OpenAiErrorResponse,
+    build_completion_chat_response, build_finish_chunk, build_models_response, build_role_chunk,
+    build_text_chunk, build_tool_call_chunk, build_tool_call_delta_chunk,
+    build_tool_completion_chat_response, chat_completion_id, convert_messages, convert_tools,
+    normalize_tool_choice, openai_error, parse_stop, unix_timestamp, validate_model_name,
 };
+#[cfg(test)]
+use thinclaw_gateway::web::openai_compat::{
+    OpenAiChatResponse, OpenAiChoice, OpenAiFunction, OpenAiMessage, OpenAiTool, OpenAiUsage,
+    convert_tool_calls_to_openai, finish_reason_str, parse_role,
+};
+#[cfg(test)]
+use thinclaw_llm_core::{Role, ToolCall};
+
+use crate::llm::{CompletionRequest, FinishReason, ToolCompletionRequest};
 
 use super::server::GatewayState;
 
-const MAX_MODEL_NAME_BYTES: usize = 256;
-
-// ---------------------------------------------------------------------------
-// OpenAI request types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct OpenAiChatRequest {
-    pub model: String,
-    pub messages: Vec<OpenAiMessage>,
-    #[serde(default)]
-    pub temperature: Option<f32>,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-    #[serde(default)]
-    pub stream: Option<bool>,
-    #[serde(default)]
-    pub tools: Option<Vec<OpenAiTool>>,
-    #[serde(default)]
-    pub tool_choice: Option<serde_json::Value>,
-    #[serde(default)]
-    pub stop: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenAiMessage {
-    pub role: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<OpenAiToolCall>>,
-    /// Extended thinking (chain-of-thought) content from the model.
-    /// Non-standard extension; compatible clients will receive it, others ignore.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_content: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenAiTool {
-    #[serde(rename = "type")]
-    pub tool_type: String,
-    pub function: OpenAiFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenAiFunction {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenAiToolCall {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub call_type: String,
-    pub function: OpenAiToolCallFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenAiToolCallFunction {
-    pub name: String,
-    pub arguments: String,
-}
-
-// ---------------------------------------------------------------------------
-// OpenAI response types (non-streaming)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiChatResponse {
-    pub id: String,
-    pub object: &'static str,
-    pub created: u64,
-    pub model: String,
-    pub choices: Vec<OpenAiChoice>,
-    pub usage: OpenAiUsage,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiChoice {
-    pub index: u32,
-    pub message: OpenAiMessage,
-    pub finish_reason: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiUsage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-}
-
-// ---------------------------------------------------------------------------
-// OpenAI response types (streaming)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiChatChunk {
-    pub id: String,
-    pub object: &'static str,
-    pub created: u64,
-    pub model: String,
-    pub choices: Vec<OpenAiChunkChoice>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiChunkChoice {
-    pub index: u32,
-    pub delta: OpenAiDelta,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<OpenAiToolCallDelta>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiToolCallDelta {
-    pub index: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub call_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub function: Option<OpenAiToolCallFunctionDelta>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiToolCallFunctionDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Error response
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiErrorResponse {
-    pub error: OpenAiErrorDetail,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OpenAiErrorDetail {
-    pub message: String,
-    #[serde(rename = "type")]
-    pub error_type: String,
-    pub param: Option<String>,
-    pub code: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Conversion functions
-// ---------------------------------------------------------------------------
-
-fn parse_role(s: &str) -> Result<Role, String> {
-    match s {
-        "system" => Ok(Role::System),
-        "user" => Ok(Role::User),
-        "assistant" => Ok(Role::Assistant),
-        "tool" => Ok(Role::Tool),
-        _ => Err(format!("Unknown role: '{}'", s)),
-    }
-}
-
-pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, String> {
-    messages
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let role = parse_role(&m.role).map_err(|e| format!("messages[{}]: {}", i, e))?;
-            match role {
-                Role::Tool => {
-                    let tool_call_id = m.tool_call_id.as_deref().ok_or_else(|| {
-                        format!("messages[{}]: tool message requires 'tool_call_id'", i)
-                    })?;
-                    let name = m
-                        .name
-                        .as_deref()
-                        .ok_or_else(|| format!("messages[{}]: tool message requires 'name'", i))?;
-                    Ok(ChatMessage::tool_result(
-                        tool_call_id,
-                        name,
-                        m.content.as_deref().unwrap_or(""),
-                    ))
-                }
-                Role::Assistant => {
-                    if let Some(ref tcs) = m.tool_calls {
-                        let calls: Vec<ToolCall> = tcs
-                            .iter()
-                            .map(|tc| ToolCall {
-                                id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                arguments: serde_json::from_str(&tc.function.arguments)
-                                    .unwrap_or(serde_json::Value::Object(Default::default())),
-                            })
-                            .collect();
-                        Ok(ChatMessage::assistant_with_tool_calls(
-                            m.content.clone(),
-                            calls,
-                        ))
-                    } else {
-                        Ok(ChatMessage::assistant(m.content.as_deref().unwrap_or("")))
-                    }
-                }
-                _ => Ok(ChatMessage {
-                    role,
-                    content: m.content.as_deref().unwrap_or("").to_string(),
-                    tool_call_id: None,
-                    name: m.name.clone(),
-                    tool_calls: None,
-                    provider_metadata: std::collections::HashMap::new(),
-                    attachments: Vec::new(),
-                }),
-            }
-        })
-        .collect()
-}
-
-pub fn convert_tools(tools: &[OpenAiTool]) -> Vec<ToolDefinition> {
-    tools
-        .iter()
-        .filter(|t| t.tool_type == "function")
-        .map(|t| ToolDefinition {
-            name: t.function.name.clone(),
-            description: t.function.description.clone().unwrap_or_default(),
-            parameters: t
-                .function
-                .parameters
-                .clone()
-                .unwrap_or(serde_json::json!({"type": "object", "properties": {}})),
-        })
-        .collect()
-}
-
-fn convert_tool_calls_to_openai(calls: &[ToolCall]) -> Vec<OpenAiToolCall> {
-    calls
-        .iter()
-        .map(|tc| OpenAiToolCall {
-            id: tc.id.clone(),
-            call_type: "function".to_string(),
-            function: OpenAiToolCallFunction {
-                name: tc.name.clone(),
-                arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
-            },
-        })
-        .collect()
-}
-
-pub fn finish_reason_str(reason: FinishReason) -> String {
-    match reason {
-        FinishReason::Stop => "stop".to_string(),
-        FinishReason::Length => "length".to_string(),
-        FinishReason::ToolUse => "tool_calls".to_string(),
-        FinishReason::ContentFilter => "content_filter".to_string(),
-        FinishReason::Unknown => "stop".to_string(),
-    }
-}
-
-fn normalize_tool_choice(val: &serde_json::Value) -> Option<String> {
-    match val {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(obj) => {
-            // { "type": "function", "function": { "name": "foo" } } → "required"
-            if obj.contains_key("function") {
-                Some("required".to_string())
-            } else {
-                obj.get("type")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            }
-        }
-        _ => None,
-    }
-}
-
 fn map_llm_error(err: crate::error::LlmError) -> (StatusCode, Json<OpenAiErrorResponse>) {
-    let (status, error_type, code) = match &err {
+    let mapping = match &err {
         crate::error::LlmError::AuthFailed { .. }
-        | crate::error::LlmError::SessionExpired { .. } => (
-            StatusCode::UNAUTHORIZED,
-            "authentication_error",
-            "auth_error",
-        ),
-        crate::error::LlmError::RateLimited { .. } => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limit_error",
-            "rate_limit",
-        ),
-        crate::error::LlmError::ContextLengthExceeded { .. } => (
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "context_length_exceeded",
-        ),
-        crate::error::LlmError::ModelNotAvailable { .. } => (
-            StatusCode::NOT_FOUND,
-            "invalid_request_error",
-            "model_not_found",
-        ),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "internal_error",
-        ),
+        | crate::error::LlmError::SessionExpired { .. } => {
+            OpenAiErrorMapping::new(StatusCode::UNAUTHORIZED, OpenAiErrorKind::Authentication)
+                .with_code("auth_error")
+        }
+        crate::error::LlmError::RateLimited { .. } => {
+            OpenAiErrorMapping::new(StatusCode::TOO_MANY_REQUESTS, OpenAiErrorKind::RateLimit)
+                .with_code("rate_limit")
+        }
+        crate::error::LlmError::ContextLengthExceeded { .. } => {
+            OpenAiErrorMapping::new(StatusCode::BAD_REQUEST, OpenAiErrorKind::InvalidRequest)
+                .with_code("context_length_exceeded")
+        }
+        crate::error::LlmError::ModelNotAvailable { .. } => {
+            OpenAiErrorMapping::new(StatusCode::NOT_FOUND, OpenAiErrorKind::InvalidRequest)
+                .with_code("model_not_found")
+        }
+        _ => OpenAiErrorMapping::new(StatusCode::INTERNAL_SERVER_ERROR, OpenAiErrorKind::Server)
+            .with_code("internal_error"),
     };
 
-    (
-        status,
-        Json(OpenAiErrorResponse {
-            error: OpenAiErrorDetail {
-                message: err.to_string(),
-                error_type: error_type.to_string(),
-                param: None,
-                code: Some(code.to_string()),
-            },
-        }),
-    )
-}
-
-fn openai_error(
-    status: StatusCode,
-    message: impl Into<String>,
-    error_type: &str,
-) -> (StatusCode, Json<OpenAiErrorResponse>) {
-    (
-        status,
-        Json(OpenAiErrorResponse {
-            error: OpenAiErrorDetail {
-                message: message.into(),
-                error_type: error_type.to_string(),
-                param: None,
-                code: None,
-            },
-        }),
-    )
-}
-
-fn chat_completion_id() -> String {
-    format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())
-}
-
-fn unix_timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn validate_model_name(model: &str) -> Result<(), String> {
-    let trimmed = model.trim();
-
-    if trimmed.is_empty() {
-        return Err("model must not be empty".to_string());
-    }
-    if trimmed != model {
-        return Err("model must not have leading or trailing whitespace".to_string());
-    }
-    if model.len() > MAX_MODEL_NAME_BYTES {
-        return Err(format!(
-            "model must be at most {} bytes",
-            MAX_MODEL_NAME_BYTES
-        ));
-    }
-    if model.chars().any(char::is_control) {
-        return Err("model contains control characters".to_string());
-    }
-    Ok(())
-}
-
-/// Extract stop sequences from the flexible `stop` field.
-fn parse_stop(val: &serde_json::Value) -> Option<Vec<String>> {
-    match val {
-        serde_json::Value::String(s) => Some(vec![s.clone()]),
-        serde_json::Value::Array(arr) => {
-            let strs: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-            if strs.is_empty() { None } else { Some(strs) }
-        }
-        _ => None,
-    }
+    mapping.into_axum_response(err.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +72,7 @@ pub async fn chat_completions_handler(
         return Err(openai_error(
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Please try again later.",
-            "rate_limit_error",
+            OpenAiErrorKind::RateLimit,
         ));
     }
 
@@ -444,7 +80,7 @@ pub async fn chat_completions_handler(
         openai_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "LLM provider not configured",
-            "server_error",
+            OpenAiErrorKind::Server,
         )
     })?;
 
@@ -452,14 +88,14 @@ pub async fn chat_completions_handler(
         return Err(openai_error(
             StatusCode::BAD_REQUEST,
             "messages must not be empty",
-            "invalid_request_error",
+            OpenAiErrorKind::InvalidRequest,
         ));
     }
     if let Err(e) = validate_model_name(&req.model) {
         return Err(openai_error(
             StatusCode::BAD_REQUEST,
             e,
-            "invalid_request_error",
+            OpenAiErrorKind::InvalidRequest,
         ));
     }
 
@@ -476,7 +112,7 @@ pub async fn chat_completions_handler(
     // --- Non-streaming path ---
 
     let messages = convert_messages(&req.messages)
-        .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
+        .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, OpenAiErrorKind::InvalidRequest))?;
     let id = chat_completion_id();
     let created = unix_timestamp();
 
@@ -500,36 +136,7 @@ pub async fn chat_completions_handler(
             .await
             .map_err(map_llm_error)?;
         let model_name = llm.effective_model_name(Some(requested_model.as_str()));
-
-        let tool_calls_openai = if resp.tool_calls.is_empty() {
-            None
-        } else {
-            Some(convert_tool_calls_to_openai(&resp.tool_calls))
-        };
-
-        let response = OpenAiChatResponse {
-            id,
-            object: "chat.completion",
-            created,
-            model: model_name,
-            choices: vec![OpenAiChoice {
-                index: 0,
-                message: OpenAiMessage {
-                    role: "assistant".to_string(),
-                    content: resp.content.clone(),
-                    name: None,
-                    tool_call_id: None,
-                    tool_calls: tool_calls_openai,
-                    reasoning_content: resp.thinking_content.clone(),
-                },
-                finish_reason: finish_reason_str(resp.finish_reason),
-            }],
-            usage: OpenAiUsage {
-                prompt_tokens: resp.input_tokens,
-                completion_tokens: resp.output_tokens,
-                total_tokens: resp.input_tokens + resp.output_tokens,
-            },
-        };
+        let response = build_tool_completion_chat_response(id, created, model_name, resp);
 
         Ok(Json(response).into_response())
     } else {
@@ -546,30 +153,7 @@ pub async fn chat_completions_handler(
 
         let resp = llm.complete(comp_req).await.map_err(map_llm_error)?;
         let model_name = llm.effective_model_name(Some(requested_model.as_str()));
-
-        let response = OpenAiChatResponse {
-            id,
-            object: "chat.completion",
-            created,
-            model: model_name,
-            choices: vec![OpenAiChoice {
-                index: 0,
-                message: OpenAiMessage {
-                    role: "assistant".to_string(),
-                    content: Some(resp.content),
-                    name: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                    reasoning_content: resp.thinking_content,
-                },
-                finish_reason: finish_reason_str(resp.finish_reason),
-            }],
-            usage: OpenAiUsage {
-                prompt_tokens: resp.input_tokens,
-                completion_tokens: resp.output_tokens,
-                total_tokens: resp.input_tokens + resp.output_tokens,
-            },
-        };
+        let response = build_completion_chat_response(id, created, model_name, resp);
 
         Ok(Json(response).into_response())
     }
@@ -592,7 +176,7 @@ async fn handle_streaming(
     use futures::StreamExt;
 
     let messages = convert_messages(&req.messages)
-        .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
+        .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, OpenAiErrorKind::InvalidRequest))?;
 
     let requested_model = req.model.clone();
     let id = chat_completion_id();
@@ -640,21 +224,7 @@ async fn handle_streaming(
         let mut chunk_stream = std::pin::pin!(chunk_stream);
 
         // Send initial chunk with role
-        let role_chunk = OpenAiChatChunk {
-            id: id.clone(),
-            object: "chat.completion.chunk",
-            created,
-            model: model_name.clone(),
-            choices: vec![OpenAiChunkChoice {
-                index: 0,
-                delta: OpenAiDelta {
-                    role: Some("assistant".to_string()),
-                    content: None,
-                    tool_calls: None,
-                },
-                finish_reason: None,
-            }],
-        };
+        let role_chunk = build_role_chunk(&id, created, &model_name);
         let data = serde_json::to_string(&role_chunk).unwrap_or_default();
         let _ = tx.send(Ok(Event::default().data(data))).await;
 
@@ -662,21 +232,7 @@ async fn handle_streaming(
         while let Some(chunk_result) = chunk_stream.next().await {
             match chunk_result {
                 Ok(StreamChunk::Text(text)) => {
-                    let chunk = OpenAiChatChunk {
-                        id: id.clone(),
-                        object: "chat.completion.chunk",
-                        created,
-                        model: model_name.clone(),
-                        choices: vec![OpenAiChunkChoice {
-                            index: 0,
-                            delta: OpenAiDelta {
-                                role: None,
-                                content: Some(text),
-                                tool_calls: None,
-                            },
-                            finish_reason: None,
-                        }],
-                    };
+                    let chunk = build_text_chunk(&id, created, &model_name, text);
                     let data = serde_json::to_string(&chunk).unwrap_or_default();
                     if tx.send(Ok(Event::default().data(data))).await.is_err() {
                         break;
@@ -688,33 +244,7 @@ async fn handle_streaming(
                     // Future: could emit as custom SSE event or extension field.
                 }
                 Ok(StreamChunk::ToolCall(tc)) => {
-                    let deltas = vec![OpenAiToolCallDelta {
-                        index: 0,
-                        id: Some(tc.id),
-                        call_type: Some("function".to_string()),
-                        function: Some(OpenAiToolCallFunctionDelta {
-                            name: Some(tc.name),
-                            arguments: Some(
-                                serde_json::to_string(&tc.arguments).unwrap_or_default(),
-                            ),
-                        }),
-                    }];
-
-                    let chunk = OpenAiChatChunk {
-                        id: id.clone(),
-                        object: "chat.completion.chunk",
-                        created,
-                        model: model_name.clone(),
-                        choices: vec![OpenAiChunkChoice {
-                            index: 0,
-                            delta: OpenAiDelta {
-                                role: None,
-                                content: None,
-                                tool_calls: Some(deltas),
-                            },
-                            finish_reason: None,
-                        }],
-                    };
+                    let chunk = build_tool_call_chunk(&id, created, &model_name, tc);
                     let data = serde_json::to_string(&chunk).unwrap_or_default();
                     if tx.send(Ok(Event::default().data(data))).await.is_err() {
                         break;
@@ -726,35 +256,15 @@ async fn handle_streaming(
                     name,
                     arguments_delta,
                 }) => {
-                    let delta = OpenAiToolCallDelta {
-                        index,
-                        id: if tc_id.is_empty() { None } else { Some(tc_id) },
-                        call_type: if name.is_some() {
-                            Some("function".to_string())
-                        } else {
-                            None
-                        },
-                        function: Some(OpenAiToolCallFunctionDelta {
-                            name,
-                            arguments: arguments_delta,
-                        }),
-                    };
-
-                    let chunk = OpenAiChatChunk {
-                        id: id.clone(),
-                        object: "chat.completion.chunk",
+                    let chunk = build_tool_call_delta_chunk(
+                        &id,
                         created,
-                        model: model_name.clone(),
-                        choices: vec![OpenAiChunkChoice {
-                            index: 0,
-                            delta: OpenAiDelta {
-                                role: None,
-                                content: None,
-                                tool_calls: Some(vec![delta]),
-                            },
-                            finish_reason: None,
-                        }],
-                    };
+                        &model_name,
+                        index,
+                        tc_id,
+                        name,
+                        arguments_delta,
+                    );
                     let data = serde_json::to_string(&chunk).unwrap_or_default();
                     if tx.send(Ok(Event::default().data(data))).await.is_err() {
                         break;
@@ -794,21 +304,7 @@ async fn send_finish_chunk(
     model: &str,
     reason: FinishReason,
 ) {
-    let chunk = OpenAiChatChunk {
-        id: id.to_string(),
-        object: "chat.completion.chunk",
-        created,
-        model: model.to_string(),
-        choices: vec![OpenAiChunkChoice {
-            index: 0,
-            delta: OpenAiDelta {
-                role: None,
-                content: None,
-                tool_calls: None,
-            },
-            finish_reason: Some(finish_reason_str(reason)),
-        }],
-    };
+    let chunk = build_finish_chunk(id, created, model, reason);
     let data = serde_json::to_string(&chunk).unwrap_or_default();
     let _ = tx.send(Ok(Event::default().data(data))).await;
 }
@@ -820,42 +316,19 @@ pub async fn models_handler(
         openai_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "LLM provider not configured",
-            "server_error",
+            OpenAiErrorKind::Server,
         )
     })?;
 
-    let model_name = llm.active_model_name();
+    let active_model = llm.active_model_name();
     let created = unix_timestamp();
 
-    // Try to fetch available models from the provider
     let models = match llm.list_models().await {
-        Ok(names) if !names.is_empty() => names
-            .into_iter()
-            .map(|name| {
-                serde_json::json!({
-                    "id": name,
-                    "object": "model",
-                    "created": created,
-                    "owned_by": "thinclaw"
-                })
-            })
-            .collect(),
-        Ok(_) => {
-            // Empty list: fall back to active model
-            vec![serde_json::json!({
-                "id": model_name,
-                "object": "model",
-                "created": created,
-                "owned_by": "thinclaw"
-            })]
-        }
+        Ok(names) => build_models_response(created, active_model, names),
         Err(e) => return Err(map_llm_error(e)),
     };
 
-    Ok(Json(serde_json::json!({
-        "object": "list",
-        "data": models
-    })))
+    Ok(Json(models))
 }
 
 // ---------------------------------------------------------------------------

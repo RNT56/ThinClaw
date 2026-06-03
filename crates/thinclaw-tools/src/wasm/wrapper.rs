@@ -952,6 +952,7 @@ impl std::fmt::Debug for WasmToolWrapper {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tool_invoke_host_tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};

@@ -144,6 +144,12 @@ impl AgentRunArtifact {
         self
     }
 
+    pub fn mark_failed(&mut self, reason: impl Into<String>) {
+        self.status = AgentRunStatus::Failed;
+        self.completed_at = Some(Utc::now());
+        self.failure_reason = Some(reason.into());
+    }
+
     pub fn with_execution_backend(mut self, execution_backend: Option<String>) -> Self {
         self.execution_backend = execution_backend.filter(|value| !value.trim().is_empty());
         self
@@ -207,6 +213,24 @@ impl AgentRunArtifact {
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = metadata;
         self
+    }
+
+    pub fn provider_payload(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_else(|_| {
+            serde_json::json!({
+                "run_id": self.run_id,
+                "source": self.source,
+                "status": self.status,
+                "started_at": self.started_at,
+                "completed_at": self.completed_at,
+                "failure_reason": self.failure_reason,
+                "execution_backend": self.execution_backend,
+                "prompt_snapshot_hash": self.prompt_snapshot_hash,
+                "ephemeral_overlay_hash": self.ephemeral_overlay_hash,
+                "provider_context_refs": self.provider_context_refs,
+                "metadata": self.metadata,
+            })
+        })
     }
 }
 
@@ -372,6 +396,21 @@ mod tests {
     }
 
     #[test]
+    fn mark_failed_sets_failed_status_reason_and_completion_time() {
+        let mut artifact =
+            AgentRunArtifact::new("experiment", AgentRunStatus::Completed, Utc::now(), None);
+
+        artifact.mark_failed("no candidate diff");
+
+        assert_eq!(artifact.status, AgentRunStatus::Failed);
+        assert_eq!(
+            artifact.failure_reason.as_deref(),
+            Some("no candidate diff")
+        );
+        assert!(artifact.completed_at.is_some());
+    }
+
+    #[test]
     fn digest_helpers_skip_empty_payloads() {
         assert_eq!(digest_text("   "), None);
         assert_eq!(digest_json(&serde_json::Value::Null), None);
@@ -382,6 +421,35 @@ mod tests {
     #[test]
     fn digest_text_is_trim_stable() {
         assert_eq!(digest_text("  hello  "), digest_text("hello"));
+    }
+
+    #[test]
+    fn provider_payload_serializes_run_artifact_for_external_memory() {
+        let artifact = AgentRunArtifact::new(
+            "chat",
+            AgentRunStatus::Completed,
+            Utc::now(),
+            Some(Utc::now()),
+        )
+        .with_execution_backend(Some("docker".to_string()))
+        .with_prompt_hashes(
+            Some("prompt-hash".to_string()),
+            Some("overlay-hash".to_string()),
+        )
+        .with_provider_context_refs(vec!["mem-2".to_string(), "mem-1".to_string()])
+        .with_metadata(serde_json::json!({"channel": "web"}));
+
+        let payload = artifact.provider_payload();
+        assert_eq!(payload["run_id"], artifact.run_id);
+        assert_eq!(payload["source"], "chat");
+        assert_eq!(payload["execution_backend"], "docker");
+        assert_eq!(payload["prompt_snapshot_hash"], "prompt-hash");
+        assert_eq!(payload["ephemeral_overlay_hash"], "overlay-hash");
+        assert_eq!(
+            payload["provider_context_refs"],
+            serde_json::json!(["mem-1", "mem-2"])
+        );
+        assert_eq!(payload["metadata"]["channel"], "web");
     }
 
     #[test]

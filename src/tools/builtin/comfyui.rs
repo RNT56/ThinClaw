@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use base64::Engine;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -16,6 +15,19 @@ use crate::secrets::{SecretAccessContext, SecretsStore};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolApprovalClass, ToolError, ToolMetadata, ToolOutput,
     ToolRateLimitConfig, ToolSideEffectLevel, require_str,
+};
+use thinclaw_tools::builtin::comfyui::{
+    COMFY_CHECK_DEPS_DESCRIPTION, COMFY_HEALTH_DESCRIPTION, COMFY_MANAGE_DESCRIPTION,
+    COMFY_RUN_WORKFLOW_DESCRIPTION, ComfyGenerationImageBytes, ComfyWorkflowJsonSource,
+    IMAGE_GENERATE_DESCRIPTION, comfy_check_deps_schema, comfy_generation_output,
+    comfy_hardware_check, comfy_health_schema, comfy_install_gpu_flag, comfy_manage_schema,
+    comfy_run_workflow_schema, image_generate_schema, optional_u32_param, parse_comfy_mode,
+    parse_workflow_json, resolve_workflow_json_source, tool_external,
+};
+use thinclaw_tools::ports::{
+    ComfyUiToolHostPort, ToolComfyActionRequest, ToolComfyActionResult, ToolComfyStatus,
+    ToolComfyWorkflowRequest, ToolComfyWorkflowResult, ToolHostError, ToolOperationScope,
+    job_context_from_tool_scope,
 };
 
 #[derive(Clone)]
@@ -36,7 +48,7 @@ impl ComfyToolState {
     }
 
     async fn client(&self) -> Result<thinclaw_media::ComfyUiClient, ToolError> {
-        let mode = parse_mode(&self.config.mode)?;
+        let mode = parse_comfy_mode(&self.config.mode)?;
         let api_key = if mode.is_cloud() {
             Some(self.resolve_cloud_api_key().await?)
         } else {
@@ -79,6 +91,124 @@ impl ComfyToolState {
     }
 }
 
+pub struct RootComfyUiToolHost {
+    config: ComfyUiConfig,
+    secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
+}
+
+pub fn root_comfyui_tool_host(
+    config: ComfyUiConfig,
+    secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
+) -> Arc<dyn ComfyUiToolHostPort> {
+    Arc::new(RootComfyUiToolHost { config, secrets })
+}
+
+fn comfy_tool_host_error_from_tool(error: ToolError) -> ToolHostError {
+    ToolHostError::OperationFailed {
+        reason: error.to_string(),
+    }
+}
+
+async fn execute_root_comfy_tool<T>(
+    tool: T,
+    request: ToolComfyActionRequest,
+    title: &str,
+) -> Result<ToolComfyActionResult, ToolHostError>
+where
+    T: Tool,
+{
+    let ctx = job_context_from_tool_scope(request.scope, title);
+    let output = tool
+        .execute(request.params, &ctx)
+        .await
+        .map_err(comfy_tool_host_error_from_tool)?;
+    Ok(ToolComfyActionResult {
+        output: output.result,
+        artifacts: output.artifacts,
+    })
+}
+
+#[async_trait]
+impl ComfyUiToolHostPort for RootComfyUiToolHost {
+    async fn comfy_status(
+        &self,
+        _scope: ToolOperationScope,
+    ) -> Result<ToolComfyStatus, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "comfy_status_structured".to_string(),
+        })
+    }
+
+    async fn run_comfy_workflow(
+        &self,
+        _request: ToolComfyWorkflowRequest,
+    ) -> Result<ToolComfyWorkflowResult, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "comfy_workflow_structured".to_string(),
+        })
+    }
+
+    async fn image_generate_action(
+        &self,
+        request: ToolComfyActionRequest,
+    ) -> Result<ToolComfyActionResult, ToolHostError> {
+        execute_root_comfy_tool(
+            ImageGenerateTool::new(self.config.clone(), self.secrets.clone()),
+            request,
+            "image generate",
+        )
+        .await
+    }
+
+    async fn comfy_health_action(
+        &self,
+        request: ToolComfyActionRequest,
+    ) -> Result<ToolComfyActionResult, ToolHostError> {
+        execute_root_comfy_tool(
+            ComfyHealthTool::new(self.config.clone(), self.secrets.clone()),
+            request,
+            "comfy health",
+        )
+        .await
+    }
+
+    async fn comfy_check_deps_action(
+        &self,
+        request: ToolComfyActionRequest,
+    ) -> Result<ToolComfyActionResult, ToolHostError> {
+        execute_root_comfy_tool(
+            ComfyCheckDepsTool::new(self.config.clone(), self.secrets.clone()),
+            request,
+            "comfy check deps",
+        )
+        .await
+    }
+
+    async fn comfy_run_workflow_action(
+        &self,
+        request: ToolComfyActionRequest,
+    ) -> Result<ToolComfyActionResult, ToolHostError> {
+        execute_root_comfy_tool(
+            ComfyRunWorkflowTool::new(self.config.clone(), self.secrets.clone()),
+            request,
+            "comfy run workflow",
+        )
+        .await
+    }
+
+    async fn comfy_manage_action(
+        &self,
+        request: ToolComfyActionRequest,
+    ) -> Result<ToolComfyActionResult, ToolHostError> {
+        execute_root_comfy_tool(
+            ComfyManageTool::new(self.config.clone(), self.secrets.clone()),
+            request,
+            "comfy manage",
+        )
+        .await
+    }
+}
+
 pub struct ImageGenerateTool {
     state: ComfyToolState,
 }
@@ -101,30 +231,11 @@ impl Tool for ImageGenerateTool {
     }
 
     fn description(&self) -> &str {
-        "Generate an image with ComfyUI. Use for prompt-to-image requests. Outputs image files and renderable image artifacts."
+        IMAGE_GENERATE_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "prompt": {"type": "string", "description": "Image prompt to generate."},
-                "aspect_ratio": {
-                    "type": "string",
-                    "enum": ["square", "landscape", "portrait", "wide", "tall", "1:1", "16:9", "9:16"],
-                    "default": self.state.config.default_aspect_ratio
-                },
-                "negative_prompt": {"type": "string", "description": "Optional negative prompt."},
-                "seed": {"type": "integer", "description": "Optional deterministic seed."},
-                "workflow": {"type": "string", "description": "Bundled workflow name or approved workflow path."},
-                "width": {"type": "integer", "minimum": 64, "maximum": 4096},
-                "height": {"type": "integer", "minimum": 64, "maximum": 4096},
-                "steps": {"type": "integer", "minimum": 1, "maximum": 150},
-                "cfg": {"type": "number", "minimum": 0.0, "maximum": 30.0},
-                "model": {"type": "string", "description": "Optional checkpoint/model filename to inject."}
-            },
-            "required": ["prompt"]
-        })
+        image_generate_schema(&self.state.config.default_aspect_ratio)
     }
 
     async fn execute(&self, params: Value, _ctx: &JobContext) -> Result<ToolOutput, ToolError> {
@@ -168,10 +279,10 @@ impl Tool for ImageGenerateTool {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
                 aspect_ratio,
-                width: optional_u32(&params, "width")?,
-                height: optional_u32(&params, "height")?,
+                width: optional_u32_param(&params, "width")?,
+                height: optional_u32_param(&params, "height")?,
                 seed: params.get("seed").and_then(Value::as_i64),
-                steps: optional_u32(&params, "steps")?,
+                steps: optional_u32_param(&params, "steps")?,
                 cfg: params.get("cfg").and_then(Value::as_f64),
                 model: params
                     .get("model")
@@ -236,11 +347,11 @@ impl Tool for ComfyHealthTool {
     }
 
     fn description(&self) -> &str {
-        "Check configured ComfyUI server health and object-info availability."
+        COMFY_HEALTH_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({"type": "object", "properties": {}, "required": []})
+        comfy_health_schema()
     }
 
     async fn execute(&self, _params: Value, _ctx: &JobContext) -> Result<ToolOutput, ToolError> {
@@ -277,17 +388,11 @@ impl Tool for ComfyCheckDepsTool {
     }
 
     fn description(&self) -> &str {
-        "Check a ComfyUI workflow for missing custom nodes and model references."
+        COMFY_CHECK_DEPS_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "workflow": {"type": "string", "description": "Bundled workflow name or approved workflow JSON path."}
-            },
-            "required": ["workflow"]
-        })
+        comfy_check_deps_schema()
     }
 
     async fn execute(&self, params: Value, _ctx: &JobContext) -> Result<ToolOutput, ToolError> {
@@ -330,29 +435,11 @@ impl Tool for ComfyRunWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Run a bundled or explicitly approved ComfyUI workflow, including img2img, upscale, or custom inpaint/video workflows."
+        COMFY_RUN_WORKFLOW_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "workflow": {"type": "string", "description": "Bundled workflow name or approved workflow JSON path."},
-                "prompt": {"type": "string"},
-                "negative_prompt": {"type": "string"},
-                "aspect_ratio": {"type": "string", "default": self.state.config.default_aspect_ratio},
-                "seed": {"type": "integer"},
-                "width": {"type": "integer", "minimum": 64, "maximum": 4096},
-                "height": {"type": "integer", "minimum": 64, "maximum": 4096},
-                "steps": {"type": "integer", "minimum": 1, "maximum": 150},
-                "cfg": {"type": "number", "minimum": 0.0, "maximum": 30.0},
-                "model": {"type": "string"},
-                "input_image": {"type": "string", "description": "Local input image path for img2img/upscale."},
-                "mask_image": {"type": "string", "description": "Local mask image path for inpaint."},
-                "wait": {"type": "boolean", "default": true}
-            },
-            "required": ["workflow", "prompt"]
-        })
+        comfy_run_workflow_schema(&self.state.config.default_aspect_ratio)
     }
 
     async fn execute(&self, params: Value, _ctx: &JobContext) -> Result<ToolOutput, ToolError> {
@@ -385,10 +472,10 @@ impl Tool for ComfyRunWorkflowTool {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
                 aspect_ratio,
-                width: optional_u32(&params, "width")?,
-                height: optional_u32(&params, "height")?,
+                width: optional_u32_param(&params, "width")?,
+                height: optional_u32_param(&params, "height")?,
                 seed: params.get("seed").and_then(Value::as_i64),
-                steps: optional_u32(&params, "steps")?,
+                steps: optional_u32_param(&params, "steps")?,
                 cfg: params.get("cfg").and_then(Value::as_f64),
                 model: params
                     .get("model")
@@ -448,24 +535,11 @@ impl Tool for ComfyManageTool {
     }
 
     fn description(&self) -> &str {
-        "Explicitly manage local ComfyUI lifecycle: hardware_check, install_cli, install_comfyui, launch, stop, download_model, install_node."
+        COMFY_MANAGE_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["hardware_check", "install_cli", "install_comfyui", "launch", "stop", "download_model", "install_node"]
-                },
-                "gpu": {"type": "string", "enum": ["nvidia", "amd", "m-series", "cpu"]},
-                "model_url": {"type": "string"},
-                "model_type": {"type": "string"},
-                "node": {"type": "string"}
-            },
-            "required": ["action"]
-        })
+        comfy_manage_schema()
     }
 
     async fn execute(&self, params: Value, _ctx: &JobContext) -> Result<ToolOutput, ToolError> {
@@ -477,7 +551,7 @@ impl Tool for ComfyManageTool {
         let start = Instant::now();
         let action = require_str(&params, "action")?;
         let result = match action {
-            "hardware_check" => hardware_check(),
+            "hardware_check" => comfy_hardware_check(),
             "install_cli" => {
                 run_command(
                     "python3",
@@ -488,17 +562,7 @@ impl Tool for ComfyManageTool {
             }
             "install_comfyui" => {
                 let gpu = params.get("gpu").and_then(Value::as_str).unwrap_or("cpu");
-                let flag = match gpu {
-                    "nvidia" => "--nvidia",
-                    "amd" => "--amd",
-                    "m-series" => "--m-series",
-                    "cpu" => "--cpu",
-                    other => {
-                        return Err(ToolError::InvalidParameters(format!(
-                            "invalid gpu '{other}'"
-                        )));
-                    }
-                };
+                let flag = comfy_install_gpu_flag(gpu)?;
                 run_command(
                     "comfy",
                     &["--skip-prompt", "install", flag],
@@ -574,7 +638,7 @@ async fn generation_output(
     generation: thinclaw_media::ComfyGeneration,
     duration: Duration,
 ) -> Result<ToolOutput, ToolError> {
-    let mut artifacts = Vec::new();
+    let mut image_bytes = Vec::new();
     for output in &generation.outputs {
         if output.media_type == "image" {
             let bytes = tokio::fs::read(&output.file_path).await.map_err(|e| {
@@ -583,94 +647,26 @@ async fn generation_output(
                     output.file_path.display()
                 ))
             })?;
-            artifacts.push(crate::tools::tool::ToolArtifact::Image {
-                data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                mime_type: output.mime_type.clone(),
-            });
-        } else {
-            artifacts.push(crate::tools::tool::ToolArtifact::ResourceLink {
-                uri: output.file_path.to_string_lossy().to_string(),
-                name: Some(output.filename.clone()),
-                title: Some(output.filename.clone()),
-                mime_type: Some(output.mime_type.clone()),
-                description: Some(format!("ComfyUI {} output", output.media_type)),
+            image_bytes.push(ComfyGenerationImageBytes {
+                file_path: output.file_path.clone(),
+                bytes,
             });
         }
     }
 
-    Ok(ToolOutput::success(json!(generation), duration).with_artifacts(artifacts))
+    comfy_generation_output(generation, duration, image_bytes)
 }
 
 async fn load_workflow(name_or_path: &str, allow_untrusted: bool) -> Result<Value, ToolError> {
-    if let Some(workflow) = thinclaw_media::bundled_workflow(name_or_path) {
-        return Ok(workflow);
-    }
-    if !allow_untrusted {
-        return Err(ToolError::InvalidParameters(format!(
-            "workflow '{name_or_path}' is not bundled and untrusted workflow paths are disabled"
-        )));
+    match resolve_workflow_json_source(name_or_path, allow_untrusted)? {
+        ComfyWorkflowJsonSource::Bundled(workflow) => return Ok(workflow),
+        ComfyWorkflowJsonSource::ApprovedPath => {}
     }
     let path = Path::new(name_or_path);
     let content = tokio::fs::read_to_string(path).await.map_err(|e| {
         ToolError::InvalidParameters(format!("failed to read workflow {}: {e}", path.display()))
     })?;
-    serde_json::from_str(&content).map_err(|e| {
-        ToolError::InvalidParameters(format!("failed to parse workflow {}: {e}", path.display()))
-    })
-}
-
-fn parse_mode(mode: &str) -> Result<thinclaw_media::ComfyUiMode, ToolError> {
-    match mode {
-        "local_existing" => Ok(thinclaw_media::ComfyUiMode::LocalExisting),
-        "local_managed" => Ok(thinclaw_media::ComfyUiMode::LocalManaged),
-        "cloud" => Ok(thinclaw_media::ComfyUiMode::Cloud),
-        other => Err(ToolError::InvalidParameters(format!(
-            "invalid ComfyUI mode '{other}'"
-        ))),
-    }
-}
-
-fn optional_u32(params: &Value, key: &str) -> Result<Option<u32>, ToolError> {
-    params
-        .get(key)
-        .and_then(Value::as_u64)
-        .map(|value| {
-            u32::try_from(value).map_err(|_| {
-                ToolError::InvalidParameters(format!("{key} is too large for a 32-bit integer"))
-            })
-        })
-        .transpose()
-}
-
-fn tool_external(error: impl std::fmt::Display) -> ToolError {
-    ToolError::ExternalService(error.to_string())
-}
-
-fn hardware_check() -> Value {
-    let mut system = sysinfo::System::new_all();
-    system.refresh_all();
-    let total_memory_gib = system.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
-    let cpu_count = system.cpus().len();
-    let os = sysinfo::System::name().unwrap_or_else(|| std::env::consts::OS.to_string());
-    let arch = std::env::consts::ARCH;
-    let verdict = if cfg!(target_os = "macos") && total_memory_gib >= 16.0 {
-        "ok_m_series_or_cpu"
-    } else if total_memory_gib >= 8.0 {
-        "ok_if_gpu_available"
-    } else {
-        "cloud_recommended"
-    };
-    json!({
-        "os": os,
-        "arch": arch,
-        "cpu_count": cpu_count,
-        "total_memory_gib": (total_memory_gib * 10.0).round() / 10.0,
-        "verdict": verdict,
-        "notes": [
-            "Use nvidia-smi or rocm-smi manually to confirm discrete GPU VRAM.",
-            "ComfyUI local generation is most reliable with at least 8GB VRAM or Apple Silicon with 16GB+ unified memory."
-        ]
-    })
+    parse_workflow_json(&path.display().to_string(), &content)
 }
 
 async fn run_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Value, ToolError> {

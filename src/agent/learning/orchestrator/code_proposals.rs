@@ -5,38 +5,13 @@ impl LearningOrchestrator {
         event: &DbLearningEvent,
         candidate: &DbLearningCandidate,
     ) -> Result<Uuid, String> {
-        let title = event
-            .payload
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Learning-driven code proposal")
-            .to_string();
-        let rationale = event
-            .payload
-            .get("rationale")
-            .and_then(|v| v.as_str())
-            .or(candidate.summary.as_deref())
-            .unwrap_or("Distilled from repeated failures/corrections")
-            .to_string();
-        let target_files = event
-            .payload
-            .get("target_files")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|entry| entry.as_str().map(str::to_string))
-            .collect::<Vec<_>>();
-        let diff = event
-            .payload
-            .get("diff")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if diff.trim().is_empty() {
-            return Err("code proposal missing diff".to_string());
-        }
-        let fingerprint = proposal_fingerprint(&title, &rationale, &target_files, &diff);
+        let fields = build_code_proposal_fields(
+            &event.source,
+            &event.payload,
+            candidate.id,
+            candidate.summary.as_deref(),
+            candidate.confidence,
+        )?;
 
         if let Ok(rejected) = self
             .store
@@ -57,62 +32,33 @@ impl LearningOrchestrator {
                             &prior.diff,
                         )
                     });
-                if prior_fp != fingerprint {
-                    continue;
-                }
-                let age_hours = (Utc::now() - prior.updated_at).num_hours().abs();
-                if age_hours <= PROPOSAL_SUPPRESSION_WINDOW_HOURS {
-                    return Err(format!(
-                        "similar proposal was rejected {}h ago (fingerprint={}); cooldown active",
-                        age_hours, fingerprint
-                    ));
+                if let Some(message) = rejected_code_proposal_suppression_message(
+                    &fields.fingerprint,
+                    &prior_fp,
+                    prior.updated_at,
+                    Utc::now(),
+                    PROPOSAL_SUPPRESSION_WINDOW_HOURS,
+                ) {
+                    return Err(message);
                 }
             }
         }
-
-        let evidence = event
-            .payload
-            .get("evidence")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({ "event_payload": event.payload }));
 
         let proposal = DbLearningCodeProposal {
             id: Uuid::new_v4(),
             learning_event_id: Some(event.id),
             user_id: event.user_id.clone(),
             status: "proposed".to_string(),
-            title: title.clone(),
-            rationale: rationale.clone(),
-            target_files: target_files.clone(),
-            diff: diff.clone(),
-            validation_results: event
-                .payload
-                .get("validation_results")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({"status": "not_run"})),
-            rollback_note: event
-                .payload
-                .get("rollback_note")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            title: fields.title,
+            rationale: fields.rationale,
+            target_files: fields.target_files,
+            diff: fields.diff,
+            validation_results: fields.validation_results,
+            rollback_note: fields.rollback_note,
             confidence: candidate.confidence,
             branch_name: None,
             pr_url: None,
-            metadata: serde_json::json!({
-                "candidate_id": candidate.id,
-                "source": event.source,
-                "fingerprint": fingerprint,
-                "package": {
-                    "problem_statement": title,
-                    "evidence": evidence,
-                    "candidate_rationale": rationale,
-                    "target_files": target_files,
-                    "unified_diff": diff,
-                    "validation_results": event.payload.get("validation_results").cloned().unwrap_or_else(|| serde_json::json!({"status": "not_run"})),
-                    "rollback_note": event.payload.get("rollback_note").cloned().unwrap_or(serde_json::Value::Null),
-                    "confidence": candidate.confidence,
-                },
-            }),
+            metadata: fields.metadata,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -166,29 +112,13 @@ impl LearningOrchestrator {
 
         let decision_lower = decision.to_ascii_lowercase();
         if decision_lower == "reject" {
-            let mut metadata = existing.metadata.clone();
-            if !metadata.is_object() {
-                metadata = serde_json::json!({});
-            }
-            if let Some(obj) = metadata.as_object_mut() {
-                obj.insert(
-                    "review".to_string(),
-                    serde_json::json!({
-                        "decision": "reject",
-                        "at": Utc::now().to_rfc3339(),
-                        "note": note,
-                    }),
-                );
-                if let Some(fingerprint) = obj.get("fingerprint").cloned() {
-                    obj.insert(
-                        "anti_learning".to_string(),
-                        serde_json::json!({
-                            "fingerprint": fingerprint,
-                            "suppressed_until": (Utc::now() + chrono::Duration::hours(PROPOSAL_SUPPRESSION_WINDOW_HOURS)).to_rfc3339(),
-                        }),
-                    );
-                }
-            }
+            let metadata = code_proposal_review_metadata(
+                &existing.metadata,
+                "reject",
+                note,
+                Utc::now(),
+                PROPOSAL_SUPPRESSION_WINDOW_HOURS,
+            );
             self.store
                 .update_learning_code_proposal(proposal_id, "rejected", None, None, Some(&metadata))
                 .await
@@ -233,20 +163,13 @@ impl LearningOrchestrator {
         };
 
         let settings = self.load_settings_for_user(user_id).await;
-        let mut metadata = existing.metadata.clone();
-        if !metadata.is_object() {
-            metadata = serde_json::json!({});
-        }
-        if let Some(obj) = metadata.as_object_mut() {
-            obj.insert(
-                "review".to_string(),
-                serde_json::json!({
-                    "decision": "approve",
-                    "at": Utc::now().to_rfc3339(),
-                    "note": note,
-                }),
-            );
-        }
+        let mut metadata = code_proposal_review_metadata(
+            &existing.metadata,
+            "approve",
+            note,
+            Utc::now(),
+            PROPOSAL_SUPPRESSION_WINDOW_HOURS,
+        );
 
         match self.write_proposal_bundle(&existing).await {
             Ok(bundle_dir) => {

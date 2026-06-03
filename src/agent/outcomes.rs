@@ -5,19 +5,27 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use thinclaw_agent::outcomes::{self as outcome_policy, OutcomeScore};
+use thinclaw_agent::outcomes::{
+    self as outcome_policy, CONTRACT_ROUTINE, CONTRACT_TOOL, CONTRACT_TURN,
+    DEFAULT_EVALUATION_INTERVAL_SECS, EVALUATOR_MANUAL_REVIEW, EVALUATOR_OUTCOME,
+    OutcomeCandidateSupplementKind, OutcomeRuntimeSettings, OutcomeScore, SOURCE_ARTIFACT_VERSION,
+    SOURCE_CODE_PROPOSAL, SOURCE_LEARNING_EVENT, SOURCE_ROUTINE_RUN, STATUS_EVALUATED, STATUS_OPEN,
+    VERDICT_NEGATIVE,
+};
+#[cfg(test)]
+use thinclaw_agent::outcomes::{VERDICT_NEUTRAL, VERDICT_POSITIVE};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 pub use outcome_policy::{contract_last_evaluator, ledger_learning_event_id};
 
-use crate::agent::learning::{ImprovementClass, LearningOrchestrator, RiskTier};
+use crate::agent::learning::LearningOrchestrator;
 use crate::agent::routine::{Routine, RoutineRun};
 use crate::db::Database;
 use crate::history::{
-    LearningArtifactVersion, LearningCandidate, LearningCodeProposal, LearningEvaluation,
-    LearningEvent, LearningFeedbackRecord, LearningRollbackRecord, OutcomeContract,
-    OutcomeContractQuery, OutcomeObservation,
+    LearningArtifactVersion, LearningCandidate, LearningCodeProposal, LearningEvent,
+    LearningFeedbackRecord, LearningRollbackRecord, OutcomeContract, OutcomeContractQuery,
+    OutcomeObservation,
 };
 use crate::llm::{LlmProvider, Reasoning};
 use crate::safety::SafetyLayer;
@@ -25,36 +33,6 @@ use crate::settings::LearningSettings;
 use crate::skills::SkillRegistry;
 use crate::workspace::Workspace;
 use crate::workspace::paths;
-
-const CONTRACT_TURN: &str = "turn_usefulness";
-const CONTRACT_TOOL: &str = "tool_durability";
-const CONTRACT_ROUTINE: &str = "routine_usefulness";
-
-const STATUS_OPEN: &str = "open";
-const STATUS_EVALUATING: &str = "evaluating";
-const STATUS_EVALUATED: &str = "evaluated";
-
-#[cfg(test)]
-const VERDICT_POSITIVE: &str = "positive";
-const VERDICT_NEUTRAL: &str = "neutral";
-const VERDICT_NEGATIVE: &str = "negative";
-
-const SOURCE_LEARNING_EVENT: &str = "learning_event";
-const SOURCE_ARTIFACT_VERSION: &str = "artifact_version";
-const SOURCE_CODE_PROPOSAL: &str = "learning_code_proposal";
-const SOURCE_ROUTINE_RUN: &str = "routine_run";
-
-const EVALUATOR_OUTCOME: &str = "outcome_evaluator_v1";
-const EVALUATOR_MANUAL_REVIEW: &str = "outcome_manual_review_v1";
-
-const DEFAULT_EVALUATION_INTERVAL_SECS: u64 = 600;
-const MIN_EVALUATION_INTERVAL_SECS: u64 = 1;
-
-#[derive(Debug, Clone)]
-struct OutcomeSchedulerPlan {
-    user_ids: Vec<String>,
-    sleep_interval_secs: u64,
-}
 
 pub struct OutcomeService {
     store: Arc<dyn Database>,
@@ -104,11 +82,12 @@ impl OutcomeService {
 
     pub async fn run_once_for_user(&self, user_id: &str) -> Result<usize, String> {
         let settings = load_learning_settings(&*self.store, user_id).await;
-        if !outcomes_enabled(&settings) {
+        let runtime_settings = outcome_runtime_settings(&settings);
+        if !outcome_policy::outcomes_enabled(&runtime_settings) {
             return Ok(0);
         }
         let now = Utc::now();
-        let limit = i64::from(settings.outcomes.max_due_per_tick.max(1));
+        let limit = outcome_policy::max_due_per_tick(&runtime_settings);
         let contracts = self
             .store
             .claim_due_outcome_contracts_for_user(user_id, limit, now)
@@ -141,26 +120,26 @@ impl OutcomeService {
         Ok(processed)
     }
 
-    async fn scheduler_plan(&self, now: DateTime<Utc>) -> Result<OutcomeSchedulerPlan, String> {
+    async fn scheduler_plan(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<outcome_policy::OutcomeSchedulerPlan, String> {
         let pending_users: Vec<crate::history::OutcomePendingUser> = self
             .store
             .list_users_with_pending_outcome_work(now)
             .await
             .map_err(|err| err.to_string())?;
-        let mut user_ids = Vec::new();
-        let mut min_interval = DEFAULT_EVALUATION_INTERVAL_SECS;
+        let mut pending_user_settings = Vec::new();
         for pending in pending_users {
             let settings = load_learning_settings(&*self.store, &pending.user_id).await;
-            if !outcomes_enabled(&settings) {
-                continue;
-            }
-            min_interval = min_interval.min(settings.outcomes.evaluation_interval_secs.max(1));
-            user_ids.push(pending.user_id);
+            pending_user_settings.push(outcome_policy::OutcomePendingUserSettings {
+                user_id: pending.user_id,
+                settings: outcome_runtime_settings(&settings),
+            });
         }
-        Ok(OutcomeSchedulerPlan {
-            user_ids,
-            sleep_interval_secs: min_interval.max(MIN_EVALUATION_INTERVAL_SECS),
-        })
+        Ok(outcome_policy::scheduler_plan_for_pending_users(
+            pending_user_settings,
+        ))
     }
 
     async fn evaluate_contract(&self, mut contract: OutcomeContract) -> Result<(), String> {
@@ -171,24 +150,21 @@ impl OutcomeService {
             .map_err(|err| err.to_string())?;
         let settings = load_learning_settings(&*self.store, &contract.user_id).await;
         let mut score = outcome_policy::deterministic_score(&contract, &observations);
-        if settings.outcomes.llm_assist_enabled
-            && outcome_policy::has_mixed_observations(&observations)
-            && let Some(llm_score) = self
-                .llm_assisted_score(&contract, &observations)
-                .await
-                .ok()
-                .flatten()
+        if outcome_policy::should_use_llm_assisted_score(
+            &outcome_runtime_settings(&settings),
+            &observations,
+        ) && let Some(llm_score) = self
+            .llm_assisted_score(&contract, &observations)
+            .await
+            .ok()
+            .flatten()
         {
             score = llm_score;
         }
 
-        contract.status = STATUS_EVALUATED.to_string();
-        contract.final_verdict = Some(score.verdict.clone());
-        contract.final_score = Some(score.score);
-        contract.evaluation_details = score.details.clone();
-        outcome_policy::annotate_contract_with_last_evaluator(&mut contract, EVALUATOR_OUTCOME);
-        contract.evaluated_at = Some(Utc::now());
-        contract.updated_at = Utc::now();
+        let evaluation_plan =
+            outcome_policy::evaluated_contract_plan(&score, EVALUATOR_OUTCOME, Utc::now());
+        outcome_policy::apply_evaluated_contract_plan(&mut contract, &evaluation_plan);
         self.store
             .update_outcome_contract(&contract)
             .await
@@ -231,17 +207,11 @@ impl OutcomeService {
         else {
             return Ok(());
         };
-        if current.status != STATUS_EVALUATING || current.evaluated_at.is_some() {
+        let Some(plan) = outcome_policy::failed_contract_requeue_plan(&current, reason, Utc::now())
+        else {
             return Ok(());
-        }
-        current.status = STATUS_OPEN.to_string();
-        current.claimed_at = None;
-        current.updated_at = Utc::now();
-        outcome_policy::upsert_json_string(
-            &mut current.evaluation_details,
-            "last_error",
-            reason.to_string(),
-        );
+        };
+        outcome_policy::apply_failed_contract_requeue_plan(&mut current, &plan);
         self.store
             .update_outcome_contract(&current)
             .await
@@ -288,27 +258,15 @@ impl OutcomeService {
             }
         };
 
-        let evaluation = LearningEvaluation {
-            id: Uuid::new_v4(),
-            learning_event_id: evaluation_event_id,
-            user_id: contract.user_id.clone(),
-            evaluator: EVALUATOR_OUTCOME.to_string(),
-            status: contract
-                .final_verdict
-                .clone()
-                .unwrap_or_else(|| VERDICT_NEUTRAL.to_string()),
-            score: Some(score.score),
-            details: json!({
-                "contract_id": contract.id,
-                "contract_type": contract.contract_type,
-                "source_kind": contract.source_kind,
-                "source_id": contract.source_id,
-                "final_verdict": score.verdict,
-                "observations": observations,
-                "strategy": score.details.get("strategy").cloned().unwrap_or_else(|| json!("deterministic")),
-            }),
-            created_at: Utc::now(),
-        };
+        let evaluation = outcome_policy::build_learning_evaluation_record(
+            Uuid::new_v4(),
+            evaluation_event_id,
+            contract,
+            score,
+            observations,
+            EVALUATOR_OUTCOME,
+            Utc::now(),
+        );
         self.store
             .insert_learning_evaluation(&evaluation)
             .await
@@ -323,20 +281,6 @@ impl OutcomeService {
         observations: &[OutcomeObservation],
         learning_event_id: Uuid,
     ) -> Result<Option<LearningCandidate>, String> {
-        if score.verdict != VERDICT_NEGATIVE {
-            return Ok(None);
-        }
-        if score.score.abs() < 0.6 {
-            return Ok(None);
-        }
-        let Some(pattern_key) = contract
-            .metadata
-            .get("pattern_key")
-            .and_then(|value| value.as_str())
-        else {
-            return Ok(None);
-        };
-
         let recent = self
             .store
             .list_outcome_contracts(&OutcomeContractQuery {
@@ -352,113 +296,59 @@ impl OutcomeService {
             .await
             .map_err(|err| err.to_string())?;
 
-        let same_pattern = recent
-            .into_iter()
-            .filter(|entry| {
-                entry.id != contract.id
-                    && entry.final_verdict.as_deref() == Some(VERDICT_NEGATIVE)
-                    && entry
-                        .metadata
-                        .get("pattern_key")
-                        .and_then(|value| value.as_str())
-                        == Some(pattern_key)
+        let pattern_key = contract
+            .metadata
+            .get("pattern_key")
+            .and_then(|value| value.as_str());
+        let same_pattern = pattern_key
+            .map(|pattern_key| {
+                recent
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.id != contract.id
+                            && entry.final_verdict.as_deref() == Some(VERDICT_NEGATIVE)
+                            && entry
+                                .metadata
+                                .get("pattern_key")
+                                .and_then(|value| value.as_str())
+                                == Some(pattern_key)
+                    })
+                    .count()
+                    + 1
             })
-            .count()
-            + 1;
+            .unwrap_or_default();
 
-        if same_pattern < 2 {
+        let Some(seed) = outcome_policy::outcome_candidate_seed(contract, score, same_pattern)
+        else {
             return Ok(None);
-        }
-
-        let outcome_class = outcome_policy::candidate_class_for_contract(contract);
-        let class = ImprovementClass::from_str(outcome_class.as_str());
-        if class == ImprovementClass::Unknown {
-            return Ok(None);
-        }
-        let risk =
-            RiskTier::from_str(outcome_policy::candidate_risk_for_class(outcome_class).as_str());
-        let target_name = outcome_policy::candidate_target_name(contract);
-        let summary = format!(
-            "Repeated negative outcome pattern detected for {} ({})",
-            contract.contract_type, pattern_key
-        );
-        let evidence = json!({
-            "source": "outcome_backed_learning",
-            "contract_id": contract.id,
-            "contract_type": contract.contract_type,
-            "pattern_key": pattern_key,
-            "pattern_count": same_pattern,
-            "final_verdict": score.verdict,
-            "observations": observations,
-            "target": target_name.clone(),
-            "target_type": outcome_policy::candidate_target_type(contract),
-            "routine_patch": outcome_policy::routine_candidate_patch(contract, observations),
-        });
+        };
 
         let recent_candidates = self
             .store
-            .list_learning_candidates(&contract.user_id, Some(class.as_str()), None, 50)
+            .list_learning_candidates(&contract.user_id, Some(&seed.candidate_type), None, 50)
             .await
             .map_err(|err| err.to_string())?;
-        let dedupe = outcome_policy::stable_key(&[
-            class.as_str(),
-            &target_name.clone().unwrap_or_default(),
-            pattern_key,
-        ]);
-        if recent_candidates.iter().any(|candidate| {
-            candidate
-                .proposal
-                .get("dedupe_key")
-                .and_then(|value| value.as_str())
-                == Some(dedupe.as_str())
-        }) {
+        if outcome_policy::candidate_dedupe_exists(&recent_candidates, &seed.dedupe_key) {
             return Ok(None);
         }
 
-        let mut proposal = serde_json::Map::new();
-        proposal.insert("dedupe_key".to_string(), json!(dedupe));
-        proposal.insert("source".to_string(), json!("outcome_backed_learning"));
-        proposal.insert("pattern_key".to_string(), json!(pattern_key));
-        proposal.insert("pattern_count".to_string(), json!(same_pattern));
-        proposal.insert("contract_type".to_string(), json!(contract.contract_type));
-        proposal.insert("verdict".to_string(), json!(score.verdict));
-        proposal.insert("evidence".to_string(), evidence);
-        proposal.insert(
-            "routine_patch".to_string(),
-            outcome_policy::routine_candidate_patch(contract, observations),
-        );
-
-        match class {
-            ImprovementClass::Prompt => {
-                let Some(prompt_payload) = self
-                    .prompt_candidate_payload(contract, observations, target_name.as_deref())
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                merge_json_object(&mut proposal, prompt_payload);
-            }
-            ImprovementClass::Code => {
-                let Some(code_payload) = outcome_policy::code_candidate_payload(contract) else {
-                    return Ok(None);
-                };
-                merge_json_object(&mut proposal, code_payload);
-            }
-            _ => {}
-        }
-
-        let candidate = LearningCandidate {
-            id: Uuid::new_v4(),
-            learning_event_id: Some(learning_event_id),
-            user_id: contract.user_id.clone(),
-            candidate_type: class.as_str().to_string(),
-            risk_tier: risk.as_str().to_string(),
-            confidence: Some(score.score.abs()),
-            target_type: Some(outcome_policy::candidate_target_type(contract)),
-            target_name,
-            summary: Some(summary),
-            proposal: serde_json::Value::Object(proposal),
-            created_at: Utc::now(),
+        let prompt_payload = if seed.supplement_kind == OutcomeCandidateSupplementKind::Prompt {
+            self.prompt_candidate_payload(contract, observations, seed.target_name.as_deref())
+                .await?
+        } else {
+            None
+        };
+        let Some(candidate) = outcome_policy::build_outcome_candidate(
+            Uuid::new_v4(),
+            learning_event_id,
+            contract,
+            score,
+            observations,
+            &seed,
+            prompt_payload,
+            Utc::now(),
+        ) else {
+            return Ok(None);
         };
         self.store
             .insert_learning_candidate(&candidate)
@@ -475,7 +365,7 @@ impl OutcomeService {
         )
         .with_routine_engine(self.routine_engine.clone());
         let outcome = orchestrator
-            .route_existing_candidate("outcome_evaluator_v1", candidate)
+            .route_existing_candidate(EVALUATOR_OUTCOME, candidate)
             .await?;
         tracing::debug!(
             candidate_id = %candidate.id,
@@ -545,31 +435,14 @@ pub async fn persist_manual_review_to_learning_ledger(
     outcome_policy::annotate_contract_with_ledger_event_id(contract, learning_event_id);
     outcome_policy::annotate_contract_with_last_evaluator(contract, EVALUATOR_MANUAL_REVIEW);
 
-    let evaluation = LearningEvaluation {
-        id: Uuid::new_v4(),
+    let evaluation = outcome_policy::build_manual_review_evaluation_record(
+        Uuid::new_v4(),
         learning_event_id,
-        user_id: contract.user_id.clone(),
-        evaluator: EVALUATOR_MANUAL_REVIEW.to_string(),
-        status: outcome_policy::manual_review_status(contract, &normalized_decision),
-        score: Some(outcome_policy::manual_review_score(
-            contract,
-            &normalized_decision,
-        )),
-        details: json!({
-            "contract_id": contract.id,
-            "contract_type": contract.contract_type,
-            "source_kind": contract.source_kind,
-            "source_id": contract.source_id,
-            "review_decision": normalized_decision,
-            "manual_verdict": contract.final_verdict,
-            "contract_status": contract.status,
-            "final_score": contract.final_score,
-            "ledger_learning_event_id": learning_event_id,
-            "observations": observations,
-            "strategy": "manual_review",
-        }),
-        created_at: Utc::now(),
-    };
+        contract,
+        &normalized_decision,
+        &observations,
+        Utc::now(),
+    );
     store
         .insert_learning_evaluation(&evaluation)
         .await
@@ -584,7 +457,7 @@ pub fn spawn_outcome_service(service: Arc<OutcomeService>) -> JoinHandle<()> {
                 Ok(plan) => plan,
                 Err(err) => {
                     tracing::debug!(error = %err, "Outcome service scheduler plan failed");
-                    OutcomeSchedulerPlan {
+                    outcome_policy::OutcomeSchedulerPlan {
                         user_ids: Vec::new(),
                         sleep_interval_secs: DEFAULT_EVALUATION_INTERVAL_SECS,
                     }
@@ -608,20 +481,18 @@ pub async fn maybe_create_turn_contract(
     store: &Arc<dyn Database>,
     event: &LearningEvent,
 ) -> Result<Option<Uuid>, String> {
-    if !event
-        .payload
-        .get("role")
-        .and_then(|value| value.as_str())
-        .is_some_and(|role| role.eq_ignore_ascii_case("assistant"))
-    {
+    if !outcome_policy::learning_event_turn_outcome_eligible(event) {
         return Ok(None);
     }
     let settings = load_learning_settings(&**store, &event.user_id).await;
-    if !outcomes_enabled(&settings) {
+    let runtime_settings = outcome_runtime_settings(&settings);
+    if !outcome_policy::outcomes_enabled(&runtime_settings) {
         return Ok(None);
     }
-    let contract =
-        outcome_policy::build_turn_contract(event, u64::from(settings.outcomes.default_ttl_hours));
+    let contract = outcome_policy::build_turn_contract(
+        event,
+        outcome_policy::default_ttl_hours(&runtime_settings),
+    );
     let id = store
         .insert_outcome_contract(&contract)
         .await
@@ -634,7 +505,7 @@ pub async fn observe_user_turn(
     event: &LearningEvent,
 ) -> Result<(), String> {
     let settings = load_learning_settings(&**store, &event.user_id).await;
-    if !outcomes_enabled(&settings) {
+    if !outcome_policy::outcomes_enabled(&outcome_runtime_settings(&settings)) {
         return Ok(());
     }
     let content = event
@@ -701,18 +572,17 @@ pub async fn maybe_create_artifact_contract(
     store: &Arc<dyn Database>,
     version: &LearningArtifactVersion,
 ) -> Result<Option<Uuid>, String> {
-    if !version.status.eq_ignore_ascii_case("applied")
-        && !version.status.eq_ignore_ascii_case("promoted")
-    {
+    if !outcome_policy::artifact_version_outcome_eligible(&version.status) {
         return Ok(None);
     }
     let settings = load_learning_settings(&**store, &version.user_id).await;
-    if !outcomes_enabled(&settings) {
+    let runtime_settings = outcome_runtime_settings(&settings);
+    if !outcome_policy::outcomes_enabled(&runtime_settings) {
         return Ok(None);
     }
     let contract = outcome_policy::build_artifact_contract(
         version,
-        u64::from(settings.outcomes.default_ttl_hours),
+        outcome_policy::default_ttl_hours(&runtime_settings),
     );
     let id = store
         .insert_outcome_contract(&contract)
@@ -726,12 +596,13 @@ pub async fn maybe_create_proposal_contract(
     proposal: &LearningCodeProposal,
 ) -> Result<Option<Uuid>, String> {
     let settings = load_learning_settings(&**store, &proposal.user_id).await;
-    if !outcomes_enabled(&settings) {
+    let runtime_settings = outcome_runtime_settings(&settings);
+    if !outcome_policy::outcomes_enabled(&runtime_settings) {
         return Ok(None);
     }
     let contract = outcome_policy::build_proposal_contract(
         proposal,
-        u64::from(settings.outcomes.default_ttl_hours),
+        outcome_policy::default_ttl_hours(&runtime_settings),
     );
     let id = store
         .insert_outcome_contract(&contract)
@@ -744,11 +615,9 @@ pub async fn observe_feedback(
     store: &Arc<dyn Database>,
     feedback: &LearningFeedbackRecord,
 ) -> Result<(), String> {
-    let source_kind = match feedback.target_type.as_str() {
-        "learning_event" => SOURCE_LEARNING_EVENT,
-        "artifact_version" => SOURCE_ARTIFACT_VERSION,
-        "code_proposal" => SOURCE_CODE_PROPOSAL,
-        _ => return Ok(()),
+    let Some(source_kind) = outcome_policy::feedback_target_source_kind(&feedback.target_type)
+    else {
+        return Ok(());
     };
     let contracts = store
         .list_outcome_contracts(&OutcomeContractQuery {
@@ -765,7 +634,7 @@ pub async fn observe_feedback(
         .map_err(|err| err.to_string())?;
     for mut contract in contracts
         .into_iter()
-        .filter(|entry| entry.status == STATUS_OPEN || entry.status == STATUS_EVALUATING)
+        .filter(outcome_policy::contract_accepts_observation)
     {
         let (polarity, weight) = outcome_policy::feedback_polarity(&feedback.verdict);
         insert_observation(
@@ -788,7 +657,7 @@ pub async fn observe_feedback(
             feedback.created_at,
         )
         .await?;
-        if polarity == VERDICT_NEGATIVE {
+        if outcome_policy::should_due_contract_for_observation_polarity(polarity) {
             contract.due_at = Utc::now();
             contract.updated_at = Utc::now();
             store
@@ -846,7 +715,7 @@ pub async fn observe_rollback(
 
     for mut contract in contracts
         .into_iter()
-        .filter(|entry| entry.status == STATUS_OPEN || entry.status == STATUS_EVALUATING)
+        .filter(outcome_policy::contract_accepts_observation)
     {
         insert_observation(
             store,
@@ -898,7 +767,7 @@ pub async fn observe_proposal_rejection(
         .map_err(|err| err.to_string())?;
     for mut contract in contracts
         .into_iter()
-        .filter(|entry| entry.status == STATUS_OPEN || entry.status == STATUS_EVALUATING)
+        .filter(outcome_policy::contract_accepts_observation)
     {
         insert_observation(
             store,
@@ -938,7 +807,7 @@ pub async fn maybe_create_routine_contract(
         return Ok(None);
     }
     let settings = load_learning_settings(&**store, &routine.user_id).await;
-    if !outcomes_enabled(&settings) {
+    if !outcome_policy::outcomes_enabled(&outcome_runtime_settings(&settings)) {
         return Ok(None);
     }
     let contract = outcome_policy::build_routine_contract(routine, run);
@@ -969,7 +838,7 @@ pub async fn observe_routine_state_change(
         .map_err(|err| err.to_string())?;
     let Some(mut contract) = contracts
         .into_iter()
-        .filter(|entry| entry.status == STATUS_OPEN || entry.status == STATUS_EVALUATING)
+        .filter(outcome_policy::contract_accepts_observation)
         .find(|entry| {
             entry
                 .metadata
@@ -1014,7 +883,7 @@ pub async fn heartbeat_review_summary(
     user_id: &str,
 ) -> Result<Option<String>, String> {
     let settings = load_learning_settings(&**store, user_id).await;
-    if !outcomes_enabled(&settings) || !settings.outcomes.heartbeat_summary_enabled {
+    if !outcome_policy::heartbeat_summary_enabled(&outcome_runtime_settings(&settings)) {
         return Ok(None);
     }
     let stats = store
@@ -1038,7 +907,8 @@ pub async fn evaluator_is_healthy(
     user_id: &str,
 ) -> Result<bool, String> {
     let settings = load_learning_settings(&**store, user_id).await;
-    if !outcomes_enabled(&settings) {
+    let runtime_settings = outcome_runtime_settings(&settings);
+    if !outcome_policy::outcomes_enabled(&runtime_settings) {
         return Ok(true);
     }
     let now = Utc::now();
@@ -1048,7 +918,7 @@ pub async fn evaluator_is_healthy(
         .map_err(|err| err.to_string())?;
     Ok(outcome_policy::evaluator_health_status(
         &health,
-        settings.outcomes.evaluation_interval_secs,
+        runtime_settings.evaluation_interval_secs,
         now,
     ))
 }
@@ -1060,8 +930,16 @@ async fn load_learning_settings(store: &dyn Database, user_id: &str) -> Learning
     }
 }
 
-fn outcomes_enabled(settings: &LearningSettings) -> bool {
-    settings.enabled && settings.outcomes.enabled
+fn outcome_runtime_settings(settings: &LearningSettings) -> OutcomeRuntimeSettings {
+    OutcomeRuntimeSettings {
+        learning_enabled: settings.enabled,
+        outcomes_enabled: settings.outcomes.enabled,
+        evaluation_interval_secs: settings.outcomes.evaluation_interval_secs,
+        max_due_per_tick: settings.outcomes.max_due_per_tick,
+        default_ttl_hours: settings.outcomes.default_ttl_hours,
+        llm_assist_enabled: settings.outcomes.llm_assist_enabled,
+        heartbeat_summary_enabled: settings.outcomes.heartbeat_summary_enabled,
+    }
 }
 
 async fn insert_observation(
@@ -1090,18 +968,6 @@ async fn insert_observation(
         .await
         .map_err(|err| err.to_string())?;
     Ok(())
-}
-
-fn merge_json_object(
-    target: &mut serde_json::Map<String, serde_json::Value>,
-    patch: serde_json::Value,
-) {
-    let Some(patch_obj) = patch.as_object() else {
-        return;
-    };
-    for (key, value) in patch_obj {
-        target.insert(key.clone(), value.clone());
-    }
 }
 
 async fn resolve_learning_event_for_manual_review(

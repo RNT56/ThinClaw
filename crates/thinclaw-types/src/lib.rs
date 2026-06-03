@@ -15,8 +15,9 @@ pub use job::{ActionRecord, JobContext, JobState, StateTransition};
 pub use media::{MediaContent, MediaType};
 pub use repair::{BrokenTool, StuckJob};
 pub use sandbox::{
-    DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS, JobMode, SandboxJobRecord, SandboxJobSpec,
-    SandboxJobSummary, normalize_sandbox_ui_state,
+    DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS, JobMode, ResourceLimits, SandboxConfig, SandboxJobRecord,
+    SandboxJobSpec, SandboxJobSummary, SandboxPolicy, default_allowlist,
+    is_terminal_sandbox_status, normalize_sandbox_ui_state, normalize_terminal_sandbox_status,
 };
 pub use setup::{
     IntegrationSetupStatus, SetupAction, SetupAuthMode, SetupSecretDescriptor, SetupState,

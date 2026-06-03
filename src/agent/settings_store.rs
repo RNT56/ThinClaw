@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use thinclaw_agent::ports::{SettingEntry, SettingsPort};
+use thinclaw_agent::settings_records::setting_entry_from_row;
 
 use crate::db::Database;
 use crate::error::DatabaseError;
@@ -43,33 +44,5 @@ impl SettingsPort for RootSettingsPort {
 
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError> {
         self.store.has_settings(user_id).await
-    }
-}
-
-fn setting_entry_from_row(row: crate::history::SettingRow) -> SettingEntry {
-    SettingEntry {
-        key: row.key,
-        value: row.value,
-        updated_at: row.updated_at,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
-
-    #[test]
-    fn setting_entry_adapter_preserves_db_fields() {
-        let updated_at = Utc::now();
-        let entry = setting_entry_from_row(crate::history::SettingRow {
-            key: "learning.enabled".to_string(),
-            value: serde_json::json!(true),
-            updated_at,
-        });
-
-        assert_eq!(entry.key, "learning.enabled");
-        assert_eq!(entry.value, serde_json::json!(true));
-        assert_eq!(entry.updated_at, updated_at);
     }
 }

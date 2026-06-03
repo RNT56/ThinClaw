@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +215,78 @@ pub fn relaunch_current_process() -> anyhow::Result<()> {
         exe.display()
     );
     Ok(())
+}
+
+/// Snapshot of the engine's current state.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EngineStatus {
+    pub engine_running: bool,
+    pub setup_completed: bool,
+    pub tool_count: usize,
+    pub active_extensions: usize,
+    pub model_name: String,
+    pub cheap_model_name: Option<String>,
+    pub llm_runtime_revision: u64,
+    pub llm_runtime_healthy: bool,
+    pub llm_last_error: Option<String>,
+    pub db_connected: bool,
+    pub workspace_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineStatusParts {
+    pub runtime_revision: u64,
+    pub runtime_last_error: Option<String>,
+    pub runtime_primary_model: String,
+    pub runtime_cheap_model: Option<String>,
+    pub fallback_model_name: String,
+    pub fallback_cheap_model_name: Option<String>,
+    pub setup_completed: bool,
+    pub tool_count: usize,
+    pub active_extensions: usize,
+    pub db_connected: bool,
+    pub workspace_available: bool,
+}
+
+/// Information about an available LLM model.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub name: String,
+    pub is_primary: bool,
+}
+
+/// Result of a database snapshot operation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SnapshotResult {
+    /// Number of bytes written to the snapshot file.
+    pub bytes_written: u64,
+    /// Path where the snapshot was saved.
+    pub path: String,
+}
+
+pub fn build_engine_status(parts: EngineStatusParts) -> EngineStatus {
+    let model_name = if parts.runtime_primary_model.trim().is_empty() {
+        parts.fallback_model_name
+    } else {
+        parts.runtime_primary_model
+    };
+    let cheap_model_name = parts
+        .runtime_cheap_model
+        .or(parts.fallback_cheap_model_name);
+
+    EngineStatus {
+        engine_running: parts.runtime_revision > 0,
+        setup_completed: parts.setup_completed,
+        tool_count: parts.tool_count,
+        active_extensions: parts.active_extensions,
+        model_name,
+        cheap_model_name,
+        llm_runtime_revision: parts.runtime_revision,
+        llm_runtime_healthy: parts.runtime_last_error.is_none(),
+        llm_last_error: parts.runtime_last_error,
+        db_connected: parts.db_connected,
+        workspace_available: parts.workspace_available,
+    }
 }
 
 /// Background persistence cadence for runtime-owned snapshots.
@@ -440,11 +513,84 @@ mod tests {
         );
         assert!(RuntimeCommandIntent::AgentRuntime.can_run_agent());
         assert!(!RuntimeCommandIntent::ImmediateCli.can_run_agent());
-        assert!(
-            RuntimeEnvBootstrapPlan::for_command(RuntimeCommandIntent::ImmediateCli).load_dotenv
+    }
+
+    #[test]
+    fn env_bootstrap_plan_loads_dotenv_and_thinclaw_env_for_runtime_cli_and_worker_intents() {
+        let expected = RuntimeEnvBootstrapPlan {
+            load_dotenv: true,
+            load_thinclaw_env: true,
+        };
+
+        for intent in [
+            RuntimeCommandIntent::AgentRuntime,
+            RuntimeCommandIntent::TuiRuntime,
+            RuntimeCommandIntent::Onboarding,
+            RuntimeCommandIntent::ImmediateCli,
+            RuntimeCommandIntent::WorkerRuntime,
+        ] {
+            assert_eq!(
+                RuntimeEnvBootstrapPlan::for_command(intent),
+                expected,
+                "{intent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_bootstrap_plan_skips_service_runtime_env_files() {
+        assert_eq!(
+            RuntimeEnvBootstrapPlan::for_command(RuntimeCommandIntent::ServiceRuntime),
+            RuntimeEnvBootstrapPlan {
+                load_dotenv: false,
+                load_thinclaw_env: false,
+            }
         );
-        assert!(
-            !RuntimeEnvBootstrapPlan::for_command(RuntimeCommandIntent::ServiceRuntime).load_dotenv
-        );
+    }
+
+    #[test]
+    fn engine_status_uses_runtime_models_and_error_health() {
+        let status = build_engine_status(EngineStatusParts {
+            runtime_revision: 4,
+            runtime_last_error: None,
+            runtime_primary_model: "openai/gpt-test".to_string(),
+            runtime_cheap_model: Some("openai/gpt-cheap".to_string()),
+            fallback_model_name: "fallback-primary".to_string(),
+            fallback_cheap_model_name: Some("fallback-cheap".to_string()),
+            setup_completed: true,
+            tool_count: 12,
+            active_extensions: 3,
+            db_connected: true,
+            workspace_available: false,
+        });
+
+        assert!(status.engine_running);
+        assert!(status.llm_runtime_healthy);
+        assert_eq!(status.model_name, "openai/gpt-test");
+        assert_eq!(status.cheap_model_name.as_deref(), Some("openai/gpt-cheap"));
+        assert_eq!(status.tool_count, 12);
+    }
+
+    #[test]
+    fn engine_status_falls_back_for_blank_runtime_model() {
+        let status = build_engine_status(EngineStatusParts {
+            runtime_revision: 0,
+            runtime_last_error: Some("reload failed".to_string()),
+            runtime_primary_model: "  ".to_string(),
+            runtime_cheap_model: None,
+            fallback_model_name: "fallback-primary".to_string(),
+            fallback_cheap_model_name: Some("fallback-cheap".to_string()),
+            setup_completed: false,
+            tool_count: 0,
+            active_extensions: 0,
+            db_connected: false,
+            workspace_available: false,
+        });
+
+        assert!(!status.engine_running);
+        assert!(!status.llm_runtime_healthy);
+        assert_eq!(status.llm_last_error.as_deref(), Some("reload failed"));
+        assert_eq!(status.model_name, "fallback-primary");
+        assert_eq!(status.cheap_model_name.as_deref(), Some("fallback-cheap"));
     }
 }

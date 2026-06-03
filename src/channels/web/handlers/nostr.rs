@@ -2,18 +2,19 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
 use nostr_sdk::{ToBech32, prelude::Keys};
+use thinclaw_gateway::web::nostr::{
+    NostrDeleteKeyResponse, NostrSaveKeyResponse, invalid_nostr_private_key_status,
+    nostr_delete_key_partial_failure_response, nostr_delete_key_response,
+    nostr_save_key_partial_failure_response, nostr_save_key_response,
+    nostr_secrets_store_unavailable_status,
+};
 
 use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
+use crate::channels::web::types::NostrPrivateKeyRequest;
 
 const NOSTR_SECRET_NAME: &str = "nostr_private_key";
 const NOSTR_TOOL_NAME: &str = "nostr_actions";
-
-#[derive(serde::Deserialize)]
-pub(crate) struct NostrPrivateKeyRequest {
-    #[serde(default)]
-    private_key: Option<String>,
-}
 
 pub(crate) async fn reconcile_nostr_runtime(
     state: &GatewayState,
@@ -91,20 +92,20 @@ pub(crate) async fn nostr_save_key_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Json(body): Json<NostrPrivateKeyRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+) -> Result<(StatusCode, Json<NostrSaveKeyResponse>), StatusCode> {
     let secrets = state
         .secrets_store
         .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        .ok_or_else(nostr_secrets_store_unavailable_status)?;
 
     let private_key = body.private_key.as_deref().unwrap_or("").trim().to_string();
     if private_key.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(invalid_nostr_private_key_status());
     }
 
     let keys = Keys::parse(&private_key).map_err(|err| {
         tracing::warn!("Rejected invalid Nostr private key from WebUI: {}", err);
-        StatusCode::BAD_REQUEST
+        invalid_nostr_private_key_status()
     })?;
 
     let _ = secrets
@@ -139,37 +140,28 @@ pub(crate) async fn nostr_save_key_handler(
         tracing::warn!("Nostr runtime reconcile failed after secret save: {}", err);
         return Ok((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "status": "partial_failure",
-                "message": format!(
-                    "The Nostr private key was saved, but the live Nostr runtime could not be reconciled: {}",
-                    err
-                ),
-                "public_key_hex": public_key_hex,
-                "public_key_npub": public_key_npub,
-            })),
+            Json(nostr_save_key_partial_failure_response(
+                err,
+                public_key_hex,
+                public_key_npub,
+            )),
         ));
     }
 
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "ok",
-            "message": "Nostr private key saved",
-            "public_key_hex": public_key_hex,
-            "public_key_npub": public_key_npub,
-        })),
+        Json(nostr_save_key_response(public_key_hex, public_key_npub)),
     ))
 }
 
 pub(crate) async fn nostr_delete_key_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+) -> Result<(StatusCode, Json<NostrDeleteKeyResponse>), StatusCode> {
     let secrets = state
         .secrets_store
         .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        .ok_or_else(nostr_secrets_store_unavailable_status)?;
 
     secrets
         .delete(&request_identity.principal_id, NOSTR_SECRET_NAME)
@@ -194,21 +186,9 @@ pub(crate) async fn nostr_delete_key_handler(
         );
         return Ok((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "status": "partial_failure",
-                "message": format!(
-                    "The Nostr private key was removed, but the live Nostr runtime could not be reconciled: {}",
-                    err
-                ),
-            })),
+            Json(nostr_delete_key_partial_failure_response(err)),
         ));
     }
 
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "ok",
-            "message": "Nostr private key removed",
-        })),
-    ))
+    Ok((StatusCode::OK, Json(nostr_delete_key_response())))
 }

@@ -6,12 +6,28 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+ratatui = "0.30.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 secrecy = { version = "0.10", features = ["serde"] }
+thinclaw-branding = { version = "0.1.0", path = "../thinclaw-branding" }
 thinclaw-settings = { version = "0.1.0", path = "../thinclaw-settings" }
+thinclaw-channels = { version = "0.1.0", path = "../thinclaw-channels", optional = true }
+thinclaw-channels-core = { version = "0.1.0", path = "../thinclaw-channels-core" }
 thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
 thinclaw-runtime-contracts = { version = "0.1.0", path = "../thinclaw-runtime-contracts" }
+thinclaw-safety = { version = "0.1.0", path = "../thinclaw-safety" }
+thinclaw-secrets = { version = "0.1.0", path = "../thinclaw-secrets" }
+thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 tracing = "0.1"
+
+[features]
+default = []
+browser = []
+nostr = ["dep:thinclaw-channels", "thinclaw-channels/nostr"]
+voice = []

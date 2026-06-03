@@ -5,36 +5,29 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use uuid::Uuid;
 
 use crate::agent::outcomes::OutcomeService;
 use crate::api::learning as learning_api;
 use crate::channels::web::identity_helpers::{
-    GatewayRequestIdentity, request_identity_with_overrides, requested_identity_override,
+    GatewayRequestIdentity, request_identity_with_overrides,
 };
 use crate::channels::web::server::GatewayState;
-
-fn learning_limit(limit: Option<usize>) -> usize {
-    limit.unwrap_or(50).clamp(1, 200)
-}
+use thinclaw_gateway::web::{
+    api::{FeatureDisabledStatus, gateway_api_error_response, learning_limit},
+    learning as learning_web,
+};
 
 fn learning_api_error(error: crate::api::ApiError) -> (StatusCode, String) {
-    match error {
-        crate::api::ApiError::InvalidInput(message) => (StatusCode::BAD_REQUEST, message),
-        crate::api::ApiError::SessionNotFound(message) => (StatusCode::NOT_FOUND, message),
-        crate::api::ApiError::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
-        crate::api::ApiError::FeatureDisabled(message) => (StatusCode::FORBIDDEN, message),
-        other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
-    }
+    gateway_api_error_response(error, FeatureDisabledStatus::Forbidden)
 }
 
 fn learning_orchestrator(
     state: &GatewayState,
 ) -> Result<crate::agent::learning::LearningOrchestrator, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
 
     Ok(crate::agent::learning::LearningOrchestrator::new(
         store.clone(),
@@ -47,12 +40,12 @@ fn learning_orchestrator(
 pub(crate) async fn learning_status_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningStatusResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningStatusResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let orchestrator = learning_orchestrator(&state)?;
     let request_identity = request_identity_with_overrides(
         &state,
@@ -72,12 +65,12 @@ pub(crate) async fn learning_status_handler(
 pub(crate) async fn learning_history_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningHistoryResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningHistoryResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -86,8 +79,8 @@ pub(crate) async fn learning_history_handler(
     )
     .await;
     let limit = learning_limit(query.limit);
-    let actor_filter = requested_identity_override(query.actor_id.as_deref())
-        .unwrap_or_else(|| request_identity.actor_id.clone());
+    let actor_filter =
+        learning_web::learning_actor_filter(query.actor_id.as_deref(), &request_identity.actor_id);
 
     learning_api::history(
         store,
@@ -105,12 +98,12 @@ pub(crate) async fn learning_history_handler(
 pub(crate) async fn learning_candidates_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningCandidateResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningCandidateResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -135,12 +128,12 @@ pub(crate) async fn learning_candidates_handler(
 pub(crate) async fn learning_artifact_versions_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningArtifactVersionResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningArtifactVersionResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -165,12 +158,12 @@ pub(crate) async fn learning_artifact_versions_handler(
 pub(crate) async fn learning_feedback_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningFeedbackResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningFeedbackResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -195,11 +188,11 @@ pub(crate) async fn learning_feedback_handler(
 pub(crate) async fn learning_feedback_submit_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Json(req): Json<learning_api::LearningFeedbackRequest>,
+    Json(req): Json<learning_web::LearningFeedbackRequest>,
 ) -> Result<
     (
         StatusCode,
-        Json<learning_api::LearningFeedbackActionResponse>,
+        Json<learning_web::LearningFeedbackActionResponse>,
     ),
     (StatusCode, String),
 > {
@@ -223,8 +216,8 @@ pub(crate) async fn learning_feedback_submit_handler(
 pub(crate) async fn learning_provider_health_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningProviderHealthResponse>, (StatusCode, String)> {
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningProviderHealthResponse>, (StatusCode, String)> {
     let orchestrator = learning_orchestrator(&state)?;
     let request_identity = request_identity_with_overrides(
         &state,
@@ -243,12 +236,12 @@ pub(crate) async fn learning_provider_health_handler(
 pub(crate) async fn learning_code_proposals_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningCodeProposalResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningCodeProposalResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -273,21 +266,16 @@ pub(crate) async fn learning_code_proposal_review_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
-    Json(req): Json<learning_api::LearningCodeProposalReviewRequest>,
+    Json(req): Json<learning_web::LearningCodeProposalReviewRequest>,
 ) -> Result<
     (
         StatusCode,
-        Json<learning_api::LearningCodeProposalReviewResponse>,
+        Json<learning_web::LearningCodeProposalReviewResponse>,
     ),
     (StatusCode, String),
 > {
     let orchestrator = learning_orchestrator(&state)?;
-    let proposal_id = Uuid::parse_str(&id).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid proposal ID (expected UUID)".to_string(),
-        )
-    })?;
+    let proposal_id = learning_web::parse_learning_proposal_id(&id)?;
 
     let response = learning_api::review_code_proposal(
         &orchestrator,
@@ -305,12 +293,12 @@ pub(crate) async fn learning_code_proposal_review_handler(
 pub(crate) async fn learning_rollbacks_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningRollbackResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningRollbackResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -335,12 +323,12 @@ pub(crate) async fn learning_rollbacks_handler(
 pub(crate) async fn learning_outcomes_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Query(query): Query<learning_api::LearningListQuery>,
-) -> Result<Json<learning_api::LearningOutcomeResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    Query(query): Query<learning_web::LearningListQuery>,
+) -> Result<Json<learning_web::LearningOutcomeResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -348,8 +336,8 @@ pub(crate) async fn learning_outcomes_handler(
         query.actor_id.as_deref(),
     )
     .await;
-    let actor_filter = requested_identity_override(query.actor_id.as_deref())
-        .unwrap_or_else(|| request_identity.actor_id.clone());
+    let actor_filter =
+        learning_web::learning_actor_filter(query.actor_id.as_deref(), &request_identity.actor_id);
     let limit = learning_limit(query.limit);
 
     learning_api::outcomes(
@@ -371,17 +359,12 @@ pub(crate) async fn learning_outcome_detail_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
-) -> Result<Json<learning_api::LearningOutcomeDetailResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-    let contract_id = Uuid::parse_str(&id).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid outcome contract ID".to_string(),
-        )
-    })?;
+) -> Result<Json<learning_web::LearningOutcomeDetailResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
+    let contract_id = learning_web::parse_learning_outcome_contract_id(&id)?;
 
     learning_api::outcome_detail(store, &request_identity.principal_id, contract_id)
         .await
@@ -393,18 +376,13 @@ pub(crate) async fn learning_outcome_review_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
-    Json(req): Json<learning_api::LearningOutcomeReviewRequest>,
-) -> Result<Json<learning_api::LearningOutcomeReviewResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-    let contract_id = Uuid::parse_str(&id).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid outcome contract ID".to_string(),
-        )
-    })?;
+    Json(req): Json<learning_web::LearningOutcomeReviewRequest>,
+) -> Result<Json<learning_web::LearningOutcomeReviewResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
+    let contract_id = learning_web::parse_learning_outcome_contract_id(&id)?;
 
     learning_api::review_outcome(
         store,
@@ -421,11 +399,11 @@ pub(crate) async fn learning_outcome_review_handler(
 pub(crate) async fn learning_outcomes_evaluate_now_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-) -> Result<Json<learning_api::LearningOutcomeEvaluateNowResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+) -> Result<Json<learning_web::LearningOutcomeEvaluateNowResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
     let safety = Arc::new(crate::safety::SafetyLayer::new(
         &crate::config::SafetyConfig::default(),
     ));
@@ -440,27 +418,26 @@ pub(crate) async fn learning_outcomes_evaluate_now_handler(
         .await
         .map_err(|error| learning_api_error(crate::api::ApiError::Internal(error)))?;
 
-    Ok(Json(learning_api::LearningOutcomeEvaluateNowResponse {
-        status: "processed",
+    Ok(Json(learning_web::learning_outcome_evaluate_now_response(
         processed,
-    }))
+    )))
 }
 
 pub(crate) async fn learning_rollback_submit_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Json(req): Json<learning_api::LearningRollbackRequest>,
+    Json(req): Json<learning_web::LearningRollbackRequest>,
 ) -> Result<
     (
         StatusCode,
-        Json<learning_api::LearningRollbackActionResponse>,
+        Json<learning_web::LearningRollbackActionResponse>,
     ),
     (StatusCode, String),
 > {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(learning_web::learning_database_unavailable)?;
 
     let response = learning_api::record_rollback(
         store,
@@ -482,6 +459,7 @@ mod tests {
     use super::*;
     use crate::history::{OutcomeContract, OutcomeObservation};
     use chrono::{Duration, Utc};
+    use uuid::Uuid;
 
     fn test_request_identity(user_id: &str) -> GatewayRequestIdentity {
         GatewayRequestIdentity::new(
@@ -681,7 +659,7 @@ mod tests {
             State(state),
             test_request_identity("gateway-user"),
             Path(contract.id.to_string()),
-            Json(learning_api::LearningOutcomeReviewRequest {
+            Json(learning_web::LearningOutcomeReviewRequest {
                 decision: "confirm".to_string(),
                 verdict: None,
             }),

@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::config::Config;
+use crate::config::EmbeddingsConfigProviderExt as _;
+#[cfg(feature = "wasm-runtime")]
+use crate::config::WasmConfigExt as _;
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;

@@ -406,6 +406,9 @@ Source builds, feature profiles, and maintainer workflows live in
 Contributor setup, source builds, local checks, feature profiles, and release
 build details live in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Build-profile
 details are tracked in [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md).
+When moving code between workspace crates, also run the structural checks in
+[docs/CRATE_OWNERSHIP.md](docs/CRATE_OWNERSHIP.md); CI rejects internal crates
+that import or depend on the root `thinclaw` package.
 
 ## License
 

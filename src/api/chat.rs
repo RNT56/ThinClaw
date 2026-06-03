@@ -15,8 +15,6 @@
 
 use std::sync::Arc;
 
-use uuid::Uuid;
-
 use crate::agent::Agent;
 use crate::agent::submission::Submission;
 use crate::channels::{IncomingMessage, StatusUpdate};
@@ -24,14 +22,10 @@ use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 
 use super::error::{ApiError, ApiResult};
 
-/// Result of a `send_message` call.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SendMessageResult {
-    /// Unique ID for this message (used by frontend to correlate SSE events).
-    pub message_id: Uuid,
-    /// Always `"accepted"` — the actual response arrives via channel events.
-    pub status: String,
-}
+pub use thinclaw_gateway::web::chat::SendMessageResult;
+use thinclaw_gateway::web::chat::{
+    chat_cancel_failed_message, empty_chat_message_content_message, parse_approval_request_id,
+};
 
 fn tauri_identity(session_key: &str) -> ResolvedIdentity {
     let stable_external_conversation_key = format!("tauri:direct:{session_key}");
@@ -84,7 +78,7 @@ pub async fn send_message_full(
     routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
 ) -> ApiResult<SendMessageResult> {
     if content.trim().is_empty() {
-        return Err(ApiError::InvalidInput("Message content is empty".into()));
+        return Err(ApiError::InvalidInput(empty_chat_message_content_message()));
     }
 
     if !deliver {
@@ -245,7 +239,8 @@ pub async fn resolve_approval(
     approved: bool,
     always: bool,
 ) -> ApiResult<SendMessageResult> {
-    let request_uuid = Uuid::parse_str(request_id)?;
+    let request_uuid = parse_approval_request_id(request_id)
+        .map_err(|(_, message)| ApiError::InvalidInput(message))?;
 
     let approval = Submission::ExecApproval {
         request_id: request_uuid,
@@ -310,6 +305,6 @@ pub async fn abort(agent: &Agent, session_key: &str) -> ApiResult<()> {
     agent
         .cancel_turn(session_key)
         .await
-        .map_err(|e| ApiError::Internal(format!("Cancel failed: {}", e)))?;
+        .map_err(|e| ApiError::Internal(chat_cancel_failed_message(e)))?;
     Ok(())
 }

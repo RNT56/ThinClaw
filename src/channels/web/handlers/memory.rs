@@ -5,95 +5,51 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
 };
-use serde::Deserialize;
 
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::workspace::paths;
-
-fn root_list_with_home_soul(mut entries: Vec<ListEntry>) -> Vec<ListEntry> {
-    let has_soul = entries.iter().any(|entry| entry.path == paths::SOUL);
-    if !has_soul && crate::identity::soul_store::read_home_soul().is_ok() {
-        entries.insert(
-            0,
-            ListEntry {
-                name: paths::SOUL.to_string(),
-                path: paths::SOUL.to_string(),
-                is_dir: false,
-                updated_at: None,
-            },
-        );
-    }
-    entries
-}
-
-#[derive(Deserialize)]
-pub(crate) struct TreeQuery {
-    #[allow(dead_code)]
-    depth: Option<usize>,
-}
+use thinclaw_gateway::web::memory::{
+    GatewayMemoryListSourceEntry, GatewayMemorySearchHit, list_entries_from_source,
+    memory_delete_response, memory_list_response, memory_read_response,
+    memory_search_response_from_hits, memory_tree_response, memory_workspace_unavailable_error,
+    memory_write_response, root_list_with_virtual_home_soul, tree_entries_from_paths,
+    tree_with_virtual_home_soul,
+};
 
 pub(crate) async fn memory_tree_handler(
     State(state): State<Arc<GatewayState>>,
     Query(_query): Query<TreeQuery>,
 ) -> Result<Json<MemoryTreeResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(memory_workspace_unavailable_error)?;
 
     let all_paths = workspace
         .list_all()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let mut entries: Vec<TreeEntry> = Vec::new();
-    let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let entries = tree_entries_from_paths(&all_paths);
+    let entries = tree_with_virtual_home_soul(
+        entries,
+        paths::SOUL,
+        all_paths.iter().any(|path| path == paths::SOUL),
+        crate::identity::soul_store::read_home_soul().is_ok(),
+    );
 
-    for path in &all_paths {
-        let parts: Vec<&str> = path.split('/').collect();
-        for i in 0..parts.len().saturating_sub(1) {
-            let dir_path = parts[..=i].join("/");
-            if seen_dirs.insert(dir_path.clone()) {
-                entries.push(TreeEntry {
-                    path: dir_path,
-                    is_dir: true,
-                });
-            }
-        }
-        entries.push(TreeEntry {
-            path: path.clone(),
-            is_dir: false,
-        });
-    }
-
-    if !all_paths.iter().any(|path| path == paths::SOUL)
-        && crate::identity::soul_store::read_home_soul().is_ok()
-    {
-        entries.push(TreeEntry {
-            path: paths::SOUL.to_string(),
-            is_dir: false,
-        });
-    }
-
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-
-    Ok(Json(MemoryTreeResponse { entries }))
-}
-
-#[derive(Deserialize)]
-pub(crate) struct ListQuery {
-    path: Option<String>,
+    Ok(Json(memory_tree_response(entries)))
 }
 
 pub(crate) async fn memory_list_handler(
     State(state): State<Arc<GatewayState>>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<MemoryListResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(memory_workspace_unavailable_error)?;
 
     let path = query.path.as_deref().unwrap_or("");
     let entries = workspace
@@ -101,50 +57,43 @@ pub(crate) async fn memory_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let list_entries: Vec<ListEntry> = entries
-        .iter()
-        .map(|e| ListEntry {
-            name: e.path.rsplit('/').next().unwrap_or(&e.path).to_string(),
-            path: e.path.clone(),
-            is_dir: e.is_directory,
-            updated_at: e.updated_at.map(|dt| dt.to_rfc3339()),
-        })
-        .collect();
+    let list_entries =
+        list_entries_from_source(
+            entries
+                .into_iter()
+                .map(|entry| GatewayMemoryListSourceEntry {
+                    path: entry.path,
+                    is_directory: entry.is_directory,
+                    updated_at: entry.updated_at.map(|dt| dt.to_rfc3339()),
+                }),
+        );
 
     let list_entries = if path.is_empty() {
-        root_list_with_home_soul(list_entries)
+        root_list_with_virtual_home_soul(
+            list_entries,
+            paths::SOUL,
+            crate::identity::soul_store::read_home_soul().is_ok(),
+        )
     } else {
         list_entries
     };
 
-    Ok(Json(MemoryListResponse {
-        path: path.to_string(),
-        entries: list_entries,
-    }))
-}
-
-#[derive(Deserialize)]
-pub(crate) struct ReadQuery {
-    path: String,
+    Ok(Json(memory_list_response(path, list_entries)))
 }
 
 pub(crate) async fn memory_read_handler(
     State(state): State<Arc<GatewayState>>,
     Query(query): Query<ReadQuery>,
 ) -> Result<Json<MemoryReadResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(memory_workspace_unavailable_error)?;
 
     if query.path == paths::SOUL
         && let Ok(content) = crate::identity::soul_store::read_home_soul()
     {
-        return Ok(Json(MemoryReadResponse {
-            path: query.path,
-            content,
-            updated_at: None,
-        }));
+        return Ok(Json(memory_read_response(query.path, content, None)));
     }
 
     let doc = workspace
@@ -152,29 +101,26 @@ pub(crate) async fn memory_read_handler(
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
 
-    Ok(Json(MemoryReadResponse {
-        path: query.path,
-        content: doc.content,
-        updated_at: Some(doc.updated_at.to_rfc3339()),
-    }))
+    Ok(Json(memory_read_response(
+        query.path,
+        doc.content,
+        Some(doc.updated_at.to_rfc3339()),
+    )))
 }
 
 pub(crate) async fn memory_write_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<MemoryWriteRequest>,
 ) -> Result<Json<MemoryWriteResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(memory_workspace_unavailable_error)?;
 
     if req.path == paths::SOUL {
         crate::identity::soul_store::write_home_soul(&req.content)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        return Ok(Json(MemoryWriteResponse {
-            path: req.path,
-            status: "written",
-        }));
+        return Ok(Json(memory_write_response(req.path)));
     }
 
     workspace
@@ -182,39 +128,33 @@ pub(crate) async fn memory_write_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(MemoryWriteResponse {
-        path: req.path,
-        status: "written",
-    }))
+    Ok(Json(memory_write_response(req.path)))
 }
 
 pub(crate) async fn memory_delete_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<MemoryDeleteRequest>,
 ) -> Result<Json<MemoryDeleteResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(memory_workspace_unavailable_error)?;
 
     crate::api::memory::delete_file(workspace, &req.path)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(MemoryDeleteResponse {
-        path: req.path,
-        status: "deleted",
-    }))
+    Ok(Json(memory_delete_response(req.path)))
 }
 
 pub(crate) async fn memory_search_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<MemorySearchRequest>,
 ) -> Result<Json<MemorySearchResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = state
+        .workspace
+        .as_ref()
+        .ok_or_else(memory_workspace_unavailable_error)?;
 
     let limit = req.limit.unwrap_or(10);
     let results = workspace
@@ -222,14 +162,11 @@ pub(crate) async fn memory_search_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let hits: Vec<SearchHit> = results
-        .iter()
-        .map(|r| SearchHit {
-            path: r.path.clone(),
-            content: r.content.clone(),
-            score: r.score as f64,
-        })
-        .collect();
-
-    Ok(Json(MemorySearchResponse { results: hits }))
+    Ok(Json(memory_search_response_from_hits(
+        results.into_iter().map(|result| GatewayMemorySearchHit {
+            path: result.path,
+            content: result.content,
+            score: result.score as f64,
+        }),
+    )))
 }

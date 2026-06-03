@@ -479,10 +479,9 @@ impl Agent {
                         );
                         reasoning.swap_llm(original_llm.clone());
                         *last_applied_model_override = None;
-                        context_messages.push(ChatMessage::system(format!(
-                            "Runtime note: model override '{}' failed and has been reset to the previous working model. Do not retry this override in this conversation unless the user explicitly asks again. Error: {}",
-                            failed_override.model_spec, err
-                        )));
+                        context_messages.push(ChatMessage::system(
+                            failed_model_override_reset_note(&failed_override.model_spec, &err),
+                        ));
                         context = self.build_turn_context(
                             context_messages,
                             available_tools.clone(),

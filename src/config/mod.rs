@@ -40,8 +40,8 @@ use crate::secrets::SecretsStore;
 use crate::settings::Settings;
 
 // Re-export all public types so `crate::config::FooConfig` continues to work.
-pub use self::agent::AgentConfig;
 pub(crate) use self::agent::resolve_personality_pack_from_settings;
+pub use self::agent::{AgentConfig, ModelThinkingOverride};
 pub use self::builder::BuilderModeConfig;
 #[cfg(feature = "nostr")]
 pub use self::channels::NostrConfig;
@@ -52,7 +52,7 @@ pub use self::channels::{
 pub use self::comfyui::ComfyUiConfig;
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::desktop_autonomy::DesktopAutonomyConfig;
-pub use self::embeddings::EmbeddingsConfig;
+pub use self::embeddings::{EmbeddingsConfig, EmbeddingsConfigProviderExt};
 pub use self::experiments::ExperimentsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
@@ -71,9 +71,11 @@ pub use self::tunnel::{
     TunnelConfig, TunnelProviderConfig,
 };
 pub use self::wasm::WasmConfig;
+#[cfg(feature = "wasm-runtime")]
+pub(crate) use self::wasm::WasmConfigExt;
 pub use self::webchat::{
     ResolvedWebSkin, WebChatBootstrap, WebChatConfig, WebChatPresentation, WebChatTheme,
-    WebSkinCatalogEntry,
+    WebSkinCatalogEntry, WebSkinCssVars, is_safe_hex_color,
 };
 
 /// IC-007: Inject bridge configuration variables into the overlay.

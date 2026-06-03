@@ -28,6 +28,7 @@ pub use thinclaw_tools::execution::{
     sandbox_job_runtime_descriptor, subagent_executor_runtime_descriptor, truncate_output,
 };
 use thinclaw_tools::execution::{
+    LocalExecutionBackend,
     LocalHostExecutionBackendWithJobs as RootIndependentLocalHostExecutionBackendWithJobs,
     SandboxJobExecutionBackend as RootIndependentSandboxJobExecutionBackend,
 };
@@ -371,6 +372,48 @@ impl JobExecutionOrchestrator for JobOrchestrationContext {
     }
 }
 
+pub struct RootExecutionBackendAdapter {
+    inner: Arc<dyn ExecutionBackend>,
+}
+
+impl RootExecutionBackendAdapter {
+    pub(crate) fn new(inner: Arc<dyn ExecutionBackend>) -> Arc<Self> {
+        Arc::new(Self { inner })
+    }
+
+    pub fn shared(inner: Arc<dyn ExecutionBackend>) -> Arc<dyn LocalExecutionBackend> {
+        Self::new(inner)
+    }
+}
+
+#[async_trait]
+impl LocalExecutionBackend for RootExecutionBackendAdapter {
+    fn kind(&self) -> ExecutionBackendKind {
+        self.inner.kind()
+    }
+
+    async fn run_shell(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<ExecutionResult, ToolError> {
+        self.inner.run_shell(request).await
+    }
+
+    async fn start_process(
+        &self,
+        request: ProcessStartRequest,
+    ) -> Result<StartedProcess, ToolError> {
+        self.inner.start_process(request).await
+    }
+
+    async fn run_script(
+        &self,
+        request: ScriptExecutionRequest,
+    ) -> Result<ExecutionResult, ToolError> {
+        self.inner.run_script(request).await
+    }
+}
+
 pub struct LocalHostExecutionBackend {
     inner: Arc<dyn ExecutionBackend>,
 }
@@ -558,5 +601,114 @@ impl RemoteRunnerAdapterExecutionBackend {
 impl ExecutionBackend for RemoteRunnerAdapterExecutionBackend {
     fn kind(&self) -> ExecutionBackendKind {
         ExecutionBackendKind::RemoteRunnerAdapter
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct RecordingBackend;
+
+    #[async_trait]
+    impl ExecutionBackend for RecordingBackend {
+        fn kind(&self) -> ExecutionBackendKind {
+            ExecutionBackendKind::DockerSandbox
+        }
+
+        async fn run_shell(
+            &self,
+            request: CommandExecutionRequest,
+        ) -> Result<ExecutionResult, ToolError> {
+            Ok(ExecutionResult {
+                stdout: request.command.clone(),
+                stderr: String::new(),
+                output: request.command,
+                exit_code: 0,
+                backend: self.kind(),
+                runtime: RuntimeDescriptor::execution_surface(
+                    self.kind(),
+                    "test-shell",
+                    Vec::new(),
+                    NetworkIsolationKind::Hard,
+                ),
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn start_process(
+            &self,
+            _request: ProcessStartRequest,
+        ) -> Result<StartedProcess, ToolError> {
+            Err(ToolError::ExecutionFailed(
+                "recorded start_process".to_string(),
+            ))
+        }
+
+        async fn run_script(
+            &self,
+            request: ScriptExecutionRequest,
+        ) -> Result<ExecutionResult, ToolError> {
+            Ok(ExecutionResult {
+                stdout: request.program.clone(),
+                stderr: String::new(),
+                output: request.program,
+                exit_code: 0,
+                backend: self.kind(),
+                runtime: RuntimeDescriptor::execution_surface(
+                    self.kind(),
+                    "test-script",
+                    Vec::new(),
+                    NetworkIsolationKind::Hard,
+                ),
+                duration: Duration::from_millis(1),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn root_execution_backend_adapter_forwards_all_local_backend_calls() {
+        let adapter = RootExecutionBackendAdapter::shared(Arc::new(RecordingBackend));
+
+        assert_eq!(adapter.kind(), ExecutionBackendKind::DockerSandbox);
+
+        let shell = adapter
+            .run_shell(CommandExecutionRequest {
+                command: "echo adapter".to_string(),
+                workdir: PathBuf::from("/tmp"),
+                timeout: Duration::from_secs(1),
+                extra_env: Default::default(),
+                allow_network: false,
+            })
+            .await
+            .expect("shell call forwards");
+        assert_eq!(shell.backend, ExecutionBackendKind::DockerSandbox);
+        assert_eq!(shell.output, "echo adapter");
+
+        let process = adapter
+            .start_process(ProcessStartRequest {
+                command: "sleep 1".to_string(),
+                workdir: Some(PathBuf::from("/tmp")),
+                extra_env: Default::default(),
+                kill_on_drop: true,
+            })
+            .await
+            .expect_err("process call forwards");
+        assert!(process.to_string().contains("recorded start_process"));
+
+        let script = adapter
+            .run_script(ScriptExecutionRequest {
+                program: "python3".to_string(),
+                args: vec!["-c".to_string(), "print(1)".to_string()],
+                workdir: PathBuf::from("/tmp"),
+                timeout: Duration::from_secs(1),
+                extra_env: Default::default(),
+                allow_network: false,
+            })
+            .await
+            .expect("script call forwards");
+        assert_eq!(script.backend, ExecutionBackendKind::DockerSandbox);
+        assert_eq!(script.output, "python3");
     }
 }

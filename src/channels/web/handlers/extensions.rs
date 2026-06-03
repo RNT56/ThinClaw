@@ -6,74 +6,61 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 
+use crate::api::extensions as extensions_api;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::extensions::manager::AuthRequestContext;
-
-fn request_origin(headers: &HeaderMap) -> Option<String> {
-    if let Some(origin) = headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-    {
-        return Some(origin.trim_end_matches('/').to_string());
-    }
-
-    headers
-        .get(axum::http::header::REFERER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| url::Url::parse(value).ok())
-        .map(|url| {
-            format!(
-                "{}://{}",
-                url.scheme(),
-                url.host_str().map(str::to_string).unwrap_or_default()
-                    + &url
-                        .port()
-                        .map(|port| format!(":{port}"))
-                        .unwrap_or_default()
-            )
-        })
-}
+use thinclaw_gateway::web::extensions::{
+    ExtensionAuthRequiredResponseInput, ExtensionInfoInput, ExtensionInstallFallbackInput,
+    ExtensionReconnectSupportInput, ExtensionRegistryEntrySource, ExtensionSetupResponseInput,
+    RegistryEntryInfoInput, RegistryEntrySearchInput, WasmChannelActivationStatusInput,
+    activation_error_needs_auth, channel_manager_unavailable_error,
+    classify_extension_reconnect_support, classify_wasm_channel_activation_status,
+    extension_action_error_response, extension_action_success_response,
+    extension_auth_required_response, extension_auth_status_allows_activation_retry,
+    extension_authentication_failed_response, extension_info, extension_internal_error,
+    extension_list_response, extension_manager_unavailable_error,
+    extension_manager_unavailable_install_response, extension_reconnect_failed_response,
+    extension_reconnect_refresh_failed_response, extension_reconnect_success_response,
+    extension_setup_response, extension_setup_save_response, registry_entry_info,
+    registry_entry_matches_query, registry_search_response, tool_info, tool_list_response,
+    tool_registry_unavailable_error, wasm_channel_activation_status_needs_pairing_state,
+};
+use thinclaw_gateway::web::ports::request_origin_from_headers;
 
 pub(crate) async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    let ext_mgr = state
+        .extension_manager
+        .as_ref()
+        .ok_or_else(extension_manager_unavailable_error)?;
 
     let installed = ext_mgr
         .list(None, false)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(extension_internal_error)?;
 
     let pairing_store = crate::pairing::PairingStore::new();
     let mut extensions = Vec::with_capacity(installed.len());
     for ext in installed {
-        let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-            Some(if ext.activation_error.is_some() {
-                "failed".to_string()
-            } else if !ext.authenticated {
-                "installed".to_string()
-            } else if ext.active && ext.name == "telegram" {
-                let has_paired = pairing_store
-                    .read_allow_from(&ext.name)
-                    .map(|list| !list.is_empty())
-                    .unwrap_or(false);
-                if has_paired {
-                    "active".to_string()
-                } else {
-                    "pairing".to_string()
-                }
-            } else if ext.active {
-                "active".to_string()
-            } else {
-                "configured".to_string()
-            })
-        } else {
-            None
+        let kind = ext.kind.to_string();
+        let mut activation_status_input = WasmChannelActivationStatusInput {
+            kind: &kind,
+            name: &ext.name,
+            authenticated: ext.authenticated,
+            active: ext.active,
+            activation_error: ext.activation_error.is_some(),
+            has_paired: false,
         };
+        if wasm_channel_activation_status_needs_pairing_state(activation_status_input) {
+            activation_status_input.has_paired = pairing_store
+                .read_allow_from(&ext.name)
+                .map(|list| !list.is_empty())
+                .unwrap_or(false);
+        }
+        let activation_status =
+            classify_wasm_channel_activation_status(activation_status_input).map(str::to_string);
         let channel_diagnostics = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
             if let Some(channel_manager) = state.channel_manager.as_ref() {
                 channel_manager.channel_diagnostics(&ext.name).await
@@ -84,13 +71,16 @@ pub(crate) async fn extensions_list_handler(
             None
         };
         let reconnect_supported =
-            ext.kind == crate::extensions::ExtensionKind::WasmChannel && ext.name == "telegram";
+            classify_extension_reconnect_support(ExtensionReconnectSupportInput {
+                kind: &kind,
+                name: &ext.name,
+            });
         let setup = ext_mgr
             .integration_setup_status(&ext, AuthRequestContext::default())
             .await;
-        extensions.push(ExtensionInfo {
+        extensions.push(extension_info(ExtensionInfoInput {
             name: ext.name,
-            kind: ext.kind.to_string(),
+            kind,
             description: ext.description,
             url: ext.url,
             authenticated: ext.authenticated,
@@ -106,19 +96,19 @@ pub(crate) async fn extensions_list_handler(
             channel_diagnostics,
             reconnect_supported,
             setup,
-        });
+        }));
     }
 
-    Ok(Json(ExtensionListResponse { extensions }))
+    Ok(Json(extension_list_response(extensions)))
 }
 
 pub(crate) async fn extensions_tools_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<ToolListResponse>, (StatusCode, String)> {
-    let registry = state.tool_registry.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Tool registry not available".to_string(),
-    ))?;
+    let registry = state
+        .tool_registry
+        .as_ref()
+        .ok_or_else(tool_registry_unavailable_error)?;
 
     let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
     let metadata = serde_json::json!({
@@ -128,13 +118,10 @@ pub(crate) async fn extensions_tools_handler(
         .filter_tool_definitions_for_metadata(registry.tool_definitions().await, &metadata);
     let tools = definitions
         .into_iter()
-        .map(|td| ToolInfo {
-            name: td.name,
-            description: td.description,
-        })
+        .map(|td| tool_info(td.name, td.description))
         .collect();
 
-    Ok(Json(ToolListResponse { tools }))
+    Ok(Json(tool_list_response(tools)))
 }
 
 pub(crate) async fn extensions_install_handler(
@@ -143,38 +130,35 @@ pub(crate) async fn extensions_install_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let Some(ext_mgr) = state.extension_manager.as_ref() else {
         if let Some(entry) = state.registry_entries.iter().find(|e| e.name == req.name) {
-            let msg = match &entry.source {
+            let registry_source = match &entry.source {
                 crate::extensions::ExtensionSource::WasmBuildable { .. } => {
-                    format!(
-                        "'{}' requires building from source. Run `thinclaw registry install {}` from the CLI.",
-                        req.name, req.name
-                    )
+                    ExtensionRegistryEntrySource::WasmBuildable
                 }
-                _ => format!(
-                    "Extension manager not available (secrets store required). Configure DATABASE_URL or a secrets backend to enable installation of '{}'.",
-                    req.name
-                ),
+                _ => ExtensionRegistryEntrySource::Other,
             };
-            return Ok(Json(ActionResponse::fail(msg)));
+            return Ok(Json(extension_manager_unavailable_install_response(
+                ExtensionInstallFallbackInput {
+                    name: &req.name,
+                    registry_source: Some(registry_source),
+                },
+            )));
         }
-        return Ok(Json(ActionResponse::fail(
-            "Extension manager not available (secrets store required)".to_string(),
+        return Ok(Json(extension_manager_unavailable_install_response(
+            ExtensionInstallFallbackInput {
+                name: &req.name,
+                registry_source: None,
+            },
         )));
     };
 
-    let kind_hint = req.kind.as_deref().and_then(|k| match k {
-        "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
-        "wasm_tool" => Some(crate::extensions::ExtensionKind::WasmTool),
-        "wasm_channel" => Some(crate::extensions::ExtensionKind::WasmChannel),
-        _ => None,
-    });
+    let kind_hint = extensions_api::extension_kind_hint(req.kind.as_deref());
 
     match ext_mgr
         .install(&req.name, req.url.as_deref(), kind_hint)
         .await
     {
-        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Ok(result) => Ok(Json(extension_action_success_response(result.message))),
+        Err(e) => Ok(Json(extension_action_error_response(e.to_string()))),
     }
 }
 
@@ -183,60 +167,50 @@ pub(crate) async fn extensions_activate_handler(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    let ext_mgr = state
+        .extension_manager
+        .as_ref()
+        .ok_or_else(extension_manager_unavailable_error)?;
 
     match ext_mgr.activate(&name).await {
-        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
+        Ok(result) => Ok(Json(extension_action_success_response(result.message))),
         Err(activate_err) => {
             let err_str = activate_err.to_string();
-            let needs_auth = err_str.contains("authentication")
-                || err_str.contains("401")
-                || err_str.contains("Unauthorized");
+            let needs_auth = activation_error_needs_auth(&err_str);
 
             if !needs_auth {
-                return Ok(Json(ActionResponse::fail(err_str)));
+                return Ok(Json(extension_action_error_response(err_str)));
             }
 
             let auth_context = AuthRequestContext {
-                callback_base_url: request_origin(&headers),
+                callback_base_url: request_origin_from_headers(&headers),
                 callback_type: Some("web".to_string()),
                 thread_id: None,
             };
 
             match ext_mgr.auth_with_context(&name, None, auth_context).await {
                 Ok(auth_result)
-                    if auth_result.auth_status == "authenticated"
-                        || auth_result.auth_status == "no_auth_required" =>
+                    if extension_auth_status_allows_activation_retry(&auth_result.auth_status) =>
                 {
                     match ext_mgr.activate(&name).await {
-                        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-                        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+                        Ok(result) => Ok(Json(extension_action_success_response(result.message))),
+                        Err(e) => Ok(Json(extension_action_error_response(e.to_string()))),
                     }
                 }
-                Ok(auth_result) => {
-                    let mut resp = ActionResponse::fail(
-                        auth_result
-                            .instructions
-                            .clone()
-                            .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
-                    );
-                    resp.auth_url = auth_result.auth_url;
-                    resp.setup_url = auth_result.setup_url;
-                    resp.auth_mode = Some(auth_result.auth_mode.clone());
-                    resp.auth_status = Some(auth_result.auth_status.clone());
-                    resp.awaiting_token = Some(auth_result.awaiting_token);
-                    resp.instructions = auth_result.instructions;
-                    resp.shared_auth_provider = auth_result.shared_auth_provider;
-                    resp.missing_scopes = auth_result.missing_scopes;
-                    Ok(Json(resp))
-                }
-                Err(auth_err) => Ok(Json(ActionResponse::fail(format!(
-                    "Authentication failed: {}",
-                    auth_err
-                )))),
+                Ok(auth_result) => Ok(Json(extension_auth_required_response(
+                    ExtensionAuthRequiredResponseInput {
+                        extension_name: &name,
+                        auth_url: auth_result.auth_url,
+                        setup_url: auth_result.setup_url,
+                        auth_mode: Some(auth_result.auth_mode),
+                        auth_status: Some(auth_result.auth_status),
+                        awaiting_token: auth_result.awaiting_token,
+                        instructions: auth_result.instructions,
+                        shared_auth_provider: auth_result.shared_auth_provider,
+                        missing_scopes: auth_result.missing_scopes,
+                    },
+                ))),
+                Err(auth_err) => Ok(Json(extension_authentication_failed_response(auth_err))),
             }
         }
     }
@@ -246,22 +220,21 @@ pub(crate) async fn extensions_reconnect_handler(
     State(state): State<Arc<GatewayState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
-    let channel_manager = state.channel_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel manager not available".to_string(),
-    ))?;
+    let ext_mgr = state
+        .extension_manager
+        .as_ref()
+        .ok_or_else(extension_manager_unavailable_error)?;
+    let channel_manager = state
+        .channel_manager
+        .as_ref()
+        .ok_or_else(channel_manager_unavailable_error)?;
 
     match ext_mgr.activate(&name).await {
         Ok(_) => {}
         Err(err) => {
-            return Ok(Json(ActionResponse::fail(format!(
-                "Failed to refresh '{}': {}",
-                name, err
-            ))));
+            return Ok(Json(extension_reconnect_refresh_failed_response(
+                &name, err,
+            )));
         }
     }
 
@@ -274,11 +247,8 @@ pub(crate) async fn extensions_reconnect_handler(
     }
 
     match channel_manager.restart_channel(&name).await {
-        Ok(()) => Ok(Json(ActionResponse::ok(format!("Reconnected '{}'", name)))),
-        Err(err) => Ok(Json(ActionResponse::fail(format!(
-            "Reconnect failed for '{}': {}",
-            name, err
-        )))),
+        Ok(()) => Ok(Json(extension_reconnect_success_response(&name))),
+        Err(err) => Ok(Json(extension_reconnect_failed_response(&name, err))),
     }
 }
 
@@ -287,24 +257,24 @@ pub(crate) async fn extensions_validate_handler(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    let ext_mgr = state
+        .extension_manager
+        .as_ref()
+        .ok_or_else(extension_manager_unavailable_error)?;
 
     match ext_mgr
         .validate_setup(
             &name,
             AuthRequestContext {
-                callback_base_url: request_origin(&headers),
+                callback_base_url: request_origin_from_headers(&headers),
                 callback_type: Some("web".to_string()),
                 thread_id: None,
             },
         )
         .await
     {
-        Ok(message) => Ok(Json(ActionResponse::ok(message))),
-        Err(error) => Ok(Json(ActionResponse::fail(error.to_string()))),
+        Ok(message) => Ok(Json(extension_action_success_response(message))),
+        Err(error) => Ok(Json(extension_action_error_response(error.to_string()))),
     }
 }
 
@@ -312,14 +282,14 @@ pub(crate) async fn extensions_remove_handler(
     State(state): State<Arc<GatewayState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    let ext_mgr = state
+        .extension_manager
+        .as_ref()
+        .ok_or_else(extension_manager_unavailable_error)?;
 
     match ext_mgr.remove(&name).await {
-        Ok(message) => Ok(Json(ActionResponse::ok(message))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Ok(message) => Ok(Json(extension_action_success_response(message))),
+        Err(e) => Ok(Json(extension_action_error_response(e.to_string()))),
     }
 }
 
@@ -328,28 +298,22 @@ pub(crate) async fn extensions_registry_handler(
     Query(params): Query<RegistrySearchQuery>,
 ) -> Json<RegistrySearchResponse> {
     let query = params.query.unwrap_or_default();
-    let query_lower = query.to_lowercase();
-    let tokens: Vec<&str> = query_lower.split_whitespace().collect();
 
-    let matching: Vec<&crate::extensions::RegistryEntry> = if tokens.is_empty() {
-        state.registry_entries.iter().collect()
-    } else {
-        state
-            .registry_entries
-            .iter()
-            .filter(|e| {
-                let name = e.name.to_lowercase();
-                let display = e.display_name.to_lowercase();
-                let desc = e.description.to_lowercase();
-                tokens.iter().any(|t| {
-                    name.contains(t)
-                        || display.contains(t)
-                        || desc.contains(t)
-                        || e.keywords.iter().any(|k| k.to_lowercase().contains(t))
-                })
-            })
-            .collect()
-    };
+    let matching: Vec<&crate::extensions::RegistryEntry> = state
+        .registry_entries
+        .iter()
+        .filter(|e| {
+            registry_entry_matches_query(
+                RegistryEntrySearchInput {
+                    name: &e.name,
+                    display_name: &e.display_name,
+                    description: &e.description,
+                    keywords: &e.keywords,
+                },
+                &query,
+            )
+        })
+        .collect();
 
     let installed: std::collections::HashSet<(String, String)> =
         if let Some(ext_mgr) = state.extension_manager.as_ref() {
@@ -368,18 +332,18 @@ pub(crate) async fn extensions_registry_handler(
         .into_iter()
         .map(|e| {
             let kind_str = e.kind.to_string();
-            RegistryEntryInfo {
+            registry_entry_info(RegistryEntryInfoInput {
                 name: e.name.clone(),
                 display_name: e.display_name.clone(),
                 installed: installed.contains(&(e.name.clone(), kind_str.clone())),
                 kind: kind_str,
                 description: e.description.clone(),
                 keywords: e.keywords.clone(),
-            }
+            })
         })
         .collect();
 
-    Json(RegistrySearchResponse { entries })
+    Json(registry_search_response(entries))
 }
 
 pub(crate) async fn extensions_setup_handler(
@@ -387,22 +351,22 @@ pub(crate) async fn extensions_setup_handler(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    let ext_mgr = state
+        .extension_manager
+        .as_ref()
+        .ok_or_else(extension_manager_unavailable_error)?;
 
     let setup = ext_mgr
         .get_setup_schema(
             &name,
             AuthRequestContext {
-                callback_base_url: request_origin(&headers),
+                callback_base_url: request_origin_from_headers(&headers),
                 callback_type: Some("web".to_string()),
                 thread_id: None,
             },
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(extension_internal_error)?;
 
     let kind = ext_mgr
         .list(None, false)
@@ -412,19 +376,21 @@ pub(crate) async fn extensions_setup_handler(
         .map(|e| e.kind.to_string())
         .unwrap_or_default();
 
-    Ok(Json(ExtensionSetupResponse {
-        name,
-        kind,
-        mode: setup.mode,
-        auth_status: setup.auth_status,
-        fields: setup.fields,
-        auth_url: setup.auth_url,
-        instructions: setup.instructions,
-        setup_url: setup.setup_url,
-        validation_url: setup.validation_url,
-        shared_auth_provider: setup.shared_auth_provider,
-        missing_scopes: setup.missing_scopes,
-    }))
+    Ok(Json(extension_setup_response(
+        ExtensionSetupResponseInput {
+            name,
+            kind,
+            mode: setup.mode,
+            auth_status: setup.auth_status,
+            fields: setup.fields,
+            auth_url: setup.auth_url,
+            instructions: setup.instructions,
+            setup_url: setup.setup_url,
+            validation_url: setup.validation_url,
+            shared_auth_provider: setup.shared_auth_provider,
+            missing_scopes: setup.missing_scopes,
+        },
+    )))
 }
 
 pub(crate) async fn extensions_setup_submit_handler(
@@ -432,20 +398,16 @@ pub(crate) async fn extensions_setup_submit_handler(
     Path(name): Path<String>,
     Json(req): Json<ExtensionSetupRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    let ext_mgr = state
+        .extension_manager
+        .as_ref()
+        .ok_or_else(extension_manager_unavailable_error)?;
 
     match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
-        Ok(result) => {
-            let mut resp = ActionResponse::ok(result.message);
-            resp.activated = Some(result.activated);
-            if !result.activated {
-                resp.needs_restart = Some(true);
-            }
-            Ok(Json(resp))
-        }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Ok(result) => Ok(Json(extension_setup_save_response(
+            result.message,
+            result.activated,
+        ))),
+        Err(e) => Ok(Json(extension_action_error_response(e.to_string()))),
     }
 }

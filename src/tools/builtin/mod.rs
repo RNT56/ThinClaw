@@ -68,6 +68,7 @@ pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use clarify::ClarifyTool;
 pub use comfyui::{
     ComfyCheckDepsTool, ComfyHealthTool, ComfyManageTool, ComfyRunWorkflowTool, ImageGenerateTool,
+    root_comfyui_tool_host,
 };
 pub use desktop_autonomy::{DesktopAutonomyPort, DesktopAutonomyTool};
 pub use device_info::DeviceInfoTool;
@@ -93,11 +94,12 @@ pub use homeassistant::HomeAssistantTool;
 pub use http::HttpTool;
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
+    root_job_tool_host,
 };
 pub use json::JsonTool;
 pub use learning_tools::{
     LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool,
-    LearningStatusTool, PromptManageTool, SkillManageTool,
+    LearningStatusTool, PromptManageTool, SkillManageTool, root_learning_tool_host,
 };
 pub use llm_tools::{
     LlmListModelsTool, LlmSelectTool, SharedModelOverride, new_shared_model_override,
@@ -105,7 +107,7 @@ pub use llm_tools::{
 pub use location::LocationTool;
 pub use memory::{
     MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    SessionSearchTool,
+    SessionSearchTool, root_memory_tool_host,
 };
 pub use moa::MoaTool;
 #[cfg(feature = "nostr")]
@@ -121,10 +123,12 @@ pub use search_files::SearchFilesTool;
 pub use send_message::{SendMessageFn, SendMessageTool};
 pub use shell::ShellTool;
 pub use skill_tools::{
-    SkillAuditTool, SkillCheckTool, SkillInspectTool, SkillInstallTool, SkillListTool,
-    SkillPromoteTrustTool, SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
-    SkillSearchTool, SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool,
-    SkillTapRemoveTool, SkillUpdateTool,
+    RootSkillPublishToolHost, RootSkillTapToolHost, RootSkillToolHost, SkillAuditTool,
+    SkillCheckTool, SkillInspectTool, SkillInstallTool, SkillListTool, SkillPromoteTrustTool,
+    SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool,
+    SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool, SkillTapRemoveTool,
+    SkillUpdateTool, root_skill_install_tool_host, root_skill_publish_tool_host,
+    root_skill_search_tool_host, root_skill_tap_tool_host, root_skill_tool_host,
 };
 pub use slack_actions::SlackActionsTool;
 pub use smart_approve::{ApprovalDecision, SmartApprovalMode, SmartApprover};

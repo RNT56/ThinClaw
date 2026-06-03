@@ -14,16 +14,19 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use uuid::Uuid;
-
 use crate::agent::session_search::{SessionSearchRender, SessionSearchService};
 use crate::context::JobContext;
 use crate::db::Database;
 use crate::llm::LlmProvider;
 use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolRouteIntent, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
+use async_trait::async_trait;
 use thinclaw_tools::builtin::memory as memory_policy;
+use thinclaw_tools::ports::{
+    MemoryToolHostPort, ToolHostError, ToolMemoryActionRequest, ToolMemoryActionResult,
+    ToolMemoryEntry, ToolMemoryReadRequest, ToolMemoryScope, ToolMemorySearchRequest,
+    ToolMemoryWriteRequest, ToolOperationScope, job_context_from_tool_scope,
+};
 
 /// Files the LLM may only APPEND to — never fully overwrite.
 ///
@@ -38,28 +41,168 @@ const APPEND_ONLY_IDENTITY_FILES: &[&str] = memory_policy::APPEND_ONLY_IDENTITY_
 /// intentionally excludes it.
 const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = memory_policy::FREELY_REWRITABLE_IDENTITY_FILES;
 
-fn job_conversation_kind(metadata: &serde_json::Value) -> memory_policy::MemoryConversationKind {
-    memory_policy::memory_conversation_kind(metadata)
-}
-
-fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
-    let actor_id = ctx
-        .metadata
-        .get("actor_id")
-        .or_else(|| ctx.metadata.get("actor"))
-        .and_then(|v| v.as_str())
-        .or(ctx.actor_id.as_deref());
-    memory_policy::resolve_memory_write_path(&ctx.metadata, actor_id, target)
-}
-
 fn workspace_for_ctx(base: &Arc<Workspace>, ctx: &JobContext) -> Workspace {
-    let agent_workspace_id = ctx
-        .metadata
-        .get("agent_workspace_id")
-        .and_then(|v| v.as_str())
-        .and_then(|v| Uuid::parse_str(v).ok())
-        .or_else(|| base.agent_id());
+    let agent_workspace_id =
+        memory_policy::workspace_agent_id_from_metadata(&ctx.metadata, base.agent_id());
     base.scoped_clone(ctx.user_id.clone(), agent_workspace_id)
+}
+
+pub struct RootMemoryToolHost {
+    workspace: Arc<Workspace>,
+    orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+    sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+}
+
+impl RootMemoryToolHost {
+    pub fn new(
+        workspace: Arc<Workspace>,
+        orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+        sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    ) -> Self {
+        Self {
+            workspace,
+            orchestrator,
+            sse_sender,
+        }
+    }
+}
+
+pub fn root_memory_tool_host(
+    workspace: Arc<Workspace>,
+    orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+    sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+) -> Arc<dyn MemoryToolHostPort> {
+    Arc::new(RootMemoryToolHost::new(workspace, orchestrator, sse_sender))
+}
+
+fn tool_host_error_from_tool(error: ToolError) -> ToolHostError {
+    match error {
+        ToolError::InvalidParameters(reason) => ToolHostError::InvalidRequest { reason },
+        ToolError::NotAuthorized(reason) => ToolHostError::PermissionDenied { reason },
+        ToolError::ExternalService(service) => ToolHostError::Unavailable { service },
+        other => ToolHostError::OperationFailed {
+            reason: other.to_string(),
+        },
+    }
+}
+
+#[async_trait]
+impl MemoryToolHostPort for RootMemoryToolHost {
+    async fn read_memory(
+        &self,
+        _request: ToolMemoryReadRequest,
+    ) -> Result<ToolMemoryEntry, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "memory_read_structured".to_string(),
+        })
+    }
+
+    async fn write_memory(
+        &self,
+        _request: ToolMemoryWriteRequest,
+    ) -> Result<ToolMemoryEntry, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "memory_write_structured".to_string(),
+        })
+    }
+
+    async fn search_memory(
+        &self,
+        _request: ToolMemorySearchRequest,
+    ) -> Result<Vec<ToolMemoryEntry>, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "memory_search_structured".to_string(),
+        })
+    }
+
+    async fn delete_memory(
+        &self,
+        _scope: ToolOperationScope,
+        _path: String,
+        _memory_scope: ToolMemoryScope,
+    ) -> Result<(), ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "memory_delete_structured".to_string(),
+        })
+    }
+
+    async fn search_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_search");
+        let tool = MemorySearchTool::new(Arc::clone(&self.workspace));
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
+
+    async fn write_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_write");
+        let tool = MemoryWriteTool::new(Arc::clone(&self.workspace), self.orchestrator.clone());
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
+
+    async fn read_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_read");
+        let tool = MemoryReadTool::new(Arc::clone(&self.workspace));
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
+
+    async fn tree_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_tree");
+        let tool = MemoryTreeTool::new(Arc::clone(&self.workspace));
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
+
+    async fn delete_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_delete");
+        let mut tool = MemoryDeleteTool::new(Arc::clone(&self.workspace));
+        if let Some(sender) = self.sse_sender.clone() {
+            tool = tool.with_sse_sender(sender);
+        }
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
 }
 
 /// Tool for searching workspace memory.
@@ -179,15 +322,6 @@ impl SessionSearchTool {
         self
     }
 
-    fn current_scope_filters(&self, ctx: &JobContext) -> memory_policy::SessionSearchScope {
-        memory_policy::resolve_session_search_scope(
-            &ctx.metadata,
-            &ctx.principal_id,
-            ctx.actor_id.as_deref(),
-            ctx.conversation_id,
-        )
-    }
-
     async fn recent_conversation_metadata(
         &self,
         principal_id: &str,
@@ -283,40 +417,23 @@ impl Tool for SessionSearchTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let direct_scope =
-            job_conversation_kind(&ctx.metadata) == memory_policy::MemoryConversationKind::Direct;
-        let parsed = memory_policy::parse_session_search_params(
+        let direct_scope = memory_policy::session_search_direct_scope_for_context(ctx);
+        let parsed = memory_policy::parse_session_search_params_for_context(
             &params,
-            direct_scope,
+            ctx,
             self.service.summarizer_configured(),
         )?;
         let query = parsed.query.as_str();
 
-        let scope = self.current_scope_filters(ctx);
-
-        let channel_filter = if parsed.all_channels {
-            None
-        } else {
-            ctx.metadata
-                .get("channel")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        };
-        let thread_filter = if parsed.include_current_thread {
-            ctx.metadata
-                .get("thread_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        } else {
-            None
-        };
+        let scope = memory_policy::resolve_session_search_scope_for_context(ctx);
+        let filters = memory_policy::session_search_filters_for_context(ctx, &parsed);
 
         if query.trim().is_empty() {
             let recent = self
                 .recent_conversation_metadata(
                     &scope.principal_id,
                     &scope.actor_id,
-                    channel_filter.as_deref(),
+                    filters.channel.as_deref(),
                     direct_scope,
                     parsed.limit,
                 )
@@ -331,8 +448,8 @@ impl Tool for SessionSearchTool {
                 &scope.principal_id,
                 query,
                 Some(&scope.actor_id),
-                channel_filter.as_deref(),
-                thread_filter.as_deref(),
+                filters.channel.as_deref(),
+                filters.thread_id.as_deref(),
                 parsed.limit as i64,
             )
             .await
@@ -413,7 +530,8 @@ impl Tool for MemoryWriteTool {
         let target = parsed.target.as_str();
         let append = parsed.append;
 
-        let (path, _is_actor_scoped) = resolve_memory_write_path(ctx, target);
+        let (path, _is_actor_scoped) =
+            memory_policy::resolve_memory_write_path_for_context(ctx, target);
         let normalized_path = path.trim_start_matches('/');
         let file_name = normalized_path
             .rsplit('/')
@@ -999,7 +1117,8 @@ mod tests {
             "actor_id": "actor-123",
         });
 
-        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "memory");
+        let (path, is_actor_scoped) =
+            memory_policy::resolve_memory_write_path_for_context(&ctx, "memory");
         assert!(is_actor_scoped);
         assert_eq!(path, "actors/actor-123/MEMORY.md");
     }
@@ -1012,7 +1131,8 @@ mod tests {
             "actor_id": "actor-123",
         });
 
-        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "shared:memory");
+        let (path, is_actor_scoped) =
+            memory_policy::resolve_memory_write_path_for_context(&ctx, "shared:memory");
         assert!(!is_actor_scoped);
         assert_eq!(path, "MEMORY.md");
     }
@@ -1024,7 +1144,8 @@ mod tests {
             "conversation_kind": "direct"
         });
 
-        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "profile");
+        let (path, is_actor_scoped) =
+            memory_policy::resolve_memory_write_path_for_context(&ctx, "profile");
         assert!(is_actor_scoped);
         assert_eq!(path, "actors/actor-456/context/profile.json");
     }

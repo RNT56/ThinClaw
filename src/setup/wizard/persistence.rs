@@ -3,6 +3,11 @@
 use crate::settings::Settings;
 
 use super::{SetupError, SetupWizard};
+use thinclaw_app::{
+    SetupBootstrapAgentInput, SetupBootstrapChannelInput, SetupBootstrapEnvInput,
+    SetupBootstrapProviderInput, SetupBootstrapWebUiInput, SetupRuntimeProfile,
+    setup_bootstrap_env_plan,
+};
 
 impl SetupWizard {
     pub(super) async fn persist_settings(&self) -> Result<bool, SetupError> {
@@ -53,264 +58,26 @@ impl SetupWizard {
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
     pub(super) fn write_bootstrap_env(&self) -> Result<(), SetupError> {
-        let mut env_vars: Vec<(&str, String)> = Vec::new();
+        let secrets_master_key =
+            if self.settings.secrets_master_key_source == crate::settings::KeySource::Env {
+                self.generated_env_master_key.clone().or_else(|| {
+                    std::env::var("SECRETS_MASTER_KEY")
+                        .ok()
+                        .filter(|key| !key.trim().is_empty())
+                })
+            } else {
+                None
+            };
 
-        if let Some(ref backend) = self.settings.database_backend {
-            env_vars.push(("DATABASE_BACKEND", backend.clone()));
-        }
-        if let Some(ref url) = self.settings.database_url {
-            env_vars.push(("DATABASE_URL", url.clone()));
-        }
-        if let Some(ref path) = self.settings.libsql_path {
-            env_vars.push(("LIBSQL_PATH", path.clone()));
-        }
-        if let Some(ref url) = self.settings.libsql_url {
-            env_vars.push(("LIBSQL_URL", url.clone()));
-        }
-        if self.settings.secrets_master_key_source == crate::settings::KeySource::Env {
-            if let Some(ref key) = self.generated_env_master_key {
-                env_vars.push(("SECRETS_MASTER_KEY", key.clone()));
-            } else if let Ok(key) = std::env::var("SECRETS_MASTER_KEY")
-                && !key.trim().is_empty()
-            {
-                env_vars.push(("SECRETS_MASTER_KEY", key));
-            }
-            if self.settings.secrets.allow_env_master_key {
-                env_vars.push(("THINCLAW_ALLOW_ENV_MASTER_KEY", "1".to_string()));
-            }
-        }
+        let input = self.bootstrap_env_input(secrets_master_key);
+        let plan = setup_bootstrap_env_plan(&input);
 
-        // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
-        // Config::from_env() needs the backend before the DB is connected.
-        if let Some(ref backend) = self.settings.llm_backend {
-            env_vars.push(("LLM_BACKEND", backend.clone()));
-        }
-        if let Some(ref url) = self.settings.openai_compatible_base_url {
-            env_vars.push(("LLM_BASE_URL", url.clone()));
-        }
-        if let Some(ref url) = self.settings.ollama_base_url {
-            env_vars.push(("OLLAMA_BASE_URL", url.clone()));
-        }
-
-        // Always write ONBOARD_COMPLETED so that check_onboard_needed()
-        // (which runs before the DB is connected) knows to skip re-onboarding.
-        if self.settings.onboard_completed {
-            env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
-        }
-        if let Some(profile) = self.selected_profile.runtime_profile_env_value() {
-            env_vars.push(("THINCLAW_RUNTIME_PROFILE", profile.to_string()));
-            if self.selected_profile.is_headless_remote() {
-                env_vars.push(("THINCLAW_HEADLESS", "true".to_string()));
-            }
-        }
-
-        // Signal channel env vars (chicken-and-egg: config resolves before DB).
-        if let Some(ref url) = self.settings.channels.signal_http_url {
-            env_vars.push(("SIGNAL_HTTP_URL", url.clone()));
-        }
-        if let Some(ref account) = self.settings.channels.signal_account {
-            env_vars.push(("SIGNAL_ACCOUNT", account.clone()));
-        }
-        if let Some(ref allow_from) = self.settings.channels.signal_allow_from {
-            env_vars.push(("SIGNAL_ALLOW_FROM", allow_from.clone()));
-        }
-        if let Some(ref allow_from_groups) = self.settings.channels.signal_allow_from_groups
-            && !allow_from_groups.is_empty()
-        {
-            env_vars.push(("SIGNAL_ALLOW_FROM_GROUPS", allow_from_groups.clone()));
-        }
-        if let Some(ref dm_policy) = self.settings.channels.signal_dm_policy {
-            env_vars.push(("SIGNAL_DM_POLICY", dm_policy.clone()));
-        }
-        if let Some(ref group_policy) = self.settings.channels.signal_group_policy {
-            env_vars.push(("SIGNAL_GROUP_POLICY", group_policy.clone()));
-        }
-        if let Some(ref group_allow_from) = self.settings.channels.signal_group_allow_from
-            && !group_allow_from.is_empty()
-        {
-            env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
-        }
-
-        // HTTP channel bootstrap vars
-        if self.settings.channels.http_enabled {
-            env_vars.push(("HTTP_ENABLED", "true".to_string()));
-            if let Some(ref host) = self.settings.channels.http_host {
-                env_vars.push(("HTTP_HOST", host.clone()));
-            }
-            if let Some(port) = self.settings.channels.http_port {
-                env_vars.push(("HTTP_PORT", port.to_string()));
-            }
-        }
-
-        // Discord channel env vars
-        if self.settings.channels.discord_enabled {
-            env_vars.push(("DISCORD_ENABLED", "true".to_string()));
-            if let Some(ref token) = self.settings.channels.discord_bot_token {
-                env_vars.push(("DISCORD_BOT_TOKEN", token.clone()));
-            }
-        }
-        if let Some(ref guild_id) = self.settings.channels.discord_guild_id {
-            env_vars.push(("DISCORD_GUILD_ID", guild_id.clone()));
-        }
-        if let Some(ref allow_from) = self.settings.channels.discord_allow_from {
-            env_vars.push(("DISCORD_ALLOW_FROM", allow_from.clone()));
-        }
-
-        // Slack channel env vars
-        if self.settings.channels.slack_enabled {
-            env_vars.push(("SLACK_ENABLED", "true".to_string()));
-            if let Some(ref token) = self.settings.channels.slack_bot_token {
-                env_vars.push(("SLACK_BOT_TOKEN", token.clone()));
-            }
-            if let Some(ref token) = self.settings.channels.slack_app_token {
-                env_vars.push(("SLACK_APP_TOKEN", token.clone()));
-            }
-        }
-        if let Some(ref allow_from) = self.settings.channels.slack_allow_from {
-            env_vars.push(("SLACK_ALLOW_FROM", allow_from.clone()));
-        }
-
-        // Nostr channel env vars
-        if self.settings.channels.nostr_enabled {
-            env_vars.push(("NOSTR_ENABLED", "true".to_string()));
-        }
-        if let Some(ref relays) = self.settings.channels.nostr_relays {
-            env_vars.push(("NOSTR_RELAYS", relays.clone()));
-        }
-        if let Some(ref owner_pubkey) = self.settings.channels.nostr_owner_pubkey {
-            env_vars.push(("NOSTR_OWNER_PUBKEY", owner_pubkey.clone()));
-        }
-        if self.settings.channels.nostr_social_dm_enabled {
-            env_vars.push(("NOSTR_SOCIAL_DM_ENABLED", "true".to_string()));
-        }
-        if let Some(ref allow_from) = self.settings.channels.nostr_allow_from {
-            env_vars.push(("NOSTR_ALLOW_FROM", allow_from.clone()));
-        }
-
-        // Gmail channel env vars
-        if self.settings.channels.gmail_enabled {
-            env_vars.push(("GMAIL_ENABLED", "true".to_string()));
-        }
-        if let Some(ref project_id) = self.settings.channels.gmail_project_id {
-            env_vars.push(("GMAIL_PROJECT_ID", project_id.clone()));
-        }
-        if let Some(ref sub_id) = self.settings.channels.gmail_subscription_id {
-            env_vars.push(("GMAIL_SUBSCRIPTION_ID", sub_id.clone()));
-        }
-        if let Some(ref topic_id) = self.settings.channels.gmail_topic_id {
-            env_vars.push(("GMAIL_TOPIC_ID", topic_id.clone()));
-        }
-        if let Some(ref senders) = self.settings.channels.gmail_allowed_senders {
-            env_vars.push(("GMAIL_ALLOWED_SENDERS", senders.clone()));
-        }
-
-        // iMessage channel env vars
-        if self.settings.channels.imessage_enabled {
-            env_vars.push(("IMESSAGE_ENABLED", "true".to_string()));
-        }
-        if let Some(ref allow_from) = self.settings.channels.imessage_allow_from {
-            env_vars.push(("IMESSAGE_ALLOW_FROM", allow_from.clone()));
-        }
-        if let Some(ref interval) = self.settings.channels.imessage_poll_interval {
-            env_vars.push(("IMESSAGE_POLL_INTERVAL", interval.to_string()));
-        }
-
-        // Apple Mail channel env vars
-        if self.settings.channels.apple_mail_enabled {
-            env_vars.push(("APPLE_MAIL_ENABLED", "true".to_string()));
-        }
-        if let Some(ref allow_from) = self.settings.channels.apple_mail_allow_from {
-            env_vars.push(("APPLE_MAIL_ALLOW_FROM", allow_from.clone()));
-        }
-        if let Some(ref interval) = self.settings.channels.apple_mail_poll_interval {
-            env_vars.push(("APPLE_MAIL_POLL_INTERVAL", interval.to_string()));
-        }
-        if !self.settings.channels.apple_mail_unread_only {
-            env_vars.push(("APPLE_MAIL_UNREAD_ONLY", "false".to_string()));
-        }
-        if !self.settings.channels.apple_mail_mark_as_read {
-            env_vars.push(("APPLE_MAIL_MARK_AS_READ", "false".to_string()));
-        }
-
-        // BlueBubbles iMessage bridge env vars
-        if self.settings.channels.bluebubbles_enabled {
-            env_vars.push(("BLUEBUBBLES_ENABLED", "true".to_string()));
-        }
-        if let Some(ref url) = self.settings.channels.bluebubbles_server_url {
-            env_vars.push(("BLUEBUBBLES_SERVER_URL", url.clone()));
-        }
-        if let Some(ref password) = self.settings.channels.bluebubbles_password {
-            env_vars.push(("BLUEBUBBLES_PASSWORD", password.clone()));
-        }
-        if let Some(ref host) = self.settings.channels.bluebubbles_webhook_host {
-            env_vars.push(("BLUEBUBBLES_WEBHOOK_HOST", host.clone()));
-        }
-        if let Some(port) = self.settings.channels.bluebubbles_webhook_port {
-            env_vars.push(("BLUEBUBBLES_WEBHOOK_PORT", port.to_string()));
-        }
-        if let Some(ref allow_from) = self.settings.channels.bluebubbles_allow_from {
-            env_vars.push(("BLUEBUBBLES_ALLOW_FROM", allow_from.clone()));
-        }
-        if let Some(send_receipts) = self.settings.channels.bluebubbles_send_read_receipts {
-            env_vars.push(("BLUEBUBBLES_SEND_READ_RECEIPTS", send_receipts.to_string()));
-        }
-
-        // Web Gateway env vars
-        if let Some(enabled) = self.settings.channels.gateway_enabled {
-            env_vars.push(("GATEWAY_ENABLED", enabled.to_string()));
-        }
-        if let Some(ref host) = self.settings.channels.gateway_host {
-            env_vars.push(("GATEWAY_HOST", host.clone()));
-        }
-        if let Some(ref port) = self.settings.channels.gateway_port {
-            env_vars.push(("GATEWAY_PORT", port.to_string()));
-        }
-        if let Some(ref token) = self.settings.channels.gateway_auth_token {
-            env_vars.push(("GATEWAY_AUTH_TOKEN", token.clone()));
-        }
-        if let Some(enabled) = self.settings.channels.cli_enabled {
-            env_vars.push(("CLI_ENABLED", enabled.to_string()));
-        }
-
-        // Smart Routing env vars
-        if let Some(ref model) = self.settings.providers.cheap_model {
-            env_vars.push(("LLM_CHEAP_MODEL", model.clone()));
-        }
-
-        // Web UI env vars
-        if let Some(ref skin) = self.settings.webchat_skin {
-            env_vars.push(("WEBCHAT_SKIN", skin.clone()));
-        }
-        if self.settings.webchat_theme != "system" {
-            env_vars.push(("WEBCHAT_THEME", self.settings.webchat_theme.clone()));
-        }
-        if let Some(ref color) = self.settings.webchat_accent_color {
-            env_vars.push(("WEBCHAT_ACCENT_COLOR", color.clone()));
-        }
-        if !self.settings.webchat_show_branding {
-            env_vars.push(("WEBCHAT_SHOW_BRANDING", "false".to_string()));
-        }
-
-        // Observability env vars
-        if self.settings.observability_backend != "none" {
-            env_vars.push((
-                "OBSERVABILITY_BACKEND",
-                self.settings.observability_backend.clone(),
-            ));
-        }
-
-        // Agent local tools
-        if self.settings.agent.allow_local_tools {
-            env_vars.push(("ALLOW_LOCAL_TOOLS", "true".to_string()));
-        }
-
-        // Agent workspace mode (unrestricted, sandboxed, project)
-        if let Some(ref mode) = self.settings.agent.workspace_mode {
-            env_vars.push(("WORKSPACE_MODE", mode.clone()));
-        }
-
-        if !env_vars.is_empty() {
-            let pairs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        if !plan.is_empty() {
+            let pairs: Vec<(&str, &str)> = plan
+                .variables()
+                .iter()
+                .map(|var| (var.key, var.value.as_str()))
+                .collect();
             crate::bootstrap::save_bootstrap_env(&pairs).map_err(|e| {
                 SetupError::Io(std::io::Error::other(format!(
                     "Failed to save bootstrap env to .env: {}",
@@ -320,6 +87,94 @@ impl SetupWizard {
         }
 
         Ok(())
+    }
+
+    fn bootstrap_env_input(&self, secrets_master_key: Option<String>) -> SetupBootstrapEnvInput {
+        let channels = &self.settings.channels;
+        let env_key_source =
+            self.settings.secrets_master_key_source == crate::settings::KeySource::Env;
+
+        SetupBootstrapEnvInput {
+            database_backend: self.settings.database_backend.clone(),
+            database_url: self.settings.database_url.clone(),
+            libsql_path: self.settings.libsql_path.clone(),
+            libsql_url: self.settings.libsql_url.clone(),
+            secrets_master_key,
+            allow_env_master_key: env_key_source && self.settings.secrets.allow_env_master_key,
+            llm_backend: self.settings.llm_backend.clone(),
+            llm_base_url: self.settings.openai_compatible_base_url.clone(),
+            ollama_base_url: self.settings.ollama_base_url.clone(),
+            onboard_completed: self.settings.onboard_completed,
+            runtime_profile: match self.selected_profile.runtime_profile_env_value() {
+                Some("remote") => Some(SetupRuntimeProfile::Remote),
+                Some("pi-os-lite-64") => Some(SetupRuntimeProfile::PiOsLite64),
+                _ => None,
+            },
+            channels: SetupBootstrapChannelInput {
+                signal_http_url: channels.signal_http_url.clone(),
+                signal_account: channels.signal_account.clone(),
+                signal_allow_from: channels.signal_allow_from.clone(),
+                signal_allow_from_groups: channels.signal_allow_from_groups.clone(),
+                signal_dm_policy: channels.signal_dm_policy.clone(),
+                signal_group_policy: channels.signal_group_policy.clone(),
+                signal_group_allow_from: channels.signal_group_allow_from.clone(),
+                http_enabled: channels.http_enabled,
+                http_host: channels.http_host.clone(),
+                http_port: channels.http_port,
+                discord_enabled: channels.discord_enabled,
+                discord_bot_token: channels.discord_bot_token.clone(),
+                discord_guild_id: channels.discord_guild_id.clone(),
+                discord_allow_from: channels.discord_allow_from.clone(),
+                slack_enabled: channels.slack_enabled,
+                slack_bot_token: channels.slack_bot_token.clone(),
+                slack_app_token: channels.slack_app_token.clone(),
+                slack_allow_from: channels.slack_allow_from.clone(),
+                nostr_enabled: channels.nostr_enabled,
+                nostr_relays: channels.nostr_relays.clone(),
+                nostr_owner_pubkey: channels.nostr_owner_pubkey.clone(),
+                nostr_social_dm_enabled: channels.nostr_social_dm_enabled,
+                nostr_allow_from: channels.nostr_allow_from.clone(),
+                gmail_enabled: channels.gmail_enabled,
+                gmail_project_id: channels.gmail_project_id.clone(),
+                gmail_subscription_id: channels.gmail_subscription_id.clone(),
+                gmail_topic_id: channels.gmail_topic_id.clone(),
+                gmail_allowed_senders: channels.gmail_allowed_senders.clone(),
+                imessage_enabled: channels.imessage_enabled,
+                imessage_allow_from: channels.imessage_allow_from.clone(),
+                imessage_poll_interval: channels.imessage_poll_interval,
+                apple_mail_enabled: channels.apple_mail_enabled,
+                apple_mail_allow_from: channels.apple_mail_allow_from.clone(),
+                apple_mail_poll_interval: channels.apple_mail_poll_interval,
+                apple_mail_unread_only: channels.apple_mail_unread_only,
+                apple_mail_mark_as_read: channels.apple_mail_mark_as_read,
+                bluebubbles_enabled: channels.bluebubbles_enabled,
+                bluebubbles_server_url: channels.bluebubbles_server_url.clone(),
+                bluebubbles_password: channels.bluebubbles_password.clone(),
+                bluebubbles_webhook_host: channels.bluebubbles_webhook_host.clone(),
+                bluebubbles_webhook_port: channels.bluebubbles_webhook_port,
+                bluebubbles_allow_from: channels.bluebubbles_allow_from.clone(),
+                bluebubbles_send_read_receipts: channels.bluebubbles_send_read_receipts,
+                gateway_enabled: channels.gateway_enabled,
+                gateway_host: channels.gateway_host.clone(),
+                gateway_port: channels.gateway_port,
+                gateway_auth_token: channels.gateway_auth_token.clone(),
+                cli_enabled: channels.cli_enabled,
+            },
+            providers: SetupBootstrapProviderInput {
+                cheap_model: self.settings.providers.cheap_model.clone(),
+            },
+            web_ui: SetupBootstrapWebUiInput {
+                skin: self.settings.webchat_skin.clone(),
+                theme: self.settings.webchat_theme.clone(),
+                accent_color: self.settings.webchat_accent_color.clone(),
+                show_branding: self.settings.webchat_show_branding,
+            },
+            observability_backend: self.settings.observability_backend.clone(),
+            agent: SetupBootstrapAgentInput {
+                allow_local_tools: self.settings.agent.allow_local_tools,
+                workspace_mode: self.settings.agent.workspace_mode.clone(),
+            },
+        }
     }
 
     /// Persist settings to DB and bootstrap .env after each step.
@@ -404,5 +259,55 @@ impl SetupWizard {
 
         // Suppress unused variable warning when only one backend is compiled.
         let _ = loaded;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::OnboardingProfile;
+    use super::*;
+
+    fn value_for<'a>(plan: &'a thinclaw_app::SetupBootstrapEnvPlan, key: &str) -> Option<&'a str> {
+        plan.variables()
+            .iter()
+            .find(|var| var.key == key)
+            .map(|var| var.value.as_str())
+    }
+
+    #[test]
+    fn bootstrap_env_input_maps_root_wizard_state_to_crate_plan() {
+        let mut wizard = SetupWizard::new();
+        wizard.selected_profile = OnboardingProfile::RemoteServer;
+        wizard.settings.onboard_completed = true;
+        wizard.settings.database_backend = Some("libsql".to_string());
+        wizard.settings.libsql_path = Some("/tmp/thinclaw.db".to_string());
+        wizard.settings.secrets_master_key_source = crate::settings::KeySource::Env;
+        wizard.settings.secrets.allow_env_master_key = true;
+        wizard.settings.channels.gateway_enabled = Some(true);
+        wizard.settings.channels.gateway_host = Some("127.0.0.1".to_string());
+        wizard.settings.channels.gateway_port = Some(3000);
+        wizard.settings.channels.cli_enabled = Some(false);
+        wizard.settings.agent.allow_local_tools = true;
+        wizard.settings.agent.workspace_mode = Some("unrestricted".to_string());
+
+        let input = wizard.bootstrap_env_input(Some("test-master-key".to_string()));
+        let plan = setup_bootstrap_env_plan(&input);
+
+        assert_eq!(value_for(&plan, "DATABASE_BACKEND"), Some("libsql"));
+        assert_eq!(value_for(&plan, "LIBSQL_PATH"), Some("/tmp/thinclaw.db"));
+        assert_eq!(
+            value_for(&plan, "SECRETS_MASTER_KEY"),
+            Some("test-master-key")
+        );
+        assert_eq!(value_for(&plan, "THINCLAW_ALLOW_ENV_MASTER_KEY"), Some("1"));
+        assert_eq!(value_for(&plan, "ONBOARD_COMPLETED"), Some("true"));
+        assert_eq!(value_for(&plan, "THINCLAW_RUNTIME_PROFILE"), Some("remote"));
+        assert_eq!(value_for(&plan, "THINCLAW_HEADLESS"), Some("true"));
+        assert_eq!(value_for(&plan, "GATEWAY_ENABLED"), Some("true"));
+        assert_eq!(value_for(&plan, "GATEWAY_HOST"), Some("127.0.0.1"));
+        assert_eq!(value_for(&plan, "GATEWAY_PORT"), Some("3000"));
+        assert_eq!(value_for(&plan, "CLI_ENABLED"), Some("false"));
+        assert_eq!(value_for(&plan, "ALLOW_LOCAL_TOOLS"), Some("true"));
+        assert_eq!(value_for(&plan, "WORKSPACE_MODE"), Some("unrestricted"));
     }
 }

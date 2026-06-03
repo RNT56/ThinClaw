@@ -1,12 +1,15 @@
 //! Root-independent thread operation helpers.
 
+use std::collections::HashSet;
+
 use uuid::Uuid;
 
 use thinclaw_llm_core::ChatMessage;
 
 use crate::ports::{PortableThreadState, ThreadRuntimeSnapshot, ThreadStorePort};
 use crate::session::{
-    PendingApproval, PendingAuthMode, Thread, ThreadState, message_hides_user_input_in_main_chat,
+    PendingApproval, PendingAuth, PendingAuthMode, Thread, ThreadState,
+    message_hides_user_input_in_main_chat,
 };
 use crate::undo::UndoManager;
 use thinclaw_types::error::DatabaseError;
@@ -118,6 +121,76 @@ pub fn direct_conversation_metadata_updates(
     updates
 }
 
+pub fn direct_conversation_candidate_is_primary(
+    metadata: &serde_json::Value,
+    thread_type: Option<&str>,
+) -> bool {
+    direct_thread_role_from_metadata(metadata) == Some(DIRECT_THREAD_ROLE_MAIN)
+        || thread_type == Some("assistant")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadVisibilityDecision {
+    Visible,
+    CheckPrincipalUser,
+    Hidden,
+}
+
+pub fn thread_visibility_after_actor_membership(
+    principal_id: &str,
+    actor_id: &str,
+    belongs_to_actor: bool,
+) -> ThreadVisibilityDecision {
+    if belongs_to_actor {
+        ThreadVisibilityDecision::Visible
+    } else if actor_id == principal_id {
+        ThreadVisibilityDecision::CheckPrincipalUser
+    } else {
+        ThreadVisibilityDecision::Hidden
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PostCompactionFactAccumulator {
+    facts: Vec<String>,
+    seen: HashSet<String>,
+    max_total: usize,
+}
+
+impl PostCompactionFactAccumulator {
+    pub fn new(max_total: usize) -> Self {
+        Self {
+            facts: Vec::new(),
+            seen: HashSet::new(),
+            max_total,
+        }
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.max_total.saturating_sub(self.facts.len())
+    }
+
+    pub fn extend_source<I>(&mut self, source: &str, candidates: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        for candidate in candidates {
+            if self.facts.len() >= self.max_total {
+                break;
+            }
+            let decorated = format!("{source}: {candidate}");
+            let key = decorated.trim().to_ascii_lowercase();
+            if !key.is_empty() && self.seen.insert(key) {
+                self.facts.push(decorated);
+            }
+        }
+    }
+
+    pub fn into_facts(self) -> Vec<String> {
+        self.facts
+    }
+}
+
 pub fn compact_text_preview(text: &str) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let preview: String = collapsed.chars().take(120).collect();
@@ -214,6 +287,47 @@ pub fn thread_state_input_admission(state: ThreadState) -> ThreadInputAdmission 
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum PendingApprovalAdmission {
+    Ready(PendingApproval),
+    Missing,
+    RequestIdMismatch,
+}
+
+pub fn take_pending_approval_matching(
+    thread: &mut Thread,
+    request_id: Option<Uuid>,
+) -> PendingApprovalAdmission {
+    if thread.state != ThreadState::AwaitingApproval {
+        return PendingApprovalAdmission::Missing;
+    }
+
+    let Some(pending) = thread.take_pending_approval() else {
+        return PendingApprovalAdmission::Missing;
+    };
+
+    if let Some(request_id) = request_id
+        && request_id != pending.request_id
+    {
+        thread.await_approval(pending);
+        return PendingApprovalAdmission::RequestIdMismatch;
+    }
+
+    PendingApprovalAdmission::Ready(pending)
+}
+
+pub fn pending_approval_missing_message() -> &'static str {
+    "No pending approval request."
+}
+
+pub fn pending_approval_request_mismatch_message() -> &'static str {
+    "Request ID mismatch. Use the correct request ID."
+}
+
+pub fn mark_pending_approval_approved(thread: &mut Thread) {
+    thread.state = ThreadState::Processing;
+}
+
 pub fn checkpoint_before_turn(thread: &Thread, undo: &mut UndoManager) {
     let turn_number = thread.turn_number();
     undo.checkpoint(
@@ -284,6 +398,61 @@ pub fn enter_auth_mode_and_complete_turn(
     (thread.turn_number(), thread.messages())
 }
 
+pub fn clear_pending_auth(thread: &mut Thread) -> bool {
+    thread.take_pending_auth().is_some()
+}
+
+pub fn reenter_pending_auth(thread: &mut Thread, pending: &PendingAuth) {
+    thread.enter_auth_mode(pending.extension_name.clone(), pending.auth_mode);
+}
+
+pub fn auth_mode_status_label(mode: PendingAuthMode) -> &'static str {
+    match mode {
+        PendingAuthMode::ManualToken => "manual_token",
+        PendingAuthMode::ExternalOAuth => "oauth",
+    }
+}
+
+pub fn auth_required_status_mode(
+    parsed_auth_mode: Option<String>,
+    fallback_mode: PendingAuthMode,
+) -> String {
+    parsed_auth_mode.unwrap_or_else(|| auth_mode_status_label(fallback_mode).to_string())
+}
+
+pub fn auth_required_status(parsed_auth_status: Option<String>) -> String {
+    parsed_auth_status.unwrap_or_else(|| "awaiting_token".to_string())
+}
+
+pub fn auth_activation_success_message(extension_name: &str, tools_loaded: &[String]) -> String {
+    let tool_list = if tools_loaded.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nTools: {}", tools_loaded.join(", "))
+    };
+    format!(
+        "{} authenticated and activated ({} tools loaded).{}",
+        extension_name,
+        tools_loaded.len(),
+        tool_list
+    )
+}
+
+pub fn auth_activation_failed_message(extension_name: &str, error: &str) -> String {
+    format!(
+        "{} authenticated successfully, but activation failed: {}. Try activating manually.",
+        extension_name, error
+    )
+}
+
+pub fn invalid_auth_token_message(instructions: Option<String>) -> String {
+    instructions.unwrap_or_else(|| "Invalid token. Please try again.".to_string())
+}
+
+pub fn auth_failed_message(extension_name: &str, error: &str) -> String {
+    format!("Authentication failed for {}: {}", extension_name, error)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UndoRedoOutcome {
     Restored {
@@ -292,6 +461,51 @@ pub enum UndoRedoOutcome {
     },
     NothingAvailable,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndoRedoAction {
+    Undo,
+    Redo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadOperationMessage {
+    Ok(String),
+    Error(&'static str),
+}
+
+pub fn undo_redo_message(
+    action: UndoRedoAction,
+    outcome: &UndoRedoOutcome,
+) -> ThreadOperationMessage {
+    match (action, outcome) {
+        (
+            UndoRedoAction::Undo,
+            UndoRedoOutcome::Restored {
+                turn_number,
+                remaining,
+            },
+        ) => ThreadOperationMessage::Ok(format!(
+            "Undone to turn {}. {} undo(s) remaining.",
+            turn_number, remaining
+        )),
+        (UndoRedoAction::Redo, UndoRedoOutcome::Restored { turn_number, .. }) => {
+            ThreadOperationMessage::Ok(format!("Redone to turn {}.", turn_number))
+        }
+        (UndoRedoAction::Undo, UndoRedoOutcome::NothingAvailable) => {
+            ThreadOperationMessage::Ok("Nothing to undo.".to_string())
+        }
+        (UndoRedoAction::Redo, UndoRedoOutcome::NothingAvailable) => {
+            ThreadOperationMessage::Ok("Nothing to redo.".to_string())
+        }
+        (UndoRedoAction::Undo, UndoRedoOutcome::Failed) => {
+            ThreadOperationMessage::Error("Undo failed.")
+        }
+        (UndoRedoAction::Redo, UndoRedoOutcome::Failed) => {
+            ThreadOperationMessage::Error("Redo failed.")
+        }
+    }
 }
 
 pub fn restore_thread_from_undo(thread: &mut Thread, undo: &mut UndoManager) -> UndoRedoOutcome {
@@ -503,6 +717,70 @@ mod tests {
     }
 
     #[test]
+    fn primary_direct_candidate_uses_role_or_thread_type() {
+        assert!(direct_conversation_candidate_is_primary(
+            &serde_json::json!({ DIRECT_THREAD_ROLE_KEY: DIRECT_THREAD_ROLE_MAIN }),
+            Some("thread")
+        ));
+        assert!(direct_conversation_candidate_is_primary(
+            &serde_json::json!({ DIRECT_THREAD_ROLE_KEY: "side" }),
+            Some("assistant")
+        ));
+        assert!(!direct_conversation_candidate_is_primary(
+            &serde_json::json!({ DIRECT_THREAD_ROLE_KEY: "side" }),
+            Some("thread")
+        ));
+    }
+
+    #[test]
+    fn thread_visibility_decision_preserves_owner_fallback_policy() {
+        assert_eq!(
+            thread_visibility_after_actor_membership("user-1", "actor-1", true),
+            ThreadVisibilityDecision::Visible
+        );
+        assert_eq!(
+            thread_visibility_after_actor_membership("user-1", "user-1", false),
+            ThreadVisibilityDecision::CheckPrincipalUser
+        );
+        assert_eq!(
+            thread_visibility_after_actor_membership("user-1", "actor-1", false),
+            ThreadVisibilityDecision::Hidden
+        );
+    }
+
+    #[test]
+    fn post_compaction_fact_accumulator_decorates_dedupes_and_caps() {
+        let mut facts = PostCompactionFactAccumulator::new(3);
+
+        facts.extend_source(
+            "Profile",
+            vec![
+                "Likes Rust".to_string(),
+                "likes rust".to_string(),
+                "Prefers direct answers".to_string(),
+            ],
+        );
+        assert_eq!(facts.remaining(), 1);
+
+        facts.extend_source(
+            "Memory",
+            vec![
+                "Prefers direct answers".to_string(),
+                "Uses web channel".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            facts.into_facts(),
+            vec![
+                "Profile: Likes Rust",
+                "Profile: Prefers direct answers",
+                "Memory: Prefers direct answers",
+            ]
+        );
+    }
+
+    #[test]
     fn trajectory_metadata_includes_target_only_when_complete() {
         let session_id = Uuid::new_v4();
         let thread_id = Uuid::new_v4();
@@ -534,6 +812,147 @@ mod tests {
         assert_eq!(
             thread_input_admission(&thread),
             ThreadInputAdmission::Reject("Thread completed. Use /thread new.")
+        );
+    }
+
+    #[test]
+    fn pending_approval_admission_preserves_mismatched_request() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        let request_id = Uuid::new_v4();
+        let pending = PendingApproval {
+            request_id,
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"cmd": "pwd"}),
+            description: "inspect cwd".to_string(),
+            tool_call_id: "call_1".to_string(),
+            context_messages: vec![ChatMessage::user("run pwd")],
+            deferred_tool_calls: vec![],
+        };
+        thread.await_approval(pending);
+
+        assert!(matches!(
+            take_pending_approval_matching(&mut thread, Some(Uuid::new_v4())),
+            PendingApprovalAdmission::RequestIdMismatch
+        ));
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+        assert_eq!(
+            thread
+                .pending_approval
+                .as_ref()
+                .map(|pending| pending.request_id),
+            Some(request_id)
+        );
+
+        let admitted = take_pending_approval_matching(&mut thread, Some(request_id));
+        assert!(matches!(admitted, PendingApprovalAdmission::Ready(_)));
+        assert!(thread.pending_approval.is_none());
+    }
+
+    #[test]
+    fn undo_redo_messages_are_policy_owned() {
+        assert_eq!(
+            undo_redo_message(UndoRedoAction::Undo, &UndoRedoOutcome::NothingAvailable),
+            ThreadOperationMessage::Ok("Nothing to undo.".to_string())
+        );
+        assert_eq!(
+            undo_redo_message(
+                UndoRedoAction::Undo,
+                &UndoRedoOutcome::Restored {
+                    turn_number: 4,
+                    remaining: 2
+                }
+            ),
+            ThreadOperationMessage::Ok("Undone to turn 4. 2 undo(s) remaining.".to_string())
+        );
+        assert_eq!(
+            undo_redo_message(
+                UndoRedoAction::Redo,
+                &UndoRedoOutcome::Restored {
+                    turn_number: 5,
+                    remaining: 0
+                }
+            ),
+            ThreadOperationMessage::Ok("Redone to turn 5.".to_string())
+        );
+        assert_eq!(
+            undo_redo_message(UndoRedoAction::Redo, &UndoRedoOutcome::Failed),
+            ThreadOperationMessage::Error("Redo failed.")
+        );
+    }
+
+    #[test]
+    fn auth_helpers_clear_reenter_and_format_status_messages() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        let pending = crate::session::PendingAuth {
+            extension_name: "github".to_string(),
+            auth_mode: crate::session::PendingAuthMode::ExternalOAuth,
+        };
+        reenter_pending_auth(&mut thread, &pending);
+        assert!(thread.pending_auth.is_some());
+        assert!(clear_pending_auth(&mut thread));
+        assert!(thread.pending_auth.is_none());
+        assert!(!clear_pending_auth(&mut thread));
+
+        assert_eq!(
+            auth_required_status_mode(None, crate::session::PendingAuthMode::ExternalOAuth),
+            "oauth"
+        );
+        assert_eq!(auth_required_status(None), "awaiting_token");
+        assert_eq!(
+            auth_activation_success_message("github", &["issues".to_string(), "prs".to_string()]),
+            "github authenticated and activated (2 tools loaded).\n\nTools: issues, prs"
+        );
+        assert_eq!(
+            auth_activation_failed_message("github", "boom"),
+            "github authenticated successfully, but activation failed: boom. Try activating manually."
+        );
+        assert_eq!(
+            invalid_auth_token_message(None),
+            "Invalid token. Please try again."
+        );
+        assert_eq!(
+            auth_failed_message("github", "network"),
+            "Authentication failed for github: network"
+        );
+    }
+
+    #[test]
+    fn runtime_snapshot_preserves_existing_context_and_prompt_fields() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("work");
+        let existing = ThreadRuntimeSnapshot {
+            post_compaction_context: Some("Recent compacted facts".to_string()),
+            frozen_workspace_prompt: Some("workspace".to_string()),
+            frozen_provider_system_prompt: Some("provider".to_string()),
+            prompt_snapshot_hash: Some("hash".to_string()),
+            ephemeral_overlay_hash: Some("overlay".to_string()),
+            prompt_segment_order: vec!["base".to_string(), "workspace".to_string()],
+            provider_context_refs: vec!["ctx-1".to_string()],
+            last_context_pressure: Some(serde_json::json!({"usage": 0.8})),
+            auto_approved_tools: vec!["shell".to_string()],
+            ..Default::default()
+        };
+
+        let snapshot = runtime_snapshot_for_persistence(
+            &thread,
+            None,
+            None,
+            None,
+            Vec::new(),
+            Some(&existing),
+        );
+
+        assert_eq!(
+            snapshot.post_compaction_context.as_deref(),
+            Some("Recent compacted facts")
+        );
+        assert_eq!(snapshot.prompt_snapshot_hash.as_deref(), Some("hash"));
+        assert_eq!(snapshot.prompt_segment_order, ["base", "workspace"]);
+        assert_eq!(snapshot.provider_context_refs, ["ctx-1"]);
+        assert_eq!(snapshot.auto_approved_tools, ["shell"]);
+        assert_eq!(
+            snapshot.last_context_pressure,
+            existing.last_context_pressure
         );
     }
 

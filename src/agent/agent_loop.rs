@@ -22,7 +22,9 @@ use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::subagent_executor::SubagentExecutor;
-use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
+use crate::agent::submission::{
+    Submission, SubmissionParser, SubmissionResponsePlan, plan_submission_response,
+};
 use crate::agent::{RootAgentRuntimePorts, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
@@ -39,7 +41,8 @@ use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
 use thinclaw_agent::agent_loop::{
-    HeartbeatRoutineConfig, HeartbeatRoutineSpec, routine_ownership_changed,
+    HeartbeatRoutineConfig, HeartbeatRoutineSpec, RESTART_NOTICE_TEXT, inbound_blocked_response,
+    inbound_rejected_response, routine_ownership_changed, should_suppress_outbound_response,
 };
 pub(crate) use thinclaw_agent::dispatcher_helpers::truncate_for_preview;
 use thinclaw_agent::startup_hooks::{
@@ -1047,8 +1050,7 @@ impl Agent {
             match self.handle_message_payload_external(&message).await {
                 Ok(Some(mut response)) if !response.is_empty() => {
                     // Suppress HEARTBEAT_OK responses from heartbeat messages
-                    let is_heartbeat = message.channel == "heartbeat";
-                    if is_heartbeat && response.content.contains("HEARTBEAT_OK") {
+                    if should_suppress_outbound_response(&message.channel, &response.content) {
                         tracing::debug!("Heartbeat returned HEARTBEAT_OK — suppressing response");
                         continue;
                     }
@@ -1571,7 +1573,9 @@ impl Agent {
         let mut submission = SubmissionParser::parse(&message.content);
 
         // Hook: BeforeInbound — allow hooks to modify or reject user input
-        if let Submission::UserInput { ref content } = submission {
+        if submission.runs_inbound_hooks()
+            && let Submission::UserInput { ref content } = submission
+        {
             let event = crate::hooks::HookEvent::Inbound {
                 user_id: message.user_id.clone(),
                 channel: message.channel.clone(),
@@ -1581,18 +1585,16 @@ impl Agent {
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
                     return Ok(Some(
-                        thinclaw_agent::submission::AgentResponsePayload::text(format!(
-                            "[Message rejected: {}]",
-                            reason
-                        )),
+                        thinclaw_agent::submission::AgentResponsePayload::text(
+                            inbound_rejected_response(&reason),
+                        ),
                     ));
                 }
                 Err(err) => {
                     return Ok(Some(
-                        thinclaw_agent::submission::AgentResponsePayload::text(format!(
-                            "[Message blocked by hook policy: {}]",
-                            err
-                        )),
+                        thinclaw_agent::submission::AgentResponsePayload::text(
+                            inbound_blocked_response(&err.to_string()),
+                        ),
                     ));
                 }
                 Ok(crate::hooks::HookOutcome::Continue {
@@ -1661,8 +1663,8 @@ impl Agent {
         if let Some(pending) = pending_auth
             && pending.auth_mode == crate::agent::session::PendingAuthMode::ManualToken
         {
-            match &submission {
-                Submission::UserInput { content } => {
+            if submission.consumes_pending_manual_auth() {
+                if let Submission::UserInput { content } = &submission {
                     return self
                         .process_auth_token(message, &pending, content, session, thread_id)
                         .await
@@ -1670,24 +1672,23 @@ impl Agent {
                             result.map(thinclaw_agent::submission::AgentResponsePayload::text)
                         });
                 }
-                _ => {
-                    // Any control submission (interrupt, undo, etc.) cancels auth mode
-                    let thread_snapshot = {
-                        let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            thread.pending_auth = None;
-                            Some(thread.clone())
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(thread_snapshot) = thread_snapshot {
-                        let _ = thread_snapshot;
-                        self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                            .await;
+            } else if submission.cancels_pending_manual_auth() {
+                // Any non-user-input submission (interrupt, undo, etc.) cancels auth mode.
+                let thread_snapshot = {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.pending_auth = None;
+                        Some(thread.clone())
+                    } else {
+                        None
                     }
-                    // Fall through to normal handling
+                };
+                if let Some(thread_snapshot) = thread_snapshot {
+                    let _ = thread_snapshot;
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                        .await;
                 }
+                // Fall through to normal handling.
             }
         }
 
@@ -1726,8 +1727,7 @@ impl Agent {
                     .restart_requested
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 let target_channel = self.config.notify_channel.as_deref().unwrap_or("web");
-                let restart_msg =
-                    OutgoingResponse::text("Restarting ThinClaw agent… I’ll relaunch shortly.");
+                let restart_msg = OutgoingResponse::text(RESTART_NOTICE_TEXT);
                 // Best-effort: send to preferred channel + web
                 let _ = self
                     .channels
@@ -1769,54 +1769,14 @@ impl Agent {
             }
         };
 
-        // Convert SubmissionResult to response payload
-        match result? {
-            SubmissionResult::Response { payload } => {
-                // Suppress silent replies (e.g. from group chat "nothing to say" responses)
-                if crate::llm::is_silent_reply(&payload.content) {
-                    tracing::debug!("Suppressing silent reply token");
-                    Ok(None)
-                } else {
-                    Ok(Some(payload))
-                }
+        // Convert SubmissionResult to a response payload or root-side status effect.
+        match plan_submission_response(result?, crate::llm::is_silent_reply) {
+            SubmissionResponsePlan::Respond(payload) => Ok(Some(payload)),
+            SubmissionResponsePlan::Suppress => {
+                tracing::debug!("Suppressing silent or empty submission response");
+                Ok(None)
             }
-            SubmissionResult::Streamed(payload) => {
-                // Response was already sent to the channel via progressive
-                // streaming edits (sendMessage + editMessageText).
-                // Return only attachments so the caller can send media follow-up
-                // without duplicating the streamed text.
-                tracing::debug!("Response already streamed to channel — skipping respond()");
-                if payload.attachments.is_empty() {
-                    Ok(Some(
-                        thinclaw_agent::submission::AgentResponsePayload::text(""),
-                    ))
-                } else {
-                    Ok(Some(
-                        thinclaw_agent::submission::AgentResponsePayload::with_attachments(
-                            "",
-                            payload.attachments,
-                        ),
-                    ))
-                }
-            }
-            SubmissionResult::Ok { message } => {
-                Ok(message.map(thinclaw_agent::submission::AgentResponsePayload::text))
-            }
-            SubmissionResult::Error { message } => Ok(Some(
-                thinclaw_agent::submission::AgentResponsePayload::text(format!(
-                    "Error: {}",
-                    message
-                )),
-            )),
-            SubmissionResult::Interrupted => Ok(Some(
-                thinclaw_agent::submission::AgentResponsePayload::text("Interrupted."),
-            )),
-            SubmissionResult::NeedApproval {
-                request_id,
-                tool_name,
-                description,
-                parameters,
-            } => {
+            SubmissionResponsePlan::SendApprovalStatusAndSuppress(approval) => {
                 // Each channel renders the approval prompt via send_status.
                 // Web gateway shows an inline card, REPL prints a formatted prompt, etc.
                 let _ = self
@@ -1824,10 +1784,10 @@ impl Agent {
                     .send_status(
                         &message.channel,
                         StatusUpdate::ApprovalNeeded {
-                            request_id: request_id.to_string(),
-                            tool_name,
-                            description,
-                            parameters,
+                            request_id: approval.request_id.to_string(),
+                            tool_name: approval.tool_name,
+                            description: approval.description,
+                            parameters: approval.parameters,
                         },
                         &message.metadata,
                     )

@@ -25,8 +25,188 @@ use crate::skills::{
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 use thinclaw_tools::builtin::learning as learning_policy;
+use thinclaw_tools::ports::{
+    LearningToolHostPort, ToolHostError, ToolLearningActionRequest, ToolLearningActionResult,
+    ToolLearningFeedbackRequest, ToolLearningHistoryQuery, ToolLearningProposalReview,
+    ToolLearningRecord, job_context_from_tool_scope,
+};
 
 const SKILL_FILE_NAME: &str = learning_policy::SKILL_FILE_NAME;
+
+pub struct RootLearningToolHost {
+    orchestrator: Arc<LearningOrchestrator>,
+    store: Arc<dyn Database>,
+    workspace: Option<Arc<Workspace>>,
+    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+}
+
+pub fn root_learning_tool_host(
+    orchestrator: Arc<LearningOrchestrator>,
+    store: Arc<dyn Database>,
+    workspace: Option<Arc<Workspace>>,
+    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+) -> Arc<dyn LearningToolHostPort> {
+    Arc::new(RootLearningToolHost {
+        orchestrator,
+        store,
+        workspace,
+        skill_registry,
+    })
+}
+
+fn learning_tool_host_error_from_tool(error: ToolError) -> ToolHostError {
+    ToolHostError::OperationFailed {
+        reason: error.to_string(),
+    }
+}
+
+async fn execute_root_learning_tool<T>(
+    tool: T,
+    request: ToolLearningActionRequest,
+    title: &str,
+) -> Result<ToolLearningActionResult, ToolHostError>
+where
+    T: Tool,
+{
+    let ctx = job_context_from_tool_scope(request.scope, title);
+    let output = tool
+        .execute(request.params, &ctx)
+        .await
+        .map_err(learning_tool_host_error_from_tool)?;
+    Ok(ToolLearningActionResult {
+        output: output.result,
+    })
+}
+
+#[async_trait]
+impl LearningToolHostPort for RootLearningToolHost {
+    async fn record_feedback(
+        &self,
+        _request: ToolLearningFeedbackRequest,
+    ) -> Result<ToolLearningRecord, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "learning_feedback_structured".to_string(),
+        })
+    }
+
+    async fn list_learning_history(
+        &self,
+        _query: ToolLearningHistoryQuery,
+    ) -> Result<Vec<ToolLearningRecord>, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "learning_history_structured".to_string(),
+        })
+    }
+
+    async fn review_learning_proposal(
+        &self,
+        _review: ToolLearningProposalReview,
+    ) -> Result<ToolLearningRecord, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "learning_proposal_review_structured".to_string(),
+        })
+    }
+
+    async fn prompt_manage_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        let workspace = self
+            .workspace
+            .clone()
+            .ok_or_else(|| ToolHostError::Unavailable {
+                service: "prompt_manage".to_string(),
+            })?;
+        execute_root_learning_tool(
+            PromptManageTool::new(
+                Arc::clone(&self.orchestrator),
+                Arc::clone(&self.store),
+                workspace,
+            ),
+            request,
+            "prompt manage",
+        )
+        .await
+    }
+
+    async fn skill_manage_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        let skill_registry =
+            self.skill_registry
+                .clone()
+                .ok_or_else(|| ToolHostError::Unavailable {
+                    service: "skill_manage".to_string(),
+                })?;
+        execute_root_learning_tool(
+            SkillManageTool::new(Arc::clone(&self.store), skill_registry),
+            request,
+            "skill manage",
+        )
+        .await
+    }
+
+    async fn learning_status_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningStatusTool::new(Arc::clone(&self.orchestrator), Arc::clone(&self.store)),
+            request,
+            "learning status",
+        )
+        .await
+    }
+
+    async fn learning_outcomes_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningOutcomesTool::new(Arc::clone(&self.store)),
+            request,
+            "learning outcomes",
+        )
+        .await
+    }
+
+    async fn learning_history_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningHistoryTool::new(Arc::clone(&self.store)),
+            request,
+            "learning history",
+        )
+        .await
+    }
+
+    async fn learning_feedback_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningFeedbackTool::new(Arc::clone(&self.orchestrator)),
+            request,
+            "learning feedback",
+        )
+        .await
+    }
+
+    async fn learning_proposal_review_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningProposalReviewTool::new(Arc::clone(&self.orchestrator)),
+            request,
+            "learning proposal review",
+        )
+        .await
+    }
+}
 
 fn tool_error_from_skill(err: SkillRegistryError) -> ToolError {
     ToolError::ExecutionFailed(err.to_string())

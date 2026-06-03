@@ -10,26 +10,11 @@ use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::sandbox_types::{CompletionResult, ContainerJobManager, PendingPrompt, PromptQueue};
 pub use thinclaw_types::sandbox::{
-    DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS, SandboxJobSpec, normalize_sandbox_ui_state,
+    DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS, SandboxJobSpec, is_terminal_sandbox_status,
+    normalize_sandbox_ui_state, normalize_terminal_sandbox_status,
 };
 
 pub const DEFAULT_PARENT_SANDBOX_DRAIN_GRACE_SECS: u64 = 15;
-
-pub fn is_terminal_sandbox_status(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
-}
-
-fn normalize_terminal_status(status: &str, success: bool) -> String {
-    match status {
-        "completed" | "success" if success => "completed".to_string(),
-        "cancelled" => "cancelled".to_string(),
-        "interrupted" => "interrupted".to_string(),
-        "completed" | "success" => "failed".to_string(),
-        "error" | "failed" => "failed".to_string(),
-        other if success => other.to_string(),
-        _ => "failed".to_string(),
-    }
-}
 
 #[derive(Clone)]
 pub struct SandboxJobController {
@@ -114,7 +99,7 @@ impl SandboxJobController {
         session_id: Option<String>,
         iterations: u32,
     ) -> Result<(), String> {
-        let normalized_status = normalize_terminal_status(status, success);
+        let normalized_status = normalize_terminal_sandbox_status(status, success);
         let mut errors = Vec::new();
 
         if let Some(store) = self.store.as_ref()

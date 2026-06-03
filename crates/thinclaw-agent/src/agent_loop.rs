@@ -10,6 +10,39 @@ use crate::routine::{
     next_fire_for_routine,
 };
 
+pub const INTERRUPTED_RESPONSE_TEXT: &str = "Interrupted.";
+pub const RESTART_NOTICE_TEXT: &str = "Restarting ThinClaw agent… I’ll relaunch shortly.";
+pub const HEARTBEAT_OK_TOKEN: &str = "HEARTBEAT_OK";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundResponsePolicy {
+    Send,
+    SuppressHeartbeatOk,
+}
+
+pub fn inbound_rejected_response(reason: &str) -> String {
+    format!("[Message rejected: {}]", reason)
+}
+
+pub fn inbound_blocked_response(error: &str) -> String {
+    format!("[Message blocked by hook policy: {}]", error)
+}
+
+pub fn outbound_response_policy(channel: &str, content: &str) -> OutboundResponsePolicy {
+    if channel == "heartbeat" && content.contains(HEARTBEAT_OK_TOKEN) {
+        OutboundResponsePolicy::SuppressHeartbeatOk
+    } else {
+        OutboundResponsePolicy::Send
+    }
+}
+
+pub fn should_suppress_outbound_response(channel: &str, content: &str) -> bool {
+    matches!(
+        outbound_response_policy(channel, content),
+        OutboundResponsePolicy::SuppressHeartbeatOk
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeartbeatRoutineConfig {
     pub interval_secs: u64,
@@ -191,5 +224,35 @@ mod tests {
 
         routine.notify.user = "other".to_string();
         assert!(spec.routine_needs_update(&routine));
+    }
+
+    #[test]
+    fn outbound_policy_suppresses_heartbeat_ok_only_for_heartbeat_channel() {
+        assert_eq!(
+            outbound_response_policy("heartbeat", "Nothing to do. HEARTBEAT_OK"),
+            OutboundResponsePolicy::SuppressHeartbeatOk
+        );
+        assert_eq!(
+            outbound_response_policy("web", "Nothing to do. HEARTBEAT_OK"),
+            OutboundResponsePolicy::Send
+        );
+        assert_eq!(
+            outbound_response_policy("heartbeat", "Needs attention"),
+            OutboundResponsePolicy::Send
+        );
+    }
+
+    #[test]
+    fn fallback_text_matches_root_contract() {
+        assert_eq!(
+            inbound_rejected_response("denied"),
+            "[Message rejected: denied]"
+        );
+        assert_eq!(
+            inbound_blocked_response("policy"),
+            "[Message blocked by hook policy: policy]"
+        );
+        assert_eq!(INTERRUPTED_RESPONSE_TEXT, "Interrupted.");
+        assert!(RESTART_NOTICE_TEXT.contains("Restarting ThinClaw agent"));
     }
 }

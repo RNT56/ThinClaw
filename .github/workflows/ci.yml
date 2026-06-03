@@ -33,6 +33,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check crate boundaries
+        run: |
+          set -euo pipefail
+          if rg -n 'use thinclaw::' crates; then
+            echo "Internal crates must not import the root thinclaw package."
+            exit 1
+          fi
+          if rg -n '^\s*thinclaw\s*=|^\s*\[.*\.thinclaw\]' crates -g Cargo.toml; then
+            echo "Internal crates must not depend on the root thinclaw package."
+            exit 1
+          fi
+          if rg -n 'package\s*=\s*"thinclaw"' crates -g Cargo.toml; then
+            echo "Internal crates must not depend on package = \"thinclaw\"."
+            exit 1
+          fi
       - name: Check lints (cargo clippy)
         run: cargo clippy --workspace -- -D warnings
       - name: Guard Linux deploy port

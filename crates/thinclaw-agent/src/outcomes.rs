@@ -6,13 +6,17 @@ use std::hash::{Hash, Hasher};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use thinclaw_history::{
-    LearningArtifactVersion, LearningCodeProposal, LearningEvent, OutcomeContract,
-    OutcomeEvaluatorHealth, OutcomeObservation,
+    LearningArtifactVersion, LearningCandidate, LearningCodeProposal, LearningEvaluation,
+    LearningEvent, OutcomeContract, OutcomeEvaluatorHealth, OutcomeObservation,
 };
 use thinclaw_llm_core::{ChatMessage, CompletionRequest};
 use thinclaw_workspace::paths;
 use uuid::Uuid;
 
+use crate::learning_policy::{
+    append_markdown_section, ensure_prompt_document_root, ensure_prompt_trailing_newline,
+    remove_markdown_section, upsert_markdown_section,
+};
 use crate::routine::{Routine, RoutineAction, RoutineRun, RunStatus};
 
 pub const CONTRACT_TURN: &str = "turn_usefulness";
@@ -20,6 +24,13 @@ pub const CONTRACT_TOOL: &str = "tool_durability";
 pub const CONTRACT_ROUTINE: &str = "routine_usefulness";
 
 pub const STATUS_OPEN: &str = "open";
+pub const STATUS_EVALUATING: &str = "evaluating";
+pub const STATUS_EVALUATED: &str = "evaluated";
+
+pub const EVALUATOR_OUTCOME: &str = "outcome_evaluator_v1";
+pub const EVALUATOR_MANUAL_REVIEW: &str = "outcome_manual_review_v1";
+
+pub const DEFAULT_EVALUATION_INTERVAL_SECS: u64 = 600;
 
 pub const VERDICT_POSITIVE: &str = "positive";
 pub const VERDICT_NEUTRAL: &str = "neutral";
@@ -33,6 +44,69 @@ pub const SOURCE_ROUTINE_RUN: &str = "routine_run";
 pub const LEDGER_EVENT_ID_KEY: &str = "ledger_learning_event_id";
 
 const MIN_EVALUATION_INTERVAL_SECS: u64 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutcomeRuntimeSettings {
+    pub learning_enabled: bool,
+    pub outcomes_enabled: bool,
+    pub evaluation_interval_secs: u64,
+    pub max_due_per_tick: u32,
+    pub default_ttl_hours: u32,
+    pub llm_assist_enabled: bool,
+    pub heartbeat_summary_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomePendingUserSettings {
+    pub user_id: String,
+    pub settings: OutcomeRuntimeSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeSchedulerPlan {
+    pub user_ids: Vec<String>,
+    pub sleep_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutcomeContractEvaluationPlan {
+    pub status: String,
+    pub final_verdict: String,
+    pub final_score: f64,
+    pub evaluation_details: serde_json::Value,
+    pub evaluator: String,
+    pub evaluated_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutcomeContractRequeuePlan {
+    pub status: String,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub evaluation_details: serde_json::Value,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutcomeCandidateSupplementKind {
+    None,
+    Prompt,
+    Code,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutcomeCandidateSeed {
+    pub candidate_type: String,
+    pub risk_tier: String,
+    pub confidence: f64,
+    pub target_type: String,
+    pub target_name: Option<String>,
+    pub summary: String,
+    pub pattern_key: String,
+    pub pattern_count: usize,
+    pub dedupe_key: String,
+    pub supplement_kind: OutcomeCandidateSupplementKind,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutcomeCandidateClass {
@@ -81,6 +155,52 @@ pub struct OutcomeScore {
     pub details: serde_json::Value,
 }
 
+pub fn outcomes_enabled(settings: &OutcomeRuntimeSettings) -> bool {
+    settings.learning_enabled && settings.outcomes_enabled
+}
+
+pub fn scheduler_plan_for_pending_users(
+    pending_users: impl IntoIterator<Item = OutcomePendingUserSettings>,
+) -> OutcomeSchedulerPlan {
+    let mut user_ids = Vec::new();
+    let mut min_interval = DEFAULT_EVALUATION_INTERVAL_SECS;
+    for pending in pending_users {
+        if !outcomes_enabled(&pending.settings) {
+            continue;
+        }
+        min_interval = min_interval.min(
+            pending
+                .settings
+                .evaluation_interval_secs
+                .max(MIN_EVALUATION_INTERVAL_SECS),
+        );
+        user_ids.push(pending.user_id);
+    }
+    OutcomeSchedulerPlan {
+        user_ids,
+        sleep_interval_secs: min_interval.max(MIN_EVALUATION_INTERVAL_SECS),
+    }
+}
+
+pub fn max_due_per_tick(settings: &OutcomeRuntimeSettings) -> i64 {
+    i64::from(settings.max_due_per_tick.max(1))
+}
+
+pub fn default_ttl_hours(settings: &OutcomeRuntimeSettings) -> u64 {
+    u64::from(settings.default_ttl_hours)
+}
+
+pub fn should_use_llm_assisted_score(
+    settings: &OutcomeRuntimeSettings,
+    observations: &[OutcomeObservation],
+) -> bool {
+    settings.llm_assist_enabled && has_mixed_observations(observations)
+}
+
+pub fn heartbeat_summary_enabled(settings: &OutcomeRuntimeSettings) -> bool {
+    outcomes_enabled(settings) && settings.heartbeat_summary_enabled
+}
+
 pub fn evaluator_health_status(
     health: &OutcomeEvaluatorHealth,
     evaluation_interval_secs: u64,
@@ -95,6 +215,63 @@ pub fn evaluator_health_status(
         .oldest_evaluating_claimed_at
         .is_some_and(|claimed_at| claimed_at <= stale_before);
     !(due_is_stale || evaluating_is_stale)
+}
+
+pub fn evaluated_contract_plan(
+    score: &OutcomeScore,
+    evaluator: &str,
+    now: DateTime<Utc>,
+) -> OutcomeContractEvaluationPlan {
+    OutcomeContractEvaluationPlan {
+        status: STATUS_EVALUATED.to_string(),
+        final_verdict: score.verdict.clone(),
+        final_score: score.score,
+        evaluation_details: score.details.clone(),
+        evaluator: evaluator.to_string(),
+        evaluated_at: now,
+        updated_at: now,
+    }
+}
+
+pub fn apply_evaluated_contract_plan(
+    contract: &mut OutcomeContract,
+    plan: &OutcomeContractEvaluationPlan,
+) {
+    contract.status = plan.status.clone();
+    contract.final_verdict = Some(plan.final_verdict.clone());
+    contract.final_score = Some(plan.final_score);
+    contract.evaluation_details = plan.evaluation_details.clone();
+    annotate_contract_with_last_evaluator(contract, &plan.evaluator);
+    contract.evaluated_at = Some(plan.evaluated_at);
+    contract.updated_at = plan.updated_at;
+}
+
+pub fn failed_contract_requeue_plan(
+    contract: &OutcomeContract,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Option<OutcomeContractRequeuePlan> {
+    if contract.status != STATUS_EVALUATING || contract.evaluated_at.is_some() {
+        return None;
+    }
+    let mut evaluation_details = contract.evaluation_details.clone();
+    upsert_json_string(&mut evaluation_details, "last_error", reason.to_string());
+    Some(OutcomeContractRequeuePlan {
+        status: STATUS_OPEN.to_string(),
+        claimed_at: None,
+        evaluation_details,
+        updated_at: now,
+    })
+}
+
+pub fn apply_failed_contract_requeue_plan(
+    contract: &mut OutcomeContract,
+    plan: &OutcomeContractRequeuePlan,
+) {
+    contract.status = plan.status.clone();
+    contract.claimed_at = plan.claimed_at;
+    contract.evaluation_details = plan.evaluation_details.clone();
+    contract.updated_at = plan.updated_at;
 }
 
 pub fn deterministic_score(
@@ -376,6 +553,70 @@ pub fn synthetic_learning_event(
     )
 }
 
+pub fn build_learning_evaluation_record(
+    id: Uuid,
+    learning_event_id: Uuid,
+    contract: &OutcomeContract,
+    score: &OutcomeScore,
+    observations: &[OutcomeObservation],
+    evaluator: &str,
+    created_at: DateTime<Utc>,
+) -> LearningEvaluation {
+    LearningEvaluation {
+        id,
+        learning_event_id,
+        user_id: contract.user_id.clone(),
+        evaluator: evaluator.to_string(),
+        status: contract
+            .final_verdict
+            .clone()
+            .unwrap_or_else(|| VERDICT_NEUTRAL.to_string()),
+        score: Some(score.score),
+        details: json!({
+            "contract_id": contract.id,
+            "contract_type": contract.contract_type,
+            "source_kind": contract.source_kind,
+            "source_id": contract.source_id,
+            "final_verdict": score.verdict,
+            "observations": observations,
+            "strategy": score.details.get("strategy").cloned().unwrap_or_else(|| json!("deterministic")),
+        }),
+        created_at,
+    }
+}
+
+pub fn build_manual_review_evaluation_record(
+    id: Uuid,
+    learning_event_id: Uuid,
+    contract: &OutcomeContract,
+    decision: &str,
+    observations: &[OutcomeObservation],
+    created_at: DateTime<Utc>,
+) -> LearningEvaluation {
+    LearningEvaluation {
+        id,
+        learning_event_id,
+        user_id: contract.user_id.clone(),
+        evaluator: EVALUATOR_MANUAL_REVIEW.to_string(),
+        status: manual_review_status(contract, decision),
+        score: Some(manual_review_score(contract, decision)),
+        details: json!({
+            "contract_id": contract.id,
+            "contract_type": contract.contract_type,
+            "source_kind": contract.source_kind,
+            "source_id": contract.source_id,
+            "review_decision": decision,
+            "manual_verdict": contract.final_verdict,
+            "contract_status": contract.status,
+            "final_score": contract.final_score,
+            "ledger_learning_event_id": learning_event_id,
+            "observations": observations,
+            "strategy": "manual_review",
+        }),
+        created_at,
+    }
+}
+
 pub fn manual_review_learning_event(
     contract: &OutcomeContract,
     decision: &str,
@@ -557,6 +798,135 @@ pub fn candidate_risk_for_class(class: OutcomeCandidateClass) -> OutcomeRiskTier
     }
 }
 
+pub fn outcome_candidate_seed(
+    contract: &OutcomeContract,
+    score: &OutcomeScore,
+    repeated_negative_pattern_count: usize,
+) -> Option<OutcomeCandidateSeed> {
+    if score.verdict != VERDICT_NEGATIVE || score.score.abs() < 0.6 {
+        return None;
+    }
+    let pattern_key = contract
+        .metadata
+        .get("pattern_key")
+        .and_then(|value| value.as_str())?;
+    if repeated_negative_pattern_count < 2 {
+        return None;
+    }
+
+    let class = candidate_class_for_contract(contract);
+    if class == OutcomeCandidateClass::Unknown {
+        return None;
+    }
+    let supplement_kind = match class {
+        OutcomeCandidateClass::Prompt => OutcomeCandidateSupplementKind::Prompt,
+        OutcomeCandidateClass::Code => {
+            if code_candidate_payload(contract).is_none() {
+                return None;
+            }
+            OutcomeCandidateSupplementKind::Code
+        }
+        _ => OutcomeCandidateSupplementKind::None,
+    };
+    let target_name = candidate_target_name(contract);
+    let dedupe_key = stable_key(&[
+        class.as_str(),
+        &target_name.clone().unwrap_or_default(),
+        pattern_key,
+    ]);
+
+    Some(OutcomeCandidateSeed {
+        candidate_type: class.as_str().to_string(),
+        risk_tier: candidate_risk_for_class(class).as_str().to_string(),
+        confidence: score.score.abs(),
+        target_type: candidate_target_type(contract),
+        target_name,
+        summary: format!(
+            "Repeated negative outcome pattern detected for {} ({})",
+            contract.contract_type, pattern_key
+        ),
+        pattern_key: pattern_key.to_string(),
+        pattern_count: repeated_negative_pattern_count,
+        dedupe_key,
+        supplement_kind,
+    })
+}
+
+pub fn candidate_dedupe_exists(candidates: &[LearningCandidate], dedupe_key: &str) -> bool {
+    candidates.iter().any(|candidate| {
+        candidate
+            .proposal
+            .get("dedupe_key")
+            .and_then(|value| value.as_str())
+            == Some(dedupe_key)
+    })
+}
+
+pub fn build_outcome_candidate(
+    id: Uuid,
+    learning_event_id: Uuid,
+    contract: &OutcomeContract,
+    score: &OutcomeScore,
+    observations: &[OutcomeObservation],
+    seed: &OutcomeCandidateSeed,
+    prompt_payload: Option<serde_json::Value>,
+    created_at: DateTime<Utc>,
+) -> Option<LearningCandidate> {
+    let target_name = seed.target_name.clone();
+    let evidence = json!({
+        "source": "outcome_backed_learning",
+        "contract_id": contract.id,
+        "contract_type": contract.contract_type.clone(),
+        "pattern_key": seed.pattern_key.clone(),
+        "pattern_count": seed.pattern_count,
+        "final_verdict": score.verdict.clone(),
+        "observations": observations,
+        "target": target_name.clone(),
+        "target_type": seed.target_type.clone(),
+        "routine_patch": routine_candidate_patch(contract, observations),
+    });
+
+    let mut proposal = serde_json::Map::new();
+    proposal.insert("dedupe_key".to_string(), json!(seed.dedupe_key.clone()));
+    proposal.insert("source".to_string(), json!("outcome_backed_learning"));
+    proposal.insert("pattern_key".to_string(), json!(seed.pattern_key.clone()));
+    proposal.insert("pattern_count".to_string(), json!(seed.pattern_count));
+    proposal.insert(
+        "contract_type".to_string(),
+        json!(contract.contract_type.clone()),
+    );
+    proposal.insert("verdict".to_string(), json!(score.verdict.clone()));
+    proposal.insert("evidence".to_string(), evidence);
+    proposal.insert(
+        "routine_patch".to_string(),
+        routine_candidate_patch(contract, observations),
+    );
+
+    match seed.supplement_kind {
+        OutcomeCandidateSupplementKind::Prompt => {
+            merge_json_object(&mut proposal, prompt_payload?);
+        }
+        OutcomeCandidateSupplementKind::Code => {
+            merge_json_object(&mut proposal, code_candidate_payload(contract)?);
+        }
+        OutcomeCandidateSupplementKind::None => {}
+    }
+
+    Some(LearningCandidate {
+        id,
+        learning_event_id: Some(learning_event_id),
+        user_id: contract.user_id.clone(),
+        candidate_type: seed.candidate_type.clone(),
+        risk_tier: seed.risk_tier.clone(),
+        confidence: Some(seed.confidence),
+        target_type: Some(seed.target_type.clone()),
+        target_name,
+        summary: Some(seed.summary.clone()),
+        proposal: serde_json::Value::Object(proposal),
+        created_at,
+    })
+}
+
 pub fn candidate_target_type(contract: &OutcomeContract) -> String {
     match contract.contract_type.as_str() {
         CONTRACT_ROUTINE => "routine".to_string(),
@@ -707,6 +1077,35 @@ pub fn feedback_polarity(verdict: &str) -> (&'static str, f64) {
         "harmful" | "revert" | "dont_learn" | "reject" => (VERDICT_NEGATIVE, 1.0),
         _ => (VERDICT_NEUTRAL, 0.0),
     }
+}
+
+pub fn feedback_target_source_kind(target_type: &str) -> Option<&'static str> {
+    match target_type {
+        "learning_event" => Some(SOURCE_LEARNING_EVENT),
+        "artifact_version" => Some(SOURCE_ARTIFACT_VERSION),
+        "code_proposal" => Some(SOURCE_CODE_PROPOSAL),
+        _ => None,
+    }
+}
+
+pub fn contract_accepts_observation(contract: &OutcomeContract) -> bool {
+    contract.status == STATUS_OPEN || contract.status == STATUS_EVALUATING
+}
+
+pub fn should_due_contract_for_observation_polarity(polarity: &str) -> bool {
+    polarity == VERDICT_NEGATIVE
+}
+
+pub fn artifact_version_outcome_eligible(status: &str) -> bool {
+    status.eq_ignore_ascii_case("applied") || status.eq_ignore_ascii_case("promoted")
+}
+
+pub fn learning_event_turn_outcome_eligible(event: &LearningEvent) -> bool {
+    event
+        .payload
+        .get("role")
+        .and_then(|value| value.as_str())
+        .is_some_and(|role| role.eq_ignore_ascii_case("assistant"))
 }
 
 pub fn is_user_visible_routine_run(routine: &Routine, run: &RoutineRun) -> bool {
@@ -992,6 +1391,18 @@ pub fn upsert_json_string(target: &mut serde_json::Value, key: &str, value: Stri
     }
 }
 
+fn merge_json_object(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    patch: serde_json::Value,
+) {
+    let Some(patch_obj) = patch.as_object() else {
+        return;
+    };
+    for (key, value) in patch_obj {
+        target.insert(key.clone(), value.clone());
+    }
+}
+
 pub fn prompt_guidance_section(
     contract: &OutcomeContract,
     observations: &[OutcomeObservation],
@@ -1120,151 +1531,6 @@ pub fn contract_last_evaluator(contract: &OutcomeContract) -> Option<String> {
         .map(str::to_string)
 }
 
-fn ensure_prompt_document_root(current: &str, target: &str) -> String {
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        return ensure_prompt_trailing_newline(trimmed);
-    }
-    if target.ends_with(paths::SOUL_LOCAL) {
-        let mut sections = std::collections::BTreeMap::new();
-        for section in thinclaw_soul::LOCAL_SECTIONS {
-            sections.insert((*section).to_string(), String::new());
-        }
-        return thinclaw_soul::render_local_soul_overlay(&thinclaw_soul::LocalSoulOverlay {
-            sections,
-        });
-    }
-    if target.ends_with(paths::SOUL) {
-        return thinclaw_soul::compose_seeded_soul("balanced").unwrap_or_else(|_| {
-            "# SOUL.md - Who You Are\n\n- **Schema:** v2\n- **Seed Pack:** balanced\n\n## Core Truths\n\n## Boundaries\n\n## Vibe\n\n## Default Behaviors\n\n## Continuity\n\n## Change Contract\n"
-                .to_string()
-        });
-    }
-    let title = if target.ends_with(paths::USER) {
-        "USER.md"
-    } else if target.ends_with(paths::AGENTS) {
-        "AGENTS.md"
-    } else {
-        target.rsplit('/').next().unwrap_or("PROMPT.md")
-    };
-    format!("# {title}\n")
-}
-
-fn ensure_prompt_trailing_newline(content: &str) -> String {
-    let trimmed = content.trim_end();
-    format!("{trimmed}\n")
-}
-
-fn normalize_heading_name(raw: &str) -> String {
-    raw.trim()
-        .trim_start_matches('#')
-        .trim()
-        .to_ascii_lowercase()
-}
-
-fn parse_markdown_heading(line: &str) -> Option<(usize, String)> {
-    let trimmed = line.trim_start();
-    if !trimmed.starts_with('#') {
-        return None;
-    }
-    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
-    if level == 0 {
-        return None;
-    }
-    let title = trimmed[level..].trim();
-    if title.is_empty() {
-        return None;
-    }
-    Some((level, title.to_string()))
-}
-
-fn find_section_byte_range(doc: &str, heading_name: &str) -> Option<(usize, usize, usize, String)> {
-    let target = normalize_heading_name(heading_name);
-    let mut offset = 0usize;
-    let mut start: Option<(usize, usize, usize, String)> = None;
-
-    for line in doc.split_inclusive('\n') {
-        let line_start = offset;
-        let line_end = offset + line.len();
-        offset = line_end;
-
-        if let Some((level, title)) = parse_markdown_heading(line) {
-            if let Some((start_offset, current_level, _, current_title)) = &start
-                && level <= *current_level
-            {
-                return Some((
-                    *start_offset,
-                    line_start,
-                    *current_level,
-                    current_title.clone(),
-                ));
-            }
-
-            if normalize_heading_name(&title) == target {
-                start = Some((line_start, level, line_end, title));
-            }
-        }
-    }
-
-    start.map(|(start_offset, level, _, title)| (start_offset, doc.len(), level, title))
-}
-
-fn upsert_markdown_section(doc: &str, heading: &str, section_content: &str) -> String {
-    let normalized_content = section_content.trim();
-    let body = if normalized_content.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}\n", normalized_content)
-    };
-
-    if let Some((start, end, level, title)) = find_section_byte_range(doc, heading) {
-        let heading_line = format!("{} {}", "#".repeat(level.max(1)), title.trim());
-        let replacement = format!("{heading_line}{body}");
-        let mut merged = String::with_capacity(doc.len() + replacement.len());
-        merged.push_str(&doc[..start]);
-        merged.push_str(replacement.trim_end_matches('\n'));
-        merged.push('\n');
-        merged.push_str(doc[end..].trim_start_matches('\n'));
-        return ensure_prompt_trailing_newline(merged.trim());
-    }
-
-    let mut merged = doc.trim().to_string();
-    if !merged.is_empty() {
-        merged.push_str("\n\n");
-    }
-    merged.push_str(&format!("## {}\n", heading.trim()));
-    if !normalized_content.is_empty() {
-        merged.push_str(normalized_content);
-        merged.push('\n');
-    }
-    ensure_prompt_trailing_newline(&merged)
-}
-
-fn append_markdown_section(doc: &str, heading: &str, section_content: &str) -> String {
-    let mut merged = doc.trim().to_string();
-    if !merged.is_empty() {
-        merged.push_str("\n\n");
-    }
-    merged.push_str(&format!("## {}\n", heading.trim()));
-    let content = section_content.trim();
-    if !content.is_empty() {
-        merged.push_str(content);
-        merged.push('\n');
-    }
-    ensure_prompt_trailing_newline(&merged)
-}
-
-fn remove_markdown_section(doc: &str, heading: &str) -> Result<String, String> {
-    let Some((start, end, _, _)) = find_section_byte_range(doc, heading) else {
-        return Err(format!("section '{}' not found", heading));
-    };
-
-    let mut merged = String::with_capacity(doc.len());
-    merged.push_str(&doc[..start]);
-    merged.push_str(doc[end..].trim_start_matches('\n'));
-    Ok(ensure_prompt_trailing_newline(merged.trim()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,6 +1574,171 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn runtime_settings(
+        learning_enabled: bool,
+        outcomes_enabled: bool,
+        evaluation_interval_secs: u64,
+    ) -> OutcomeRuntimeSettings {
+        OutcomeRuntimeSettings {
+            learning_enabled,
+            outcomes_enabled,
+            evaluation_interval_secs,
+            max_due_per_tick: 50,
+            default_ttl_hours: 72,
+            llm_assist_enabled: true,
+            heartbeat_summary_enabled: true,
+        }
+    }
+
+    #[test]
+    fn scheduler_plan_filters_disabled_users_and_uses_shortest_interval() {
+        let plan = scheduler_plan_for_pending_users([
+            OutcomePendingUserSettings {
+                user_id: "enabled-slow".to_string(),
+                settings: runtime_settings(true, true, 600),
+            },
+            OutcomePendingUserSettings {
+                user_id: "learning-disabled".to_string(),
+                settings: runtime_settings(false, true, 30),
+            },
+            OutcomePendingUserSettings {
+                user_id: "outcomes-disabled".to_string(),
+                settings: runtime_settings(true, false, 20),
+            },
+            OutcomePendingUserSettings {
+                user_id: "enabled-fast".to_string(),
+                settings: runtime_settings(true, true, 10),
+            },
+        ]);
+
+        assert_eq!(plan.user_ids, ["enabled-slow", "enabled-fast"]);
+        assert_eq!(plan.sleep_interval_secs, 10);
+    }
+
+    #[test]
+    fn evaluation_plan_sets_status_and_evaluator_metadata() {
+        let mut contract = contract();
+        let now = Utc::now();
+        let score = OutcomeScore {
+            verdict: VERDICT_NEGATIVE.to_string(),
+            score: -0.8,
+            details: json!({"strategy":"deterministic"}),
+        };
+        let plan = evaluated_contract_plan(&score, EVALUATOR_OUTCOME, now);
+        apply_evaluated_contract_plan(&mut contract, &plan);
+
+        assert_eq!(contract.status, STATUS_EVALUATED);
+        assert_eq!(contract.final_verdict.as_deref(), Some(VERDICT_NEGATIVE));
+        assert_eq!(contract.final_score, Some(-0.8));
+        assert_eq!(contract.evaluated_at, Some(now));
+        assert_eq!(
+            contract_last_evaluator(&contract).as_deref(),
+            Some(EVALUATOR_OUTCOME)
+        );
+    }
+
+    #[test]
+    fn requeue_plan_only_applies_to_unfinished_claimed_contracts() {
+        let mut contract = contract();
+        contract.status = STATUS_EVALUATING.to_string();
+        contract.claimed_at = Some(Utc::now());
+        let now = Utc::now();
+        let plan = failed_contract_requeue_plan(&contract, "temporary failure", now)
+            .expect("requeue plan");
+        apply_failed_contract_requeue_plan(&mut contract, &plan);
+
+        assert_eq!(contract.status, STATUS_OPEN);
+        assert!(contract.claimed_at.is_none());
+        assert_eq!(contract.updated_at, now);
+        assert_eq!(
+            contract
+                .evaluation_details
+                .get("last_error")
+                .and_then(|value| value.as_str()),
+            Some("temporary failure")
+        );
+
+        contract.status = STATUS_EVALUATED.to_string();
+        contract.evaluated_at = Some(now);
+        assert!(failed_contract_requeue_plan(&contract, "late failure", now).is_none());
+    }
+
+    #[test]
+    fn source_mapping_and_status_policy_match_root_observation_rules() {
+        assert_eq!(
+            feedback_target_source_kind("learning_event"),
+            Some(SOURCE_LEARNING_EVENT)
+        );
+        assert_eq!(
+            feedback_target_source_kind("artifact_version"),
+            Some(SOURCE_ARTIFACT_VERSION)
+        );
+        assert_eq!(
+            feedback_target_source_kind("code_proposal"),
+            Some(SOURCE_CODE_PROPOSAL)
+        );
+        assert_eq!(feedback_target_source_kind("unknown"), None);
+
+        let mut contract = contract();
+        assert!(contract_accepts_observation(&contract));
+        contract.status = STATUS_EVALUATED.to_string();
+        assert!(!contract_accepts_observation(&contract));
+        assert!(should_due_contract_for_observation_polarity(
+            VERDICT_NEGATIVE
+        ));
+        assert!(!should_due_contract_for_observation_polarity(
+            VERDICT_POSITIVE
+        ));
+    }
+
+    #[test]
+    fn candidate_seed_and_builder_shape_repeated_negative_payload() {
+        let mut contract = contract();
+        contract.contract_type = CONTRACT_TOOL.to_string();
+        contract.metadata = json!({
+            "artifact_type": "memory",
+            "artifact_name": paths::MEMORY,
+            "pattern_key": "artifact:memory:MEMORY.md",
+        });
+        let score = OutcomeScore {
+            verdict: VERDICT_NEGATIVE.to_string(),
+            score: -0.9,
+            details: json!({"strategy":"deterministic"}),
+        };
+        let seed = outcome_candidate_seed(&contract, &score, 2).expect("candidate seed");
+        assert_eq!(seed.candidate_type, "memory");
+        assert_eq!(seed.risk_tier, "low");
+        assert_eq!(seed.supplement_kind, OutcomeCandidateSupplementKind::None);
+
+        let candidate = build_outcome_candidate(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &contract,
+            &score,
+            &[observation("explicit_correction", VERDICT_NEGATIVE, 1.0)],
+            &seed,
+            None,
+            Utc::now(),
+        )
+        .expect("candidate");
+        assert_eq!(candidate.candidate_type, "memory");
+        assert_eq!(
+            candidate
+                .proposal
+                .get("dedupe_key")
+                .and_then(|value| value.as_str()),
+            Some(seed.dedupe_key.as_str())
+        );
+        assert_eq!(
+            candidate
+                .proposal
+                .get("evidence")
+                .and_then(|value| value.get("pattern_count"))
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
     }
 
     #[test]

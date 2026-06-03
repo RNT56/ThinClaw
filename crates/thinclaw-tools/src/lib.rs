@@ -9,6 +9,7 @@ pub mod builtin;
 pub mod execution;
 pub mod intent_display;
 pub mod mcp;
+pub mod ports;
 pub mod registry;
 pub mod smart_approve;
 pub mod user_tool;

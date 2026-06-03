@@ -1,8 +1,19 @@
 //! Root-independent memory tool path policy.
 
-use thinclaw_tools_core::ToolError;
+use std::sync::Arc;
+use std::time::Instant;
+
+use async_trait::async_trait;
+use thinclaw_tools_core::{
+    Tool, ToolError, ToolMetadata, ToolOutput, ToolRateLimitConfig, ToolRouteIntent,
+};
+use thinclaw_types::JobContext;
 use thinclaw_workspace::paths;
 use uuid::Uuid;
+
+#[cfg(test)]
+use crate::ports::ToolOperationScope;
+use crate::ports::{MemoryToolHostPort, ToolMemoryActionRequest, tool_scope_from_job_context};
 
 /// Files the LLM may only append to, never fully overwrite.
 pub const APPEND_ONLY_IDENTITY_FILES: &[&str] = &[];
@@ -74,6 +85,12 @@ pub struct SessionSearchScope {
     pub actor_id: String,
     pub include_group_history: bool,
     pub conversation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSearchFilters {
+    pub channel: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 pub fn split_scoped_target(target: &str) -> (Option<MemoryScope>, String) {
@@ -594,6 +611,45 @@ pub fn parse_session_search_params(
     })
 }
 
+pub fn session_search_direct_scope_for_context(ctx: &JobContext) -> bool {
+    memory_conversation_kind(&ctx.metadata) == MemoryConversationKind::Direct
+}
+
+pub fn parse_session_search_params_for_context(
+    params: &serde_json::Value,
+    ctx: &JobContext,
+    summarizer_configured: bool,
+) -> Result<SessionSearchParams, ToolError> {
+    parse_session_search_params(
+        params,
+        session_search_direct_scope_for_context(ctx),
+        summarizer_configured,
+    )
+}
+
+pub fn session_search_filters_for_context(
+    ctx: &JobContext,
+    params: &SessionSearchParams,
+) -> SessionSearchFilters {
+    let channel = if params.all_channels {
+        None
+    } else {
+        ctx.metadata
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let thread_id = if params.include_current_thread {
+        ctx.metadata
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    } else {
+        None
+    };
+    SessionSearchFilters { channel, thread_id }
+}
+
 pub fn memory_conversation_kind(metadata: &serde_json::Value) -> MemoryConversationKind {
     let kind = metadata
         .get("conversation_kind")
@@ -641,6 +697,26 @@ pub fn resolve_session_search_scope(
     }
 }
 
+pub fn resolve_session_search_scope_for_context(ctx: &JobContext) -> SessionSearchScope {
+    resolve_session_search_scope(
+        &ctx.metadata,
+        &ctx.principal_id,
+        ctx.actor_id.as_deref(),
+        ctx.conversation_id,
+    )
+}
+
+pub fn workspace_agent_id_from_metadata(
+    metadata: &serde_json::Value,
+    fallback_agent_id: Option<Uuid>,
+) -> Option<Uuid> {
+    metadata
+        .get("agent_workspace_id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .or(fallback_agent_id)
+}
+
 pub fn resolve_memory_write_path(
     metadata: &serde_json::Value,
     actor_id: Option<&str>,
@@ -674,9 +750,283 @@ pub fn resolve_memory_write_path(
     }
 }
 
+pub fn resolve_memory_write_path_for_context(ctx: &JobContext, target: &str) -> (String, bool) {
+    let actor_id = ctx
+        .metadata
+        .get("actor_id")
+        .or_else(|| ctx.metadata.get("actor"))
+        .and_then(|v| v.as_str())
+        .or(ctx.actor_id.as_deref());
+    resolve_memory_write_path(&ctx.metadata, actor_id, target)
+}
+
+async fn execute_memory_action<F, Fut>(
+    host: &Arc<dyn MemoryToolHostPort>,
+    params: serde_json::Value,
+    ctx: &JobContext,
+    action: F,
+) -> Result<ToolOutput, ToolError>
+where
+    F: FnOnce(Arc<dyn MemoryToolHostPort>, ToolMemoryActionRequest) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<crate::ports::ToolMemoryActionResult, crate::ports::ToolHostError>,
+        >,
+{
+    let start = Instant::now();
+    let request = ToolMemoryActionRequest {
+        scope: tool_scope_from_job_context(ctx),
+        params,
+    };
+    let result = action(Arc::clone(host), request)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+    Ok(ToolOutput::success(result.output, start.elapsed()))
+}
+
+macro_rules! memory_host_tool {
+    (
+        $tool:ident,
+        $name:literal,
+        $description:literal,
+        $schema:ident,
+        $parse:expr,
+        $method:ident,
+        $metadata:expr,
+        $rate_limit:expr
+    ) => {
+        pub struct $tool {
+            host: Arc<dyn MemoryToolHostPort>,
+        }
+
+        impl $tool {
+            pub fn new(host: Arc<dyn MemoryToolHostPort>) -> Self {
+                Self { host }
+            }
+        }
+
+        #[async_trait]
+        impl Tool for $tool {
+            fn name(&self) -> &str {
+                $name
+            }
+
+            fn description(&self) -> &str {
+                $description
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                $schema()
+            }
+
+            fn metadata(&self) -> ToolMetadata {
+                $metadata
+            }
+
+            async fn execute(
+                &self,
+                params: serde_json::Value,
+                ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                $parse(&params)?;
+                execute_memory_action(&self.host, params, ctx, |host, request| async move {
+                    host.$method(request).await
+                })
+                .await
+            }
+
+            fn requires_sanitization(&self) -> bool {
+                false
+            }
+
+            fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+                $rate_limit
+            }
+        }
+    };
+}
+
+fn validate_memory_read_params(params: &serde_json::Value) -> Result<(), ToolError> {
+    params
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(|_| ())
+        .ok_or_else(|| ToolError::InvalidParameters("missing required parameter: path".to_string()))
+}
+
+fn validate_memory_delete_params(params: &serde_json::Value) -> Result<(), ToolError> {
+    let path = params
+        .get("path")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            ToolError::InvalidParameters("missing required parameter: path".to_string())
+        })?;
+    let _ = resolve_memory_delete_action(path)?;
+    Ok(())
+}
+
+fn validate_memory_tree_params(params: &serde_json::Value) -> Result<(), ToolError> {
+    let _ = parse_memory_tree_params(params);
+    Ok(())
+}
+
+memory_host_tool!(
+    MemorySearchHostTool,
+    "memory_search",
+    "Search past memories, decisions, and context.",
+    memory_search_parameters_schema,
+    parse_memory_search_params,
+    search_memory_action,
+    ToolMetadata::authoritative(ToolRouteIntent::MemoryRecall),
+    None
+);
+
+memory_host_tool!(
+    MemoryWriteHostTool,
+    "memory_write",
+    "Write to persistent memory.",
+    memory_write_parameters_schema,
+    parse_memory_write_params,
+    write_memory_action,
+    ToolMetadata::default(),
+    Some(ToolRateLimitConfig::new(20, 200))
+);
+
+memory_host_tool!(
+    MemoryReadHostTool,
+    "memory_read",
+    "Read a durable ThinClaw memory file.",
+    memory_read_parameters_schema,
+    validate_memory_read_params,
+    read_memory_action,
+    ToolMetadata::authoritative(ToolRouteIntent::MemoryRecall),
+    None
+);
+
+memory_host_tool!(
+    MemoryTreeHostTool,
+    "memory_tree",
+    "View the workspace memory structure as a tree.",
+    memory_tree_parameters_schema,
+    validate_memory_tree_params,
+    tree_memory_action,
+    ToolMetadata::default(),
+    None
+);
+
+memory_host_tool!(
+    MemoryDeleteHostTool,
+    "memory_delete",
+    "Delete a file from workspace memory.",
+    memory_delete_parameters_schema,
+    validate_memory_delete_params,
+    delete_memory_action,
+    ToolMetadata::default(),
+    None
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::{
+        ToolHostError, ToolMemoryActionResult, ToolMemoryEntry, ToolMemoryReadRequest,
+        ToolMemoryScope, ToolMemorySearchRequest, ToolMemoryWriteRequest,
+    };
+
+    struct StubMemoryHost;
+
+    impl StubMemoryHost {
+        fn output(action: &str, request: ToolMemoryActionRequest) -> ToolMemoryActionResult {
+            ToolMemoryActionResult {
+                output: serde_json::json!({
+                    "action": action,
+                    "principal_id": request.scope.principal_id,
+                    "actor_id": request.scope.actor_id,
+                    "thread_id": request.scope.thread_id,
+                    "params": request.params,
+                }),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryToolHostPort for StubMemoryHost {
+        async fn read_memory(
+            &self,
+            _request: ToolMemoryReadRequest,
+        ) -> Result<ToolMemoryEntry, ToolHostError> {
+            Err(ToolHostError::Unavailable {
+                service: "memory_read_structured".to_string(),
+            })
+        }
+
+        async fn write_memory(
+            &self,
+            _request: ToolMemoryWriteRequest,
+        ) -> Result<ToolMemoryEntry, ToolHostError> {
+            Err(ToolHostError::Unavailable {
+                service: "memory_write_structured".to_string(),
+            })
+        }
+
+        async fn search_memory(
+            &self,
+            _request: ToolMemorySearchRequest,
+        ) -> Result<Vec<ToolMemoryEntry>, ToolHostError> {
+            Err(ToolHostError::Unavailable {
+                service: "memory_search_structured".to_string(),
+            })
+        }
+
+        async fn delete_memory(
+            &self,
+            _scope: ToolOperationScope,
+            _path: String,
+            _memory_scope: ToolMemoryScope,
+        ) -> Result<(), ToolHostError> {
+            Err(ToolHostError::Unavailable {
+                service: "memory_delete_structured".to_string(),
+            })
+        }
+
+        async fn search_memory_action(
+            &self,
+            request: ToolMemoryActionRequest,
+        ) -> Result<ToolMemoryActionResult, ToolHostError> {
+            Ok(Self::output("search", request))
+        }
+
+        async fn write_memory_action(
+            &self,
+            request: ToolMemoryActionRequest,
+        ) -> Result<ToolMemoryActionResult, ToolHostError> {
+            Ok(Self::output("write", request))
+        }
+
+        async fn read_memory_action(
+            &self,
+            request: ToolMemoryActionRequest,
+        ) -> Result<ToolMemoryActionResult, ToolHostError> {
+            Ok(Self::output("read", request))
+        }
+
+        async fn tree_memory_action(
+            &self,
+            request: ToolMemoryActionRequest,
+        ) -> Result<ToolMemoryActionResult, ToolHostError> {
+            Ok(Self::output("tree", request))
+        }
+
+        async fn delete_memory_action(
+            &self,
+            request: ToolMemoryActionRequest,
+        ) -> Result<ToolMemoryActionResult, ToolHostError> {
+            Ok(Self::output("delete", request))
+        }
+    }
+
+    fn stub_memory_host() -> Arc<dyn MemoryToolHostPort> {
+        Arc::new(StubMemoryHost)
+    }
 
     #[test]
     fn scoped_targets_route_to_shared_or_actor_paths() {
@@ -715,6 +1065,174 @@ mod tests {
     }
 
     #[test]
+    fn context_memory_write_path_prefers_metadata_actor() {
+        let mut ctx = JobContext::with_identity("user-1", "ctx-actor", "memory", "test");
+        ctx.metadata = serde_json::json!({
+            "conversation_kind": "direct",
+            "actor_id": "metadata-actor"
+        });
+
+        assert_eq!(
+            resolve_memory_write_path_for_context(&ctx, "memory"),
+            (paths::actor_memory("metadata-actor"), true)
+        );
+    }
+
+    #[test]
+    fn context_memory_write_path_uses_context_actor_without_metadata_actor() {
+        let mut ctx = JobContext::with_identity("user-1", "ctx-actor", "memory", "test");
+        ctx.metadata = serde_json::json!({
+            "conversation_kind": "direct"
+        });
+
+        assert_eq!(
+            resolve_memory_write_path_for_context(&ctx, "profile"),
+            (paths::actor_profile("ctx-actor"), true)
+        );
+    }
+
+    #[test]
+    fn session_scope_for_context_uses_context_identity_by_default() {
+        let conversation_id = Uuid::new_v4();
+        let mut ctx = JobContext::with_identity("principal", "actor", "session", "test");
+        ctx.conversation_id = Some(conversation_id);
+        ctx.metadata = serde_json::json!({ "conversation_kind": "direct" });
+
+        let scope = resolve_session_search_scope_for_context(&ctx);
+
+        assert_eq!(scope.principal_id, "principal");
+        assert_eq!(scope.actor_id, "actor");
+        assert_eq!(scope.conversation_id, Some(conversation_id));
+        assert!(!scope.include_group_history);
+    }
+
+    #[test]
+    fn session_scope_for_context_allows_metadata_overrides() {
+        let thread_id = Uuid::new_v4();
+        let mut ctx = JobContext::with_identity("principal", "actor", "session", "test");
+        ctx.metadata = serde_json::json!({
+            "principal_id": "metadata-principal",
+            "actor_id": "metadata-actor",
+            "conversation_kind": "group",
+            "thread_id": thread_id.to_string(),
+        });
+
+        let scope = resolve_session_search_scope_for_context(&ctx);
+
+        assert_eq!(scope.principal_id, "metadata-principal");
+        assert_eq!(scope.actor_id, "metadata-actor");
+        assert_eq!(scope.conversation_id, Some(thread_id));
+        assert!(scope.include_group_history);
+    }
+
+    #[test]
+    fn session_search_params_for_context_default_to_cross_channel_direct_history() {
+        let mut ctx = JobContext::with_identity("principal", "actor", "session", "test");
+        ctx.metadata = serde_json::json!({ "conversation_kind": "direct" });
+
+        let params = parse_session_search_params_for_context(
+            &serde_json::json!({ "query": "recent decisions" }),
+            &ctx,
+            true,
+        )
+        .unwrap();
+
+        assert!(!params.include_current_thread);
+        assert!(params.all_channels);
+        assert!(params.summarize_sessions);
+    }
+
+    #[test]
+    fn session_search_params_for_context_default_to_current_group_thread() {
+        let mut ctx = JobContext::with_identity("principal", "actor", "session", "test");
+        ctx.metadata = serde_json::json!({ "conversation_kind": "group" });
+
+        let params = parse_session_search_params_for_context(
+            &serde_json::json!({ "query": "recent decisions" }),
+            &ctx,
+            false,
+        )
+        .unwrap();
+
+        assert!(params.include_current_thread);
+        assert!(!params.all_channels);
+        assert!(!params.summarize_sessions);
+    }
+
+    #[test]
+    fn session_search_filters_omit_channel_for_all_channel_searches() {
+        let mut ctx = JobContext::with_identity("principal", "actor", "session", "test");
+        ctx.metadata = serde_json::json!({
+            "channel": "telegram",
+            "thread_id": "thread-1"
+        });
+        let params = SessionSearchParams {
+            query: "recent decisions".to_string(),
+            limit: 8,
+            include_current_thread: true,
+            all_channels: true,
+            summarize_sessions: false,
+        };
+
+        let filters = session_search_filters_for_context(&ctx, &params);
+
+        assert_eq!(filters.channel, None);
+        assert_eq!(filters.thread_id.as_deref(), Some("thread-1"));
+    }
+
+    #[test]
+    fn session_search_filters_omit_thread_when_current_thread_excluded() {
+        let mut ctx = JobContext::with_identity("principal", "actor", "session", "test");
+        ctx.metadata = serde_json::json!({
+            "channel": "telegram",
+            "thread_id": "thread-1"
+        });
+        let params = SessionSearchParams {
+            query: "recent decisions".to_string(),
+            limit: 8,
+            include_current_thread: false,
+            all_channels: false,
+            summarize_sessions: false,
+        };
+
+        let filters = session_search_filters_for_context(&ctx, &params);
+
+        assert_eq!(filters.channel.as_deref(), Some("telegram"));
+        assert_eq!(filters.thread_id, None);
+    }
+
+    #[test]
+    fn workspace_agent_id_from_metadata_prefers_valid_explicit_id() {
+        let explicit = Uuid::new_v4();
+        let fallback = Uuid::new_v4();
+
+        assert_eq!(
+            workspace_agent_id_from_metadata(
+                &serde_json::json!({ "agent_workspace_id": explicit.to_string() }),
+                Some(fallback),
+            ),
+            Some(explicit)
+        );
+    }
+
+    #[test]
+    fn workspace_agent_id_from_metadata_falls_back_for_missing_or_invalid_id() {
+        let fallback = Uuid::new_v4();
+
+        assert_eq!(
+            workspace_agent_id_from_metadata(&serde_json::json!({}), Some(fallback)),
+            Some(fallback)
+        );
+        assert_eq!(
+            workspace_agent_id_from_metadata(
+                &serde_json::json!({ "agent_workspace_id": "not-a-uuid" }),
+                Some(fallback),
+            ),
+            Some(fallback)
+        );
+    }
+
+    #[test]
     fn memory_search_params_apply_defaults_and_limits() {
         assert_eq!(
             memory_search_parameters_schema()["properties"]["limit"]["maximum"],
@@ -733,6 +1251,76 @@ mod tests {
         assert!(params.use_temporal_decay);
 
         assert!(parse_memory_search_params(&serde_json::json!({})).is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_host_tools_delegate_action_outputs() {
+        let mut ctx = JobContext::with_identity("user-1", "actor-1", "memory", "test");
+        ctx.metadata = serde_json::json!({ "thread_id": "thread-1" });
+        let host = stub_memory_host();
+
+        let search = MemorySearchHostTool::new(Arc::clone(&host));
+        assert_eq!(search.name(), "memory_search");
+        assert!(!search.requires_sanitization());
+        assert!(
+            search
+                .metadata()
+                .route_intents
+                .contains(&ToolRouteIntent::MemoryRecall)
+        );
+        let output = search
+            .execute(
+                serde_json::json!({
+                    "query": "decision",
+                    "limit": 2
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "search");
+        assert_eq!(output.result["principal_id"], "user-1");
+        assert_eq!(output.result["actor_id"], "actor-1");
+        assert_eq!(output.result["thread_id"], "thread-1");
+        assert_eq!(output.result["params"]["query"], "decision");
+
+        let write = MemoryWriteHostTool::new(Arc::clone(&host));
+        assert!(write.rate_limit_config().is_some());
+        let output = write
+            .execute(serde_json::json!({ "content": "remember this" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "write");
+        assert_eq!(output.result["params"]["content"], "remember this");
+
+        let read = MemoryReadHostTool::new(Arc::clone(&host));
+        assert!(
+            read.metadata()
+                .route_intents
+                .contains(&ToolRouteIntent::MemoryRecall)
+        );
+        let output = read
+            .execute(serde_json::json!({ "path": "MEMORY.md" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "read");
+        assert_eq!(output.result["params"]["path"], "MEMORY.md");
+
+        let tree = MemoryTreeHostTool::new(Arc::clone(&host));
+        let output = tree
+            .execute(serde_json::json!({ "depth": 2 }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "tree");
+        assert_eq!(output.result["params"]["depth"], 2);
+
+        let delete = MemoryDeleteHostTool::new(host);
+        let output = delete
+            .execute(serde_json::json!({ "path": "daily/today.md" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "delete");
+        assert_eq!(output.result["params"]["path"], "daily/today.md");
     }
 
     #[test]

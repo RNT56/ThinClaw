@@ -7,12 +7,18 @@ use nostr_sdk::{ToBech32, prelude::Keys};
 use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use thinclaw_gateway::web::status::{
+    GatewayRuntimeStatusInput, GatewayStatusResponseInput, build_cache_stats_response,
+    build_gmail_setup_status as gateway_build_gmail_setup_status,
+    build_native_lifecycle_setup_status as gateway_build_native_lifecycle_setup_status,
+    cost_tracker_unavailable_status, finalize_nostr_setup_status, format_budget_limit_cents,
+    format_daily_cost, gateway_restart_accepted_response,
+    gateway_restart_already_in_progress_response, gateway_status_response, health_response,
+    model_usage_entry, unavailable_cache_stats_response,
+};
 
 pub(crate) async fn health_handler() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "healthy",
-        channel: "gateway",
-    })
+    Json(health_response())
 }
 
 pub(crate) async fn gateway_restart_handler(
@@ -28,7 +34,7 @@ pub(crate) async fn gateway_restart_handler(
         )
         .is_err()
     {
-        return Json(ActionResponse::ok("Restart already in progress"));
+        return Json(gateway_restart_already_in_progress_response());
     }
 
     if let Some(tx) = state.shutdown_tx.write().await.take() {
@@ -36,7 +42,7 @@ pub(crate) async fn gateway_restart_handler(
         tracing::info!("Gateway restart requested via API");
     }
 
-    Json(ActionResponse::ok("Restarting..."))
+    Json(gateway_restart_accepted_response())
 }
 
 pub(crate) async fn gateway_status_handler(
@@ -62,19 +68,19 @@ pub(crate) async fn gateway_status_handler(
             let usage = cg.model_usage().await;
             let models: Vec<ModelUsageEntry> = usage
                 .into_iter()
-                .map(|(model, tokens)| ModelUsageEntry {
-                    model,
-                    input_tokens: tokens.input_tokens,
-                    output_tokens: tokens.output_tokens,
-                    cost: format!("{:.6}", tokens.cost),
+                .map(|(model, tokens)| {
+                    model_usage_entry(
+                        model,
+                        tokens.input_tokens,
+                        tokens.output_tokens,
+                        tokens.cost,
+                    )
                 })
                 .collect();
-            let budget = cg
-                .daily_budget_cents()
-                .map(|c| format!("{:.2}", c as f64 / 100.0));
+            let budget = cg.daily_budget_cents().map(format_budget_limit_cents);
             let rate_limit = cg.hourly_action_limit();
             (
-                Some(format!("{:.4}", cost)),
+                Some(format_daily_cost(cost)),
                 Some(actions),
                 Some(models),
                 budget,
@@ -84,59 +90,47 @@ pub(crate) async fn gateway_status_handler(
             (None, None, None, None, None)
         };
 
-    Json(GatewayStatusResponse {
+    let runtime_status = runtime_status.map(|status| GatewayRuntimeStatusInput {
+        revision: status.revision,
+        primary_model: status.primary_model,
+        cheap_model: status.cheap_model,
+        routing_enabled: status.routing_enabled,
+        routing_mode: status.routing_mode.as_str().to_string(),
+        primary_provider: status.primary_provider,
+        last_error: status.last_error,
+    });
+
+    Json(gateway_status_response(GatewayStatusResponseInput {
         sse_connections,
         ws_connections,
-        total_connections: sse_connections + ws_connections,
         uptime_secs,
         daily_cost,
         actions_this_hour,
         model_usage,
         budget_limit_usd,
         hourly_action_limit,
-        runtime_revision: runtime_status.as_ref().map(|status| status.revision),
-        active_model: runtime_status
-            .as_ref()
-            .map(|status| status.primary_model.clone()),
-        active_cheap_model: runtime_status
-            .as_ref()
-            .and_then(|status| status.cheap_model.clone()),
-        routing_enabled: runtime_status.as_ref().map(|status| status.routing_enabled),
-        routing_mode: runtime_status
-            .as_ref()
-            .map(|status| status.routing_mode.as_str().to_string()),
-        primary_provider: runtime_status
-            .as_ref()
-            .and_then(|status| status.primary_provider.clone()),
-        runtime_reload_error: runtime_status.and_then(|status| status.last_error),
+        runtime_status,
         channel_setup,
-    })
+    }))
 }
 
 pub(crate) async fn cache_stats_handler(
     State(state): State<Arc<GatewayState>>,
-) -> Json<serde_json::Value> {
+) -> Json<CacheStatsResponse> {
     if let Some(cache) = state.response_cache.as_ref() {
         let stats = cache.read().await.stats();
-        return Json(serde_json::json!({
-            "hits": stats.hits,
-            "misses": stats.misses,
-            "evictions": stats.evictions,
-            "size_bytes": stats.size,
-            "size": stats.size,
-            "hit_rate": stats.hit_rate,
-        }));
+        return Json(build_cache_stats_response(
+            stats.hits,
+            stats.misses,
+            stats.evictions,
+            stats.size,
+            stats.hit_rate.into(),
+        ));
     }
 
-    Json(serde_json::json!({
-        "hits": 0,
-        "misses": 0,
-        "evictions": 0,
-        "size_bytes": 0,
-        "size": 0,
-        "hit_rate": 0.0,
-        "reason": "unavailable: response cache is not attached to this gateway"
-    }))
+    Json(unavailable_cache_stats_response(
+        "unavailable: response cache is not attached to this gateway",
+    ))
 }
 
 async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> ChannelSetupStatus {
@@ -239,45 +233,17 @@ fn build_native_lifecycle_setup_status(
 ) -> PartialChannelSetupStatus {
     let enabled = crate::config::helpers::parse_bool_env(enabled_env, enabled_setting)
         .unwrap_or(enabled_setting);
-    let mut missing_fields = Vec::new();
-    if enabled {
-        if !available {
-            missing_fields.push("build_feature".to_string());
-        }
-        for (field, env_vars) in required_fields {
-            let present = env_vars.iter().any(|env_var| {
-                crate::config::helpers::optional_env(env_var)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|value| !value.trim().is_empty())
-            });
-            if !present {
-                missing_fields.push((*field).to_string());
-            }
-        }
-    }
+    let required_fields = required_fields.iter().map(|(field, env_vars)| {
+        let present = env_vars.iter().any(|env_var| {
+            crate::config::helpers::optional_env(env_var)
+                .ok()
+                .flatten()
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        (*field, present)
+    });
 
-    PartialChannelSetupStatus {
-        enabled,
-        configured: enabled && available && missing_fields.is_empty(),
-        missing_fields,
-        needs_oauth: false,
-        needs_private_key: required_fields
-            .iter()
-            .any(|(field, _)| field.contains("key")),
-        owner_configured: false,
-        tool_ready: enabled && available,
-        control_ready: enabled && available,
-        social_dm_enabled: false,
-        relay_count: None,
-        connected_relay_count: None,
-        relay_health: None,
-        public_key_hex: None,
-        public_key_npub: None,
-        owner_pubkey_hex: None,
-        owner_pubkey_npub: None,
-        invalid_private_key: false,
-    }
+    gateway_build_native_lifecycle_setup_status(enabled, available, required_fields)
 }
 
 fn build_gmail_setup_status(settings: &crate::settings::Settings) -> PartialChannelSetupStatus {
@@ -300,44 +266,18 @@ fn build_gmail_setup_status(settings: &crate::settings::Settings) -> PartialChan
         .or(settings.channels.gmail_topic_id.clone())
         .unwrap_or_default();
 
-    let mut missing_fields = Vec::new();
-    if enabled {
-        if project_id.trim().is_empty() {
-            missing_fields.push("project_id".to_string());
-        }
-        if subscription_id.trim().is_empty() {
-            missing_fields.push("subscription_id".to_string());
-        }
-        if topic_id.trim().is_empty() {
-            missing_fields.push("topic_id".to_string());
-        }
-    }
-
     let has_oauth_token = crate::config::helpers::optional_env("GMAIL_OAUTH_TOKEN")
         .ok()
         .flatten()
         .is_some();
-    let needs_oauth = enabled && missing_fields.is_empty() && !has_oauth_token;
 
-    PartialChannelSetupStatus {
+    gateway_build_gmail_setup_status(
         enabled,
-        configured: enabled && missing_fields.is_empty() && !needs_oauth,
-        missing_fields,
-        needs_oauth,
-        needs_private_key: false,
-        owner_configured: false,
-        tool_ready: false,
-        control_ready: false,
-        social_dm_enabled: false,
-        relay_count: None,
-        connected_relay_count: None,
-        relay_health: None,
-        public_key_hex: None,
-        public_key_npub: None,
-        owner_pubkey_hex: None,
-        owner_pubkey_npub: None,
-        invalid_private_key: false,
-    }
+        !project_id.trim().is_empty(),
+        !subscription_id.trim().is_empty(),
+        !topic_id.trim().is_empty(),
+        has_oauth_token,
+    )
 }
 
 fn build_nostr_setup_status(
@@ -479,119 +419,7 @@ fn build_nostr_setup_status(
         }
     }
 
-    status.tool_ready = enabled && status.public_key_hex.is_some() && !status.invalid_private_key;
-    status.configured = status.tool_ready;
-    status.control_ready = status.tool_ready && owner_configured;
-
-    status.relay_health = Some(
-        match (
-            enabled,
-            status.connected_relay_count,
-            status.invalid_private_key,
-        ) {
-            (_, _, true) => "invalid_private_key".to_string(),
-            (false, _, _) => "disabled".to_string(),
-            (true, Some(count), _) if count > 0 => format!("connected:{count}"),
-            (true, Some(_), _) => "configured_not_connected".to_string(),
-            (true, None, _) => "configured".to_string(),
-        },
-    );
-
-    status
-}
-
-#[derive(serde::Serialize)]
-struct ModelUsageEntry {
-    model: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cost: String,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct GatewayStatusResponse {
-    sse_connections: u64,
-    ws_connections: u64,
-    total_connections: u64,
-    uptime_secs: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    daily_cost: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    actions_this_hour: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model_usage: Option<Vec<ModelUsageEntry>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    budget_limit_usd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hourly_action_limit: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    runtime_revision: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active_cheap_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    routing_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    routing_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    primary_provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    runtime_reload_error: Option<String>,
-    channel_setup: ChannelSetupStatus,
-}
-
-#[derive(serde::Serialize)]
-struct ChannelSetupStatus {
-    slack: PartialChannelSetupStatus,
-    telegram: PartialChannelSetupStatus,
-    gmail: PartialChannelSetupStatus,
-    apple_mail: PartialChannelSetupStatus,
-    nostr: PartialChannelSetupStatus,
-    matrix: PartialChannelSetupStatus,
-    voice_call: PartialChannelSetupStatus,
-    apns: PartialChannelSetupStatus,
-    browser_push: PartialChannelSetupStatus,
-}
-
-#[derive(serde::Serialize)]
-struct PartialChannelSetupStatus {
-    enabled: bool,
-    configured: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    missing_fields: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    needs_oauth: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    needs_private_key: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    owner_configured: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    tool_ready: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    control_ready: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    social_dm_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    relay_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    connected_relay_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    relay_health: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    public_key_hex: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    public_key_npub: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    owner_pubkey_hex: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    owner_pubkey_npub: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    invalid_private_key: bool,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
+    finalize_nostr_setup_status(status, owner_configured)
 }
 
 #[cfg(test)]
@@ -718,7 +546,7 @@ pub(crate) async fn costs_summary_handler(
     let tracker = state
         .cost_tracker
         .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        .ok_or_else(cost_tracker_unavailable_status)?;
     let now = chrono::Utc::now();
     let today = now.format("%Y-%m-%d").to_string();
     let this_month = now.format("%Y-%m").to_string();
@@ -739,7 +567,7 @@ pub(crate) async fn costs_export_handler(
     let tracker = state
         .cost_tracker
         .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        .ok_or_else(cost_tracker_unavailable_status)?;
     let guard = tracker.lock().await;
     let csv = guard.export_csv();
     let filename = format!(
@@ -768,7 +596,7 @@ pub(crate) async fn costs_reset_handler(
     let tracker = state
         .cost_tracker
         .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        .ok_or_else(cost_tracker_unavailable_status)?;
     {
         let mut guard = tracker.lock().await;
         guard.clear();

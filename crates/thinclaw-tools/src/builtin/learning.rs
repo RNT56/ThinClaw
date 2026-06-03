@@ -1,9 +1,15 @@
 //! Root-independent learning tool policy helpers.
 
-use thinclaw_tools_core::ToolError;
+use std::sync::Arc;
+use std::time::Instant;
+
+use async_trait::async_trait;
+use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+use thinclaw_types::JobContext;
 use thinclaw_workspace::paths;
 use uuid::Uuid;
 
+use crate::ports::{LearningToolHostPort, ToolLearningActionRequest, tool_scope_from_job_context};
 use crate::registry::ToolRegistry;
 
 pub const PROMPT_TARGETS: &[&str] = &[paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER];
@@ -984,9 +990,271 @@ pub fn artifact_name_for_skill(skill_name: &str, path: &std::path::Path) -> Stri
     }
 }
 
+async fn execute_learning_action<F, Fut>(
+    host: &Arc<dyn LearningToolHostPort>,
+    params: serde_json::Value,
+    ctx: &JobContext,
+    action: F,
+) -> Result<ToolOutput, ToolError>
+where
+    F: FnOnce(Arc<dyn LearningToolHostPort>, ToolLearningActionRequest) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<crate::ports::ToolLearningActionResult, crate::ports::ToolHostError>,
+        >,
+{
+    let start = Instant::now();
+    let request = ToolLearningActionRequest {
+        scope: tool_scope_from_job_context(ctx),
+        params,
+    };
+    let result = action(Arc::clone(host), request)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+    Ok(ToolOutput::success(result.output, start.elapsed()))
+}
+
+macro_rules! learning_host_tool {
+    (
+        $tool:ident,
+        $name:literal,
+        $description:literal,
+        $schema:expr,
+        $validate:expr,
+        $method:ident,
+        $approval:expr
+    ) => {
+        pub struct $tool {
+            host: Arc<dyn LearningToolHostPort>,
+        }
+
+        impl $tool {
+            pub fn new(host: Arc<dyn LearningToolHostPort>) -> Self {
+                Self { host }
+            }
+        }
+
+        #[async_trait]
+        impl Tool for $tool {
+            fn name(&self) -> &str {
+                $name
+            }
+
+            fn description(&self) -> &str {
+                $description
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                $schema()
+            }
+
+            async fn execute(
+                &self,
+                params: serde_json::Value,
+                ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                $validate(&params)?;
+                execute_learning_action(&self.host, params, ctx, |host, request| async move {
+                    host.$method(request).await
+                })
+                .await
+            }
+
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                $approval
+            }
+
+            fn requires_sanitization(&self) -> bool {
+                false
+            }
+        }
+    };
+}
+
+fn validate_learning_status_params(params: &serde_json::Value) -> Result<(), ToolError> {
+    let _ = params;
+    Ok(())
+}
+
+fn validate_learning_history_params(params: &serde_json::Value) -> Result<(), ToolError> {
+    let _ = parse_learning_history_params(params);
+    Ok(())
+}
+
+learning_host_tool!(
+    PromptManageHostTool,
+    "prompt_manage",
+    "Update SOUL.md, SOUL.local.md, AGENTS.md, or USER.md through the root learning adapter.",
+    prompt_manage_parameters_schema,
+    parse_prompt_manage_params,
+    prompt_manage_action,
+    ApprovalRequirement::UnlessAutoApproved
+);
+
+learning_host_tool!(
+    SkillManageHostTool,
+    "skill_manage",
+    "Create, patch, edit, delete, write files, remove files, or reload skills through the root learning adapter.",
+    skill_manage_parameters_schema,
+    parse_skill_manage_params,
+    skill_manage_action,
+    ApprovalRequirement::UnlessAutoApproved
+);
+
+learning_host_tool!(
+    LearningStatusHostTool,
+    "learning_status",
+    "Summarize learning settings, provider health, and recent learning activity.",
+    learning_status_parameters_schema,
+    validate_learning_status_params,
+    learning_status_action,
+    ApprovalRequirement::Never
+);
+
+learning_host_tool!(
+    LearningOutcomesHostTool,
+    "learning_outcomes",
+    "Inspect outcome-backed learning contracts and their observations.",
+    learning_outcomes_parameters_schema,
+    parse_learning_outcomes_params,
+    learning_outcomes_action,
+    ApprovalRequirement::Never
+);
+
+learning_host_tool!(
+    LearningHistoryHostTool,
+    "learning_history",
+    "Inspect stored learning events, candidates, artifact versions, feedback, rollbacks, and proposals.",
+    learning_history_parameters_schema,
+    validate_learning_history_params,
+    learning_history_action,
+    ApprovalRequirement::Never
+);
+
+learning_host_tool!(
+    LearningFeedbackHostTool,
+    "learning_feedback",
+    "Record feedback on a learning target such as a candidate or proposal.",
+    learning_feedback_parameters_schema,
+    parse_learning_feedback_params,
+    learning_feedback_action,
+    ApprovalRequirement::UnlessAutoApproved
+);
+
+learning_host_tool!(
+    LearningProposalReviewHostTool,
+    "learning_proposal_review",
+    "Approve or reject a learning code proposal and return the updated proposal record.",
+    learning_proposal_review_parameters_schema,
+    parse_learning_proposal_review_params,
+    learning_proposal_review_action,
+    ApprovalRequirement::UnlessAutoApproved
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StubLearningHost;
+
+    impl StubLearningHost {
+        fn output(
+            action: &str,
+            request: ToolLearningActionRequest,
+        ) -> crate::ports::ToolLearningActionResult {
+            crate::ports::ToolLearningActionResult {
+                output: serde_json::json!({
+                    "action": action,
+                    "principal_id": request.scope.principal_id,
+                    "actor_id": request.scope.actor_id,
+                    "thread_id": request.scope.thread_id,
+                    "params": request.params,
+                }),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LearningToolHostPort for StubLearningHost {
+        async fn record_feedback(
+            &self,
+            _request: crate::ports::ToolLearningFeedbackRequest,
+        ) -> Result<crate::ports::ToolLearningRecord, crate::ports::ToolHostError> {
+            Err(crate::ports::ToolHostError::Unavailable {
+                service: "learning_feedback_structured".to_string(),
+            })
+        }
+
+        async fn list_learning_history(
+            &self,
+            _query: crate::ports::ToolLearningHistoryQuery,
+        ) -> Result<Vec<crate::ports::ToolLearningRecord>, crate::ports::ToolHostError> {
+            Err(crate::ports::ToolHostError::Unavailable {
+                service: "learning_history_structured".to_string(),
+            })
+        }
+
+        async fn review_learning_proposal(
+            &self,
+            _review: crate::ports::ToolLearningProposalReview,
+        ) -> Result<crate::ports::ToolLearningRecord, crate::ports::ToolHostError> {
+            Err(crate::ports::ToolHostError::Unavailable {
+                service: "learning_proposal_review_structured".to_string(),
+            })
+        }
+
+        async fn prompt_manage_action(
+            &self,
+            request: ToolLearningActionRequest,
+        ) -> Result<crate::ports::ToolLearningActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("prompt_manage", request))
+        }
+
+        async fn skill_manage_action(
+            &self,
+            request: ToolLearningActionRequest,
+        ) -> Result<crate::ports::ToolLearningActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("skill_manage", request))
+        }
+
+        async fn learning_status_action(
+            &self,
+            request: ToolLearningActionRequest,
+        ) -> Result<crate::ports::ToolLearningActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("learning_status", request))
+        }
+
+        async fn learning_outcomes_action(
+            &self,
+            request: ToolLearningActionRequest,
+        ) -> Result<crate::ports::ToolLearningActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("learning_outcomes", request))
+        }
+
+        async fn learning_history_action(
+            &self,
+            request: ToolLearningActionRequest,
+        ) -> Result<crate::ports::ToolLearningActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("learning_history", request))
+        }
+
+        async fn learning_feedback_action(
+            &self,
+            request: ToolLearningActionRequest,
+        ) -> Result<crate::ports::ToolLearningActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("learning_feedback", request))
+        }
+
+        async fn learning_proposal_review_action(
+            &self,
+            request: ToolLearningActionRequest,
+        ) -> Result<crate::ports::ToolLearningActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("learning_proposal_review", request))
+        }
+    }
+
+    fn stub_learning_host() -> Arc<dyn LearningToolHostPort> {
+        Arc::new(StubLearningHost)
+    }
 
     #[test]
     fn prompt_target_normalization_accepts_known_targets() {
@@ -1181,6 +1449,99 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn learning_host_tools_delegate_action_outputs() {
+        let mut ctx = JobContext::with_identity("user-1", "actor-1", "learning", "test");
+        ctx.metadata = serde_json::json!({ "thread_id": "thread-1" });
+        let host = stub_learning_host();
+
+        let prompt = PromptManageHostTool::new(Arc::clone(&host));
+        assert_eq!(prompt.name(), "prompt_manage");
+        assert_eq!(
+            prompt.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+        let output = prompt
+            .execute(
+                serde_json::json!({
+                    "target": "AGENTS.md",
+                    "operation": "replace",
+                    "content": "# Agents"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "prompt_manage");
+        assert_eq!(output.result["principal_id"], "user-1");
+        assert_eq!(output.result["actor_id"], "actor-1");
+        assert_eq!(output.result["thread_id"], "thread-1");
+        assert_eq!(output.result["params"]["target"], "AGENTS.md");
+
+        let skill = SkillManageHostTool::new(Arc::clone(&host));
+        let output = skill
+            .execute(
+                serde_json::json!({
+                    "operation": "reload",
+                    "name": "docs"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "skill_manage");
+
+        let status = LearningStatusHostTool::new(Arc::clone(&host));
+        assert_eq!(
+            status.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+        let output = status.execute(serde_json::json!({}), &ctx).await.unwrap();
+        assert_eq!(output.result["action"], "learning_status");
+
+        let outcomes = LearningOutcomesHostTool::new(Arc::clone(&host));
+        let output = outcomes
+            .execute(serde_json::json!({ "limit": 5 }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "learning_outcomes");
+        assert_eq!(output.result["params"]["limit"], 5);
+
+        let history = LearningHistoryHostTool::new(Arc::clone(&host));
+        let output = history
+            .execute(serde_json::json!({ "kind": "events" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "learning_history");
+
+        let feedback = LearningFeedbackHostTool::new(Arc::clone(&host));
+        let output = feedback
+            .execute(
+                serde_json::json!({
+                    "target_type": "candidate",
+                    "target_id": "abc",
+                    "verdict": "helpful"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "learning_feedback");
+
+        let review = LearningProposalReviewHostTool::new(host);
+        let output = review
+            .execute(
+                serde_json::json!({
+                    "proposal_id": Uuid::nil().to_string(),
+                    "decision": "reject"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "learning_proposal_review");
     }
 
     #[test]
