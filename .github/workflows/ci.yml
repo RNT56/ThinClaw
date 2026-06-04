@@ -195,9 +195,7 @@ jobs:
         run: npx tauri info
       - name: Tauri build smoke (cloud/no sidecars)
         working-directory: apps/desktop
-        run: |
-          bash scripts/generate_tauri_overrides.sh none
-          npx tauri build --config backend/tauri.override.json -- --no-default-features --features runtime-postgres
+        run: npm run tauri:build:cloud:unsigned
 
   edge-dependency-guard:
     name: Edge dependency guard
