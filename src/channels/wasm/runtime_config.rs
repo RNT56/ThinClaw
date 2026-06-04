@@ -98,6 +98,8 @@ mod tests {
     #[tokio::test]
     async fn from_config_matches_core_runtime_inputs() {
         let mut settings = Settings::default();
+        settings.llm_backend = Some("openai_compatible".to_string());
+        settings.openai_compatible_base_url = Some("http://localhost:12345/v1".to_string());
         settings.tunnel.public_url = Some("https://agent.ts.net".to_string());
         settings.tunnel.provider = Some("tailscale".to_string());
         settings.tunnel.ts_funnel = false;

@@ -197,7 +197,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           bash scripts/generate_tauri_overrides.sh none
-          npx tauri build --config backend/tauri.override.json -- --no-default-features
+          npx tauri build --config backend/tauri.override.json -- --no-default-features --features runtime-postgres
 
   edge-dependency-guard:
     name: Edge dependency guard

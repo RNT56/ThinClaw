@@ -24,11 +24,19 @@ tauri-build = { version = "2", features = [] }
 # Inference Engine Features — each build targets ONE engine per platform
 # ---------------------------------------------------------------------------
 [features]
-default = ["llamacpp"]
+default = ["llamacpp", "runtime-libsql"]
 llamacpp = []     # Bundled llama-server sidecar — all platforms
 mlx = []          # External Python process via uv — macOS Apple Silicon only
 vllm = []         # External Python process via uv — Linux CUDA only
 ollama = []       # Detect existing Ollama daemon — all platforms
+runtime-common = [
+    "thinclaw_core/html-to-markdown",
+    "thinclaw_core/document-extraction",
+    "thinclaw_core/repl",
+    "thinclaw_core/timezones",
+]
+runtime-libsql = ["thinclaw_core/desktop"]
+runtime-postgres = ["runtime-common", "thinclaw_core/postgres"]
 
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "protocol-asset", "tray-icon", "image-png"] }
@@ -95,8 +103,8 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 zstd = "0.13"
 
-# ThinClaw agent engine (root crate, desktop feature = libsql + html-to-markdown)
-thinclaw_core = { path = "../../..", package = "thinclaw", features = ["desktop"] }
+# ThinClaw agent engine (root crate; runtime DB backend is selected by features)
+thinclaw_core = { path = "../../..", package = "thinclaw", default-features = false }
 thinclaw-config = { path = "../../../crates/thinclaw-config" }
 thinclaw-runtime-contracts = { path = "../../../crates/thinclaw-runtime-contracts", features = ["specta"] }
 
