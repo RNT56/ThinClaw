@@ -2318,16 +2318,30 @@ pub fn normalize_trial_completion(
     completion
 }
 
-pub fn next_campaign_status(
-    campaign: &ExperimentCampaign,
-    project: &ExperimentProject,
-    trial: &ExperimentTrial,
-    non_improving: u32,
-    max_trials: Option<u32>,
-    plateau_limit: u32,
-    runtime_limit_reached: bool,
-    cost_limit_reached: bool,
-) -> ExperimentCampaignStatus {
+#[derive(Debug, Clone, Copy)]
+pub struct CampaignStatusDecisionInput<'a> {
+    pub campaign: &'a ExperimentCampaign,
+    pub project: &'a ExperimentProject,
+    pub trial: &'a ExperimentTrial,
+    pub non_improving: u32,
+    pub max_trials: Option<u32>,
+    pub plateau_limit: u32,
+    pub runtime_limit_reached: bool,
+    pub cost_limit_reached: bool,
+}
+
+pub fn next_campaign_status(input: CampaignStatusDecisionInput<'_>) -> ExperimentCampaignStatus {
+    let CampaignStatusDecisionInput {
+        campaign,
+        project,
+        trial,
+        non_improving,
+        max_trials,
+        plateau_limit,
+        runtime_limit_reached,
+        cost_limit_reached,
+    } = input;
+
     if campaign.failure_count >= project.stop_policy.infra_failure_pause_threshold {
         return ExperimentCampaignStatus::Paused;
     }
@@ -2368,16 +2382,18 @@ pub fn next_campaign_status(
     }
 }
 
-pub fn campaign_status_message(
-    campaign: &ExperimentCampaign,
-    project: &ExperimentProject,
-    trial: &ExperimentTrial,
-    non_improving: u32,
-    max_trials: Option<u32>,
-    plateau_limit: u32,
-    runtime_limit_reached: bool,
-    cost_limit_reached: bool,
-) -> String {
+pub fn campaign_status_message(input: CampaignStatusDecisionInput<'_>) -> String {
+    let CampaignStatusDecisionInput {
+        campaign,
+        project,
+        trial,
+        non_improving,
+        max_trials,
+        plateau_limit,
+        runtime_limit_reached,
+        cost_limit_reached,
+    } = input;
+
     if campaign.failure_count >= project.stop_policy.infra_failure_pause_threshold {
         return format!(
             "Paused after {} infrastructure failures.",

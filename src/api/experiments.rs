@@ -21,7 +21,7 @@ use crate::api::{ApiError, ApiResult};
 use crate::db::Database;
 use crate::experiments::adapters::{self, RemoteLaunchAction, RunnerLaunchOutcome};
 use crate::experiments::{
-    ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign,
+    CampaignStatusDecisionInput, ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign,
     ExperimentCampaignQueueState, ExperimentCampaignStatus, ExperimentLease,
     ExperimentLeaseAuthentication, ExperimentLeaseStatus, ExperimentPreset, ExperimentProject,
     ExperimentProjectStatus, ExperimentRunnerArtifactUpload, ExperimentRunnerBackend,
@@ -3062,7 +3062,7 @@ async fn finalize_trial(
             "Campaign paused: failed to restore campaign worktree: {error}"
         ));
     } else {
-        campaign.pause_reason = Some(campaign_status_message(
+        let status_decision = CampaignStatusDecisionInput {
             campaign,
             project,
             trial,
@@ -3071,17 +3071,11 @@ async fn finalize_trial(
             plateau_limit,
             runtime_limit_reached,
             cost_limit_reached,
-        ));
-        campaign.status = next_campaign_status(
-            campaign,
-            project,
-            trial,
-            non_improving,
-            max_trials,
-            plateau_limit,
-            runtime_limit_reached,
-            cost_limit_reached,
-        );
+        };
+        let pause_reason = campaign_status_message(status_decision);
+        let next_status = next_campaign_status(status_decision);
+        campaign.pause_reason = Some(pause_reason);
+        campaign.status = next_status;
     }
     if matches!(
         campaign.status,
