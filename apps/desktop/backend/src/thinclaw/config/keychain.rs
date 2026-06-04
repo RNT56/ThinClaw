@@ -29,12 +29,55 @@
 //! `com.schack.scrappy/api_keys` blob is copied into the new service and left
 //! in place for rollback.
 
+use std::collections::HashMap;
+#[cfg(not(target_os = "macos"))]
+use std::fmt;
+use std::sync::Mutex;
+use tracing::{info, warn};
+
+#[cfg(target_os = "macos")]
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
-use std::collections::HashMap;
-use std::sync::Mutex;
-use tracing::{info, warn};
+#[cfg(target_os = "macos")]
+type KeychainError = security_framework::base::Error;
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone, Copy)]
+struct KeychainError;
+
+#[cfg(not(target_os = "macos"))]
+impl KeychainError {
+    fn code(&self) -> i32 {
+        -25300
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl fmt::Display for KeychainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("platform keychain is unavailable")
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_generic_password(_service: &str, _account: &str) -> Result<Vec<u8>, KeychainError> {
+    Err(KeychainError)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_generic_password(
+    _service: &str,
+    _account: &str,
+    _password: &[u8],
+) -> Result<(), KeychainError> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn delete_generic_password(_service: &str, _account: &str) -> Result<(), KeychainError> {
+    Err(KeychainError)
+}
 
 /// The Keychain service name — matches the app bundle identifier.
 const SERVICE: &str = "com.thinclaw.desktop";
@@ -185,10 +228,7 @@ pub fn load_all() {
     *loaded = true;
 }
 
-fn get_keychain_blob(
-    service: &str,
-    account: &str,
-) -> Result<HashMap<String, String>, security_framework::base::Error> {
+fn get_keychain_blob(service: &str, account: &str) -> Result<HashMap<String, String>, KeychainError> {
     match get_generic_password(service, account) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(json_str) => match serde_json::from_str::<HashMap<String, String>>(&json_str) {
@@ -472,7 +512,7 @@ fn flush_cache(cache: &HashMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
-fn is_not_found(e: &security_framework::base::Error) -> bool {
+fn is_not_found(e: &KeychainError) -> bool {
     // errSecItemNotFound = -25300
     e.code() == -25300
 }

@@ -10593,6 +10593,7 @@ dependencies = [
  "html2text",
  "image",
  "ndarray",
+ "open",
  "opendal",
  "ort",
  "pdf-extract",
