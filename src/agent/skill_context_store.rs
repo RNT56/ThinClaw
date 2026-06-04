@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use thinclaw_agent::ports::{SkillContext, SkillContextPort, SkillContextRequest, SkillSummary};
+use thinclaw_agent::prompt_assembly::{render_active_skill_block, render_available_skill_index};
 use tokio::sync::RwLock;
 
 use crate::config::SkillsConfig;
@@ -66,11 +67,11 @@ impl SkillContextPort for RootSkillContextPort {
         let active_skills = active.iter().map(skill_summary).collect::<Vec<_>>();
         let available_index_block = request
             .include_available_index
-            .then(|| available_index_block(&available_skills))
+            .then(|| render_available_skill_index(&available_skills))
             .flatten();
         let active_skill_block = request
             .include_active_matches
-            .then(|| active_skill_block(&active_skills))
+            .then(|| render_active_skill_block(&active_skills))
             .flatten();
 
         Ok(SkillContext {
@@ -87,7 +88,7 @@ impl SkillContextPort for RootSkillContextPort {
     }
 }
 
-fn skill_summary(skill: &LoadedSkill) -> SkillSummary {
+pub(crate) fn skill_summary(skill: &LoadedSkill) -> SkillSummary {
     SkillSummary {
         name: skill.name().to_string(),
         version: skill.version().to_string(),
@@ -95,39 +96,6 @@ fn skill_summary(skill: &LoadedSkill) -> SkillSummary {
         trust: skill.trust.to_string(),
         path: skill.source.path().map(|path| path.display().to_string()),
     }
-}
-
-fn available_index_block(skills: &[SkillSummary]) -> Option<String> {
-    if skills.is_empty() {
-        return None;
-    }
-    let mut parts = vec!["### Available Skills".to_string()];
-    for skill in skills {
-        parts.push(format!("- **{}**: {}", skill.name, skill.description));
-    }
-    parts.push(
-        "\nUse `skill_read` with a skill name to inspect full instructions before relying on a skill."
-            .to_string(),
-    );
-    Some(parts.join("\n"))
-}
-
-fn active_skill_block(skills: &[SkillSummary]) -> Option<String> {
-    if skills.is_empty() {
-        return None;
-    }
-    let mut parts = vec!["### Active Skills".to_string()];
-    for skill in skills {
-        parts.push(format!(
-            "- **{}** (v{}, {}): {}",
-            skill.name, skill.version, skill.trust, skill.description
-        ));
-    }
-    parts.push(
-        "\nUse `skill_read` with the skill name to load full instructions before using a skill."
-            .to_string(),
-    );
-    Some(parts.join("\n"))
 }
 
 trait SkillSourcePath {
@@ -159,11 +127,11 @@ mod tests {
             path: None,
         }];
 
-        let available = available_index_block(&skills).expect("available block");
+        let available = render_available_skill_index(&skills).expect("available block");
         assert!(available.contains("### Available Skills"));
         assert!(available.contains("rust-fix"));
 
-        let active = active_skill_block(&skills).expect("active block");
+        let active = render_active_skill_block(&skills).expect("active block");
         assert!(active.contains("v1.0.0, trusted"));
         assert!(active.contains("skill_read"));
     }

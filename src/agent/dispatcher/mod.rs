@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::personality;
-use crate::agent::prompt_assembly::PromptAssemblyV2;
+use crate::agent::prompt_assembly::{
+    PromptAssemblyV2, render_active_skill_block, render_available_skill_index,
+};
 use crate::agent::prompt_sanitation::sanitize_project_context_for_channel;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};

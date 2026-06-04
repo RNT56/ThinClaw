@@ -152,56 +152,33 @@ impl Agent {
             .collect_all_skills(routed_allowed_skills.as_deref())
             .await;
 
-        // Build skill context block.
-        //
-        // Structure:
-        //   ## Skills
-        //
-        //   [### Active Skills — only when prefilter matched something]
-        //   - **name** (vX, trust): description
-        //   ...
-        //   Use `skill_read` to load full instructions.
-        //
-        //   [### Available Skills — always present when any skills are loaded]
-        //   name, name, name   ← compact directory
-        //   If a task might benefit from a listed skill, use `skill_read` to check it.
-        let skill_index_context = if !all_skills.is_empty() {
-            let mut parts: Vec<String> = vec!["### Available Skills".to_string()];
-            for (name, desc) in &all_skills {
-                parts.push(format!("- **{}**: {}", name, desc));
-            }
-            parts.push(
-                "\nUse `skill_read` with a skill name to inspect full instructions before relying on a skill.".to_string(),
-            );
-            Some(parts.join("\n"))
-        } else {
-            None
-        };
+        let skill_index_context = render_available_skill_index(
+            &all_skills
+                .iter()
+                .map(|(name, description)| thinclaw_agent::ports::SkillSummary {
+                    name: name.clone(),
+                    version: String::new(),
+                    description: description.clone(),
+                    trust: String::new(),
+                    path: None,
+                })
+                .collect::<Vec<_>>(),
+        );
 
-        let active_skill_context = if !active_skills.is_empty() {
-            let mut parts: Vec<String> = vec!["### Active Skills".to_string()];
-            for skill in &active_skills {
-                tracing::info!(
-                    skill_name = skill.name(),
-                    skill_version = skill.version(),
-                    trust = %skill.trust,
-                    "Skill activated"
-                );
-                parts.push(format!(
-                    "- **{}** (v{}, {}): {}",
-                    skill.name(),
-                    skill.version(),
-                    skill.trust,
-                    skill.manifest.description,
-                ));
-            }
-            parts.push(
-                "\nUse `skill_read` with the skill name to load full instructions before using a skill.".to_string(),
+        for skill in &active_skills {
+            tracing::info!(
+                skill_name = skill.name(),
+                skill_version = skill.version(),
+                trust = %skill.trust,
+                "Skill activated"
             );
-            Some(parts.join("\n"))
-        } else {
-            None
-        };
+        }
+        let active_skill_context = render_active_skill_block(
+            &active_skills
+                .iter()
+                .map(crate::agent::skill_context_store::skill_summary)
+                .collect::<Vec<_>>(),
+        );
 
         // Request-time provider routing now happens inside the runtime LLM wrapper,
         // which sees the full canonical provider config and live-reload state.

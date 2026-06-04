@@ -26,6 +26,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use thinclaw_agent::prompt_assembly::{
+    SUBAGENT_AVAILABLE_SKILL_INSTRUCTION, render_skill_sections,
+};
 pub use thinclaw_agent::subagent::{
     DEFAULT_MAX_CONCURRENT, DEFAULT_TIMEOUT_SECS, SUBAGENT_MAX_ITERATIONS, SubagentConfig,
     SubagentInfo, SubagentResult, SubagentResultMessage, SubagentSpawnRequest, SubagentStatus,
@@ -1314,54 +1317,28 @@ async fn build_subagent_skill_context(
     .cloned()
     .collect::<Vec<_>>();
 
-    let mut sections = Vec::new();
-    if !active_skills.is_empty() {
-        let mut active_lines = vec!["### Active Skills".to_string()];
-        for skill in &active_skills {
-            active_lines.push(format!(
-                "- **{}** (v{}, {}): {}",
-                skill.name(),
-                skill.version(),
-                skill.trust,
-                skill.manifest.description,
-            ));
-        }
-        active_lines.push(
-            "\nUse `skill_read` with the skill name to load full instructions before using a skill."
-                .to_string(),
-        );
-        sections.push(active_lines.join("\n"));
-    }
-
     let active_names = active_skills
         .iter()
         .map(|skill| skill.name())
         .collect::<std::collections::HashSet<_>>();
-    let inactive = available_skills
+    let inactive_skills = available_skills
         .iter()
         .filter(|skill| !active_names.contains(skill.name()))
         .collect::<Vec<_>>();
+    let active_summaries = active_skills
+        .iter()
+        .map(crate::agent::skill_context_store::skill_summary)
+        .collect::<Vec<_>>();
+    let inactive_summaries = inactive_skills
+        .iter()
+        .map(|skill| crate::agent::skill_context_store::skill_summary(skill))
+        .collect::<Vec<_>>();
 
-    if !inactive.is_empty() {
-        let mut available_lines = vec!["### Available Skills".to_string()];
-        for skill in inactive {
-            available_lines.push(format!(
-                "- **{}**: {}",
-                skill.name(),
-                skill.manifest.description
-            ));
-        }
-        available_lines.push(
-            "\nIf a task would benefit from one of these skills, use `skill_read` to load its full instructions first.".to_string(),
-        );
-        sections.push(available_lines.join("\n"));
-    }
-
-    if sections.is_empty() {
-        None
-    } else {
-        Some(sections.join("\n"))
-    }
+    render_skill_sections(
+        &active_summaries,
+        &inactive_summaries,
+        SUBAGENT_AVAILABLE_SKILL_INSTRUCTION,
+    )
 }
 
 #[cfg(test)]
