@@ -14,15 +14,25 @@ use crate::channels::web::types::*;
 use crate::context::JobContext;
 use crate::tools::Tool;
 use crate::tools::builtin::{
-    SkillPublishTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool, SkillTapRemoveTool,
+    root_skill_publish_tool_host, root_skill_tap_tool_host, root_skill_tool_host,
 };
-
-fn confirmed(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        == Some("true")
-}
+use thinclaw_gateway::web::skills::{
+    SkillCatalogSearchResultInput, SkillInfoInput, SkillSearchMatchInput,
+    has_confirm_action_header, invalid_skill_trust_level_error, skill_action_error_response,
+    skill_catalog_search_result, skill_catalog_unavailable_error, skill_duplicate_response,
+    skill_info, skill_install_commit_response, skill_install_confirmation_error,
+    skill_install_missing_source_response, skill_list_response, skill_matches_query,
+    skill_publish_remote_write_confirmation_error, skill_quarantine_unavailable_error,
+    skill_reload_all_response, skill_reload_confirmation_error, skill_reload_response,
+    skill_removal_confirmation_error, skill_remove_response, skill_search_response,
+    skill_tap_add_confirmation_error, skill_tap_refresh_confirmation_error,
+    skill_tap_remove_confirmation_error, skill_trust_confirmation_error, skill_trust_response,
+    skills_system_unavailable_error,
+};
+use thinclaw_tools::builtin::{
+    SkillInspectHostTool, SkillPublishHostTool, SkillTapAddHostTool, SkillTapListHostTool,
+    SkillTapRefreshHostTool, SkillTapRemoveHostTool,
+};
 
 fn api_job_context(identity: &GatewayRequestIdentity) -> JobContext {
     JobContext {
@@ -36,43 +46,44 @@ fn api_job_context(identity: &GatewayRequestIdentity) -> JobContext {
 pub async fn skills_list_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<SkillListResponse>, (StatusCode, String)> {
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
 
     let guard = registry.read().await;
 
     let skills: Vec<SkillInfo> = guard
         .skills()
         .iter()
-        .map(|s| SkillInfo {
-            name: s.manifest.name.clone(),
-            description: s.manifest.description.clone(),
-            version: s.manifest.version.clone(),
-            trust: s.trust.to_string(),
-            source: format!("{:?}", s.source),
-            keywords: s.manifest.activation.keywords.clone(),
+        .map(|s| {
+            skill_info(SkillInfoInput {
+                name: s.manifest.name.clone(),
+                description: s.manifest.description.clone(),
+                version: s.manifest.version.clone(),
+                trust: s.trust.to_string(),
+                source: format!("{:?}", s.source),
+                keywords: s.manifest.activation.keywords.clone(),
+            })
         })
         .collect();
 
-    let count = skills.len();
-    Ok(Json(SkillListResponse { skills, count }))
+    Ok(Json(skill_list_response(skills)))
 }
 
 pub async fn skills_search_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<SkillSearchRequest>,
 ) -> Result<Json<SkillSearchResponse>, (StatusCode, String)> {
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
 
-    let catalog = state.skill_catalog.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skill catalog not available".to_string(),
-    ))?;
+    let catalog = state
+        .skill_catalog
+        .as_ref()
+        .ok_or_else(skill_catalog_unavailable_error)?;
 
     // Search ClawHub catalog
     let catalog_outcome = catalog.search(&req.query).await;
@@ -82,77 +93,90 @@ pub async fn skills_search_handler(
     let mut entries = catalog_outcome.results;
     catalog.enrich_search_results(&mut entries, 5).await;
 
-    let catalog_json: Vec<serde_json::Value> = entries
+    let catalog_results: Vec<SkillCatalogSearchResult> = entries
         .into_iter()
-        .map(|e| {
-            serde_json::json!({
-                "slug": e.slug,
-                "name": e.name,
-                "description": e.description,
-                "version": e.version,
-                "score": e.score,
-                "updatedAt": e.updated_at,
-                "stars": e.stars,
-                "downloads": e.downloads,
-                "owner": e.owner,
+        .map(|entry| {
+            skill_catalog_search_result(SkillCatalogSearchResultInput {
+                slug: entry.slug,
+                name: entry.name,
+                description: entry.description,
+                version: entry.version,
+                score: entry.score,
+                updated_at: entry.updated_at,
+                stars: entry.stars,
+                downloads: entry.downloads,
+                owner: entry.owner,
             })
         })
         .collect();
 
     // Search local skills
-    let query_lower = req.query.to_lowercase();
     let installed: Vec<SkillInfo> = {
         let guard = registry.read().await;
         guard
             .skills()
             .iter()
             .filter(|s| {
-                s.manifest.name.to_lowercase().contains(&query_lower)
-                    || s.manifest.description.to_lowercase().contains(&query_lower)
+                skill_matches_query(
+                    SkillSearchMatchInput {
+                        name: &s.manifest.name,
+                        description: &s.manifest.description,
+                    },
+                    &req.query,
+                )
             })
-            .map(|s| SkillInfo {
-                name: s.manifest.name.clone(),
-                description: s.manifest.description.clone(),
-                version: s.manifest.version.clone(),
-                trust: s.trust.to_string(),
-                source: format!("{:?}", s.source),
-                keywords: s.manifest.activation.keywords.clone(),
+            .map(|s| {
+                skill_info(SkillInfoInput {
+                    name: s.manifest.name.clone(),
+                    description: s.manifest.description.clone(),
+                    version: s.manifest.version.clone(),
+                    trust: s.trust.to_string(),
+                    source: format!("{:?}", s.source),
+                    keywords: s.manifest.activation.keywords.clone(),
+                })
             })
             .collect()
     };
 
-    Ok(Json(SkillSearchResponse {
-        catalog: catalog_json,
+    Ok(Json(skill_search_response(
+        catalog_results,
         installed,
-        registry_url: catalog.registry_url().to_string(),
+        catalog.registry_url().to_string(),
         catalog_error,
-    }))
+    )))
 }
 
 pub async fn skills_inspect_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(name): Path<String>,
     Json(req): Json<SkillInspectRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
-    let quarantine = state.skill_quarantine.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skill quarantine not available".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
+    let quarantine = state
+        .skill_quarantine
+        .as_ref()
+        .ok_or_else(skill_quarantine_unavailable_error)?;
 
-    crate::tools::builtin::skill_tools::inspect_skill_report(
-        registry,
-        quarantine,
-        &name,
-        req.include_content.unwrap_or(false),
-        req.include_files.unwrap_or(true),
-        req.audit.unwrap_or(true),
+    let tool = SkillInspectHostTool::new(root_skill_tool_host(
+        Arc::clone(registry),
+        Arc::clone(quarantine),
+    ));
+    let ctx = api_job_context(&request_identity);
+    tool.execute(
+        serde_json::json!({
+            "name": name,
+            "include_content": req.include_content.unwrap_or(false),
+            "include_files": req.include_files.unwrap_or(true),
+            "audit": req.audit.unwrap_or(true),
+        }),
+        &ctx,
     )
     .await
-    .map(Json)
+    .map(|output| Json(output.result))
     .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
 }
 
@@ -165,28 +189,25 @@ pub async fn skills_publish_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let remote_write = req.remote_write.unwrap_or(false);
     let confirm_remote_write = req.confirm_remote_write.unwrap_or(false);
-    if remote_write && !confirmed(&headers) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Skill publish remote write requires X-Confirm-Action: true header".to_string(),
-        ));
+    if remote_write && !has_confirm_action_header(&headers) {
+        return Err(skill_publish_remote_write_confirmation_error());
     }
 
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
-    let quarantine = state.skill_quarantine.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skill quarantine not available".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
+    let quarantine = state
+        .skill_quarantine
+        .as_ref()
+        .ok_or_else(skill_quarantine_unavailable_error)?;
 
-    let tool = SkillPublishTool::new(
+    let tool = SkillPublishHostTool::new(root_skill_publish_tool_host(
         Arc::clone(registry),
         state.skill_remote_hub.clone(),
         Arc::clone(quarantine),
         state.store.clone(),
-    );
+    ));
     let params = serde_json::json!({
         "name": name,
         "target_repo": req.target_repo,
@@ -206,7 +227,10 @@ pub async fn skill_taps_list_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tool = SkillTapListTool::new(state.store.clone(), state.skill_remote_hub.clone());
+    let tool = SkillTapListHostTool::new(root_skill_tap_tool_host(
+        state.store.clone(),
+        state.skill_remote_hub.clone(),
+    ));
     let ctx = api_job_context(&request_identity);
     tool.execute(serde_json::json!({"include_health": true}), &ctx)
         .await
@@ -220,13 +244,13 @@ pub async fn skill_taps_add_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SkillTapAddRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !confirmed(&headers) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Skill tap add requires X-Confirm-Action: true header".to_string(),
-        ));
+    if !has_confirm_action_header(&headers) {
+        return Err(skill_tap_add_confirmation_error());
     }
-    let tool = SkillTapAddTool::new(state.store.clone(), state.skill_remote_hub.clone());
+    let tool = SkillTapAddHostTool::new(root_skill_tap_tool_host(
+        state.store.clone(),
+        state.skill_remote_hub.clone(),
+    ));
     let ctx = api_job_context(&request_identity);
     tool.execute(
         serde_json::json!({
@@ -249,13 +273,13 @@ pub async fn skill_taps_remove_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SkillTapRemoveRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !confirmed(&headers) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Skill tap remove requires X-Confirm-Action: true header".to_string(),
-        ));
+    if !has_confirm_action_header(&headers) {
+        return Err(skill_tap_remove_confirmation_error());
     }
-    let tool = SkillTapRemoveTool::new(state.store.clone(), state.skill_remote_hub.clone());
+    let tool = SkillTapRemoveHostTool::new(root_skill_tap_tool_host(
+        state.store.clone(),
+        state.skill_remote_hub.clone(),
+    ));
     let ctx = api_job_context(&request_identity);
     tool.execute(
         serde_json::json!({
@@ -276,13 +300,13 @@ pub async fn skill_taps_refresh_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SkillTapRefreshRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !confirmed(&headers) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Skill tap refresh requires X-Confirm-Action: true header".to_string(),
-        ));
+    if !has_confirm_action_header(&headers) {
+        return Err(skill_tap_refresh_confirmation_error());
     }
-    let tool = SkillTapRefreshTool::new(state.store.clone(), state.skill_remote_hub.clone());
+    let tool = SkillTapRefreshHostTool::new(root_skill_tap_tool_host(
+        state.store.clone(),
+        state.skill_remote_hub.clone(),
+    ));
     let ctx = api_job_context(&request_identity);
     tool.execute(
         serde_json::json!({
@@ -303,21 +327,14 @@ pub async fn skills_install_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     // Require explicit confirmation header to prevent accidental installs.
     // Chat tools have requires_approval(); this is the equivalent for the web API.
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Skill install requires X-Confirm-Action: true header".to_string(),
-        ));
+    if !has_confirm_action_header(&headers) {
+        return Err(skill_install_confirmation_error());
     }
 
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
 
     // Check whether the caller wants to force-update an existing skill.
     let force = req.force.unwrap_or(false);
@@ -335,9 +352,7 @@ pub async fn skills_install_handler(
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
     } else {
-        return Ok(Json(ActionResponse::fail(
-            "Provide 'content' or 'url' to install a skill".to_string(),
-        )));
+        return Ok(Json(skill_install_missing_source_response()));
     };
 
     // Parse to extract the skill name (cheap, in-memory).
@@ -351,10 +366,7 @@ pub async fn skills_install_handler(
         let guard = registry.read().await;
 
         if guard.has(&skill_name_from_parse) && !force {
-            return Ok(Json(ActionResponse::fail(format!(
-                "Skill '{}' already exists (use force=true to update)",
-                skill_name_from_parse
-            ))));
+            return Ok(Json(skill_duplicate_response(&skill_name_from_parse)));
         }
 
         guard.install_target_dir().to_path_buf()
@@ -395,13 +407,7 @@ pub async fn skills_install_handler(
     let mut guard = registry.write().await;
 
     match guard.commit_install(&skill_name, loaded_skill) {
-        Ok(()) => {
-            let action = if force { "updated" } else { "installed" };
-            Ok(Json(ActionResponse::ok(format!(
-                "Skill '{}' {}",
-                skill_name, action
-            ))))
-        }
+        Ok(()) => Ok(Json(skill_install_commit_response(&skill_name, force))),
         Err(e) => {
             // ── TOCTOU cleanup ─────────────────────────────────────────
             // Another concurrent request installed the same skill between
@@ -416,7 +422,7 @@ pub async fn skills_install_handler(
                 let _ =
                     crate::skills::registry::SkillRegistry::delete_skill_files(&orphan_dir).await;
             }
-            Ok(Json(ActionResponse::fail(e.to_string())))
+            Ok(Json(skill_action_error_response(e.to_string())))
         }
     }
 }
@@ -427,21 +433,14 @@ pub async fn skills_remove_handler(
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     // Require explicit confirmation header to prevent accidental removals.
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Skill removal requires X-Confirm-Action: true header".to_string(),
-        ));
+    if !has_confirm_action_header(&headers) {
+        return Err(skill_removal_confirmation_error());
     }
 
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
 
     // ── TOCTOU fix ─────────────────────────────────────────────────────
     // Hold the write lock for the entire validate → delete → commit
@@ -460,11 +459,8 @@ pub async fn skills_remove_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     match guard.commit_remove(&name) {
-        Ok(()) => Ok(Json(ActionResponse::ok(format!(
-            "Skill '{}' removed",
-            name
-        )))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Ok(()) => Ok(Json(skill_remove_response(&name))),
+        Err(e) => Ok(Json(skill_action_error_response(e.to_string()))),
     }
 }
 
@@ -475,34 +471,21 @@ pub async fn skills_trust_handler(
     Json(req): Json<SkillTrustRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     // Require explicit confirmation — changing trust is a security-sensitive action.
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Trust changes require X-Confirm-Action: true header".to_string(),
-        ));
+    if !has_confirm_action_header(&headers) {
+        return Err(skill_trust_confirmation_error());
     }
 
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
 
     // Parse the target trust level from the request string.
     let target_trust = match req.trust.to_lowercase().as_str() {
         "trusted" => crate::skills::SkillTrust::Trusted,
         "installed" => crate::skills::SkillTrust::Installed,
         other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "Invalid trust level '{}'. Must be 'trusted' or 'installed'.",
-                    other
-                ),
-            ));
+            return Err(invalid_skill_trust_level_error(other));
         }
     };
 
@@ -511,12 +494,9 @@ pub async fn skills_trust_handler(
     match guard.promote_trust(&name, target_trust).await {
         Ok(()) => {
             let label = target_trust.to_string();
-            Ok(Json(ActionResponse::ok(format!(
-                "Skill '{}' is now {}",
-                name, label
-            ))))
+            Ok(Json(skill_trust_response(&name, &label)))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(skill_action_error_response(e.to_string()))),
     }
 }
 
@@ -530,29 +510,19 @@ pub async fn skills_reload_handler(
     headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Skill reload requires X-Confirm-Action: true header".to_string(),
-        ));
+    if !has_confirm_action_header(&headers) {
+        return Err(skill_reload_confirmation_error());
     }
 
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
 
     let mut guard = registry.write().await;
     match guard.reload_skill(&name).await {
-        Ok(reloaded) => Ok(Json(ActionResponse::ok(format!(
-            "Skill '{}' reloaded from disk",
-            reloaded
-        )))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Ok(reloaded) => Ok(Json(skill_reload_response(reloaded))),
+        Err(e) => Ok(Json(skill_action_error_response(e.to_string()))),
     }
 }
 
@@ -564,27 +534,16 @@ pub async fn skills_reload_all_handler(
     State(state): State<Arc<GatewayState>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    if headers
-        .get("x-confirm-action")
-        .and_then(|v| v.to_str().ok())
-        != Some("true")
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Skill reload requires X-Confirm-Action: true header".to_string(),
-        ));
+    if !has_confirm_action_header(&headers) {
+        return Err(skill_reload_confirmation_error());
     }
 
-    let registry = state.skill_registry.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Skills system not enabled".to_string(),
-    ))?;
+    let registry = state
+        .skill_registry
+        .as_ref()
+        .ok_or_else(skills_system_unavailable_error)?;
 
     let mut guard = registry.write().await;
     let loaded = guard.reload().await;
-    Ok(Json(ActionResponse::ok(format!(
-        "Reloaded {} skill(s): {}",
-        loaded.len(),
-        loaded.join(", ")
-    ))))
+    Ok(Json(skill_reload_all_response(&loaded)))
 }

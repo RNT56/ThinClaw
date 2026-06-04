@@ -62,6 +62,58 @@ impl SchedulerCapacity {
     }
 }
 
+/// Which capacity policy to apply when admitting a scheduled worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerAdmissionKind {
+    /// Normal user-visible jobs count against the configured worker limit.
+    Standard,
+    /// System routine jobs may use one overflow slot above normal capacity.
+    ReservedSystem,
+}
+
+impl SchedulerAdmissionKind {
+    pub fn capacity_limit(self, max_parallel_jobs: usize) -> usize {
+        match self {
+            Self::Standard => max_parallel_jobs,
+            Self::ReservedSystem => reserved_job_limit(max_parallel_jobs),
+        }
+    }
+
+    pub fn transition_reason(self) -> &'static str {
+        match self {
+            Self::Standard => "Scheduled for execution",
+            Self::ReservedSystem => "Scheduled for execution (reserved slot)",
+        }
+    }
+}
+
+/// Deterministic outcome of a scheduler admission check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerAdmissionOutcome {
+    AlreadyScheduled,
+    Accepted { capacity: SchedulerCapacity },
+    AtCapacity { capacity: SchedulerCapacity },
+}
+
+/// Decide whether a worker can be inserted before root creates tasks/channels.
+pub fn scheduler_admission(
+    already_scheduled: bool,
+    running: usize,
+    max_parallel_jobs: usize,
+    kind: SchedulerAdmissionKind,
+) -> SchedulerAdmissionOutcome {
+    if already_scheduled {
+        return SchedulerAdmissionOutcome::AlreadyScheduled;
+    }
+
+    let capacity = SchedulerCapacity::new(running, kind.capacity_limit(max_parallel_jobs));
+    if capacity.allows_schedule() {
+        SchedulerAdmissionOutcome::Accepted { capacity }
+    } else {
+        SchedulerAdmissionOutcome::AtCapacity { capacity }
+    }
+}
+
 /// Reserved system jobs get one overflow slot above normal user capacity.
 pub fn reserved_job_limit(max_parallel_jobs: usize) -> usize {
     max_parallel_jobs.saturating_add(1)
@@ -93,6 +145,24 @@ pub fn routine_job_metadata(
 pub const SUBTASK_CLEANUP_DELAYS_MS: [u64; 8] =
     [100, 500, 1000, 2000, 5000, 10_000, 10_000, 10_000];
 pub const SUBTASK_CLEANUP_TIMEOUT_SECS: u64 = 600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtaskCleanupDecision {
+    KeepWaiting,
+    RemoveFinished,
+    ForceRemoveTimedOut,
+}
+
+/// Decide what to do after each subtask cleanup polling interval.
+pub fn subtask_cleanup_decision(deadline_reached: bool, finished: bool) -> SubtaskCleanupDecision {
+    if deadline_reached {
+        SubtaskCleanupDecision::ForceRemoveTimedOut
+    } else if finished {
+        SubtaskCleanupDecision::RemoveFinished
+    } else {
+        SubtaskCleanupDecision::KeepWaiting
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -126,5 +196,67 @@ mod tests {
     fn reserved_limit_saturates() {
         assert_eq!(reserved_job_limit(2), 3);
         assert_eq!(reserved_job_limit(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn scheduler_admission_uses_standard_capacity() {
+        assert_eq!(
+            scheduler_admission(false, 1, 2, SchedulerAdmissionKind::Standard),
+            SchedulerAdmissionOutcome::Accepted {
+                capacity: SchedulerCapacity::new(1, 2)
+            }
+        );
+        assert_eq!(
+            scheduler_admission(false, 2, 2, SchedulerAdmissionKind::Standard),
+            SchedulerAdmissionOutcome::AtCapacity {
+                capacity: SchedulerCapacity::new(2, 2)
+            }
+        );
+    }
+
+    #[test]
+    fn scheduler_admission_grants_reserved_overflow_slot() {
+        assert_eq!(
+            scheduler_admission(false, 2, 2, SchedulerAdmissionKind::ReservedSystem),
+            SchedulerAdmissionOutcome::Accepted {
+                capacity: SchedulerCapacity::new(2, 3)
+            }
+        );
+    }
+
+    #[test]
+    fn scheduler_admission_short_circuits_existing_job() {
+        assert_eq!(
+            scheduler_admission(true, 99, 1, SchedulerAdmissionKind::Standard),
+            SchedulerAdmissionOutcome::AlreadyScheduled
+        );
+    }
+
+    #[test]
+    fn schedule_transition_reasons_match_legacy_status_text() {
+        assert_eq!(
+            SchedulerAdmissionKind::Standard.transition_reason(),
+            "Scheduled for execution"
+        );
+        assert_eq!(
+            SchedulerAdmissionKind::ReservedSystem.transition_reason(),
+            "Scheduled for execution (reserved slot)"
+        );
+    }
+
+    #[test]
+    fn subtask_cleanup_prefers_timeout_over_finished_state() {
+        assert_eq!(
+            subtask_cleanup_decision(false, false),
+            SubtaskCleanupDecision::KeepWaiting
+        );
+        assert_eq!(
+            subtask_cleanup_decision(false, true),
+            SubtaskCleanupDecision::RemoveFinished
+        );
+        assert_eq!(
+            subtask_cleanup_decision(true, true),
+            SubtaskCleanupDecision::ForceRemoveTimedOut
+        );
     }
 }

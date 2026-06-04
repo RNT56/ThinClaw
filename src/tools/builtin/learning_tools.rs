@@ -25,8 +25,188 @@ use crate::skills::{
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 use thinclaw_tools::builtin::learning as learning_policy;
+use thinclaw_tools::ports::{
+    LearningToolHostPort, ToolHostError, ToolLearningActionRequest, ToolLearningActionResult,
+    ToolLearningFeedbackRequest, ToolLearningHistoryQuery, ToolLearningProposalReview,
+    ToolLearningRecord, job_context_from_tool_scope,
+};
 
 const SKILL_FILE_NAME: &str = learning_policy::SKILL_FILE_NAME;
+
+pub struct RootLearningToolHost {
+    orchestrator: Arc<LearningOrchestrator>,
+    store: Arc<dyn Database>,
+    workspace: Option<Arc<Workspace>>,
+    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+}
+
+pub fn root_learning_tool_host(
+    orchestrator: Arc<LearningOrchestrator>,
+    store: Arc<dyn Database>,
+    workspace: Option<Arc<Workspace>>,
+    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+) -> Arc<dyn LearningToolHostPort> {
+    Arc::new(RootLearningToolHost {
+        orchestrator,
+        store,
+        workspace,
+        skill_registry,
+    })
+}
+
+fn learning_tool_host_error_from_tool(error: ToolError) -> ToolHostError {
+    ToolHostError::OperationFailed {
+        reason: error.to_string(),
+    }
+}
+
+async fn execute_root_learning_tool<T>(
+    tool: T,
+    request: ToolLearningActionRequest,
+    title: &str,
+) -> Result<ToolLearningActionResult, ToolHostError>
+where
+    T: Tool,
+{
+    let ctx = job_context_from_tool_scope(request.scope, title);
+    let output = tool
+        .execute(request.params, &ctx)
+        .await
+        .map_err(learning_tool_host_error_from_tool)?;
+    Ok(ToolLearningActionResult {
+        output: output.result,
+    })
+}
+
+#[async_trait]
+impl LearningToolHostPort for RootLearningToolHost {
+    async fn record_feedback(
+        &self,
+        _request: ToolLearningFeedbackRequest,
+    ) -> Result<ToolLearningRecord, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "learning_feedback_structured".to_string(),
+        })
+    }
+
+    async fn list_learning_history(
+        &self,
+        _query: ToolLearningHistoryQuery,
+    ) -> Result<Vec<ToolLearningRecord>, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "learning_history_structured".to_string(),
+        })
+    }
+
+    async fn review_learning_proposal(
+        &self,
+        _review: ToolLearningProposalReview,
+    ) -> Result<ToolLearningRecord, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "learning_proposal_review_structured".to_string(),
+        })
+    }
+
+    async fn prompt_manage_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        let workspace = self
+            .workspace
+            .clone()
+            .ok_or_else(|| ToolHostError::Unavailable {
+                service: "prompt_manage".to_string(),
+            })?;
+        execute_root_learning_tool(
+            PromptManageTool::new(
+                Arc::clone(&self.orchestrator),
+                Arc::clone(&self.store),
+                workspace,
+            ),
+            request,
+            "prompt manage",
+        )
+        .await
+    }
+
+    async fn skill_manage_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        let skill_registry =
+            self.skill_registry
+                .clone()
+                .ok_or_else(|| ToolHostError::Unavailable {
+                    service: "skill_manage".to_string(),
+                })?;
+        execute_root_learning_tool(
+            SkillManageTool::new(Arc::clone(&self.store), skill_registry),
+            request,
+            "skill manage",
+        )
+        .await
+    }
+
+    async fn learning_status_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningStatusTool::new(Arc::clone(&self.orchestrator), Arc::clone(&self.store)),
+            request,
+            "learning status",
+        )
+        .await
+    }
+
+    async fn learning_outcomes_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningOutcomesTool::new(Arc::clone(&self.store)),
+            request,
+            "learning outcomes",
+        )
+        .await
+    }
+
+    async fn learning_history_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningHistoryTool::new(Arc::clone(&self.store)),
+            request,
+            "learning history",
+        )
+        .await
+    }
+
+    async fn learning_feedback_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningFeedbackTool::new(Arc::clone(&self.orchestrator)),
+            request,
+            "learning feedback",
+        )
+        .await
+    }
+
+    async fn learning_proposal_review_action(
+        &self,
+        request: ToolLearningActionRequest,
+    ) -> Result<ToolLearningActionResult, ToolHostError> {
+        execute_root_learning_tool(
+            LearningProposalReviewTool::new(Arc::clone(&self.orchestrator)),
+            request,
+            "learning proposal review",
+        )
+        .await
+    }
+}
 
 fn tool_error_from_skill(err: SkillRegistryError) -> ToolError {
     ToolError::ExecutionFailed(err.to_string())
@@ -197,10 +377,6 @@ async fn record_artifact_version(
         );
     }
     Ok(id)
-}
-
-fn serialized<T: serde::Serialize>(value: T) -> serde_json::Value {
-    learning_policy::serialize_value(value)
 }
 
 async fn loaded_skill_root(
@@ -832,19 +1008,19 @@ impl Tool for LearningStatusTool {
         .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
 
         let summary = learning_policy::learning_status_output(
-            serialized(&settings),
-            serialized(providers),
+            learning_policy::serialize_value(&settings),
+            learning_policy::serialize_value(providers),
             settings.enabled && settings.outcomes.enabled,
-            serialized(outcome_stats),
-            summarize_recent(outcome_contracts),
+            learning_policy::serialize_value(outcome_stats),
+            learning_policy::recent_items_output(outcome_contracts),
             learning_policy::learning_recent_activity_output(
-                summarize_recent(events),
-                summarize_recent(evaluations),
-                summarize_recent(candidates),
-                summarize_recent(artifact_versions),
-                summarize_recent(feedback),
-                summarize_recent(rollbacks),
-                summarize_recent(proposals),
+                learning_policy::recent_items_output(events),
+                learning_policy::recent_items_output(evaluations),
+                learning_policy::recent_items_output(candidates),
+                learning_policy::recent_items_output(artifact_versions),
+                learning_policy::recent_items_output(feedback),
+                learning_policy::recent_items_output(rollbacks),
+                learning_policy::recent_items_output(proposals),
             ),
         );
 
@@ -854,10 +1030,6 @@ impl Tool for LearningStatusTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
-}
-
-fn summarize_recent<T: serde::Serialize>(items: Vec<T>) -> serde_json::Value {
-    learning_policy::recent_items_output(items)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -982,57 +1154,71 @@ impl Tool for LearningHistoryTool {
         let kind = parsed.kind;
         let limit = parsed.limit;
 
-        let output = match kind.as_str() {
-            "events" => learning_policy::learning_history_single_output(
-                &kind,
-                self.store
-                    .list_learning_events(&ctx.user_id, None, None, None, limit)
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
-            ),
-            "evaluations" => learning_policy::learning_history_single_output(
-                &kind,
-                self.store
-                    .list_learning_evaluations(&ctx.user_id, limit)
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
-            ),
-            "candidates" => learning_policy::learning_history_single_output(
-                &kind,
-                self.store
-                    .list_learning_candidates(&ctx.user_id, None, None, limit)
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
-            ),
-            "artifact_versions" => learning_policy::learning_history_single_output(
-                &kind,
-                self.store
-                    .list_learning_artifact_versions(&ctx.user_id, None, None, limit)
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
-            ),
-            "feedback" => learning_policy::learning_history_single_output(
-                &kind,
-                self.store
-                    .list_learning_feedback(&ctx.user_id, None, None, limit)
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
-            ),
-            "rollbacks" => learning_policy::learning_history_single_output(
-                &kind,
-                self.store
-                    .list_learning_rollbacks(&ctx.user_id, None, None, limit)
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
-            ),
-            "code_proposals" => learning_policy::learning_history_single_output(
-                &kind,
-                self.store
-                    .list_learning_code_proposals(&ctx.user_id, None, limit)
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
-            ),
-            _ => {
+        let output = match learning_policy::learning_history_kind(&kind) {
+            learning_policy::LearningHistoryKind::Events => {
+                learning_policy::learning_history_single_output(
+                    &kind,
+                    self.store
+                        .list_learning_events(&ctx.user_id, None, None, None, limit)
+                        .await
+                        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+                )
+            }
+            learning_policy::LearningHistoryKind::Evaluations => {
+                learning_policy::learning_history_single_output(
+                    &kind,
+                    self.store
+                        .list_learning_evaluations(&ctx.user_id, limit)
+                        .await
+                        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+                )
+            }
+            learning_policy::LearningHistoryKind::Candidates => {
+                learning_policy::learning_history_single_output(
+                    &kind,
+                    self.store
+                        .list_learning_candidates(&ctx.user_id, None, None, limit)
+                        .await
+                        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+                )
+            }
+            learning_policy::LearningHistoryKind::ArtifactVersions => {
+                learning_policy::learning_history_single_output(
+                    &kind,
+                    self.store
+                        .list_learning_artifact_versions(&ctx.user_id, None, None, limit)
+                        .await
+                        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+                )
+            }
+            learning_policy::LearningHistoryKind::Feedback => {
+                learning_policy::learning_history_single_output(
+                    &kind,
+                    self.store
+                        .list_learning_feedback(&ctx.user_id, None, None, limit)
+                        .await
+                        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+                )
+            }
+            learning_policy::LearningHistoryKind::Rollbacks => {
+                learning_policy::learning_history_single_output(
+                    &kind,
+                    self.store
+                        .list_learning_rollbacks(&ctx.user_id, None, None, limit)
+                        .await
+                        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+                )
+            }
+            learning_policy::LearningHistoryKind::CodeProposals => {
+                learning_policy::learning_history_single_output(
+                    &kind,
+                    self.store
+                        .list_learning_code_proposals(&ctx.user_id, None, limit)
+                        .await
+                        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+                )
+            }
+            learning_policy::LearningHistoryKind::All => {
                 let (
                     events,
                     evaluations,
@@ -1194,16 +1380,12 @@ impl Tool for LearningProposalReviewTool {
             .await
             .map_err(ToolError::ExecutionFailed)?;
 
-        let Some(proposal) = proposal else {
-            return Err(ToolError::ExecutionFailed(format!(
-                "proposal '{}' was not found",
-                parsed.proposal_id
-            )));
-        };
-
-        let proposal_status = proposal.status.clone();
         Ok(ToolOutput::success(
-            learning_policy::learning_proposal_review_output(proposal_status, proposal),
+            learning_policy::learning_proposal_review_result(
+                parsed.proposal_id,
+                proposal,
+                |proposal| proposal.status.clone(),
+            )?,
             start.elapsed(),
         ))
     }

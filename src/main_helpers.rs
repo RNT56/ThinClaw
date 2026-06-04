@@ -14,6 +14,7 @@ use thinclaw::channels::wasm::{
     WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
 };
 use thinclaw::config::Config;
+use thinclaw::config::EmbeddingsConfigProviderExt as _;
 use thinclaw::pairing::PairingStore;
 #[cfg(all(feature = "docker-sandbox", target_os = "macos"))]
 use thinclaw::secrets::CreateSecretParams;

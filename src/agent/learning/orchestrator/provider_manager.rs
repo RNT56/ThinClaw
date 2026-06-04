@@ -8,47 +8,7 @@ pub struct LearningOrchestrator {
     pub(in crate::agent::learning) provider_manager: Arc<MemoryProviderManager>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::agent::learning) enum GeneratedSkillLifecycle {
-    Draft,
-    Shadow,
-    Proposed,
-    Active,
-    Frozen,
-    RolledBack,
-}
-
-impl GeneratedSkillLifecycle {
-    pub(in crate::agent::learning) fn as_str(self) -> &'static str {
-        match self {
-            Self::Draft => "draft",
-            Self::Shadow => "shadow",
-            Self::Proposed => "proposed",
-            Self::Active => "active",
-            Self::Frozen => "frozen",
-            Self::RolledBack => "rolled_back",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::agent::learning) enum SkillSynthesisTrigger {
-    ComplexSuccess,
-    DeadEndRecovery,
-    UserCorrection,
-    NonTrivialWorkflow,
-}
-
-impl SkillSynthesisTrigger {
-    pub(in crate::agent::learning) fn as_str(self) -> &'static str {
-        match self {
-            Self::ComplexSuccess => "complex_success",
-            Self::DeadEndRecovery => "dead_end_recovery",
-            Self::UserCorrection => "user_correction",
-            Self::NonTrivialWorkflow => "non_trivial_workflow",
-        }
-    }
-}
+pub(in crate::agent::learning) use thinclaw_agent::learning_policy::GeneratedSkillLifecycle;
 
 pub(in crate::agent::learning) const PROPOSAL_SUPPRESSION_WINDOW_HOURS: i64 = 24 * 7;
 
@@ -109,29 +69,14 @@ impl MemoryProviderManager {
     pub(in crate::agent::learning) fn provider_context_refs(
         hits: &[ProviderMemoryHit],
     ) -> Vec<String> {
-        hits.iter()
-            .enumerate()
-            .map(|(index, hit)| {
-                hit.provenance
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        hit.provenance
-                            .get("memory_id")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| format!("{}:{}", hit.provider, index))
-            })
-            .collect()
+        thinclaw_agent::learning_provider_types::provider_context_refs(hits)
     }
 
     pub(in crate::agent::learning) fn decorate_provider_status(
         &self,
         provider: &Arc<dyn MemoryProvider>,
         settings: &LearningSettings,
-        mut status: ProviderHealthStatus,
+        status: ProviderHealthStatus,
     ) -> ProviderHealthStatus {
         let active_name = self
             .active_provider_for_settings(settings)
@@ -146,26 +91,12 @@ impl MemoryProviderManager {
             .active_provider_for_settings(settings)
             .is_some_and(|active| active.name() == provider.name());
 
-        status.active = is_active;
-        status.capabilities = provider.tool_extensions();
-        if !is_active && status.readiness.is_ready() {
-            status.readiness = ProviderReadiness::Inactive;
-        }
-        if !status.metadata.is_object() {
-            status.metadata = serde_json::json!({});
-        }
-        if let Some(obj) = status.metadata.as_object_mut() {
-            obj.insert("active".to_string(), serde_json::json!(is_active));
-            obj.insert(
-                "active_provider".to_string(),
-                serde_json::json!(active_name),
-            );
-            obj.insert(
-                "state".to_string(),
-                serde_json::json!(status.readiness.as_str()),
-            );
-        }
-        status
+        thinclaw_agent::learning_provider_types::decorate_provider_status(
+            status,
+            is_active,
+            active_name,
+            provider.tool_extensions(),
+        )
     }
 
     pub(in crate::agent::learning) async fn ready_active_provider(
@@ -247,31 +178,11 @@ impl MemoryProviderManager {
         }
     }
 
-    pub(in crate::agent::learning) fn run_artifact_payload(
-        artifact: &crate::agent::AgentRunArtifact,
-    ) -> serde_json::Value {
-        serde_json::to_value(artifact).unwrap_or_else(|_| {
-            serde_json::json!({
-                "run_id": artifact.run_id,
-                "source": artifact.source,
-                "status": artifact.status,
-                "started_at": artifact.started_at,
-                "completed_at": artifact.completed_at,
-                "failure_reason": artifact.failure_reason,
-                "execution_backend": artifact.execution_backend,
-                "prompt_snapshot_hash": artifact.prompt_snapshot_hash,
-                "ephemeral_overlay_hash": artifact.ephemeral_overlay_hash,
-                "provider_context_refs": artifact.provider_context_refs,
-                "metadata": artifact.metadata,
-            })
-        })
-    }
-
     pub async fn after_turn_sync(&self, user_id: &str, artifact: &crate::agent::AgentRunArtifact) {
         let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
             return;
         };
-        let payload = Self::run_artifact_payload(artifact);
+        let payload = artifact.provider_payload();
         if let Err(err) = provider.after_turn_sync(&settings, user_id, &payload).await {
             tracing::debug!(
                 provider = provider.name(),
@@ -301,7 +212,7 @@ impl MemoryProviderManager {
         let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
             return;
         };
-        let payload = Self::run_artifact_payload(artifact);
+        let payload = artifact.provider_payload();
         if let Err(err) = provider
             .session_end_extract(&settings, user_id, &payload)
             .await

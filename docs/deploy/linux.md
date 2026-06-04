@@ -13,7 +13,7 @@ and development boxes. For Raspberry Pi OS Lite, use
 | Small VPS / SD-card host | Release installer with `--profile edge` |
 | Container deployment | [docker.md](docker.md) |
 | Raspberry Pi OS Lite 64-bit | [raspberry-pi-os-lite.md](raspberry-pi-os-lite.md) |
-| Remote Scrappy access | [remote-access.md](remote-access.md) |
+| Remote ThinClaw Desktop access | [remote-access.md](remote-access.md) |
 
 ## Prerequisites
 

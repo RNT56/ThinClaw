@@ -1,0 +1,2084 @@
+/**
+ * ThinClaw API - wrappers for Tauri commands
+ *
+ * These wrappers call the thinclaw Tauri commands. The types match
+ * the Rust structs in backend/src/thinclaw/commands.rs
+ */
+
+import { invoke } from '@tauri-apps/api/core';
+import { openPath as tauriOpenPath, revealItemInDir } from '@tauri-apps/plugin-opener';
+
+/**
+ * Guard wrapper: only call invoke when the Tauri runtime is available.
+ * During Vite HMR reloads the IPC bridge can momentarily disappear,
+ * which otherwise causes `Cannot read properties of undefined (reading 'invoke')`.
+ */
+function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) {
+        return Promise.reject(new Error(`Tauri runtime not available (calling ${cmd})`));
+    }
+    return invoke<T>(cmd, args);
+}
+
+// ============================================================================
+// Types (matching Rust types from commands.rs)
+// ============================================================================
+
+export interface CustomSecret {
+    id: string;
+    name: string;
+    description: string | null;
+    granted: boolean;
+}
+
+export interface ThinClawStatus {
+    engine_running: boolean;
+    engine_connected: boolean;
+    slack_enabled: boolean;
+    telegram_enabled: boolean;
+    port: number;
+    gateway_mode: string;
+    remote_url: string | null;
+    remote_token: string | null;
+    device_id: string;
+    auth_token: string;
+    state_dir: string;
+    has_huggingface_token: boolean;
+    huggingface_granted: boolean;
+    has_anthropic_key: boolean;
+    anthropic_granted: boolean;
+    has_brave_key: boolean;
+    brave_granted: boolean;
+    has_openai_key: boolean;
+    openai_granted: boolean;
+    has_openrouter_key: boolean;
+    openrouter_granted: boolean;
+    has_gemini_key: boolean;
+    gemini_granted: boolean;
+    has_groq_key: boolean;
+    groq_granted: boolean;
+    custom_secrets: CustomSecret[];
+    allow_local_tools: boolean;
+    workspace_mode: string;
+    workspace_root: string | null;
+    local_inference_enabled: boolean;
+    selected_cloud_brain: string | null;
+    selected_cloud_model: string | null;
+    profiles: AgentProfile[];
+    setup_completed: boolean;
+    auto_start_gateway: boolean;
+    dev_mode_wizard: boolean;
+    /** When true, the agent runs tools without per-tool approval prompts. */
+    auto_approve_tools: boolean;
+    /** Whether the first-run identity bootstrap ritual has been completed. */
+    bootstrap_completed: boolean;
+    custom_llm_url: string | null;
+    custom_llm_key: string | null;
+    custom_llm_model: string | null;
+    custom_llm_enabled: boolean;
+    enabled_cloud_providers: string[];
+    enabled_cloud_models: Record<string, string[]>;
+    // --- Extended cloud provider status ---
+    has_xai_key: boolean;
+    xai_granted: boolean;
+    has_venice_key: boolean;
+    venice_granted: boolean;
+    has_together_key: boolean;
+    together_granted: boolean;
+    has_moonshot_key: boolean;
+    moonshot_granted: boolean;
+    has_minimax_key: boolean;
+    minimax_granted: boolean;
+    has_nvidia_key: boolean;
+    nvidia_granted: boolean;
+    has_qianfan_key: boolean;
+    qianfan_granted: boolean;
+    has_mistral_key: boolean;
+    mistral_granted: boolean;
+    has_xiaomi_key: boolean;
+    xiaomi_granted: boolean;
+    has_cohere_key: boolean;
+    cohere_granted: boolean;
+    has_voyage_key: boolean;
+    voyage_granted: boolean;
+    has_deepgram_key: boolean;
+    deepgram_granted: boolean;
+    has_elevenlabs_key: boolean;
+    elevenlabs_granted: boolean;
+    has_stability_key: boolean;
+    stability_granted: boolean;
+    has_fal_key: boolean;
+    fal_granted: boolean;
+    has_bedrock_key: boolean;
+    bedrock_granted: boolean;
+}
+
+export interface AgentProfile {
+    id: string;
+    name: string;
+    url: string;
+    token: string | null;
+    mode: string;
+    auto_connect: boolean;
+    // Sprint 13 extensions (optional for backward compat)
+    is_default?: boolean;
+    status?: 'running' | 'paused' | 'error' | 'offline';
+    session_count?: number;
+    last_active_at?: string;
+}
+
+export interface SlackConfigInput {
+    enabled: boolean;
+    bot_token: string | null;
+    app_token: string | null;
+}
+
+export interface TelegramConfigInput {
+    enabled: boolean;
+    bot_token: string | null;
+    dm_policy: string;
+    groups_enabled: boolean;
+}
+
+export interface ThinClawSession {
+    session_key: string;
+    title: string | null;
+    updated_at_ms: number | null;
+    source: string | null;
+}
+
+export interface ThinClawSessionsResponse {
+    sessions: ThinClawSession[];
+}
+
+export interface ThinClawMessage {
+    id: string;
+    role: string;
+    ts_ms: number;
+    text: string;
+    source: string | null;
+    metadata?: any;
+    tokensPerSec?: number;
+}
+
+export interface ThinClawHistoryResponse {
+    messages: ThinClawMessage[];
+    has_more: boolean;
+}
+
+export interface ThinClawRpcResponse {
+    ok: boolean;
+    message: string | null;
+}
+
+export interface CronJob {
+    key: string;            // UUID of the routine
+    name: string;           // display name
+    description: string;
+    schedule: string;       // 7-field cron expression
+    nextRun?: string;       // ISO timestamp
+    lastRun?: string;       // ISO timestamp
+    lastStatus?: 'ok' | 'error' | string;
+    enabled?: boolean;
+    run_count?: number;
+    action_type?: 'lightweight' | 'full_job' | 'heartbeat' | string;
+    trigger_type?: 'cron' | 'event' | 'webhook' | 'manual' | 'system_event' | string;
+}
+
+export interface CronHistoryItem {
+    timestamp: number;
+    status: string;
+    duration_ms: number;
+    output?: string;
+}
+
+export interface Skill {
+    skillKey: string;
+    name: string;
+    description: string;
+    disabled: boolean;
+    eligible: boolean;
+    emoji?: string;
+    homepage?: string;
+    source: string;
+    requirements?: {
+        bins: string[];
+    };
+    missing?: {
+        bins: string[];
+    };
+    install?: Array<{
+        installId: string;
+        type: string;
+        bins: string[];
+    }>;
+    version?: string;
+    trust?: string;
+    keywords?: string[];
+}
+
+export interface ThinClawSkillsStatus {
+    skills: Skill[];
+}
+
+export interface ThinClawDiagnostics {
+    timestamp: string;
+    engine_running: boolean;
+    engine_connected: boolean;
+    version: string;
+    platform: string;
+    port: number | null;
+    state_dir: string | null;
+    slack_enabled: boolean | null;
+    telegram_enabled: boolean | null;
+}
+
+// ============================================================================
+// API Functions
+// ============================================================================
+
+/**
+ * Get current ThinClaw status
+ */
+export async function getThinClawStatus(): Promise<ThinClawStatus> {
+    return safeInvoke('thinclaw_get_status');
+}
+
+/**
+ * Save Slack configuration
+ */
+export async function saveSlackConfig(config: SlackConfigInput): Promise<void> {
+    return invoke('thinclaw_save_slack_config', { configInput: config });
+}
+
+/**
+ * Save Telegram configuration
+ */
+export async function saveTelegramConfig(config: TelegramConfigInput): Promise<void> {
+    return invoke('thinclaw_save_telegram_config', { configInput: config });
+}
+
+/**
+ * Save Anthropic API key
+ */
+export async function saveAnthropicKey(key: string): Promise<void> {
+    return invoke('thinclaw_save_anthropic_key', { key });
+}
+
+/**
+ * Save Gateway configuration
+ */
+export async function saveGatewaySettings(
+    mode: string,
+    url: string | null,
+    token: string | null
+): Promise<void> {
+    return invoke('thinclaw_save_gateway_settings', { mode, url, token });
+}
+
+/**
+ * Start the ThinClaw runtime (in-process, no HTTP server)
+ */
+export async function startThinClawGateway(): Promise<void> {
+    return invoke('thinclaw_start_gateway');
+}
+
+/**
+ * Stop the ThinClaw runtime
+ */
+export async function stopThinClawGateway(): Promise<void> {
+    return invoke('thinclaw_stop_gateway');
+}
+
+/**
+ * Reload secrets (API keys) into the running ThinClaw runtime.
+ *
+ * Performs a graceful engine restart to re-inject keys from macOS Keychain.
+ * Call after saving or toggling API keys so the agent picks up changes
+ * without requiring manual restart.
+ */
+export async function reloadSecrets(): Promise<void> {
+    return invoke('thinclaw_reload_secrets');
+}
+
+export interface CustomLlmConfigInput {
+    url: string | null;
+    key: string | null;
+    model: string | null;
+    enabled: boolean;
+}
+
+export async function saveCloudConfig(
+    enabledProviders: string[],
+    enabledModels: Record<string, string[]>,
+    customLlm: CustomLlmConfigInput | null
+): Promise<void> {
+    return invoke('thinclaw_save_cloud_config', { enabledProviders, enabledModels, customLlm });
+}
+
+/**
+ * Get list of ThinClaw sessions
+ */
+export async function deleteThinClawSession(sessionKey: string): Promise<void> {
+    await invoke('thinclaw_delete_session', { sessionKey });
+}
+
+export async function resetThinClawSession(sessionKey: string): Promise<void> {
+    await invoke('thinclaw_reset_session', { sessionKey });
+}
+
+export async function getThinClawSessions(): Promise<ThinClawSessionsResponse> {
+    return invoke('thinclaw_get_sessions');
+}
+
+/**
+ * Get chat history for a session
+ */
+export async function getThinClawHistory(
+    sessionKey: string,
+    limit: number,
+    before?: string
+): Promise<ThinClawHistoryResponse> {
+    return invoke('thinclaw_get_history', { sessionKey, limit, before: before ?? null });
+}
+
+/**
+ * Send a message to a ThinClaw session
+ */
+export async function sendThinClawMessage(
+    sessionKey: string,
+    text: string,
+    deliver: boolean = true
+): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_send_message', { sessionKey, text, deliver });
+}
+
+/**
+ * Subscribe to a session for live updates
+ */
+export async function subscribeThinClawSession(sessionKey: string): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_subscribe_session', { sessionKey });
+}
+
+/**
+ * Abort a running chat
+ */
+export async function abortThinClawChat(
+    sessionKey: string,
+    runId?: string
+): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_abort_chat', { sessionKey, runId: runId ?? null });
+}
+
+/**
+ * Resolve an approval request (3-tier: Deny / Allow Once / Allow Session)
+ *
+ * @param approvalId   Unique approval request ID from the agent
+ * @param approved     Whether the action is approved (true) or denied (false)
+ * @param allowSession If true, approve for the entire session (until engine restart)
+ */
+export async function resolveThinClawApproval(
+    approvalId: string,
+    approved: boolean,
+    allowSession: boolean = false
+): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_resolve_approval', { approvalId, approved, allowSession });
+}
+
+/**
+ * Get diagnostic information
+ */
+export async function getThinClawDiagnostics(): Promise<ThinClawDiagnostics> {
+    return invoke('thinclaw_get_diagnostics');
+}
+
+/**
+ * Clear ThinClaw memory (deletes memory directory)
+ */
+/**
+ * Clear ThinClaw memory (deletes memory directory)
+ */
+export async function clearThinClawMemory(target: 'memory' | 'identity' | 'all'): Promise<void> {
+    return invoke('thinclaw_clear_memory', { target });
+}
+
+/**
+ * Get ThinClaw memory content (MEMORY.md)
+ */
+export async function getThinClawMemory(): Promise<string> {
+    return invoke('thinclaw_get_memory');
+}
+
+/**
+ * Get content of a specific file in the ThinClaw workspace
+ */
+export async function getThinClawFile(path: string): Promise<string> {
+    return invoke('thinclaw_get_file', { path });
+}
+
+/**
+ * List all markdown files in the ThinClaw workspace
+ */
+export async function listWorkspaceFiles(): Promise<string[]> {
+    return invoke('thinclaw_list_workspace_files');
+}
+
+/**
+ * Write content to a specific file in the ThinClaw workspace
+ */
+export async function writeThinClawFile(path: string, content: string): Promise<void> {
+    return invoke('thinclaw_write_file', { path, content });
+}
+
+/**
+ * Delete a file from the ThinClaw DB workspace.
+ * Core seeded files (SOUL.md, IDENTITY.md, etc.) are protected.
+ */
+export async function deleteThinClawFile(path: string): Promise<void> {
+    return invoke('thinclaw_delete_file', { path });
+}
+
+/**
+ * Open a path in the system file manager
+ */
+export async function openPath(path: string): Promise<void> {
+    return tauriOpenPath(path);
+}
+
+export async function revealPath(path: string): Promise<void> {
+    return revealItemInDir(path);
+}
+
+// ============================================================================
+// New ThinClaw Gateway RPC Methods
+// ============================================================================
+
+export async function getThinClawCronList(): Promise<CronJob[]> {
+    return invoke('thinclaw_cron_list');
+}
+
+export async function runThinClawCron(key: string): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_cron_run', { key });
+}
+
+export async function getThinClawCronHistory(key: string, limit: number): Promise<CronHistoryItem[]> {
+    return invoke('thinclaw_cron_history', { key, limit });
+}
+
+export interface RoutineAuditEntry {
+    routine_key: string;
+    started_at: string;
+    completed_at: string | null;
+    outcome: 'success' | 'failure' | 'skipped' | 'timeout' | string;
+    duration_ms: number | null;
+    error: string | null;
+}
+
+/** Fetch routine execution history from the RoutineAuditLog. */
+export async function getRoutineAuditList(
+    routineKey: string,
+    limit?: number,
+    outcome?: string,
+): Promise<RoutineAuditEntry[]> {
+    return invoke('thinclaw_routine_audit_list', {
+        routineKey,
+        limit: limit ?? null,
+        outcome: outcome ?? null,
+    });
+}
+
+/** Clear routine run history. If routineKey is provided, clears only that routine's runs. */
+export async function clearRoutineRuns(routineKey?: string): Promise<void> {
+    await invoke('thinclaw_clear_routine_runs', { key: routineKey ?? null });
+}
+
+// ============================================================================
+// Channel listing
+// ============================================================================
+
+export interface ChannelInfo {
+    id: string;
+    name: string;
+    type: 'wasm' | 'native' | 'builtin';
+    enabled: boolean;
+    stream_mode: string;
+}
+
+export interface ChannelsListResponse {
+    channels: ChannelInfo[];
+}
+
+export async function getThinClawChannelsList(): Promise<ChannelsListResponse> {
+    return invoke('thinclaw_channels_list');
+}
+
+// ============================================================================
+// Cron expression linting
+// ============================================================================
+
+export interface CronLintResult {
+    valid: boolean;
+    expression: string;
+    next_fire_times: string[];
+    checked_at: string;
+}
+
+export async function lintCronExpression(expression: string): Promise<CronLintResult> {
+    return invoke('thinclaw_cron_lint', { expression });
+}
+
+export interface CreateRoutineResult {
+    id: string;
+    name: string;
+    description: string;
+    schedule: string;
+    task: string;
+    created_at: string;
+}
+
+/** Create a new scheduled routine. */
+export async function createRoutine(
+    name: string,
+    description: string,
+    schedule: string,
+    task: string,
+): Promise<CreateRoutineResult> {
+    return invoke('thinclaw_routine_create', { name, description, schedule, task });
+}
+
+export async function getThinClawSkillsList(): Promise<Skill[]> {
+    return invoke('thinclaw_skills_list');
+}
+
+export async function getThinClawSkillsStatus(): Promise<ThinClawSkillsStatus> {
+    return invoke('thinclaw_skills_status');
+}
+
+export async function toggleThinClawSkill(key: string, enabled: boolean): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_skills_toggle', { key, enabled });
+}
+
+export async function toggleThinClawLocalTools(enabled: boolean): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_toggle_local_tools', { enabled });
+}
+
+export async function setThinClawWorkspaceMode(mode: string, root: string | null): Promise<string> {
+    return invoke('thinclaw_set_workspace_mode', { mode, root });
+}
+
+export async function toggleThinClawLocalInference(enabled: boolean): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_toggle_local_inference', { enabled });
+}
+
+export async function toggleThinClawExposeInference(enabled: boolean): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_toggle_expose_inference', { enabled });
+}
+
+export async function selectThinClawBrain(brain: string | null): Promise<void> {
+    return invoke('select_thinclaw_brain', { brain });
+}
+
+export async function selectThinClawModel(model: string | null): Promise<void> {
+    return invoke('thinclaw_save_selected_cloud_model', { model });
+}
+
+export async function installThinClawSkillRepo(repoUrl: string): Promise<string> {
+    return invoke('thinclaw_install_skill_repo', { repoUrl });
+}
+
+export async function installThinClawSkillDeps(name: string, installId?: string): Promise<void> {
+    return invoke('thinclaw_install_skill_deps', { name, installId });
+}
+
+export interface SkillInfo {
+    name: string;
+    description: string;
+    version: string;
+    trust: string;
+    source: string;
+    keywords: string[];
+}
+
+export interface SkillSearchResponse {
+    catalog: any[];
+    installed: SkillInfo[];
+    registry_url: string;
+    catalog_error?: string | null;
+}
+
+export interface SkillActionResponse {
+    success?: boolean;
+    ok?: boolean;
+    message?: string;
+    [key: string]: any;
+}
+
+export async function searchSkillsCatalog(query: string): Promise<SkillSearchResponse> {
+    return invoke('thinclaw_skills_search', { query });
+}
+
+export async function installSkill(name: string, opts: { url?: string | null; content?: string | null; force?: boolean } = {}): Promise<SkillActionResponse> {
+    return invoke('thinclaw_skill_install', {
+        name,
+        url: opts.url ?? null,
+        content: opts.content ?? null,
+        force: opts.force ?? false,
+    });
+}
+
+export async function removeSkill(name: string): Promise<SkillActionResponse> {
+    return invoke('thinclaw_skill_remove', { name });
+}
+
+export async function setSkillTrust(name: string, trust: string): Promise<SkillActionResponse> {
+    return invoke('thinclaw_skill_trust', { name, trust });
+}
+
+export async function reloadSkill(name: string): Promise<SkillActionResponse> {
+    return invoke('thinclaw_skill_reload', { name });
+}
+
+export async function reloadAllSkills(): Promise<SkillActionResponse> {
+    return invoke('thinclaw_skills_reload_all');
+}
+
+export async function inspectSkill(
+    name: string,
+    opts: { includeContent?: boolean; includeFiles?: boolean; audit?: boolean } = {},
+): Promise<any> {
+    return invoke('thinclaw_skill_inspect', {
+        name,
+        includeContent: opts.includeContent ?? false,
+        includeFiles: opts.includeFiles ?? true,
+        audit: opts.audit ?? true,
+    });
+}
+
+export async function publishSkill(
+    name: string,
+    targetRepo: string,
+    opts: { dryRun?: boolean; remoteWrite?: boolean; confirmRemoteWrite?: boolean; approveRisky?: boolean } = {},
+): Promise<any> {
+    return invoke('thinclaw_skill_publish', {
+        name,
+        targetRepo,
+        dryRun: opts.dryRun ?? true,
+        remoteWrite: opts.remoteWrite ?? false,
+        confirmRemoteWrite: opts.confirmRemoteWrite ?? false,
+        approveRisky: opts.approveRisky ?? false,
+    });
+}
+
+export async function getThinClawConfigSchema(): Promise<Record<string, any>> {
+    return invoke('thinclaw_config_schema');
+}
+
+export async function getThinClawConfig(): Promise<Record<string, any>> {
+    return invoke('thinclaw_config_get');
+}
+
+export async function patchThinClawConfig(patch: any): Promise<void> {
+    return invoke('thinclaw_config_patch', { patch });
+}
+
+export async function getThinClawSystemPresence(): Promise<AgentRuntimePresence> {
+    return invoke('thinclaw_system_presence');
+}
+
+/** Live runtime data for the Agent Runtime / Presence panel. */
+export interface AgentRuntimePresence {
+    online: boolean;
+    engine: string;
+    mode: string;
+    session_count: number;
+    sub_agent_count: number;
+    tool_count: number;
+    hook_count: number;
+    channel_count: number;
+    routine_engine_running: boolean;
+    uptime_secs: number | null;
+}
+
+export interface LogLine {
+    timestamp: string;
+    level: string;
+    target: string;
+    message: string;
+}
+
+export async function getThinClawLogsTail(limit: number): Promise<{ logs: LogLine[]; lines: string[] }> {
+    return invoke('thinclaw_logs_tail', { limit });
+}
+
+export async function runThinClawUpdate(): Promise<void> {
+    return invoke('thinclaw_update_run');
+}
+
+export async function loginThinClawWhatsapp(): Promise<void> {
+    return invoke('thinclaw_web_login_whatsapp');
+}
+
+export async function loginThinClawTelegram(): Promise<void> {
+    return invoke('thinclaw_web_login_telegram');
+}
+
+
+
+export async function getPermissionStatus(): Promise<{ accessibility: boolean, screen_recording: boolean }> {
+    return invoke('get_permission_status');
+}
+
+export async function requestPermission(permission: string): Promise<{ accessibility: boolean, screen_recording: boolean }> {
+    return invoke('request_permission', { permission });
+}
+
+export async function openPermissionSettings(permission: string): Promise<void> {
+    return invoke('open_permission_settings', { permission });
+}
+
+export async function setSetupCompleted(completed: boolean): Promise<void> {
+    return invoke('thinclaw_set_setup_completed', { completed });
+}
+
+export async function addAgentProfile(profile: AgentProfile): Promise<void> {
+    return invoke('thinclaw_add_agent_profile', { profile });
+}
+
+export async function removeAgentProfile(id: string): Promise<void> {
+    return invoke('thinclaw_remove_agent_profile', { id });
+}
+
+export async function setHfToken(token: string): Promise<void> {
+    return invoke('thinclaw_set_hf_token', { token });
+}
+
+export async function toggleThinClawAutoStart(enabled: boolean): Promise<void> {
+    return invoke('thinclaw_toggle_auto_start', { enabled });
+}
+
+export async function setDevModeWizard(enabled: boolean): Promise<void> {
+    return invoke('thinclaw_set_dev_mode_wizard', { enabled });
+}
+
+export async function switchToProfile(profileId: string): Promise<void> {
+    return invoke('thinclaw_switch_to_profile', { profileId });
+}
+
+export async function broadcastCommand(command: string): Promise<void> {
+    return invoke('thinclaw_broadcast_command', { command });
+}
+
+export async function verifyConnection(url: string, token: string | null): Promise<boolean> {
+    return invoke('thinclaw_test_connection', { url, token });
+}
+
+export interface AgentStatusSummary {
+    id: string;
+    name: string;
+    url: string;
+    online: boolean;
+    latency_ms: number | null;
+    version: string | null;
+    stats: any | null;
+    current_task: string | null;
+    progress: number | null;
+    logs: string[] | null;
+    parent_id: string | null;
+    children_ids: string[] | null;
+    active_session_id: string | null;
+    active: boolean;
+    capabilities: string[] | null;
+    run_status: string | null; // idle | processing | waiting_approval | error | offline
+    model: string | null;
+}
+
+export async function getFleetStatus(): Promise<AgentStatusSummary[]> {
+    return invoke('thinclaw_get_fleet_status');
+}
+
+// ── Sub-agent spawning types ─────────────────────────────────────────────
+
+export interface SpawnSessionResponse {
+    session_key: string;
+    parent_session: string | null;
+    task: string;
+}
+
+export interface ChildSessionInfo {
+    session_key: string;
+    task: string;
+    status: 'running' | 'completed' | 'failed';
+    spawned_at: number;
+    result_summary: string | null;
+}
+
+/**
+ * Spawn a new sub-agent session.
+ *
+ * @param agentId       Agent to spawn
+ * @param task          Task description for the sub-agent
+ * @param parentSession Optional parent session key for tracking
+ */
+export async function spawnSession(
+    agentId: string,
+    task: string,
+    parentSession?: string
+): Promise<SpawnSessionResponse> {
+    return invoke('thinclaw_spawn_session', {
+        agentId,
+        task,
+        parentSession: parentSession ?? null,
+    });
+}
+
+/**
+ * List all child sessions spawned by a parent session.
+ */
+export async function listChildSessions(parentSession: string): Promise<ChildSessionInfo[]> {
+    return invoke('thinclaw_list_child_sessions', { parentSession });
+}
+
+/**
+ * Update a sub-agent's status (mark as completed/failed).
+ */
+export async function updateSubAgentStatus(
+    childSession: string,
+    status: 'running' | 'completed' | 'failed',
+    resultSummary?: string
+): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_update_sub_agent_status', {
+        childSession,
+        status,
+        resultSummary: resultSummary ?? null,
+    });
+}
+
+export async function getAgentsList(): Promise<AgentProfile[]> {
+    return invoke('thinclaw_agents_list');
+}
+
+export async function canvasPush(content: string): Promise<void> {
+    return invoke('thinclaw_canvas_push', { content });
+}
+
+export async function canvasNavigate(url: string): Promise<void> {
+    return invoke('thinclaw_canvas_navigate', { url });
+}
+
+// --- Canvas / A2UI Types ---
+
+export type PanelPosition = 'right' | 'bottom' | 'center' | 'floating';
+export type NotifyLevel = 'info' | 'success' | 'warning' | 'error';
+export type ButtonStyle = 'primary' | 'secondary' | 'danger' | 'ghost';
+
+export interface KvItem {
+    key: string;
+    value: string;
+}
+
+export interface FormFieldText { type: 'text'; name: string; label: string; placeholder?: string; required?: boolean; }
+export interface FormFieldNumber { type: 'number'; name: string; label: string; min?: number; max?: number; }
+export interface FormFieldSelect { type: 'select'; name: string; label: string; options: string[]; }
+export interface FormFieldCheckbox { type: 'checkbox'; name: string; label: string; checked?: boolean; }
+export interface FormFieldTextarea { type: 'textarea'; name: string; label: string; rows?: number; }
+export type FormField = FormFieldText | FormFieldNumber | FormFieldSelect | FormFieldCheckbox | FormFieldTextarea;
+
+export interface UiComponentText { type: 'text'; content: string; }
+export interface UiComponentHeading { type: 'heading'; text: string; level?: number; }
+export interface UiComponentTable { type: 'table'; headers: string[]; rows: string[][]; }
+export interface UiComponentCode { type: 'code'; language: string; content: string; }
+export interface UiComponentImage { type: 'image'; src: string; alt?: string; width?: number; }
+export interface UiComponentProgress { type: 'progress'; label?: string; value: number; max: number; }
+export interface UiComponentKeyValue { type: 'key_value'; items: KvItem[]; }
+export interface UiComponentDivider { type: 'divider'; }
+export interface UiComponentButton { type: 'button'; label: string; action: string; style?: ButtonStyle; }
+export interface UiComponentForm { type: 'form'; form_id: string; fields: FormField[]; submit_label: string; }
+export interface UiComponentJson { type: 'json'; data: any; collapsed?: boolean; }
+
+export type UiComponent =
+    | UiComponentText | UiComponentHeading | UiComponentTable | UiComponentCode
+    | UiComponentImage | UiComponentProgress | UiComponentKeyValue | UiComponentDivider
+    | UiComponentButton | UiComponentForm | UiComponentJson;
+
+export interface CanvasActionShow {
+    action: 'show';
+    panel_id: string;
+    title: string;
+    components: UiComponent[];
+    position?: PanelPosition;
+    modal?: boolean;
+}
+export interface CanvasActionUpdate {
+    action: 'update';
+    panel_id: string;
+    components: UiComponent[];
+}
+export interface CanvasActionDismiss {
+    action: 'dismiss';
+    panel_id: string;
+}
+export interface CanvasActionNotify {
+    action: 'notify';
+    message: string;
+    level?: NotifyLevel;
+    duration_secs?: number;
+}
+export type CanvasAction = CanvasActionShow | CanvasActionUpdate | CanvasActionDismiss | CanvasActionNotify;
+
+/** Dispatch a canvas action event (button click, form submit) back to the agent. */
+export async function canvasDispatchAction(
+    sessionKey: string,
+    eventType: string,
+    payload: any,
+    runId?: string
+): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_canvas_dispatch_event', { sessionKey, runId: runId ?? null, eventType, payload });
+}
+
+export async function abortSession(sessionKey: string, runId?: string): Promise<void> {
+    return invoke('thinclaw_abort_chat', { sessionKey, runId: runId ?? null });
+}
+
+export async function dispatchCanvasEvent(
+    sessionKey: string,
+    eventType: string,
+    payload: any,
+    runId?: string
+): Promise<ThinClawRpcResponse> {
+    return invoke('thinclaw_canvas_dispatch_event', { sessionKey, runId, eventType, payload });
+}
+
+export async function syncLocalLlm(): Promise<void> {
+    return invoke('thinclaw_sync_local_llm');
+}
+
+// ============================================================================
+// New Feature API Functions
+// ============================================================================
+
+export interface ThinkingConfigResult {
+    enabled: boolean;
+    budget_tokens: number | null;
+}
+
+/**
+ * Set thinking mode natively via ThinClaw's ThinkingConfig.
+ *
+ * This replaces the old localStorage hack that prepended
+ * "Think step by step" to messages.
+ */
+export async function setThinking(
+    enabled: boolean,
+    budgetTokens?: number
+): Promise<ThinkingConfigResult> {
+    return invoke('thinclaw_set_thinking', {
+        enabled,
+        budgetTokens: budgetTokens ?? null,
+    });
+}
+
+export interface MemorySearchResult {
+    path: string;
+    snippet: string;
+    score: number;
+}
+
+export interface MemorySearchResponse {
+    results: MemorySearchResult[];
+    query: string;
+    total: number;
+}
+
+/**
+ * Search workspace memory using ThinClaw's hybrid BM25+vector search.
+ * Falls back to simple text search if vector search is unavailable.
+ */
+export async function searchMemory(
+    query: string,
+    limit?: number
+): Promise<MemorySearchResponse> {
+    return invoke('thinclaw_memory_search', { query, limit: limit ?? null });
+}
+
+export interface SessionExportResponse {
+    transcript: string;
+    session_key: string;
+    message_count: number;
+}
+
+/**
+ * Export a session's history in the given format.
+ * Supported: 'md' (default), 'json', 'txt', 'csv', 'html'
+ */
+export async function exportSession(
+    sessionKey: string,
+    format: string = 'md'
+): Promise<SessionExportResponse> {
+    return invoke('thinclaw_export_session', { sessionKey, format });
+}
+
+// ============================================================================
+// Hooks & Extensions Management
+// ============================================================================
+
+export interface HookInfoItem {
+    name: string;
+    hook_points: string[];
+    failure_mode: string;
+    timeout_ms: number;
+    priority: number;
+}
+
+export interface HooksListResponse {
+    hooks: HookInfoItem[];
+    total: number;
+}
+
+/** List all registered lifecycle hooks. */
+export async function listHooks(): Promise<HooksListResponse> {
+    return invoke('thinclaw_hooks_list');
+}
+
+export interface HookRegisterResponse {
+    ok: boolean;
+    hooks_registered: number;
+    webhooks_registered: number;
+    errors: number;
+    message: string | null;
+}
+
+export interface HookUnregisterResponse {
+    ok: boolean;
+    removed: boolean;
+    message: string | null;
+}
+
+/** Register a hook bundle from a JSON configuration. */
+export async function registerHookBundle(bundleJson: string, source?: string): Promise<HookRegisterResponse> {
+    return invoke('thinclaw_hooks_register', { input: { bundle_json: bundleJson, source: source || null } });
+}
+
+/** Unregister (remove) a hook by name. */
+export async function unregisterHook(hookName: string): Promise<HookUnregisterResponse> {
+    return invoke('thinclaw_hooks_unregister', { hookName });
+}
+
+export interface ExtensionInfoItem {
+    name: string;
+    kind: string;
+    description: string | null;
+    url: string | null;
+    active: boolean;
+    authenticated: boolean;
+    auth_mode: string;
+    auth_status: string;
+    tools: string[];
+    needs_setup: boolean;
+    shared_auth_provider: string | null;
+    missing_scopes: string[];
+    activation_status: string | null;
+    activation_error: string | null;
+    channel_diagnostics: any | null;
+    reconnect_supported: boolean;
+    setup: any;
+}
+
+export interface ExtensionsListResponse {
+    extensions: ExtensionInfoItem[];
+    total: number;
+}
+
+export interface ExtensionActionResponse {
+    ok: boolean;
+    message: string | null;
+    auth_url?: string | null;
+    setup_url?: string | null;
+    auth_mode?: string | null;
+    auth_status?: string | null;
+    awaiting_token?: boolean | null;
+    instructions?: string | null;
+    shared_auth_provider?: string | null;
+    missing_scopes?: string[];
+    activated?: boolean | null;
+    needs_restart?: boolean | null;
+}
+
+/** List all installed extensions/plugins. */
+export async function listExtensions(): Promise<ExtensionsListResponse> {
+    return invoke('thinclaw_extensions_list');
+}
+
+export async function installExtension(name: string, url?: string | null, kind?: string | null): Promise<ExtensionActionResponse> {
+    return invoke('thinclaw_extension_install', { name, url: url ?? null, kind: kind ?? null });
+}
+
+export async function searchExtensionRegistry(query?: string): Promise<{ entries: any[] }> {
+    return invoke('thinclaw_extension_registry_search', { query: query ?? null });
+}
+
+/** Activate an extension by name. */
+export async function activateExtension(name: string): Promise<ExtensionActionResponse> {
+    return invoke('thinclaw_extension_activate', { name });
+}
+
+export async function reconnectExtension(name: string): Promise<ExtensionActionResponse> {
+    return invoke('thinclaw_extension_reconnect', { name });
+}
+
+export async function getExtensionSetup(name: string): Promise<any> {
+    return invoke('thinclaw_extension_setup_get', { name });
+}
+
+export async function submitExtensionSetup(name: string, secrets: Record<string, string>): Promise<ExtensionActionResponse> {
+    return invoke('thinclaw_extension_setup_submit', { name, secrets });
+}
+
+export async function validateExtensionSetup(name: string): Promise<ExtensionActionResponse> {
+    return invoke('thinclaw_extension_validate_setup', { name });
+}
+
+/** Remove an extension by name. */
+export async function removeExtension(name: string): Promise<ExtensionActionResponse> {
+    return invoke('thinclaw_extension_remove', { name });
+}
+
+export async function listMcpServers(): Promise<any> {
+    return invoke('thinclaw_mcp_servers');
+}
+
+export async function getMcpServer(name: string): Promise<any> {
+    return invoke('thinclaw_mcp_server', { name });
+}
+
+export async function listMcpServerTools(name: string): Promise<any> {
+    return invoke('thinclaw_mcp_server_tools', { name });
+}
+
+export async function listMcpServerResources(name: string): Promise<any> {
+    return invoke('thinclaw_mcp_server_resources', { name });
+}
+
+export async function readMcpResource(name: string, uri: string): Promise<any> {
+    return invoke('thinclaw_mcp_read_resource', { name, uri });
+}
+
+export async function listMcpResourceTemplates(name: string): Promise<any> {
+    return invoke('thinclaw_mcp_resource_templates', { name });
+}
+
+export async function listMcpServerPrompts(name: string): Promise<any> {
+    return invoke('thinclaw_mcp_server_prompts', { name });
+}
+
+export async function getMcpPrompt(serverName: string, promptName: string, args?: any): Promise<any> {
+    return invoke('thinclaw_mcp_get_prompt', { serverName, promptName, promptArgs: args ?? null });
+}
+
+export async function discoverMcpOauth(name: string): Promise<any> {
+    return invoke('thinclaw_mcp_oauth', { name });
+}
+
+export async function setMcpLogLevel(name: string, level: string): Promise<ExtensionActionResponse> {
+    return invoke('thinclaw_mcp_set_log_level', { name, level });
+}
+
+export async function listMcpInteractions(): Promise<any> {
+    return invoke('thinclaw_mcp_interactions');
+}
+
+export async function respondMcpInteraction(interactionId: string, action: string, response?: any, message?: string): Promise<ExtensionActionResponse> {
+    return invoke('thinclaw_mcp_interaction_respond', {
+        interactionId,
+        action,
+        response: response ?? null,
+        message: message ?? null,
+    });
+}
+
+// ============================================================================
+// Config Editor
+// ============================================================================
+
+export interface SettingItem {
+    key: string;
+    value: any;
+    updated_at: string;
+}
+
+export interface SettingsListResponse {
+    settings: SettingItem[];
+}
+
+/** List all ThinClaw config settings. */
+export async function listSettings(): Promise<SettingsListResponse> {
+    return invoke('thinclaw_config_get');
+}
+
+/** Set a single config setting. */
+export async function setSetting(key: string, value: any): Promise<{ ok: boolean }> {
+    return invoke('thinclaw_config_set', { key, value });
+}
+
+/** Bulk-update settings. */
+export async function patchSettings(patch: Record<string, any>): Promise<{ ok: boolean }> {
+    return invoke('thinclaw_config_patch', { patch });
+}
+
+// ============================================================================
+// System Diagnostics
+// ============================================================================
+
+export interface DiagnosticCheck {
+    name: string;
+    status: 'pass' | 'fail' | 'warn' | 'skip';
+    detail: string;
+}
+
+export interface DiagnosticsResponse {
+    checks: DiagnosticCheck[];
+    passed: number;
+    failed: number;
+    skipped: number;
+}
+
+/** Run system diagnostics. */
+export async function runDiagnostics(): Promise<DiagnosticsResponse> {
+    return invoke('thinclaw_diagnostics');
+}
+
+// ============================================================================
+// Tool Listing (for Tool Policies)
+// ============================================================================
+
+export interface ToolInfoItem {
+    name: string;
+    description: string;
+    enabled: boolean;
+    source: string; // 'builtin' | 'skill' | 'extension' | 'mcp'
+}
+
+export interface ToolsListResponse {
+    tools: ToolInfoItem[];
+    total: number;
+}
+
+/** List all registered tools with their status. */
+export async function listTools(): Promise<ToolsListResponse> {
+    return invoke('thinclaw_tools_list');
+}
+
+/** Get the list of globally disabled tool names. */
+export async function getDisabledTools(): Promise<string[]> {
+    return invoke('thinclaw_tool_policy_get');
+}
+
+/** Overwrite the list of globally disabled tool names. */
+export async function setDisabledTools(disabledTools: string[]): Promise<void> {
+    return invoke('thinclaw_tool_policy_set', { disabledTools });
+}
+
+/** Toggle a single tool on/off. Returns the new enabled state. */
+export async function toggleTool(toolName: string, currentlyEnabled: boolean): Promise<boolean> {
+    const disabled = await getDisabledTools();
+    let next: string[];
+    if (currentlyEnabled) {
+        // Currently enabled → disable it
+        next = [...new Set([...disabled, toolName])];
+    } else {
+        // Currently disabled → enable it
+        next = disabled.filter(n => n !== toolName);
+    }
+    await setDisabledTools(next);
+    return !currentlyEnabled;
+}
+
+// ============================================================================
+// DM Pairing Management
+// ============================================================================
+
+export interface PairingItem {
+    channel: string;
+    user_id: string;
+    paired_at: string;
+    status: 'active' | 'pending';
+}
+
+export interface PairingListResponse {
+    pairings: PairingItem[];
+    total: number;
+}
+
+/** List pairings for a channel (pending + approved). */
+export async function listPairings(channel: string): Promise<PairingListResponse> {
+    return invoke('thinclaw_pairing_list', { channel });
+}
+
+/** Approve a pairing code for a channel. */
+export async function approvePairing(channel: string, code: string): Promise<{ ok: boolean }> {
+    return invoke('thinclaw_pairing_approve', { channel, code });
+}
+
+// ============================================================================
+// Context Compaction
+// ============================================================================
+
+export interface CompactSessionResponse {
+    tokens_before: number;
+    tokens_after: number;
+    turns_removed: number;
+    summary: string | null;
+}
+
+/** Trigger context compaction for a session. */
+export async function compactSession(sessionKey: string): Promise<CompactSessionResponse> {
+    return invoke('thinclaw_compact_session', { sessionKey });
+}
+
+// ============================================================================
+// Sprint 13 — New Backend APIs
+// ============================================================================
+
+// --- Cost Tracking ---
+
+export interface CostSummary {
+    total_cost_usd: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+    total_requests: number;
+    avg_cost_per_request: number;
+    daily: Record<string, number>;
+    monthly: Record<string, number>;
+    by_model: Record<string, number>;
+    by_agent: Record<string, number>;
+    alert_threshold_usd: number;
+    alert_triggered: boolean;
+}
+
+/** Get LLM cost summary with daily/monthly/per-model breakdowns. */
+export async function getCostSummary(): Promise<CostSummary> {
+    return invoke('thinclaw_cost_summary');
+}
+
+/** Export cost data as CSV string. */
+export async function exportCostCsv(): Promise<string> {
+    return invoke('thinclaw_cost_export_csv');
+}
+
+/** Reset (clear) all cost tracking data. Persists empty state to DB. */
+export async function resetCostData(): Promise<void> {
+    return invoke('thinclaw_cost_reset');
+}
+
+// --- Channel Status ---
+
+export interface ChannelStatusEntry {
+    id: string;
+    name: string;
+    type: 'wasm' | 'native' | 'builtin';
+    state: 'Running' | 'Connecting' | 'Degraded' | 'Disconnected' | 'Error';
+    enabled: boolean;
+    uptime_secs: number | null;
+    messages_sent: number;
+    messages_received: number;
+    last_error: string | null;
+    stream_mode: string;
+}
+
+/** Get all channel statuses with live state and counters. */
+export async function getChannelStatusList(): Promise<ChannelStatusEntry[]> {
+    return invoke('thinclaw_channel_status_list');
+}
+
+// --- Agent Management ---
+
+/** Set the default agent profile. */
+export async function setDefaultAgent(agentId: string): Promise<void> {
+    return invoke('thinclaw_agents_set_default', { agentId });
+}
+
+// --- ClawHub ---
+
+export interface ClawHubEntry {
+    id: string;
+    name: string;
+    description: string;
+    version: string;
+    author: string;
+    category: string;
+    install_count: number;
+    tags: string[];
+}
+
+/** Search ClawHub plugin catalog (proxied through ThinClaw). */
+export async function searchClawHub(query: string): Promise<{ entries: ClawHubEntry[] }> {
+    return invoke('thinclaw_clawhub_search', { query });
+}
+
+/** Install a plugin from ClawHub. */
+export async function installFromClawHub(pluginId: string): Promise<void> {
+    return invoke('thinclaw_clawhub_install', { pluginId });
+}
+
+
+// --- Cache Stats ---
+
+
+export interface CacheStats {
+    hits: number;
+    misses: number;
+    evictions: number;
+    size_bytes: number;
+    hit_rate: number;
+}
+
+/** Get response cache statistics. */
+export async function getCacheStats(): Promise<CacheStats> {
+    return invoke('thinclaw_cache_stats');
+}
+
+// --- Plugin Lifecycle ---
+
+export interface LifecycleEventItem {
+    timestamp: string;
+    plugin_id: string;
+    event_type: string; // 'installed' | 'activated' | 'deactivated' | 'removed' | 'error'
+    details: string | null;
+}
+
+/** List plugin lifecycle events. */
+export async function getPluginLifecycleList(): Promise<LifecycleEventItem[]> {
+    return invoke('thinclaw_plugin_lifecycle_list');
+}
+
+// --- Manifest Validation ---
+
+export interface ManifestValidation {
+    errors: string[];
+    warnings: string[];
+}
+
+/** Validate a plugin's manifest. */
+export async function validateManifest(pluginId: string): Promise<ManifestValidation> {
+    return invoke('thinclaw_manifest_validate', { pluginId });
+}
+
+// --- Smart Routing ---
+
+/** Get current smart routing configuration. */
+export async function getRoutingConfig(): Promise<{ smart_routing_enabled: boolean }> {
+    return invoke('thinclaw_routing_get');
+}
+
+/** Enable or disable smart routing. */
+export async function setRoutingConfig(smartRoutingEnabled: boolean): Promise<void> {
+    return invoke('thinclaw_routing_set', { smartRoutingEnabled });
+}
+
+// --- Routing Rules ---
+
+export interface RoutingRule {
+    id: string;
+    label: string;
+    match_kind: 'keyword' | 'context_length' | 'provider' | 'always';
+    match_value: string;
+    target_model: string;
+    target_provider: string | null;
+    priority: number;
+    enabled: boolean;
+}
+
+export interface RoutingRulesResponse {
+    rules: RoutingRule[];
+    smart_routing_enabled: boolean;
+}
+
+/** List all routing rules along with smart routing toggle state. */
+export async function getRoutingRules(): Promise<RoutingRulesResponse> {
+    return invoke('thinclaw_routing_rules_list');
+}
+
+/** Save routing rules (full replace — ordered by priority). */
+export async function saveRoutingRules(rules: RoutingRule[]): Promise<void> {
+    return invoke('thinclaw_routing_rules_save', { rules });
+}
+
+// --- Gmail OAuth PKCE ---
+
+export interface GmailOAuthResult {
+    success: boolean;
+    access_token: string | null;
+    refresh_token: string | null;
+    expires_in: number | null;
+    scope: string | null;
+    error: string | null;
+}
+
+/**
+ * Start the Gmail OAuth PKCE flow via ThinClaw.
+ * Opens a browser for Google consent, waits for callback, exchanges for tokens.
+ * Returns the full result — caller should check `success` field.
+ */
+export async function startGmailOAuth(): Promise<GmailOAuthResult> {
+    return invoke('thinclaw_gmail_oauth_start');
+}
+
+// --- Routing Rule CRUD ---
+
+/** Add a routing rule at position (or at the end). Returns updated rules list. */
+export async function addRoutingRule(rule: RoutingRule, position?: number): Promise<RoutingRule[]> {
+    return invoke('thinclaw_routing_rules_add', { rule, position: position ?? null });
+}
+
+/** Remove a routing rule by index. Returns updated rules list. */
+export async function removeRoutingRule(index: number): Promise<RoutingRule[]> {
+    return invoke('thinclaw_routing_rules_remove', { index });
+}
+
+/** Reorder a routing rule (move from one position to another). Returns updated rules list. */
+export async function reorderRoutingRule(from: number, to: number): Promise<RoutingRule[]> {
+    return invoke('thinclaw_routing_rules_reorder', { from, to });
+}
+
+/** Save explicit primary and cheap provider pool order. */
+export async function saveRoutingPools(primaryPoolOrder: string[], cheapPoolOrder: string[]): Promise<void> {
+    return invoke('thinclaw_routing_pools_save', {
+        primaryPoolOrder,
+        cheapPoolOrder,
+    });
+}
+
+// --- Routing Status ---
+
+export interface RoutingRuleSummary {
+    index: number;
+    kind: string;
+    description: string;
+    provider: string | null;
+}
+
+export interface LatencyEntry {
+    provider: string;
+    avg_latency_ms: number;
+}
+
+export interface RoutingStatusResponse {
+    enabled: boolean;
+    default_provider: string;
+    routing_mode: string;
+    primary_model: string | null;
+    preferred_cheap_provider: string | null;
+    cheap_model: string | null;
+    primary_pool_order: string[];
+    cheap_pool_order: string[];
+    fallback_chain: string[];
+    advisor_ready: boolean;
+    advisor_disabled_reason: string | null;
+    executor_target: string | null;
+    advisor_target: string | null;
+    diagnostics: string[];
+    runtime_revision: number | null;
+    llm_select_state: string;
+    rule_count: number;
+    rules: RoutingRuleSummary[];
+    latency_data: LatencyEntry[];
+}
+
+/** Get full routing policy status including latency data. */
+export async function getRoutingStatus(): Promise<RoutingStatusResponse> {
+    return invoke('thinclaw_routing_status');
+}
+
+export interface RouteSimulationRequest {
+    prompt: string;
+    has_vision: boolean;
+    has_tools: boolean;
+    requires_streaming: boolean;
+}
+
+export interface RouteSimulationScore {
+    target: string;
+    telemetry_key: string | null;
+    quality: number;
+    cost: number;
+    latency: number;
+    health: number;
+    policy_bias: number;
+    composite: number;
+}
+
+export interface RouteSimulationResponse {
+    target: string;
+    reason: string;
+    fallback_chain: string[];
+    candidate_list: string[];
+    rejections: string[];
+    score_breakdown: RouteSimulationScore[];
+    diagnostics: string[];
+}
+
+/** Simulate how ThinClaw will route a prompt without executing a model call. */
+export async function simulateRouting(request: RouteSimulationRequest): Promise<RouteSimulationResponse> {
+    return invoke('thinclaw_routing_simulate', { request });
+}
+
+// --- Gmail Status ---
+
+export interface GmailStatusResponse {
+    enabled: boolean;
+    configured: boolean;
+    status: string;
+    project_id: string;
+    subscription_id: string;
+    label_filters: string[];
+    allowed_senders: string[];
+    missing_fields: string[];
+    oauth_configured: boolean;
+}
+
+/** Get Gmail channel configuration status. */
+export async function getGmailStatus(): Promise<GmailStatusResponse> {
+    return invoke('thinclaw_gmail_status');
+}
+
+// ============================================================================
+// Canvas Panel Management
+// ============================================================================
+
+export interface CanvasPanelSummary {
+    panel_id: string;
+    title: string;
+}
+
+export interface CanvasPanelData {
+    panel_id: string;
+    title: string;
+    components: unknown;
+    metadata?: unknown;
+}
+
+/** List all active canvas panels. */
+export async function listCanvasPanels(): Promise<{ panels: CanvasPanelSummary[] }> {
+    return safeInvoke('thinclaw_canvas_panels_list');
+}
+
+/** Get full data for a specific canvas panel. */
+export async function getCanvasPanel(panelId: string): Promise<CanvasPanelData | null> {
+    return safeInvoke('thinclaw_canvas_panel_get', { panelId });
+}
+
+/** Dismiss (remove) a canvas panel. */
+export async function dismissCanvasPanel(panelId: string): Promise<boolean> {
+    return safeInvoke('thinclaw_canvas_panel_dismiss', { panelId });
+}
+
+// ============================================================================
+// Routine Delete / Toggle
+// ============================================================================
+
+/** Delete a routine by ID or name. */
+export async function deleteRoutine(routineId: string): Promise<{ ok: boolean; deleted_id: string }> {
+    return safeInvoke('thinclaw_routine_delete', { routineId });
+}
+
+/** Toggle a routine enabled/disabled. */
+export async function toggleRoutine(routineId: string, enabled: boolean): Promise<{ ok: boolean; id: string; enabled: boolean }> {
+    return safeInvoke('thinclaw_routine_toggle', { routineId, enabled });
+}
+
+// ============================================================================
+// Autonomy mode
+// ============================================================================
+
+/**
+ * Enable or disable fully autonomous tool execution.
+ * When enabled, the agent runs tools without per-tool approval prompts.
+ * When disabled, the user approves each tool call (human-in-the-loop).
+ * Takes effect on the next engine start.
+ */
+export async function setAutonomyMode(enabled: boolean): Promise<void> {
+    return safeInvoke('thinclaw_set_autonomy_mode', { enabled });
+}
+
+/** Get the current autonomy mode setting. */
+export async function getAutonomyMode(): Promise<boolean> {
+    return safeInvoke('thinclaw_get_autonomy_mode');
+}
+
+// ============================================================================
+// Jobs
+// ============================================================================
+
+export interface ThinClawJob {
+    id: string;
+    title: string;
+    state: string;
+    user_id?: string;
+    created_at?: string;
+    started_at?: string | null;
+    execution_backend?: string | null;
+    runtime_family?: string | null;
+    runtime_mode?: string | null;
+}
+
+export interface ThinClawJobSummary {
+    total: number;
+    pending: number;
+    in_progress: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    interrupted: number;
+    stuck: number;
+}
+
+export interface ThinClawJobTransition {
+    from: string;
+    to: string;
+    timestamp: string;
+    reason?: string | null;
+}
+
+export interface ThinClawJobDetail extends ThinClawJob {
+    description?: string;
+    completed_at?: string | null;
+    elapsed_secs?: number | null;
+    project_dir?: string | null;
+    browse_url?: string | null;
+    runtime_capabilities?: string[];
+    network_isolation?: string | null;
+    job_mode?: string | null;
+    interactive?: boolean;
+    transitions?: ThinClawJobTransition[];
+}
+
+export interface ThinClawJobEvent {
+    id?: string;
+    event_type: string;
+    data?: unknown;
+    created_at?: string;
+}
+
+export interface ThinClawJobFileEntry {
+    name: string;
+    path: string;
+    is_dir: boolean;
+}
+
+export async function listJobs(): Promise<{ jobs: ThinClawJob[]; capabilities?: Record<string, boolean>; unavailable?: Record<string, string> }> {
+    return safeInvoke('thinclaw_jobs_list');
+}
+
+export async function getJobsSummary(): Promise<ThinClawJobSummary> {
+    return safeInvoke('thinclaw_jobs_summary');
+}
+
+export async function getJobDetail(jobId: string): Promise<ThinClawJobDetail> {
+    return safeInvoke('thinclaw_job_detail', { jobId });
+}
+
+export async function cancelJob(jobId: string): Promise<unknown> {
+    return safeInvoke('thinclaw_job_cancel', { jobId });
+}
+
+export async function restartJob(jobId: string): Promise<unknown> {
+    return safeInvoke('thinclaw_job_restart', { jobId });
+}
+
+export async function promptJob(jobId: string, content: string | null, done = false): Promise<unknown> {
+    return safeInvoke('thinclaw_job_prompt', { jobId, content, done });
+}
+
+export async function getJobEvents(jobId: string): Promise<{ job_id: string; events: ThinClawJobEvent[]; events_available?: boolean; unavailable_reason?: string | null }> {
+    return safeInvoke('thinclaw_job_events', { jobId });
+}
+
+export async function listJobFiles(jobId: string, path?: string): Promise<{ entries: ThinClawJobFileEntry[] }> {
+    return safeInvoke('thinclaw_job_files_list', { jobId, path: path || null });
+}
+
+export async function readJobFile(jobId: string, path: string): Promise<{ path: string; content: string }> {
+    return safeInvoke('thinclaw_job_file_read', { jobId, path });
+}
+
+// ============================================================================
+// Desktop autonomy runtime
+// ============================================================================
+
+export interface AutonomyStatus {
+    enabled: boolean;
+    profile: string;
+    deployment_mode: string;
+    paused: boolean;
+    pause_reason?: string | null;
+    bootstrap_passed: boolean;
+    emergency_stop_active: boolean;
+    capture_evidence: boolean;
+    kill_switch_hotkey: string;
+    current_build_id?: string | null;
+    last_bootstrap_at?: string | null;
+    last_error?: string | null;
+    code_auto_apply_paused: boolean;
+    session_ready: boolean;
+    action_ready: boolean;
+    blocking_reason?: string | null;
+    permission_summary?: unknown;
+    prerequisite_summary?: unknown;
+}
+
+export interface AutonomyCheckResult {
+    name: string;
+    passed: boolean;
+    detail?: string | null;
+    evidence?: unknown;
+}
+
+export interface AutonomyRolloutSummary {
+    current_build_id?: string | null;
+    last_successful_build_id?: string | null;
+    rollback_target_build_id?: string | null;
+    code_auto_apply_paused: boolean;
+    pause_reason?: string | null;
+    consecutive_failed_promotions: number;
+    failed_canary_count: number;
+    recent_builds: Array<{
+        build_id: string;
+        proposal_id: string;
+        title: string;
+        created_at: string;
+        promoted: boolean;
+        checks: AutonomyCheckResult[];
+        metadata?: unknown;
+    }>;
+}
+
+export interface AutonomyChecksSummary {
+    bootstrap_checks: AutonomyCheckResult[];
+    latest_canary_checks: AutonomyCheckResult[];
+    permission_report?: unknown;
+}
+
+export interface AutonomyEvidenceSummary {
+    latest_bootstrap_report?: unknown;
+    latest_canary_report?: unknown;
+    recent_events: Array<{ kind: string; message: string; timestamp?: string | null }>;
+    seeded_routines: string[];
+    seeded_skills: string[];
+}
+
+export async function getAutonomyStatus(): Promise<AutonomyStatus> {
+    return safeInvoke('thinclaw_autonomy_status');
+}
+
+export async function bootstrapAutonomy(): Promise<unknown> {
+    return safeInvoke('thinclaw_autonomy_bootstrap');
+}
+
+export async function pauseAutonomy(reason?: string): Promise<unknown> {
+    return safeInvoke('thinclaw_autonomy_pause', { reason: reason || null });
+}
+
+export async function resumeAutonomy(): Promise<unknown> {
+    return safeInvoke('thinclaw_autonomy_resume');
+}
+
+export async function getAutonomyPermissions(): Promise<unknown> {
+    return safeInvoke('thinclaw_autonomy_permissions');
+}
+
+export async function rollbackAutonomy(): Promise<unknown> {
+    return safeInvoke('thinclaw_autonomy_rollback');
+}
+
+export async function getAutonomyRollouts(): Promise<AutonomyRolloutSummary> {
+    return safeInvoke('thinclaw_autonomy_rollouts');
+}
+
+export async function getAutonomyChecks(): Promise<AutonomyChecksSummary> {
+    return safeInvoke('thinclaw_autonomy_checks');
+}
+
+export async function getAutonomyEvidence(): Promise<AutonomyEvidenceSummary> {
+    return safeInvoke('thinclaw_autonomy_evidence');
+}
+
+// ============================================================================
+// Bootstrap ritual
+// ============================================================================
+
+/**
+ * Mark the first-run identity bootstrap ritual as completed.
+ * Called by the frontend after the agent has finished naming itself.
+ */
+export async function setBootstrapCompleted(completed: boolean): Promise<void> {
+    return safeInvoke('thinclaw_set_bootstrap_completed', { completed });
+}
+
+/**
+ * Check whether the bootstrap ritual needs to run.
+ * Returns true if the agent has NOT yet completed the identity ritual.
+ */
+export async function checkBootstrapNeeded(): Promise<boolean> {
+    return safeInvoke('thinclaw_check_bootstrap_needed');
+}
+
+/**
+ * Re-trigger the bootstrap ritual (Reinitiate Identity Ritual).
+ * Resets bootstrap_completed so the modal shows on next startup.
+ */
+export async function triggerBootstrap(): Promise<void> {
+    return safeInvoke('thinclaw_trigger_bootstrap');
+}
+
+// ── Workspace path & Finder reveal ────────────────────────────────────────────
+
+/** Returns the local filesystem workspace root. */
+export async function getWorkspacePath(): Promise<string> {
+    return safeInvoke('thinclaw_get_workspace_path');
+}
+
+/** Opens the local workspace directory in Finder and returns the path. */
+export async function revealWorkspace(): Promise<string> {
+    return safeInvoke('thinclaw_reveal_workspace');
+}
+
+export interface WorkspaceFile {
+    path: string;
+    absolute_path: string;
+    size: number;
+    modified_ms: number;
+}
+
+/** Lists all real files inside the agent_workspace filesystem directory. */
+export async function listAgentWorkspaceFiles(): Promise<WorkspaceFile[]> {
+    return safeInvoke('thinclaw_list_agent_workspace_files');
+}
+
+/** Reveals a specific file in Finder (macOS) / Explorer (Windows). */
+export async function revealFile(absolutePath: string): Promise<void> {
+    return safeInvoke('thinclaw_reveal_file', { path: absolutePath });
+}
+
+/**
+ * Write content to a file in the agent's local `agent_workspace` directory.
+ * Returns the absolute path of the written file.
+ */
+export async function writeAgentWorkspaceFile(relativePath: string, content: string): Promise<string> {
+    return safeInvoke('thinclaw_write_agent_workspace_file', { relativePath, content });
+}
+
+/**
+ * Update the heartbeat interval (in minutes) at runtime.
+ * Takes effect immediately — updates the DB routine schedule and persists to config.
+ */
+export async function setHeartbeatInterval(intervalMinutes: number): Promise<any> {
+    return safeInvoke('thinclaw_heartbeat_set_interval', { intervalMinutes });
+}
+
+// ── Experiments & learning review ───────────────────────────────────────────
+
+export type ThinClawJson = null | boolean | number | string | ThinClawJson[] | { [key: string]: ThinClawJson };
+
+export async function getLearningStatus(limit = 50): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_status', { limit });
+}
+
+export async function getLearningHistory(limit = 50): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_history', { limit });
+}
+
+export async function getLearningCandidates(limit = 50): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_candidates', { limit });
+}
+
+export async function getLearningArtifactVersions(limit = 50): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_artifact_versions', { limit });
+}
+
+export async function getLearningProviderHealth(): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_provider_health');
+}
+
+export async function getLearningCodeProposals(status: string | null = null, limit = 50): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_code_proposals', { status, limit });
+}
+
+export async function getLearningOutcomes(status: string | null = null, limit = 50): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_outcomes', { status, limit });
+}
+
+export async function getLearningRollbacks(limit = 50): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_rollbacks', { limit });
+}
+
+export async function reviewLearningCodeProposal(proposalId: string, decision: 'approve' | 'reject', note?: string): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_review_code_proposal', { proposalId, decision, note: note || null });
+}
+
+export async function reviewLearningOutcome(outcomeId: string, decision: 'confirm' | 'dismiss' | 'requeue', verdict?: 'positive' | 'neutral' | 'negative'): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_review_outcome', { outcomeId, decision, verdict: verdict || null });
+}
+
+export async function recordLearningRollback(artifactType: string, artifactName: string, reason: string, artifactVersionId?: string): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_record_rollback', {
+        artifactType,
+        artifactName,
+        artifactVersionId: artifactVersionId || null,
+        reason,
+    });
+}
+
+export async function evaluateLearningOutcomes(): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_learning_evaluate_outcomes');
+}
+
+export async function getExperimentProjects(): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_projects');
+}
+
+export async function getExperimentCampaigns(): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_campaigns');
+}
+
+export async function getExperimentRunners(): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_runners');
+}
+
+export async function getExperimentTargets(): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_targets');
+}
+
+export async function getExperimentTrials(campaignId: string): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_trials', { campaignId });
+}
+
+export async function getExperimentTrialArtifacts(trialId: string): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_trial_artifacts', { trialId });
+}
+
+export async function getExperimentModelUsage(limit = 100): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_model_usage', { limit });
+}
+
+export async function getExperimentOpportunities(limit = 100): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_opportunities', { limit });
+}
+
+export async function getExperimentGpuClouds(): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_gpu_clouds');
+}
+
+export async function validateExperimentRunner(runnerId: string): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_validate_runner', { runnerId });
+}
+
+export async function runExperimentCampaignAction(campaignId: string, action: 'pause' | 'resume' | 'cancel' | 'promote' | 'reissue-lease'): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_campaign_action', { campaignId, action });
+}
+
+export async function validateExperimentGpuCloud(provider: string): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_gpu_validate', { provider });
+}
+
+export async function launchExperimentGpuCloudTest(provider: string): Promise<ThinClawJson> {
+    return safeInvoke('thinclaw_experiments_gpu_launch_test', { provider });
+}

@@ -16,70 +16,12 @@
 //!   `config.toml`, and API keys via `SecretsStore` or env vars.
 //! - Scrappy: the bridge writes the same settings from the UI config.
 //!
-//! The catalog is the single source of truth for provider endpoints, replacing
-//! both Scrappy's `provider_endpoints.rs` and the bridge's hardcoded match arms.
+//! The catalog is the single source of truth for provider endpoints across
+//! Direct Workbench, ThinClaw Agent Cockpit, and generated client contracts.
 
 use std::collections::HashMap;
 
-/// API compatibility mode for a cloud provider.
-///
-/// Determines which RigAdapter constructor to use when creating the provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ApiStyle {
-    /// Native OpenAI API (uses rig `openai::Client`)
-    #[serde(rename = "openai")]
-    OpenAi,
-    /// Native Anthropic API (uses rig `anthropic::Client`)
-    #[serde(rename = "anthropic")]
-    Anthropic,
-    /// OpenAI-compatible endpoint (uses rig `openai::Client` with custom base_url)
-    #[serde(rename = "openai_compatible")]
-    OpenAiCompatible,
-    /// Local Ollama instance
-    #[serde(rename = "ollama")]
-    Ollama,
-}
-
-/// Endpoint configuration for a cloud provider.
-///
-/// All fields use owned `String` to support runtime loading from JSON.
-/// The `LazyLock` ensures these live for `'static`, so references are
-/// safe to hold across the process lifetime.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ProviderEndpoint {
-    /// Provider slug (the HashMap key; also serialized as `"id"` in JSON).
-    #[serde(rename = "id")]
-    pub slug: String,
-    /// Human-readable display name.
-    pub display_name: String,
-    /// Base URL for API requests.
-    pub base_url: String,
-    /// API compatibility mode.
-    pub api_style: ApiStyle,
-    /// Default model to use if none specified by the user.
-    pub default_model: String,
-    /// Default context window size in tokens.
-    pub default_context_size: u32,
-    /// Whether the provider supports streaming responses.
-    pub supports_streaming: bool,
-    /// Environment variable name for the API key (e.g., "OPENAI_API_KEY").
-    pub env_key_name: String,
-    /// Secret store key name used by scoped runtime credential resolution.
-    /// This maps to the key used for audited `get_for_injection` access.
-    pub secret_name: String,
-    /// URL where the user can obtain an API key (optional, surfaced in UI).
-    #[serde(default)]
-    pub setup_url: Option<String>,
-    /// Suggested cheap/fast model for routing cost optimization (optional).
-    #[serde(default)]
-    pub suggested_cheap_model: Option<String>,
-    /// Provider tier for UI grouping: "tier1", "tier2", "gateway" (optional).
-    #[serde(default)]
-    pub tier: Option<String>,
-    /// Free-form notes about this provider (optional).
-    #[serde(default)]
-    pub notes: Option<String>,
-}
+pub use thinclaw_runtime_contracts::{ApiStyle, ProviderEndpoint};
 
 /// Lazy-initialized catalog of all known cloud providers.
 ///

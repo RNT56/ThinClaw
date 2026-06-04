@@ -8,35 +8,21 @@ use std::sync::Arc;
 use crate::channels::web::types::*;
 use crate::workspace::Workspace;
 use crate::workspace::paths;
+use thinclaw_gateway::web::memory::{
+    GatewayMemoryListSourceEntry, GatewayMemorySearchHit, list_entries_from_source,
+    memory_list_response, memory_read_response, memory_search_response_from_hits,
+    memory_tree_response, root_list_with_virtual_home_soul, tree_entries_from_paths,
+    tree_with_virtual_home_soul,
+};
 
 use super::error::{ApiError, ApiResult};
-
-fn root_list_with_home_soul(mut entries: Vec<ListEntry>) -> Vec<ListEntry> {
-    let has_soul = entries.iter().any(|entry| entry.path == paths::SOUL);
-    if !has_soul && crate::identity::soul_store::read_home_soul().is_ok() {
-        entries.insert(
-            0,
-            ListEntry {
-                name: paths::SOUL.to_string(),
-                path: paths::SOUL.to_string(),
-                is_dir: false,
-                updated_at: None,
-            },
-        );
-    }
-    entries
-}
 
 /// Read a file from the workspace.
 pub async fn get_file(workspace: &Arc<Workspace>, path: &str) -> ApiResult<MemoryReadResponse> {
     if path == paths::SOUL
         && let Ok(content) = crate::identity::soul_store::read_home_soul()
     {
-        return Ok(MemoryReadResponse {
-            path: path.to_string(),
-            content,
-            updated_at: None,
-        });
+        return Ok(memory_read_response(path, content, None));
     }
 
     let doc = workspace
@@ -44,11 +30,11 @@ pub async fn get_file(workspace: &Arc<Workspace>, path: &str) -> ApiResult<Memor
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(MemoryReadResponse {
-        path: path.to_string(),
-        content: doc.content,
-        updated_at: Some(doc.updated_at.to_rfc3339()),
-    })
+    Ok(memory_read_response(
+        path,
+        doc.content,
+        Some(doc.updated_at.to_rfc3339()),
+    ))
 }
 
 /// Write content to a file in the workspace (creates or overwrites).
@@ -86,26 +72,24 @@ pub async fn list_files(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let list_entries: Vec<ListEntry> = entries
-        .iter()
-        .map(|e| ListEntry {
-            name: e.path.rsplit('/').next().unwrap_or(&e.path).to_string(),
-            path: e.path.clone(),
-            is_dir: e.is_directory,
-            updated_at: e.updated_at.map(|dt| dt.to_rfc3339()),
-        })
-        .collect();
+    let list_entries: Vec<ListEntry> =
+        list_entries_from_source(entries.iter().map(|entry| GatewayMemoryListSourceEntry {
+            path: entry.path.clone(),
+            is_directory: entry.is_directory,
+            updated_at: entry.updated_at.map(|dt| dt.to_rfc3339()),
+        }));
 
     let list_entries = if dir.is_empty() {
-        root_list_with_home_soul(list_entries)
+        root_list_with_virtual_home_soul(
+            list_entries,
+            paths::SOUL,
+            crate::identity::soul_store::read_home_soul().is_ok(),
+        )
     } else {
         list_entries
     };
 
-    Ok(MemoryListResponse {
-        path: dir.to_string(),
-        entries: list_entries,
-    })
+    Ok(memory_list_response(dir, list_entries))
 }
 
 /// Build a tree view of all workspace files.
@@ -115,37 +99,13 @@ pub async fn file_tree(workspace: &Arc<Workspace>) -> ApiResult<MemoryTreeRespon
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let mut entries: Vec<TreeEntry> = Vec::new();
-    let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for path in &all_paths {
-        let parts: Vec<&str> = path.split('/').collect();
-        for i in 0..parts.len().saturating_sub(1) {
-            let dir_path = parts[..=i].join("/");
-            if seen_dirs.insert(dir_path.clone()) {
-                entries.push(TreeEntry {
-                    path: dir_path,
-                    is_dir: true,
-                });
-            }
-        }
-        entries.push(TreeEntry {
-            path: path.clone(),
-            is_dir: false,
-        });
-    }
-
-    if !all_paths.iter().any(|path| path == paths::SOUL)
-        && crate::identity::soul_store::read_home_soul().is_ok()
-    {
-        entries.push(TreeEntry {
-            path: paths::SOUL.to_string(),
-            is_dir: false,
-        });
-    }
-
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(MemoryTreeResponse { entries })
+    let entries = tree_with_virtual_home_soul(
+        tree_entries_from_paths(&all_paths),
+        paths::SOUL,
+        all_paths.iter().any(|path| path == paths::SOUL),
+        crate::identity::soul_store::read_home_soul().is_ok(),
+    );
+    Ok(memory_tree_response(entries))
 }
 
 /// Search workspace memory (vector search).
@@ -160,14 +120,14 @@ pub async fn search(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let hits: Vec<SearchHit> = results
+    let hits = results
         .iter()
-        .map(|r| SearchHit {
+        .map(|r| GatewayMemorySearchHit {
             path: r.path.clone(),
             content: r.content.clone(),
             score: r.score as f64,
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    Ok(MemorySearchResponse { results: hits })
+    Ok(memory_search_response_from_hits(hits))
 }

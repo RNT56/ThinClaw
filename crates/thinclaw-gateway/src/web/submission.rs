@@ -1,5 +1,6 @@
 //! Reusable gateway message submission helpers.
 
+use axum::http::StatusCode;
 use thinclaw_channels_core::IncomingMessage;
 use uuid::Uuid;
 
@@ -42,4 +43,42 @@ pub async fn submit_gateway_message(
     let message_id = message.id;
     port.submit_agent_message(message).await?;
     Ok(message_id)
+}
+
+pub const CHANNEL_NOT_STARTED_ERROR: &str = "Channel not started";
+
+pub fn gateway_submission_error(error: String) -> (StatusCode, String) {
+    let status = if error == CHANNEL_NOT_STARTED_ERROR {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submission_error_maps_channel_startup_to_unavailable() {
+        assert_eq!(
+            gateway_submission_error(CHANNEL_NOT_STARTED_ERROR.to_string()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                CHANNEL_NOT_STARTED_ERROR.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn submission_error_maps_unknown_failures_to_internal() {
+        assert_eq!(
+            gateway_submission_error("queue closed".to_string()),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "queue closed".to_string()
+            )
+        );
+    }
 }

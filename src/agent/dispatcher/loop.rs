@@ -112,19 +112,12 @@ impl Agent {
             );
 
         let max_tool_iterations = self.config.max_tool_iterations;
-        // Force a text-only response on the last iteration to guarantee termination
-        // instead of hard-erroring. The penultimate iteration also gets a nudge
-        // message so the LLM knows it should wrap up.
-        let force_text_at = max_tool_iterations;
-        let nudge_at = max_tool_iterations.saturating_sub(1);
+        let iteration_policy = IterationLimitPolicy::new(max_tool_iterations);
         let mut iteration = 0;
 
         // Stuck loop detection: track consecutive identical tool calls.
         // If the LLM calls the same tool with the same arguments repeatedly,
-        // it's stuck. After STUCK_WARN_THRESHOLD consecutive identical calls we
-        // inject a system nudge; after STUCK_FORCE_THRESHOLD we force text-only.
-        const STUCK_WARN_THRESHOLD: u32 = 3;
-        const STUCK_FORCE_THRESHOLD: u32 = 5;
+        // it's stuck. The policy decides when to warn or force finalization.
         let mut last_call_signature: Option<u64> = None;
         let mut consecutive_same_calls: u32 = 0;
         // Track whether we've already fired the pre-compaction memory flush this cycle.
@@ -154,11 +147,12 @@ impl Agent {
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
-            // since force_text_at guarantees a text response, but kept as a safety net).
-            if iteration > max_tool_iterations + 1 {
+            // since the iteration policy forces a text response, but kept as a safety net).
+            let iteration_decision = iteration_policy.decision_for(iteration);
+            if let Some(reason) = iteration_decision.abort_reason {
                 return Err(crate::error::LlmError::InvalidResponse {
                     provider: "agent".to_string(),
-                    reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
+                    reason,
                 }
                 .into());
             }
@@ -171,43 +165,45 @@ impl Agent {
             if let Some(ref override_lock) = self.deps.model_override {
                 let current_override = override_lock.get(&model_override_scope_key).await;
                 let current_spec = current_override.as_ref().map(|mo| mo.model_spec.clone());
-                if current_spec != last_applied_model_override {
-                    if let Some(ref mo) = current_override {
-                        let new_model = &mo.model_spec;
-                        let provider_slug = new_model
-                            .split_once('/')
-                            .map(|(provider, _)| provider)
-                            .unwrap_or("");
-                        if crate::tools::builtin::llm_tools::is_runtime_supported_provider_slug(
-                            provider_slug,
-                        ) {
-                            tracing::info!(
-                                to = %new_model,
-                                reason = mo.reason.as_deref().unwrap_or("agent decision"),
-                                "Agent-driven model switch via llm_select"
-                            );
-                            reasoning.swap_llm(
-                                crate::tools::builtin::llm_tools::wrap_model_spec_override(
-                                    original_llm.clone(),
-                                    new_model.clone(),
-                                ),
-                            );
-                            last_applied_model_override = current_spec;
-                        } else {
-                            tracing::warn!(
-                                model = %new_model,
-                                "Failed to apply agent model override because the provider slug is unsupported"
-                            );
-                            override_lock.clear(&model_override_scope_key).await;
-                            reasoning.swap_llm(original_llm.clone());
-                            context_messages.push(ChatMessage::system(format!(
-                                "Runtime note: requested model override '{}' could not be activated and was cleared because the provider slug is unsupported.",
-                                new_model
-                            )));
-                            last_applied_model_override = None;
-                        }
-                    } else {
-                        // Override was reset — swap back to the original provider.
+                let current_reason = current_override
+                    .as_ref()
+                    .and_then(|mo| mo.reason.as_deref());
+                match decide_model_override_activation(
+                    current_spec.as_deref(),
+                    current_reason,
+                    last_applied_model_override.as_deref(),
+                    crate::tools::builtin::llm_tools::is_runtime_supported_provider_slug,
+                ) {
+                    ModelOverrideActivationDecision::Unchanged => {}
+                    ModelOverrideActivationDecision::Activate {
+                        model_spec, reason, ..
+                    } => {
+                        tracing::info!(
+                            to = %model_spec,
+                            reason = reason.unwrap_or("agent decision"),
+                            "Agent-driven model switch via llm_select"
+                        );
+                        reasoning.swap_llm(
+                            crate::tools::builtin::llm_tools::wrap_model_spec_override(
+                                original_llm.clone(),
+                                model_spec.to_string(),
+                            ),
+                        );
+                        last_applied_model_override = current_spec;
+                    }
+                    ModelOverrideActivationDecision::Unsupported { model_spec, .. } => {
+                        tracing::warn!(
+                            model = %model_spec,
+                            "Failed to apply agent model override because the provider slug is unsupported"
+                        );
+                        override_lock.clear(&model_override_scope_key).await;
+                        reasoning.swap_llm(original_llm.clone());
+                        context_messages.push(ChatMessage::system(
+                            unsupported_model_override_note(model_spec),
+                        ));
+                        last_applied_model_override = None;
+                    }
+                    ModelOverrideActivationDecision::Reset => {
                         tracing::info!("Agent model override reset — restoring primary");
                         reasoning.swap_llm(original_llm.clone());
                         last_applied_model_override = None;
@@ -413,16 +409,11 @@ impl Agent {
 
             // Inject a nudge message when approaching the iteration limit so the
             // LLM is aware it should produce a final answer on the next turn.
-            if iteration == nudge_at {
-                context_messages.push(ChatMessage::system(
-                    "You are approaching the tool call limit. \
-                     Provide your best final answer on the next response \
-                     using the information you have gathered so far. \
-                     Do not call any more tools.",
-                ));
+            if iteration_decision.inject_nudge {
+                context_messages.push(ChatMessage::system(ITERATION_LIMIT_NUDGE_PROMPT));
             }
 
-            let force_text = iteration >= force_text_at;
+            let force_text = iteration_decision.force_text;
 
             // ── Hard chat history cap ───────────────────────────────────
             // Enforce max_context_messages to prevent OOM on very long
@@ -467,22 +458,10 @@ impl Agent {
             // TOOL_RESULT_KEEP_TURNS turns' tool results are kept.
             // This does NOT modify JSONL/DB history — only the in-memory slice
             // sent to the LLM, preventing token burn over long sessions.
-            const TOOL_RESULT_KEEP_TURNS: usize = 3;
             {
-                // Count distinct "assistant turn boundaries" (assistant messages
-                // mark the start of a new reasoning turn).
-                let mut turns_from_end = 0usize;
-                let mut prune_before_idx = 0usize;
-                for (i, msg) in context_messages.iter().enumerate().rev() {
-                    if msg.role == crate::llm::Role::Assistant {
-                        turns_from_end += 1;
-                        if turns_from_end > TOOL_RESULT_KEEP_TURNS {
-                            prune_before_idx = i + 1;
-                            break;
-                        }
-                    }
-                }
-                if prune_before_idx > 0 {
+                if let Some(prune_before_idx) =
+                    tool_result_prune_boundary(&context_messages, TOOL_RESULT_KEEP_TURNS)
+                {
                     let pruned: usize = context_messages[..prune_before_idx]
                         .iter()
                         .filter(|m| m.role == crate::llm::Role::Tool)
@@ -729,7 +708,9 @@ impl Agent {
                                         );
                                         return Ok(AgenticLoopResult::Response(
                                             thinclaw_agent::submission::AgentResponsePayload::text(
-                                                TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE,
+                                                finalization_failure_response(
+                                                    FinalizationFailureKind::ToolPhase,
+                                                ),
                                             ),
                                         )
                                         .with_generated_attachments(&generated_attachments));
@@ -740,7 +721,9 @@ impl Agent {
                                         );
                                         return Ok(AgenticLoopResult::Response(
                                             thinclaw_agent::submission::AgentResponsePayload::text(
-                                                TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE,
+                                                finalization_failure_response(
+                                                    FinalizationFailureKind::ToolPhase,
+                                                ),
                                             ),
                                         )
                                         .with_generated_attachments(&generated_attachments));
@@ -763,7 +746,9 @@ impl Agent {
                                         &persistent_draft,
                                         &original_llm,
                                         &mut last_applied_model_override,
-                                        TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE,
+                                        finalization_failure_response(
+                                            FinalizationFailureKind::ToolPhase,
+                                        ),
                                     )
                                     .await?
                                     .with_generated_attachments(&generated_attachments));
@@ -804,12 +789,13 @@ impl Agent {
                     // Compute a signature from the tool call names + arguments.
                     // If the same set of calls repeats consecutively, the LLM is
                     // likely stuck in a loop.
-                    if last_call_signature == Some(sig) {
-                        consecutive_same_calls += 1;
-                    } else {
-                        consecutive_same_calls = 1;
-                        last_call_signature = Some(sig);
-                    }
+                    let signature_update = update_stuck_loop_signature(
+                        last_call_signature,
+                        consecutive_same_calls,
+                        sig,
+                    );
+                    last_call_signature = signature_update.last_call_signature;
+                    consecutive_same_calls = signature_update.consecutive_same_calls;
 
                     if advisor_state.blocked_tool_signatures.contains(&sig) {
                         context_messages.push(ChatMessage::assistant_with_tool_calls(
@@ -820,7 +806,7 @@ impl Agent {
                             let blocked_message = serde_json::json!({
                                 "status": "error",
                                 "code": "advisor_stop_blocked",
-                                "message": "Blocked by advisor STOP guidance for this turn. Follow the revised plan, ask a narrow clarification, or return a bounded limitation instead of retrying the same tool-call pattern."
+                                "message": ADVISOR_BLOCKED_TOOL_RESULT_MESSAGE
                             })
                             .to_string();
                             context_messages.push(ChatMessage::tool_result(
@@ -829,52 +815,51 @@ impl Agent {
                                 blocked_message,
                             ));
                         }
-                        context_messages.push(ChatMessage::system(
-                            "Advisor STOP guidance is still active for the blocked tool-call pattern. Choose a different approach.",
-                        ));
+                        context_messages.push(ChatMessage::system(ADVISOR_BLOCKED_SYSTEM_PROMPT));
                         last_call_signature = None;
                         consecutive_same_calls = 0;
                         continue;
                     }
 
-                    if consecutive_same_calls >= STUCK_FORCE_THRESHOLD {
-                        tracing::warn!(
-                            iteration,
-                            consecutive = consecutive_same_calls,
-                            tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
-                            "Stuck loop detected — forcing text-only response"
-                        );
-                        // Give the LLM one last chance with a strong nudge and no tools
-                        context_messages.push(ChatMessage::system(STUCK_LOOP_FINALIZATION_PROMPT));
+                    match stuck_loop_decision(consecutive_same_calls) {
+                        StuckLoopDecision::ForceText => {
+                            tracing::warn!(
+                                iteration,
+                                consecutive = consecutive_same_calls,
+                                tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
+                                "Stuck loop detected — forcing text-only response"
+                            );
+                            // Give the LLM one last chance with a strong nudge and no tools
+                            context_messages
+                                .push(ChatMessage::system(STUCK_LOOP_FINALIZATION_PROMPT));
 
-                        return Ok(self
-                            .finalize_primary_text_only(
-                                &mut reasoning,
-                                &mut context_messages,
-                                &prompt_context_documents,
-                                thread_id,
-                                message,
-                                &persistent_draft,
-                                &original_llm,
-                                &mut last_applied_model_override,
-                                STUCK_LOOP_FINALIZATION_FAILURE_RESPONSE,
-                            )
-                            .await?
-                            .with_generated_attachments(&generated_attachments));
-                    }
-
-                    if consecutive_same_calls == STUCK_WARN_THRESHOLD {
-                        tracing::info!(
-                            iteration,
-                            consecutive = consecutive_same_calls,
-                            tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
-                            "Possible stuck loop detected — injecting nudge"
-                        );
-                        context_messages.push(ChatMessage::system(
-                            "You appear to be calling the same tool repeatedly. \
-                             Try a different approach, use different parameters, or \
-                             provide your answer based on what you already know.",
-                        ));
+                            return Ok(self
+                                .finalize_primary_text_only(
+                                    &mut reasoning,
+                                    &mut context_messages,
+                                    &prompt_context_documents,
+                                    thread_id,
+                                    message,
+                                    &persistent_draft,
+                                    &original_llm,
+                                    &mut last_applied_model_override,
+                                    finalization_failure_response(
+                                        FinalizationFailureKind::StuckLoop,
+                                    ),
+                                )
+                                .await?
+                                .with_generated_attachments(&generated_attachments));
+                        }
+                        StuckLoopDecision::Warn => {
+                            tracing::info!(
+                                iteration,
+                                consecutive = consecutive_same_calls,
+                                tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
+                                "Possible stuck loop detected — injecting nudge"
+                            );
+                            context_messages.push(ChatMessage::system(STUCK_LOOP_NUDGE_PROMPT));
+                        }
+                        StuckLoopDecision::Continue => {}
                     }
 
                     let blocked_signature = last_call_signature;

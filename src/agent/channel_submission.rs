@@ -7,7 +7,6 @@ use chrono::Utc;
 use thinclaw_agent::ports::{
     ChannelSubmission, ChannelSubmissionAck, ChannelSubmissionPort, SubmissionStatus,
 };
-use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::error::ChannelError;
@@ -28,12 +27,8 @@ impl ChannelSubmissionPort for RootChannelSubmissionPort {
         &self,
         submission: ChannelSubmission,
     ) -> Result<ChannelSubmissionAck, ChannelError> {
-        let run_id = Uuid::new_v4();
-        let thread_id = submission
-            .message
-            .thread_id
-            .as_deref()
-            .and_then(|value| Uuid::parse_str(value).ok());
+        let run_id = uuid::Uuid::new_v4();
+        let thread_id = submission.parsed_thread_id();
         let agent = Arc::clone(&self.agent);
         let message = submission.message;
 
@@ -49,24 +44,5 @@ impl ChannelSubmissionPort for RootChannelSubmissionPort {
             accepted_at: Utc::now(),
             status: SubmissionStatus::Accepted,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::channels::IncomingMessage;
-
-    #[test]
-    fn submission_ack_thread_id_parser_accepts_uuid_threads() {
-        let thread_id = Uuid::new_v4();
-        let message =
-            IncomingMessage::new("web", "user-1", "hello").with_thread(thread_id.to_string());
-        let parsed = message
-            .thread_id
-            .as_deref()
-            .and_then(|value| Uuid::parse_str(value).ok());
-
-        assert_eq!(parsed, Some(thread_id));
     }
 }

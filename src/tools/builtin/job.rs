@@ -34,6 +34,221 @@ use crate::tools::execution_backend::{
 use crate::tools::execution_backend::{resolve_project_dir, sandbox_job_runtime_descriptor};
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 use thinclaw_tools::builtin::job::{self as job_policy, JobReferenceKind};
+use thinclaw_tools::ports::{
+    JobToolHostPort, ToolCreateJobRequest, ToolHostError, ToolJobActionRequest,
+    ToolJobActionResult, ToolJobQuery, ToolJobSnapshot, ToolOperationScope,
+    job_context_from_tool_scope,
+};
+
+pub struct RootJobToolHost {
+    context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
+    store: Option<Arc<dyn Database>>,
+    scheduler: Option<Arc<Scheduler>>,
+    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
+    inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
+    prompt_queue: Option<PromptQueue>,
+    sandbox_children: Option<Arc<SandboxChildRegistry>>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn root_job_tool_host(
+    context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
+    store: Option<Arc<dyn Database>>,
+    scheduler: Option<Arc<Scheduler>>,
+    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
+    inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
+    prompt_queue: Option<PromptQueue>,
+    sandbox_children: Option<Arc<SandboxChildRegistry>>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+) -> Arc<dyn JobToolHostPort> {
+    Arc::new(RootJobToolHost {
+        context_manager,
+        job_manager,
+        store,
+        scheduler,
+        event_tx,
+        inject_tx,
+        prompt_queue,
+        sandbox_children,
+        secrets_store,
+    })
+}
+
+fn tool_host_error_from_tool(error: ToolError) -> ToolHostError {
+    ToolHostError::OperationFailed {
+        reason: error.to_string(),
+    }
+}
+
+async fn execute_root_job_tool<T>(
+    tool: T,
+    request: ToolJobActionRequest,
+    title: &str,
+) -> Result<ToolJobActionResult, ToolHostError>
+where
+    T: Tool,
+{
+    let ctx = job_context_from_tool_scope(request.scope, title);
+    let output = tool
+        .execute(request.params, &ctx)
+        .await
+        .map_err(tool_host_error_from_tool)?;
+    Ok(ToolJobActionResult {
+        output: output.result,
+    })
+}
+
+impl RootJobToolHost {
+    fn create_tool(&self) -> CreateJobTool {
+        let mut tool = CreateJobTool::new(Arc::clone(&self.context_manager));
+        if let Some(scheduler) = self.scheduler.clone() {
+            tool = tool.with_scheduler(scheduler);
+        }
+        if let Some(job_manager) = self.job_manager.clone() {
+            tool = tool.with_sandbox(job_manager, self.store.clone());
+        }
+        if let (Some(event_tx), Some(inject_tx)) = (self.event_tx.clone(), self.inject_tx.clone()) {
+            tool = tool.with_monitor_deps(event_tx, inject_tx, self.prompt_queue.clone());
+        }
+        if let Some(children) = self.sandbox_children.clone() {
+            tool = tool.with_sandbox_children(children);
+        }
+        if let Some(secrets) = self.secrets_store.clone() {
+            tool = tool.with_secrets(secrets);
+        }
+        tool
+    }
+
+    fn list_tool(&self) -> ListJobsTool {
+        ListJobsTool::new(Arc::clone(&self.context_manager))
+            .with_sandbox(self.job_manager.clone(), self.store.clone())
+    }
+
+    fn status_tool(&self) -> JobStatusTool {
+        JobStatusTool::new(Arc::clone(&self.context_manager))
+            .with_sandbox(self.job_manager.clone(), self.store.clone())
+    }
+
+    fn cancel_tool(&self) -> CancelJobTool {
+        let mut tool = CancelJobTool::new(Arc::clone(&self.context_manager));
+        if let Some(scheduler) = self.scheduler.clone() {
+            tool = tool.with_scheduler(scheduler);
+        }
+        tool.with_sandbox(self.job_manager.clone(), self.store.clone())
+    }
+
+    fn events_tool(&self) -> Result<JobEventsTool, ToolHostError> {
+        let store = self
+            .store
+            .clone()
+            .ok_or_else(|| ToolHostError::Unavailable {
+                service: "job_events".to_string(),
+            })?;
+        Ok(JobEventsTool::new(
+            store,
+            Arc::clone(&self.context_manager),
+            self.job_manager.clone(),
+        ))
+    }
+
+    fn prompt_tool(&self) -> Result<JobPromptTool, ToolHostError> {
+        let prompt_queue = self
+            .prompt_queue
+            .clone()
+            .ok_or_else(|| ToolHostError::Unavailable {
+                service: "job_prompt".to_string(),
+            })?;
+        Ok(
+            JobPromptTool::new(prompt_queue, Arc::clone(&self.context_manager))
+                .with_sandbox(self.job_manager.clone(), self.store.clone()),
+        )
+    }
+}
+
+#[async_trait]
+impl JobToolHostPort for RootJobToolHost {
+    async fn create_job(
+        &self,
+        _request: ToolCreateJobRequest,
+    ) -> Result<ToolJobSnapshot, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "job_create_structured".to_string(),
+        })
+    }
+
+    async fn load_job(
+        &self,
+        _scope: ToolOperationScope,
+        _job_id: Uuid,
+    ) -> Result<Option<ToolJobSnapshot>, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "job_load_structured".to_string(),
+        })
+    }
+
+    async fn list_jobs(&self, _query: ToolJobQuery) -> Result<Vec<ToolJobSnapshot>, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "job_list_structured".to_string(),
+        })
+    }
+
+    async fn send_job_prompt(
+        &self,
+        _scope: ToolOperationScope,
+        _job_id: Uuid,
+        _content: Option<String>,
+        _done: bool,
+    ) -> Result<ToolJobSnapshot, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "job_prompt_structured".to_string(),
+        })
+    }
+
+    async fn create_job_action(
+        &self,
+        request: ToolJobActionRequest,
+    ) -> Result<ToolJobActionResult, ToolHostError> {
+        execute_root_job_tool(self.create_tool(), request, "create job").await
+    }
+
+    async fn list_jobs_action(
+        &self,
+        request: ToolJobActionRequest,
+    ) -> Result<ToolJobActionResult, ToolHostError> {
+        execute_root_job_tool(self.list_tool(), request, "list jobs").await
+    }
+
+    async fn job_status_action(
+        &self,
+        request: ToolJobActionRequest,
+    ) -> Result<ToolJobActionResult, ToolHostError> {
+        execute_root_job_tool(self.status_tool(), request, "job status").await
+    }
+
+    async fn cancel_job_action(
+        &self,
+        request: ToolJobActionRequest,
+    ) -> Result<ToolJobActionResult, ToolHostError> {
+        execute_root_job_tool(self.cancel_tool(), request, "cancel job").await
+    }
+
+    async fn job_events_action(
+        &self,
+        request: ToolJobActionRequest,
+    ) -> Result<ToolJobActionResult, ToolHostError> {
+        execute_root_job_tool(self.events_tool()?, request, "job events").await
+    }
+
+    async fn job_prompt_action(
+        &self,
+        request: ToolJobActionRequest,
+    ) -> Result<ToolJobActionResult, ToolHostError> {
+        execute_root_job_tool(self.prompt_tool()?, request, "job prompt").await
+    }
+}
 
 #[derive(Clone, Default)]
 struct SandboxJobLookup {
@@ -42,6 +257,23 @@ struct SandboxJobLookup {
 }
 
 impl SandboxJobLookup {
+    fn live_state(&self) -> Option<job_policy::SandboxContainerState> {
+        self.live.as_ref().map(|handle| match handle.state {
+            crate::sandbox_types::ContainerState::Creating => {
+                job_policy::SandboxContainerState::Creating
+            }
+            crate::sandbox_types::ContainerState::Running => {
+                job_policy::SandboxContainerState::Running
+            }
+            crate::sandbox_types::ContainerState::Stopped => {
+                job_policy::SandboxContainerState::Stopped
+            }
+            crate::sandbox_types::ContainerState::Failed => {
+                job_policy::SandboxContainerState::Failed
+            }
+        })
+    }
+
     fn spec(&self) -> Option<&crate::sandbox_jobs::SandboxJobSpec> {
         self.live
             .as_ref()
@@ -50,27 +282,15 @@ impl SandboxJobLookup {
     }
 
     fn status(&self) -> String {
-        if let Some(handle) = self.live.as_ref() {
-            return match handle.state {
-                crate::sandbox_types::ContainerState::Creating => "creating".to_string(),
-                crate::sandbox_types::ContainerState::Running => "running".to_string(),
-                crate::sandbox_types::ContainerState::Stopped => handle
-                    .completion_result
-                    .as_ref()
-                    .map(|result| result.status.clone())
-                    .or_else(|| self.stored.as_ref().map(|job| job.status.clone()))
-                    .unwrap_or_else(|| "completed".to_string()),
-                crate::sandbox_types::ContainerState::Failed => handle
-                    .completion_result
-                    .as_ref()
-                    .map(|result| result.status.clone())
-                    .unwrap_or_else(|| "failed".to_string()),
-            };
-        }
-        self.stored
-            .as_ref()
-            .map(|job| job.status.clone())
-            .unwrap_or_else(|| "unknown".to_string())
+        job_policy::sandbox_lookup_status(job_policy::SandboxJobLookupStatusInput {
+            live_state: self.live_state(),
+            live_completion_status: self
+                .live
+                .as_ref()
+                .and_then(|handle| handle.completion_result.as_ref())
+                .map(|result| result.status.as_str()),
+            stored_status: self.stored.as_ref().map(|job| job.status.as_str()),
+        })
     }
 
     fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -89,15 +309,15 @@ impl SandboxJobLookup {
     }
 
     fn failure_reason(&self) -> Option<String> {
-        self.stored
-            .as_ref()
-            .and_then(|job| job.failure_reason.clone())
-            .or_else(|| {
-                self.live
-                    .as_ref()
-                    .and_then(|handle| handle.completion_result.as_ref())
-                    .and_then(|result| result.message.clone())
-            })
+        job_policy::sandbox_lookup_failure_reason(
+            self.stored
+                .as_ref()
+                .and_then(|job| job.failure_reason.as_deref()),
+            self.live
+                .as_ref()
+                .and_then(|handle| handle.completion_result.as_ref())
+                .and_then(|result| result.message.as_deref()),
+        )
     }
 
     fn is_interactive(&self) -> bool {
@@ -105,18 +325,7 @@ impl SandboxJobLookup {
     }
 
     fn accepts_prompts(&self) -> bool {
-        self.is_interactive()
-            && self
-                .live
-                .as_ref()
-                .map(|handle| {
-                    matches!(
-                        handle.state,
-                        crate::sandbox_types::ContainerState::Creating
-                            | crate::sandbox_types::ContainerState::Running
-                    )
-                })
-                .unwrap_or(false)
+        job_policy::sandbox_lookup_accepts_prompts(self.is_interactive(), self.live_state())
     }
 }
 
@@ -428,6 +637,7 @@ impl CreateJobTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let metadata_policy = job_policy::job_execution_metadata_policy(&ctx.metadata);
         let result = self
             .job_backend()
             .run_job(JobExecutionRequest {
@@ -440,19 +650,9 @@ impl CreateJobTool {
                 explicit_project_dir: None,
                 mode: None,
                 metadata: ctx.metadata.clone(),
-                allowed_tools: crate::tools::ToolRegistry::metadata_string_list(
-                    &ctx.metadata,
-                    "allowed_tools",
-                ),
-                allowed_skills: crate::tools::ToolRegistry::metadata_string_list(
-                    &ctx.metadata,
-                    "allowed_skills",
-                ),
-                tool_profile: ctx
-                    .metadata
-                    .get("tool_profile")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
+                allowed_tools: metadata_policy.allowed_tools,
+                allowed_skills: metadata_policy.allowed_skills,
+                tool_profile: metadata_policy.tool_profile,
                 credential_grants: Vec::new(),
                 job_events_available: self.store.is_some(),
                 job_prompt_available: self.prompt_queue.is_some(),
@@ -480,6 +680,7 @@ impl CreateJobTool {
             .split_once("\n\n")
             .map(|(title, description)| (title.to_string(), description.to_string()))
             .unwrap_or_else(|| (task.to_string(), task.to_string()));
+        let metadata_policy = job_policy::job_execution_metadata_policy(&ctx.metadata);
         let result = self
             .job_backend()
             .run_job(JobExecutionRequest {
@@ -492,19 +693,9 @@ impl CreateJobTool {
                 explicit_project_dir: explicit_dir,
                 mode: Some(mode),
                 metadata: ctx.metadata.clone(),
-                allowed_tools: crate::tools::ToolRegistry::metadata_string_list(
-                    &ctx.metadata,
-                    "allowed_tools",
-                ),
-                allowed_skills: crate::tools::ToolRegistry::metadata_string_list(
-                    &ctx.metadata,
-                    "allowed_skills",
-                ),
-                tool_profile: ctx
-                    .metadata
-                    .get("tool_profile")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
+                allowed_tools: metadata_policy.allowed_tools,
+                allowed_skills: metadata_policy.allowed_skills,
+                tool_profile: metadata_policy.tool_profile,
                 credential_grants,
                 job_events_available: self.store.is_some(),
                 job_prompt_available: self.prompt_queue.is_some(),
@@ -683,7 +874,7 @@ impl Tool for ListJobsTool {
                 jobs.push(job_policy::sandbox_job_list_entry(
                     job_id,
                     &spec.title,
-                    &crate::sandbox_jobs::normalize_sandbox_ui_state(&status),
+                    job_policy::sandbox_ui_status(&status),
                     lookup.created_at().map(|value| value.to_rfc3339()),
                     spec.mode.as_str(),
                 ));
@@ -772,8 +963,7 @@ impl Tool for JobStatusTool {
                     job_policy::SandboxJobStatusOutput {
                         title: lookup.spec().map(|spec| spec.title.clone()),
                         description: lookup.spec().map(|spec| spec.description.clone()),
-                        status: crate::sandbox_jobs::normalize_sandbox_ui_state(&lookup.status())
-                            .to_string(),
+                        status: job_policy::sandbox_ui_status(&lookup.status()).to_string(),
                         created_at: lookup.created_at().map(|value| value.to_rfc3339()),
                         started_at: lookup.started_at().map(|value| value.to_rfc3339()),
                         completed_at: lookup.completed_at().map(|value| value.to_rfc3339()),

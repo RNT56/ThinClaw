@@ -90,9 +90,83 @@ pub fn compact_post_plan(messages: &mut Vec<ChatMessage>, plan_goal: &str) {
 }
 
 pub const MAX_WORKER_ITERATIONS: usize = 500;
+pub const DEFAULT_WORKER_ITERATIONS: usize = 50;
+pub const WORKER_STUCK_NUDGE_AFTER_ITERATION: usize = 8;
+pub const WORKER_STUCK_NUDGE_EVERY: usize = 10;
+pub const WORKER_DIRECT_LOOP_DELAY_MS: u64 = 100;
+pub const WORKER_TOOL_KEEPALIVE_SECS: u64 = 15;
+pub const WORKER_TASK_FAILED_DURING_EXECUTION_REASON: &str = "Task failed during execution";
 
 pub fn capped_worker_iterations(requested: Option<u64>, default_value: usize) -> usize {
     (requested.unwrap_or(default_value as u64) as usize).min(MAX_WORKER_ITERATIONS)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerLoopMetadata {
+    pub max_iterations: usize,
+    pub is_heartbeat: bool,
+    pub allowed_tools: Option<Vec<String>>,
+    pub allowed_skills: Option<Vec<String>>,
+}
+
+impl WorkerLoopMetadata {
+    pub fn from_metadata(metadata: &serde_json::Value, default_iterations: usize) -> Self {
+        Self {
+            max_iterations: capped_worker_iterations(
+                metadata
+                    .get("max_iterations")
+                    .and_then(|value| value.as_u64()),
+                default_iterations,
+            ),
+            is_heartbeat: metadata
+                .get("heartbeat")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            allowed_tools: metadata_string_list(metadata, "allowed_tools"),
+            allowed_skills: metadata_string_list(metadata, "allowed_skills"),
+        }
+    }
+}
+
+pub fn metadata_string_list(metadata: &serde_json::Value, key: &str) -> Option<Vec<String>> {
+    metadata.get(key).and_then(|value| {
+        value.as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+    })
+}
+
+pub fn worker_iteration_exceeded(iteration: usize, max_iterations: usize) -> bool {
+    iteration > max_iterations
+}
+
+pub fn should_nudge_worker(iteration: usize) -> bool {
+    iteration > WORKER_STUCK_NUDGE_AFTER_ITERATION
+        && iteration.is_multiple_of(WORKER_STUCK_NUDGE_EVERY)
+}
+
+pub fn should_finish_heartbeat_after_output(is_heartbeat: bool, has_output: bool) -> bool {
+    is_heartbeat && has_output
+}
+
+pub fn should_persist_heartbeat_completion_critique(success: bool, quality_score: u32) -> bool {
+    !success || quality_score < 100
+}
+
+pub fn heartbeat_completion_critique(
+    job_id: Uuid,
+    quality_score: u32,
+    reasoning: impl Into<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "job_id": job_id.to_string(),
+        "quality": quality_score,
+        "reasoning": reasoning.into(),
+    })
 }
 
 pub fn is_worker_terminal_state(state: JobState) -> bool {
@@ -104,6 +178,38 @@ pub fn is_worker_terminal_state(state: JobState) -> bool {
             | JobState::Cancelled
             | JobState::Abandoned
     )
+}
+
+/// Reorder joined parallel worker results into request order.
+///
+/// Root adapters own task spawning and concrete error construction. This helper
+/// only applies the deterministic policy used after joins finish: successful
+/// results are placed at their original index, and missing slots receive join
+/// failure reasons in arrival order before falling back to the default reason.
+pub fn order_parallel_worker_results<T>(
+    count: usize,
+    completed: impl IntoIterator<Item = (usize, T)>,
+    failed_reasons: impl IntoIterator<Item = String>,
+    default_missing_reason: &str,
+) -> Vec<Result<T, String>> {
+    let mut ordered: Vec<Option<T>> = (0..count).map(|_| None).collect();
+    for (idx, result) in completed {
+        if idx < count {
+            ordered[idx] = Some(result);
+        }
+    }
+
+    let mut failed_reasons = failed_reasons.into_iter();
+    ordered
+        .into_iter()
+        .map(|result| {
+            result.ok_or_else(|| {
+                failed_reasons
+                    .next()
+                    .unwrap_or_else(|| default_missing_reason.to_string())
+            })
+        })
+        .collect()
 }
 
 pub fn build_worker_system_prompt(
@@ -311,9 +417,107 @@ mod tests {
     }
 
     #[test]
+    fn worker_loop_metadata_extracts_heartbeat_iterations_and_capabilities() {
+        let metadata = serde_json::json!({
+            "heartbeat": true,
+            "max_iterations": 12,
+            "allowed_tools": ["shell", 5, "read_file"],
+            "allowed_skills": ["github"]
+        });
+
+        let parsed = WorkerLoopMetadata::from_metadata(&metadata, DEFAULT_WORKER_ITERATIONS);
+
+        assert_eq!(parsed.max_iterations, 12);
+        assert!(parsed.is_heartbeat);
+        assert_eq!(
+            parsed.allowed_tools,
+            Some(vec!["shell".to_string(), "read_file".to_string()])
+        );
+        assert_eq!(parsed.allowed_skills, Some(vec!["github".to_string()]));
+    }
+
+    #[test]
+    fn worker_loop_metadata_defaults_missing_fields() {
+        let parsed =
+            WorkerLoopMetadata::from_metadata(&serde_json::Value::Null, DEFAULT_WORKER_ITERATIONS);
+
+        assert_eq!(parsed.max_iterations, DEFAULT_WORKER_ITERATIONS);
+        assert!(!parsed.is_heartbeat);
+        assert!(parsed.allowed_tools.is_none());
+        assert!(parsed.allowed_skills.is_none());
+    }
+
+    #[test]
+    fn worker_loop_metadata_caps_requested_iterations() {
+        let metadata = serde_json::json!({
+            "max_iterations": (MAX_WORKER_ITERATIONS as u64) + 100
+        });
+
+        let parsed = WorkerLoopMetadata::from_metadata(&metadata, DEFAULT_WORKER_ITERATIONS);
+
+        assert_eq!(parsed.max_iterations, MAX_WORKER_ITERATIONS);
+    }
+
+    #[test]
+    fn worker_loop_iteration_policy_matches_legacy_boundaries() {
+        assert!(!worker_iteration_exceeded(50, 50));
+        assert!(worker_iteration_exceeded(51, 50));
+        assert!(!should_nudge_worker(8));
+        assert!(should_nudge_worker(10));
+        assert!(!should_nudge_worker(11));
+        assert!(should_finish_heartbeat_after_output(true, true));
+        assert!(!should_finish_heartbeat_after_output(true, false));
+        assert!(!should_finish_heartbeat_after_output(false, true));
+    }
+
+    #[test]
+    fn heartbeat_completion_critique_policy_flags_imperfect_runs() {
+        assert!(!should_persist_heartbeat_completion_critique(true, 100));
+        assert!(should_persist_heartbeat_completion_critique(true, 99));
+        assert!(should_persist_heartbeat_completion_critique(false, 100));
+
+        let job_id = Uuid::new_v4();
+        let critique = heartbeat_completion_critique(job_id, 80, "needs follow-up");
+        assert_eq!(critique["job_id"], job_id.to_string());
+        assert_eq!(critique["quality"], 80);
+        assert_eq!(critique["reasoning"], "needs follow-up");
+    }
+
+    #[test]
     fn completed_is_terminal_for_worker_cleanup() {
         assert!(is_worker_terminal_state(JobState::Completed));
         assert!(!is_worker_terminal_state(JobState::InProgress));
+    }
+
+    #[test]
+    fn parallel_worker_results_are_reordered_by_original_index() {
+        let ordered = order_parallel_worker_results(
+            3,
+            vec![(2, "third"), (0, "first"), (1, "second")],
+            Vec::new(),
+            WORKER_TASK_FAILED_DURING_EXECUTION_REASON,
+        );
+
+        assert_eq!(ordered, vec![Ok("first"), Ok("second"), Ok("third")]);
+    }
+
+    #[test]
+    fn parallel_worker_results_fill_missing_slots_with_join_reasons() {
+        let ordered = order_parallel_worker_results(
+            3,
+            vec![(1, "second")],
+            vec!["Task panicked: boom".to_string()],
+            WORKER_TASK_FAILED_DURING_EXECUTION_REASON,
+        );
+
+        assert_eq!(
+            ordered,
+            vec![
+                Err("Task panicked: boom".to_string()),
+                Ok("second"),
+                Err(WORKER_TASK_FAILED_DURING_EXECUTION_REASON.to_string())
+            ]
+        );
     }
 
     #[test]

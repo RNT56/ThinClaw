@@ -1026,7 +1026,7 @@ async fn create_code_proposal_from_candidate_rejects_empty_diff() {
         proposal: serde_json::json!({
             "title": "Fix missing diff handling",
             "rationale": "Outcome-backed durability fix",
-            "target_files": ["src/agent/learning.rs"],
+            "target_files": ["src/agent/learning/mod.rs"],
             "diff": ""
         }),
         created_at: Utc::now(),

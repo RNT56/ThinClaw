@@ -11,6 +11,11 @@ use std::sync::Arc;
 use crate::channels::web::types::*;
 use crate::skills::SkillRegistry;
 use crate::skills::catalog::SkillCatalog;
+use thinclaw_gateway::web::skills::{
+    SkillCatalogSearchResultInput, SkillInfoInput, skill_action_error_response,
+    skill_api_install_response, skill_api_remove_response, skill_catalog_search_result, skill_info,
+    skill_list_response, skill_search_response,
+};
 
 use super::error::ApiResult;
 
@@ -23,21 +28,19 @@ pub async fn list_skills(
 
     let skill_infos: Vec<SkillInfo> = skills
         .iter()
-        .map(|s| SkillInfo {
-            name: s.manifest.name.clone(),
-            description: s.manifest.description.clone(),
-            version: s.manifest.version.clone(),
-            trust: s.trust.to_string(),
-            source: format!("{:?}", s.source),
-            keywords: s.manifest.activation.keywords.clone(),
+        .map(|s| {
+            skill_info(SkillInfoInput {
+                name: s.manifest.name.clone(),
+                description: s.manifest.description.clone(),
+                version: s.manifest.version.clone(),
+                trust: s.trust.to_string(),
+                source: format!("{:?}", s.source),
+                keywords: s.manifest.activation.keywords.clone(),
+            })
         })
         .collect();
 
-    let count = skill_infos.len();
-    Ok(SkillListResponse {
-        skills: skill_infos,
-        count,
-    })
+    Ok(skill_list_response(skill_infos))
 }
 
 /// Search the skill catalog and installed skills.
@@ -52,26 +55,40 @@ pub async fn search_skills(
     let installed: Vec<SkillInfo> = registry
         .skills()
         .iter()
-        .map(|s| SkillInfo {
-            name: s.manifest.name.clone(),
-            description: s.manifest.description.clone(),
-            version: s.manifest.version.clone(),
-            trust: s.trust.to_string(),
-            source: format!("{:?}", s.source),
-            keywords: s.manifest.activation.keywords.clone(),
+        .map(|s| {
+            skill_info(SkillInfoInput {
+                name: s.manifest.name.clone(),
+                description: s.manifest.description.clone(),
+                version: s.manifest.version.clone(),
+                trust: s.trust.to_string(),
+                source: format!("{:?}", s.source),
+                keywords: s.manifest.activation.keywords.clone(),
+            })
         })
         .collect();
 
-    Ok(SkillSearchResponse {
-        catalog: outcome
+    Ok(skill_search_response(
+        outcome
             .results
             .into_iter()
-            .filter_map(|e| serde_json::to_value(e).ok())
+            .map(|entry| {
+                skill_catalog_search_result(SkillCatalogSearchResultInput {
+                    slug: entry.slug,
+                    name: entry.name,
+                    description: entry.description,
+                    version: entry.version,
+                    score: entry.score,
+                    updated_at: entry.updated_at,
+                    stars: entry.stars,
+                    downloads: entry.downloads,
+                    owner: entry.owner,
+                })
+            })
             .collect(),
         installed,
-        registry_url: skill_catalog.registry_url().to_string(),
-        catalog_error: outcome.error,
-    })
+        skill_catalog.registry_url().to_string(),
+        outcome.error,
+    ))
 }
 
 /// Install a skill from content.
@@ -81,8 +98,8 @@ pub async fn install_skill(
 ) -> ApiResult<ActionResponse> {
     let mut registry = skill_registry.write().await;
     match registry.install_skill(content).await {
-        Ok(name) => Ok(ActionResponse::ok(format!("Installed skill '{}'", name))),
-        Err(e) => Ok(ActionResponse::fail(e.to_string())),
+        Ok(name) => Ok(skill_api_install_response(name)),
+        Err(e) => Ok(skill_action_error_response(e.to_string())),
     }
 }
 
@@ -93,7 +110,7 @@ pub async fn remove_skill(
 ) -> ApiResult<ActionResponse> {
     let mut registry = skill_registry.write().await;
     match registry.remove_skill(name).await {
-        Ok(()) => Ok(ActionResponse::ok(format!("Removed skill '{}'", name))),
-        Err(e) => Ok(ActionResponse::fail(e.to_string())),
+        Ok(()) => Ok(skill_api_remove_response(name)),
+        Err(e) => Ok(skill_action_error_response(e.to_string())),
     }
 }

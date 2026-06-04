@@ -1,13 +1,10 @@
 use super::*;
-pub(super) fn provider_base_url(
-    config: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    config
-        .get("base_url")
-        .or_else(|| config.get("url"))
-        .cloned()
-        .filter(|v| !v.trim().is_empty())
-}
+
+pub(super) use thinclaw_agent::learning_provider_policy::{
+    payload_text, provider_agent_id, provider_base_url, provider_base_url_or, provider_bool,
+    provider_config_value, provider_export_messages, provider_join_url, provider_path,
+    provider_path_with_vars, provider_scoped_user_id,
+};
 
 pub(super) fn provider_token(config: &std::collections::HashMap<String, String>) -> Option<String> {
     if let Some(token) = config.get("api_key").cloned().filter(|v| !v.is_empty()) {
@@ -23,74 +20,6 @@ pub(super) fn provider_token(config: &std::collections::HashMap<String, String>)
             .filter(|v| !v.trim().is_empty());
     }
     None
-}
-
-pub(super) fn provider_config_value(
-    config: &std::collections::HashMap<String, String>,
-    key: &str,
-) -> Option<String> {
-    config.get(key).cloned().filter(|v| !v.trim().is_empty())
-}
-
-pub(super) fn provider_base_url_or(
-    config: &std::collections::HashMap<String, String>,
-    default: &str,
-) -> String {
-    provider_base_url(config).unwrap_or_else(|| default.to_string())
-}
-
-pub(super) fn provider_bool(config: &std::collections::HashMap<String, String>, key: &str) -> bool {
-    config
-        .get(key)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
-}
-
-pub(super) fn provider_scoped_user_id(
-    config: &std::collections::HashMap<String, String>,
-    user_id: &str,
-) -> String {
-    provider_config_value(config, "user_id").unwrap_or_else(|| user_id.to_string())
-}
-
-pub(super) fn provider_agent_id(config: &std::collections::HashMap<String, String>) -> String {
-    provider_config_value(config, "agent_id").unwrap_or_else(|| "thinclaw".to_string())
-}
-
-pub(super) fn provider_join_url(base_url: &str, path: &str) -> String {
-    if path.starts_with("http://") || path.starts_with("https://") {
-        return path.to_string();
-    }
-    format!(
-        "{}/{}",
-        base_url.trim_end_matches('/'),
-        path.trim_start_matches('/')
-    )
-}
-
-pub(super) fn provider_path(
-    config: &std::collections::HashMap<String, String>,
-    key: &str,
-    default: &str,
-) -> String {
-    provider_config_value(config, key).unwrap_or_else(|| default.to_string())
-}
-
-pub(super) fn provider_path_with_vars(
-    config: &std::collections::HashMap<String, String>,
-    key: &str,
-    default: &str,
-) -> String {
-    let mut path = provider_path(config, key, default);
-    for (name, value) in config {
-        path = path.replace(&format!("{{{name}}}"), value);
-    }
-    path
 }
 
 pub(super) fn apply_provider_auth(
@@ -117,43 +46,6 @@ pub(super) fn apply_provider_auth(
         "x-chroma-token" | "x_chroma_token" => request.header("x-chroma-token", token),
         _ => request.bearer_auth(token),
     }
-}
-
-pub(super) fn provider_required_status(
-    provider_name: &str,
-    enabled: bool,
-    missing: &[String],
-) -> Option<ProviderHealthStatus> {
-    if !enabled {
-        return Some(ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
-            enabled,
-            healthy: false,
-            readiness: ProviderReadiness::Disabled,
-            latency_ms: None,
-            error: None,
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({"state": "disabled"}),
-        });
-    }
-    if missing.is_empty() {
-        return None;
-    }
-    Some(ProviderHealthStatus {
-        provider: provider_name.to_string(),
-        active: false,
-        enabled,
-        healthy: false,
-        readiness: ProviderReadiness::NotConfigured,
-        latency_ms: None,
-        error: Some(format!("missing {}", missing.join(", "))),
-        capabilities: Vec::new(),
-        metadata: serde_json::json!({
-            "state": "not_configured",
-            "missing": missing,
-        }),
-    })
 }
 
 pub(super) async fn configured_provider_health(
@@ -193,20 +85,7 @@ pub(super) async fn configured_provider_health(
     }
 
     if provider_bool(&provider.config, "skip_health_check") || default_health_path.is_none() {
-        return ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
-            enabled: provider.enabled,
-            healthy: true,
-            readiness: ProviderReadiness::Ready,
-            latency_ms: None,
-            error: None,
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({
-                "state": "configured",
-                "health_check": "skipped",
-            }),
-        };
+        return provider_configured_skipped_health_status(provider_name, provider.enabled);
     }
 
     let base_url = base_url.expect("checked above");
@@ -219,17 +98,7 @@ pub(super) async fn configured_provider_health(
         .timeout(std::time::Duration::from_secs(5))
         .build();
     let Ok(client) = client else {
-        return ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
-            enabled: provider.enabled,
-            healthy: false,
-            readiness: ProviderReadiness::Unhealthy,
-            latency_ms: None,
-            error: Some("failed to initialize HTTP client".to_string()),
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({}),
-        };
+        return provider_http_client_error_status(provider_name, provider.enabled);
     };
 
     let started = std::time::Instant::now();
@@ -239,39 +108,20 @@ pub(super) async fn configured_provider_health(
         default_auth_scheme,
     );
     match request.send().await {
-        Ok(response) => ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
-            enabled: provider.enabled,
-            healthy: response.status().is_success(),
-            readiness: if response.status().is_success() {
-                ProviderReadiness::Ready
-            } else {
-                ProviderReadiness::Unhealthy
-            },
-            latency_ms: Some(started.elapsed().as_millis() as u64),
-            error: if response.status().is_success() {
-                None
-            } else {
-                Some(format!("HTTP {}", response.status()))
-            },
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({
-                "status": response.status().as_u16(),
-                "health_url": health_url,
-            }),
-        },
-        Err(err) => ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
-            enabled: provider.enabled,
-            healthy: false,
-            readiness: ProviderReadiness::Unhealthy,
-            latency_ms: Some(started.elapsed().as_millis() as u64),
-            error: Some(err.to_string()),
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({"health_url": health_url}),
-        },
+        Ok(response) => provider_http_response_status(
+            provider_name,
+            provider.enabled,
+            response.status().as_u16(),
+            started.elapsed().as_millis() as u64,
+            Some(&health_url),
+        ),
+        Err(err) => provider_http_request_error_status(
+            provider_name,
+            provider.enabled,
+            err.to_string(),
+            started.elapsed().as_millis() as u64,
+            Some(&health_url),
+        ),
     }
 }
 
@@ -282,48 +132,18 @@ pub(super) async fn provider_health_request(
     token: Option<String>,
 ) -> ProviderHealthStatus {
     if !enabled {
-        return ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
-            enabled,
-            healthy: false,
-            readiness: ProviderReadiness::Disabled,
-            latency_ms: None,
-            error: None,
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({"state": "disabled"}),
-        };
+        return provider_disabled_status(provider_name, enabled);
     }
 
     let Some(base_url) = base_url else {
-        return ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
-            enabled,
-            healthy: false,
-            readiness: ProviderReadiness::NotConfigured,
-            latency_ms: None,
-            error: Some("missing base_url".to_string()),
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({}),
-        };
+        return provider_missing_base_url_status(provider_name, enabled);
     };
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build();
     let Ok(client) = client else {
-        return ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
-            enabled,
-            healthy: false,
-            readiness: ProviderReadiness::Unhealthy,
-            latency_ms: None,
-            error: Some("failed to initialize HTTP client".to_string()),
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({}),
-        };
+        return provider_http_client_error_status(provider_name, enabled);
     };
 
     let started = std::time::Instant::now();
@@ -333,35 +153,19 @@ pub(super) async fn provider_health_request(
     }
 
     match req.send().await {
-        Ok(response) => ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
+        Ok(response) => provider_http_response_status(
+            provider_name,
             enabled,
-            healthy: response.status().is_success(),
-            readiness: if response.status().is_success() {
-                ProviderReadiness::Ready
-            } else {
-                ProviderReadiness::Unhealthy
-            },
-            latency_ms: Some(started.elapsed().as_millis() as u64),
-            error: if response.status().is_success() {
-                None
-            } else {
-                Some(format!("HTTP {}", response.status()))
-            },
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({"status": response.status().as_u16()}),
-        },
-        Err(err) => ProviderHealthStatus {
-            provider: provider_name.to_string(),
-            active: false,
+            response.status().as_u16(),
+            started.elapsed().as_millis() as u64,
+            None,
+        ),
+        Err(err) => provider_http_request_error_status(
+            provider_name,
             enabled,
-            healthy: false,
-            readiness: ProviderReadiness::Unhealthy,
-            latency_ms: Some(started.elapsed().as_millis() as u64),
-            error: Some(err.to_string()),
-            capabilities: Vec::new(),
-            metadata: serde_json::json!({}),
-        },
+            err.to_string(),
+            started.elapsed().as_millis() as u64,
+            None,
+        ),
     }
 }

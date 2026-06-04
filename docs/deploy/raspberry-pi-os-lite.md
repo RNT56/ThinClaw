@@ -12,7 +12,7 @@ has no interactive Linux desktop session.
 
 Supported:
 
-- Web gateway and remote Scrappy connection on port `3000`
+- Web gateway and remote ThinClaw Desktop connection on port `3000`
 - libSQL local database
 - routines and scheduled background work
 - native and WASM channels that do not require a desktop session
@@ -240,7 +240,7 @@ full native runtime surface on the Pi.
 
 ## Private Access With Tailscale
 
-For private access from Scrappy or devices that should connect without opening an
+For private access from ThinClaw Desktop or devices that should connect without opening an
 SSH tunnel, use Tailscale:
 
 ```bash

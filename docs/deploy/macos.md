@@ -12,7 +12,7 @@ polished host for local use, service mode, and desktop autonomy.
 | Source patch workflow | Manual Cargo build |
 | Always-on background runtime | `thinclaw onboard --profile remote`, then launchd service |
 | Host-level desktop automation | Enable the reckless desktop autonomy profile after local setup |
-| Remote Scrappy access | Bind the gateway to a private address or Tailscale |
+| Remote ThinClaw Desktop access | Bind the gateway to a private address or Tailscale |
 
 ## Prerequisites
 

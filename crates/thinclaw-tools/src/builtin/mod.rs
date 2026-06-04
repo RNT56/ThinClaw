@@ -11,6 +11,7 @@ pub mod browser_cloud;
 pub mod camera_capture;
 pub mod canvas;
 pub mod clarify;
+pub mod comfyui;
 pub mod desktop_autonomy;
 pub mod device_info;
 pub mod discord_actions;
@@ -65,6 +66,10 @@ pub use browser_a11y::AgentBrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use clarify::ClarifyTool;
+pub use comfyui::{
+    ComfyCheckDepsHostTool, ComfyHealthHostTool, ComfyManageHostTool, ComfyRunWorkflowHostTool,
+    ImageGenerateHostTool,
+};
 pub use desktop_autonomy::{DesktopAutonomyPort, DesktopAutonomyTool};
 pub use device_info::DeviceInfoTool;
 pub use discord_actions::DiscordActionsTool;
@@ -88,10 +93,15 @@ pub use file::{
 pub use homeassistant::HomeAssistantTool;
 pub use html_converter::convert_html_to_markdown;
 pub use http::HttpTool;
-pub use job::{DANGEROUS_ENV_VARS, validate_env_var_name};
+pub use job::{
+    CancelJobHostTool, CreateJobHostTool, DANGEROUS_ENV_VARS, JobEventsHostTool, JobPromptHostTool,
+    JobStatusHostTool, ListJobsHostTool, validate_env_var_name,
+};
 pub use json::JsonTool;
 pub use learning::{
-    PROMPT_TARGETS, SKILL_FILE_NAME, append_markdown_section, artifact_name_for_skill,
+    LearningFeedbackHostTool, LearningHistoryHostTool, LearningOutcomesHostTool,
+    LearningProposalReviewHostTool, LearningStatusHostTool, PROMPT_TARGETS, PromptManageHostTool,
+    SKILL_FILE_NAME, SkillManageHostTool, append_markdown_section, artifact_name_for_skill,
     find_section_byte_range, normalize_prompt_target, prompt_manage_user_target,
     remove_markdown_section, upsert_markdown_section, validate_agents_prompt_safety,
     validate_prompt_content, validate_prompt_manage_available, validate_relative_skill_path,
@@ -103,8 +113,9 @@ pub use llm_tools::{
 pub use location::LocationTool;
 pub use memory::{
     APPEND_ONLY_IDENTITY_FILES, DELETE_PROTECTED_FILES, FREELY_REWRITABLE_IDENTITY_FILES,
-    MemoryConversationKind, MemoryScope, actor_scoped_path, memory_conversation_kind,
-    resolve_memory_write_path, shared_root_path, split_scoped_target,
+    MemoryConversationKind, MemoryDeleteHostTool, MemoryReadHostTool, MemoryScope,
+    MemorySearchHostTool, MemoryTreeHostTool, MemoryWriteHostTool, actor_scoped_path,
+    memory_conversation_kind, resolve_memory_write_path, shared_root_path, split_scoped_target,
 };
 pub use moa::MoaTool;
 #[cfg(feature = "nostr")]
@@ -117,9 +128,13 @@ pub use shell::{
     AcpTerminalExecution, AcpTerminalExecutor, ShellSafetyOptions, ShellSmartApprover, ShellTool,
 };
 pub use skill::{
-    ensure_skill_admin_available, ensure_skill_allowed, is_skipped_package_name,
-    normalize_tap_path, relative_path_is_safe, restricted_skill_names, validate_github_repo,
-    validate_repo_path_component, validate_repo_relative_path,
+    SkillAuditHostTool, SkillCheckHostTool, SkillInspectHostTool, SkillInstallHostTool,
+    SkillListHostTool, SkillPromoteTrustHostTool, SkillPublishHostTool, SkillReadHostTool,
+    SkillReloadHostTool, SkillRemoveHostTool, SkillSearchHostTool, SkillSnapshotHostTool,
+    SkillTapAddHostTool, SkillTapListHostTool, SkillTapRefreshHostTool, SkillTapRemoveHostTool,
+    SkillUpdateHostTool, ensure_skill_admin_available, ensure_skill_allowed,
+    is_skipped_package_name, normalize_tap_path, relative_path_is_safe, restricted_skill_names,
+    validate_github_repo, validate_repo_path_component, validate_repo_relative_path,
 };
 pub use slack_actions::SlackActionsTool;
 pub use subagent::{

@@ -10,52 +10,13 @@ use thinclaw_tools::builtin::execute_code as runtime_execute_code;
 use crate::context::JobContext;
 use crate::tools::ToolRegistry;
 use crate::tools::execution_backend::{
-    CommandExecutionRequest, ExecutionBackend, ExecutionBackendKind, ExecutionResult,
-    LocalHostExecutionBackend, ProcessStartRequest, ScriptExecutionRequest, StartedProcess,
+    ExecutionBackend, LocalHostExecutionBackend, RootExecutionBackendAdapter,
 };
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig,
 };
 
 pub use runtime_execute_code::ToolRpcHost;
-
-struct RootExecutionBackendAdapter {
-    inner: Arc<dyn ExecutionBackend>,
-}
-
-impl RootExecutionBackendAdapter {
-    fn new(inner: Arc<dyn ExecutionBackend>) -> Arc<Self> {
-        Arc::new(Self { inner })
-    }
-}
-
-#[async_trait]
-impl thinclaw_tools::execution::LocalExecutionBackend for RootExecutionBackendAdapter {
-    fn kind(&self) -> ExecutionBackendKind {
-        self.inner.kind()
-    }
-
-    async fn run_shell(
-        &self,
-        request: CommandExecutionRequest,
-    ) -> Result<ExecutionResult, ToolError> {
-        self.inner.run_shell(request).await
-    }
-
-    async fn start_process(
-        &self,
-        request: ProcessStartRequest,
-    ) -> Result<StartedProcess, ToolError> {
-        self.inner.start_process(request).await
-    }
-
-    async fn run_script(
-        &self,
-        request: ScriptExecutionRequest,
-    ) -> Result<ExecutionResult, ToolError> {
-        self.inner.run_script(request).await
-    }
-}
 
 struct RootToolRpcHost {
     tools: Weak<ToolRegistry>,
@@ -136,7 +97,7 @@ impl ExecuteCodeTool {
     pub fn new() -> Self {
         Self {
             inner: runtime_execute_code::ExecuteCodeTool::new().with_backend(
-                RootExecutionBackendAdapter::new(LocalHostExecutionBackend::shared()),
+                RootExecutionBackendAdapter::shared(LocalHostExecutionBackend::shared()),
             ),
         }
     }
@@ -154,7 +115,7 @@ impl ExecuteCodeTool {
     pub fn with_backend(mut self, backend: Arc<dyn ExecutionBackend>) -> Self {
         self.inner = self
             .inner
-            .with_backend(RootExecutionBackendAdapter::new(backend));
+            .with_backend(RootExecutionBackendAdapter::shared(backend));
         self
     }
 

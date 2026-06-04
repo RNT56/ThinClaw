@@ -392,6 +392,22 @@ impl Submission {
                 | Self::SystemCommand { .. }
         )
     }
+
+    /// Whether this submission should be intercepted by inbound text hooks.
+    pub fn runs_inbound_hooks(&self) -> bool {
+        matches!(self, Self::UserInput { .. })
+    }
+
+    /// Whether this submission should consume a pending manual-token auth flow.
+    pub fn consumes_pending_manual_auth(&self) -> bool {
+        matches!(self, Self::UserInput { .. })
+    }
+
+    /// Whether this submission cancels a pending manual-token auth flow before
+    /// normal handling continues.
+    pub fn cancels_pending_manual_auth(&self) -> bool {
+        !self.consumes_pending_manual_auth()
+    }
 }
 
 /// Result of processing a submission.
@@ -434,6 +450,26 @@ pub enum SubmissionResult {
 
     /// Turn was interrupted.
     Interrupted,
+}
+
+/// Root-independent status payload for a tool approval request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalStatusPayload {
+    pub request_id: Uuid,
+    pub tool_name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// Pure plan for converting a submission result into caller-visible output.
+#[derive(Debug, Clone)]
+pub enum SubmissionResponsePlan {
+    /// Send this payload through the caller's normal response channel.
+    Respond(AgentResponsePayload),
+    /// Do not send a normal response.
+    Suppress,
+    /// Send an approval status event, then suppress the normal response.
+    SendApprovalStatusAndSuppress(ApprovalStatusPayload),
 }
 
 /// Final user-facing response plus generated media ready for outbound delivery.
@@ -499,6 +535,54 @@ impl SubmissionResult {
         Self::Error {
             message: message.into(),
         }
+    }
+}
+
+/// Convert a processed submission into a response plan without touching
+/// channels, hooks, thread state, or root LLM helpers.
+pub fn plan_submission_response(
+    result: SubmissionResult,
+    is_silent_reply: impl FnOnce(&str) -> bool,
+) -> SubmissionResponsePlan {
+    match result {
+        SubmissionResult::Response { payload } => {
+            if is_silent_reply(&payload.content) {
+                SubmissionResponsePlan::Suppress
+            } else {
+                SubmissionResponsePlan::Respond(payload)
+            }
+        }
+        SubmissionResult::Streamed(payload) => {
+            if payload.attachments.is_empty() {
+                SubmissionResponsePlan::Respond(AgentResponsePayload::text(""))
+            } else {
+                SubmissionResponsePlan::Respond(AgentResponsePayload::with_attachments(
+                    "",
+                    payload.attachments,
+                ))
+            }
+        }
+        SubmissionResult::Ok { message } => match message {
+            Some(message) => SubmissionResponsePlan::Respond(AgentResponsePayload::text(message)),
+            None => SubmissionResponsePlan::Suppress,
+        },
+        SubmissionResult::Error { message } => SubmissionResponsePlan::Respond(
+            AgentResponsePayload::text(format!("Error: {}", message)),
+        ),
+        SubmissionResult::Interrupted => {
+            SubmissionResponsePlan::Respond(AgentResponsePayload::text("Interrupted."))
+        }
+        SubmissionResult::NeedApproval {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+        } => SubmissionResponsePlan::SendApprovalStatusAndSuppress(ApprovalStatusPayload {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+        }),
     }
 }
 
@@ -944,5 +1028,90 @@ mod tests {
             SubmissionParser::parse("/Restart"),
             Submission::Restart
         ));
+    }
+
+    #[test]
+    fn submission_auth_policy_only_user_input_consumes_manual_token() {
+        let input = SubmissionParser::parse("secret-token");
+        assert!(input.runs_inbound_hooks());
+        assert!(input.consumes_pending_manual_auth());
+        assert!(!input.cancels_pending_manual_auth());
+
+        let control = SubmissionParser::parse("/interrupt");
+        assert!(!control.runs_inbound_hooks());
+        assert!(!control.consumes_pending_manual_auth());
+        assert!(control.cancels_pending_manual_auth());
+
+        let approval = Submission::ApprovalResponse {
+            approved: true,
+            always: false,
+        };
+        assert!(approval.cancels_pending_manual_auth());
+    }
+
+    #[test]
+    fn response_plan_suppresses_silent_reply() {
+        let plan = plan_submission_response(SubmissionResult::response("<silent>"), |text| {
+            text == "<silent>"
+        });
+        assert!(matches!(plan, SubmissionResponsePlan::Suppress));
+    }
+
+    #[test]
+    fn response_plan_keeps_streamed_attachments_without_text() {
+        let attachment = MediaContent::new(vec![1, 2, 3], "image/png");
+        let plan = plan_submission_response(
+            SubmissionResult::Streamed(AgentResponsePayload::with_attachments(
+                "already streamed",
+                vec![attachment],
+            )),
+            |_| false,
+        );
+
+        match plan {
+            SubmissionResponsePlan::Respond(payload) => {
+                assert_eq!(payload.content, "");
+                assert_eq!(payload.attachments.len(), 1);
+            }
+            other => panic!("expected response plan, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn response_plan_shapes_error_interrupted_and_approval() {
+        let plan = plan_submission_response(SubmissionResult::error("bad"), |_| false);
+        match plan {
+            SubmissionResponsePlan::Respond(payload) => {
+                assert_eq!(payload.content, "Error: bad");
+            }
+            other => panic!("expected error response, got {:?}", other),
+        }
+
+        let plan = plan_submission_response(SubmissionResult::Interrupted, |_| false);
+        match plan {
+            SubmissionResponsePlan::Respond(payload) => {
+                assert_eq!(payload.content, "Interrupted.");
+            }
+            other => panic!("expected interrupted response, got {:?}", other),
+        }
+
+        let request_id = Uuid::new_v4();
+        let plan = plan_submission_response(
+            SubmissionResult::NeedApproval {
+                request_id,
+                tool_name: "shell".to_string(),
+                description: "run command".to_string(),
+                parameters: serde_json::json!({"cmd": "true"}),
+            },
+            |_| false,
+        );
+        match plan {
+            SubmissionResponsePlan::SendApprovalStatusAndSuppress(approval) => {
+                assert_eq!(approval.request_id, request_id);
+                assert_eq!(approval.tool_name, "shell");
+                assert_eq!(approval.parameters["cmd"], "true");
+            }
+            other => panic!("expected approval status plan, got {:?}", other),
+        }
     }
 }

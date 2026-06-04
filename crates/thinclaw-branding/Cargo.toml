@@ -1,0 +1,15 @@
+[package]
+name = "thinclaw-branding"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ratatui = "0.30.0"
+serde = { version = "1", features = ["derive"] }
+termimad = "0.34"
+thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
+toml = "0.8"
+tracing = "0.1"
+unicode-width = "0.2.2"

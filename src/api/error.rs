@@ -3,6 +3,8 @@
 //! Provides a framework-agnostic error enum that Tauri (or any other host)
 //! can convert into its own error representation.
 
+use thinclaw_gateway::web::api::{GatewayApiError, GatewayApiErrorKind};
+
 /// Unified error for all API functions.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -51,6 +53,31 @@ impl ApiError {
             Self::Serialization(_) => "serialization_error",
             Self::UuidParse(_) => "uuid_parse_error",
             Self::Internal(_) => "internal_error",
+        }
+    }
+}
+
+impl From<ApiError> for GatewayApiError {
+    fn from(error: ApiError) -> Self {
+        match error {
+            ApiError::InvalidInput(message) => {
+                Self::new(GatewayApiErrorKind::InvalidInput, message)
+            }
+            ApiError::SessionNotFound(message) => {
+                Self::new(GatewayApiErrorKind::SessionNotFound, message)
+            }
+            ApiError::Unavailable(message) => Self::new(GatewayApiErrorKind::Unavailable, message),
+            ApiError::FeatureDisabled(message) => {
+                Self::new(GatewayApiErrorKind::FeatureDisabled, message)
+            }
+            ApiError::Agent(error) => Self::new(GatewayApiErrorKind::Agent, error.to_string()),
+            ApiError::Serialization(error) => {
+                Self::new(GatewayApiErrorKind::Serialization, error.to_string())
+            }
+            ApiError::UuidParse(error) => {
+                Self::new(GatewayApiErrorKind::UuidParse, error.to_string())
+            }
+            ApiError::Internal(message) => Self::new(GatewayApiErrorKind::Internal, message),
         }
     }
 }

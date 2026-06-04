@@ -3,7 +3,6 @@
 //! Extracted from `agent_loop.rs` to isolate thread management (user input
 //! processing, undo/redo, approval, auth, persistence) from the core loop.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -14,9 +13,7 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::{ContextPressure, pressure_message, pressure_transition};
-use crate::agent::dispatcher::{
-    AgenticLoopResult, check_auth_required_content, parse_auth_result_content,
-};
+use crate::agent::dispatcher::AgenticLoopResult;
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
 use crate::agent::outcomes;
 use crate::agent::session::{
@@ -43,9 +40,15 @@ use crate::tools::execution_backend::interactive_chat_runtime_descriptor;
 use crate::tools::{ToolExecutionLane, ToolProfile, execution};
 use crate::workspace::paths;
 use thinclaw_agent::thread_ops::{
-    DIRECT_THREAD_ROLE_MAIN, ThreadInputAdmission, UndoRedoOutcome,
-    direct_conversation_metadata_updates, direct_thread_role_from_metadata,
+    PendingApprovalAdmission, PostCompactionFactAccumulator, ThreadInputAdmission,
+    ThreadOperationMessage, ThreadVisibilityDecision, UndoRedoAction, UndoRedoOutcome,
+    direct_conversation_candidate_is_primary, direct_conversation_metadata_updates,
     is_primary_direct_thread_metadata,
+};
+
+use thinclaw_agent::dispatcher_helpers::{
+    check_auth_required_json as check_auth_required_content,
+    parse_auth_result_json as parse_auth_result_content,
 };
 
 fn to_history_conversation_kind(
@@ -61,25 +64,6 @@ fn detect_user_correction_signal(role: &str, content: &str) -> u32 {
     thinclaw_agent::thread_ops::detect_user_correction_signal(role, content)
 }
 
-fn merge_post_compaction_facts(
-    facts: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-    source: &str,
-    candidates: Vec<String>,
-    max_total: usize,
-) {
-    for candidate in candidates {
-        if facts.len() >= max_total {
-            break;
-        }
-        let decorated = format!("{source}: {candidate}");
-        let key = decorated.trim().to_ascii_lowercase();
-        if !key.is_empty() && seen.insert(key) {
-            facts.push(decorated);
-        }
-    }
-}
-
 impl Agent {
     async fn collect_post_compaction_pinned_facts(
         &self,
@@ -91,8 +75,7 @@ impl Agent {
             return Vec::new();
         };
 
-        let mut facts = Vec::new();
-        let mut seen = HashSet::new();
+        let mut facts = PostCompactionFactAccumulator::new(MAX_PINNED_FACTS);
         let is_group = identity.is_some_and(|resolved| {
             matches!(
                 resolved.conversation_kind,
@@ -102,69 +85,48 @@ impl Agent {
 
         if !is_group && let Some(actor_id) = identity.map(|resolved| resolved.actor_id.as_str()) {
             if let Ok(doc) = workspace.read(&paths::actor_user(actor_id)).await {
-                let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
-                merge_post_compaction_facts(
-                    &mut facts,
-                    &mut seen,
+                let remaining = facts.remaining();
+                facts.extend_source(
                     "Actor USER",
                     extract_markdown_field_facts(&doc.content, remaining),
-                    MAX_PINNED_FACTS,
                 );
             }
             if let Ok(doc) = workspace.read(&paths::actor_profile(actor_id)).await {
-                let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
-                merge_post_compaction_facts(
-                    &mut facts,
-                    &mut seen,
+                let remaining = facts.remaining();
+                facts.extend_source(
                     "Actor profile",
                     extract_profile_facts(&doc.content, remaining),
-                    MAX_PINNED_FACTS,
                 );
             }
             if let Ok(doc) = workspace.read(&paths::actor_memory(actor_id)).await {
-                let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
-                merge_post_compaction_facts(
-                    &mut facts,
-                    &mut seen,
+                let remaining = facts.remaining();
+                facts.extend_source(
                     "Actor memory",
                     extract_pinned_facts_from_markdown(&doc.content, remaining),
-                    MAX_PINNED_FACTS,
                 );
             }
         }
 
         if let Ok(doc) = workspace.read(paths::USER).await {
-            let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
-            merge_post_compaction_facts(
-                &mut facts,
-                &mut seen,
+            let remaining = facts.remaining();
+            facts.extend_source(
                 "USER.md",
                 extract_markdown_field_facts(&doc.content, remaining),
-                MAX_PINNED_FACTS,
             );
         }
         if let Ok(doc) = workspace.read(paths::PROFILE).await {
-            let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
-            merge_post_compaction_facts(
-                &mut facts,
-                &mut seen,
-                "Profile",
-                extract_profile_facts(&doc.content, remaining),
-                MAX_PINNED_FACTS,
-            );
+            let remaining = facts.remaining();
+            facts.extend_source("Profile", extract_profile_facts(&doc.content, remaining));
         }
         if let Ok(doc) = workspace.read(paths::MEMORY).await {
-            let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
-            merge_post_compaction_facts(
-                &mut facts,
-                &mut seen,
+            let remaining = facts.remaining();
+            facts.extend_source(
                 "Memory",
                 extract_pinned_facts_from_markdown(&doc.content, remaining),
-                MAX_PINNED_FACTS,
             );
         }
 
-        facts
+        facts.into_facts()
     }
 
     async fn build_post_compaction_context_fragment(
@@ -267,7 +229,7 @@ impl Agent {
             return true;
         }
 
-        match store
+        let belongs_to_actor = match store
             .conversation_belongs_to_actor(
                 conversation_id,
                 &identity.principal_id,
@@ -275,20 +237,28 @@ impl Agent {
             )
             .await
         {
-            Ok(true) => true,
-            Ok(false) if identity.actor_id == identity.principal_id => store
-                .conversation_belongs_to_user(conversation_id, &identity.principal_id)
-                .await
-                .unwrap_or(false),
-            Ok(false) => false,
+            Ok(value) => value,
             Err(err) => {
                 tracing::warn!(
                     thread = %conversation_id,
                     error = %err,
                     "Failed to verify actor ownership while hydrating thread"
                 );
-                false
+                return false;
             }
+        };
+
+        match thinclaw_agent::thread_ops::thread_visibility_after_actor_membership(
+            &identity.principal_id,
+            &identity.actor_id,
+            belongs_to_actor,
+        ) {
+            ThreadVisibilityDecision::Visible => true,
+            ThreadVisibilityDecision::CheckPrincipalUser => store
+                .conversation_belongs_to_user(conversation_id, &identity.principal_id)
+                .await
+                .unwrap_or(false),
+            ThreadVisibilityDecision::Hidden => false,
         }
     }
 
@@ -429,9 +399,7 @@ impl Agent {
             let Ok(Some(metadata)) = store.get_conversation_metadata(summary.id).await else {
                 continue;
             };
-            if direct_thread_role_from_metadata(&metadata) == Some(DIRECT_THREAD_ROLE_MAIN)
-                || summary.thread_type.as_deref() == Some("assistant")
-            {
+            if direct_conversation_candidate_is_primary(&metadata, summary.thread_type.as_deref()) {
                 return Some(summary.id);
             }
         }
@@ -1700,36 +1668,28 @@ impl Agent {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
-        if !mgr.can_undo() {
-            return Ok(SubmissionResult::ok_with_message("Nothing to undo."));
-        }
-
         let mut sess = session.lock().await;
         let thread = sess
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        match thinclaw_agent::thread_ops::restore_thread_from_undo(thread, &mut mgr) {
-            UndoRedoOutcome::Restored {
-                turn_number,
-                remaining,
-            } => {
+        let outcome = thinclaw_agent::thread_ops::restore_thread_from_undo(thread, &mut mgr);
+        match &outcome {
+            UndoRedoOutcome::Restored { .. } => {
                 let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                 drop(mgr);
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
                 self.record_context_pressure_state(thread_id, usage_percent)
                     .await;
-                Ok(SubmissionResult::ok_with_message(format!(
-                    "Undone to turn {}. {} undo(s) remaining.",
-                    turn_number, remaining
-                )))
             }
-            UndoRedoOutcome::NothingAvailable => {
-                Ok(SubmissionResult::ok_with_message("Nothing to undo."))
-            }
-            UndoRedoOutcome::Failed => Ok(SubmissionResult::error("Undo failed.")),
+            UndoRedoOutcome::NothingAvailable | UndoRedoOutcome::Failed => {}
+        }
+
+        match thinclaw_agent::thread_ops::undo_redo_message(UndoRedoAction::Undo, &outcome) {
+            ThreadOperationMessage::Ok(message) => Ok(SubmissionResult::ok_with_message(message)),
+            ThreadOperationMessage::Error(message) => Ok(SubmissionResult::error(message)),
         }
     }
 
@@ -1741,33 +1701,28 @@ impl Agent {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
-        if !mgr.can_redo() {
-            return Ok(SubmissionResult::ok_with_message("Nothing to redo."));
-        }
-
         let mut sess = session.lock().await;
         let thread = sess
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        match thinclaw_agent::thread_ops::restore_thread_from_redo(thread, &mut mgr) {
-            UndoRedoOutcome::Restored { turn_number, .. } => {
+        let outcome = thinclaw_agent::thread_ops::restore_thread_from_redo(thread, &mut mgr);
+        match &outcome {
+            UndoRedoOutcome::Restored { .. } => {
                 let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                 drop(mgr);
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
                 self.record_context_pressure_state(thread_id, usage_percent)
                     .await;
-                Ok(SubmissionResult::ok_with_message(format!(
-                    "Redone to turn {}.",
-                    turn_number
-                )))
             }
-            UndoRedoOutcome::NothingAvailable => {
-                Ok(SubmissionResult::ok_with_message("Nothing to redo."))
-            }
-            UndoRedoOutcome::Failed => Ok(SubmissionResult::error("Redo failed.")),
+            UndoRedoOutcome::NothingAvailable | UndoRedoOutcome::Failed => {}
+        }
+
+        match thinclaw_agent::thread_ops::undo_redo_message(UndoRedoAction::Redo, &outcome) {
+            ThreadOperationMessage::Ok(message) => Ok(SubmissionResult::ok_with_message(message)),
+            ThreadOperationMessage::Error(message) => Ok(SubmissionResult::error(message)),
         }
     }
 
@@ -1975,7 +1930,6 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get pending approval for this thread
         let pending = {
             let mut sess = session.lock().await;
             let thread = sess
@@ -1983,41 +1937,23 @@ impl Agent {
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-            if thread.state != ThreadState::AwaitingApproval {
-                return Ok(SubmissionResult::error("No pending approval request."));
-            }
-
-            thread.take_pending_approval()
-        };
-
-        let pending = match pending {
-            Some(p) => p,
-            None => return Ok(SubmissionResult::error("No pending approval request.")),
-        };
-
-        // Verify request ID if provided
-        if let Some(req_id) = request_id
-            && req_id != pending.request_id
-        {
-            // Put it back and return error
-            let thread_snapshot = {
-                let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thinclaw_agent::thread_ops::await_thread_approval(thread, pending);
-                    Some(thread.clone())
-                } else {
-                    None
+            match thinclaw_agent::thread_ops::take_pending_approval_matching(thread, request_id) {
+                PendingApprovalAdmission::Ready(pending) => pending,
+                PendingApprovalAdmission::Missing => {
+                    return Ok(SubmissionResult::error(
+                        thinclaw_agent::thread_ops::pending_approval_missing_message(),
+                    ));
                 }
-            };
-            if let Some(thread_snapshot) = thread_snapshot {
-                let _ = thread_snapshot;
-                self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                    .await;
+                PendingApprovalAdmission::RequestIdMismatch => {
+                    drop(sess);
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                        .await;
+                    return Ok(SubmissionResult::error(
+                        thinclaw_agent::thread_ops::pending_approval_request_mismatch_message(),
+                    ));
+                }
             }
-            return Ok(SubmissionResult::error(
-                "Request ID mismatch. Use the correct request ID.",
-            ));
-        }
+        };
 
         if approved {
             // If always, add to auto-approved set
@@ -2035,7 +1971,7 @@ impl Agent {
             let processing_snapshot = {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.state = ThreadState::Processing;
+                    thinclaw_agent::thread_ops::mark_pending_approval_approved(thread);
                     Some(thread.clone())
                 } else {
                     None
@@ -2816,13 +2752,13 @@ impl Agent {
                     instructions: Some(instructions.clone()),
                     auth_url: auth_data.auth_url,
                     setup_url: auth_data.setup_url,
-                    auth_mode: auth_data.auth_mode.unwrap_or_else(|| match auth_mode {
-                        PendingAuthMode::ManualToken => "manual_token".to_string(),
-                        PendingAuthMode::ExternalOAuth => "oauth".to_string(),
-                    }),
-                    auth_status: auth_data
-                        .auth_status
-                        .unwrap_or_else(|| "awaiting_token".to_string()),
+                    auth_mode: thinclaw_agent::thread_ops::auth_required_status_mode(
+                        auth_data.auth_mode,
+                        auth_mode,
+                    ),
+                    auth_status: thinclaw_agent::thread_ops::auth_required_status(
+                        auth_data.auth_status,
+                    ),
                     shared_auth_provider: auth_data.shared_auth_provider,
                     missing_scopes: auth_data.missing_scopes,
                     thread_id: Some(thread_id.to_string()),
@@ -2850,7 +2786,7 @@ impl Agent {
         let cleared_snapshot = {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.pending_auth = None;
+                thinclaw_agent::thread_ops::clear_pending_auth(thread);
                 Some(thread.clone())
             } else {
                 None
@@ -2877,15 +2813,9 @@ impl Agent {
                 // Auto-activate so tools are available immediately after auth
                 match ext_mgr.activate(&pending.extension_name).await {
                     Ok(activate_result) => {
-                        let tool_count = activate_result.tools_loaded.len();
-                        let tool_list = if activate_result.tools_loaded.is_empty() {
-                            String::new()
-                        } else {
-                            format!("\n\nTools: {}", activate_result.tools_loaded.join(", "))
-                        };
-                        let msg = format!(
-                            "{} authenticated and activated ({} tools loaded).{}",
-                            pending.extension_name, tool_count, tool_list
+                        let msg = thinclaw_agent::thread_ops::auth_activation_success_message(
+                            &pending.extension_name,
+                            &activate_result.tools_loaded,
                         );
                         let _ = self
                             .channels
@@ -2912,10 +2842,9 @@ impl Agent {
                             pending.extension_name,
                             e
                         );
-                        let msg = format!(
-                            "{} authenticated successfully, but activation failed: {}. \
-                             Try activating manually.",
-                            pending.extension_name, e
+                        let msg = thinclaw_agent::thread_ops::auth_activation_failed_message(
+                            &pending.extension_name,
+                            &e.to_string(),
                         );
                         let _ = self
                             .channels
@@ -2943,15 +2872,13 @@ impl Agent {
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(pending.extension_name.clone(), pending.auth_mode);
+                        thinclaw_agent::thread_ops::reenter_pending_auth(thread, pending);
                     }
                 }
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
-                let msg = result
-                    .instructions
-                    .clone()
-                    .unwrap_or_else(|| "Invalid token. Please try again.".to_string());
+                let msg =
+                    thinclaw_agent::thread_ops::invalid_auth_token_message(result.instructions);
                 // Re-emit AuthRequired so web UI re-shows the card
                 let _ = self
                     .channels
@@ -2974,9 +2901,9 @@ impl Agent {
                 Ok(Some(msg))
             }
             Err(e) => {
-                let msg = format!(
-                    "Authentication failed for {}: {}",
-                    pending.extension_name, e
+                let msg = thinclaw_agent::thread_ops::auth_failed_message(
+                    &pending.extension_name,
+                    &e.to_string(),
                 );
                 let _ = self
                     .channels

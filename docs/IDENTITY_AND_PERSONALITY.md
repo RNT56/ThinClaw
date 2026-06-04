@@ -53,5 +53,4 @@ Available built-in overlays include the core packs plus lightweight tone presets
 
 - `agent.persona_seed` is still read for backward compatibility.
 - `AGENT_PERSONA_SEED` still works, but `AGENT_PERSONALITY_PACK` is the preferred environment override.
-- Legacy `assets/persona_seeds/*.md` files are migration stubs; new code should use `assets/personality_packs/*.md`.
 - Legacy workspace `SOUL.md` files are migrated to the canonical home soul or archived as `SOUL.legacy.md` plus `SOUL.local.md` when the workspace is agent-specific.

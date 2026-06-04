@@ -7,7 +7,8 @@ use std::time::Duration;
 pub use thinclaw_agent::scheduler::WorkerMessage;
 use thinclaw_agent::scheduler::{
     SUBTASK_CLEANUP_DELAYS_MS, SUBTASK_CLEANUP_TIMEOUT_SECS, ScheduledJob, ScheduledSubtask,
-    SchedulerCapacity, reserved_job_limit, routine_job_metadata,
+    SchedulerAdmissionKind, SchedulerAdmissionOutcome, SubtaskCleanupDecision,
+    routine_job_metadata, scheduler_admission, subtask_cleanup_decision,
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
@@ -255,24 +256,31 @@ impl Scheduler {
         {
             let mut jobs = self.jobs.write().await;
 
-            if jobs.contains_key(&job_id) {
-                return Ok(());
-            }
-
-            // Allow one overflow slot for reserved system tasks.
-            let reserved_limit = reserved_job_limit(self.config.max_parallel_jobs);
-            let capacity = SchedulerCapacity::new(jobs.len(), reserved_limit);
-            if !capacity.allows_schedule() {
-                return Err(JobError::MaxJobsExceeded {
-                    max: capacity.limit,
-                });
+            let admission = scheduler_admission(
+                jobs.contains_key(&job_id),
+                jobs.len(),
+                self.config.max_parallel_jobs,
+                SchedulerAdmissionKind::ReservedSystem,
+            );
+            match admission {
+                SchedulerAdmissionOutcome::AlreadyScheduled => return Ok(()),
+                SchedulerAdmissionOutcome::Accepted { .. } => {}
+                SchedulerAdmissionOutcome::AtCapacity { capacity } => {
+                    return Err(JobError::MaxJobsExceeded {
+                        max: capacity.limit,
+                    });
+                }
             }
 
             self.context_manager
                 .update_context(job_id, |ctx| {
                     ctx.transition_to(
                         JobState::InProgress,
-                        Some("Scheduled for execution (reserved slot)".to_string()),
+                        Some(
+                            SchedulerAdmissionKind::ReservedSystem
+                                .transition_reason()
+                                .to_string(),
+                        ),
                     )
                 })
                 .await?
@@ -349,22 +357,31 @@ impl Scheduler {
         {
             let mut jobs = self.jobs.write().await;
 
-            if jobs.contains_key(&job_id) {
-                return Ok(());
-            }
-
-            let capacity = SchedulerCapacity::new(jobs.len(), self.config.max_parallel_jobs);
-            if !capacity.allows_schedule() {
-                return Err(JobError::MaxJobsExceeded {
-                    max: capacity.limit,
-                });
+            let admission = scheduler_admission(
+                jobs.contains_key(&job_id),
+                jobs.len(),
+                self.config.max_parallel_jobs,
+                SchedulerAdmissionKind::Standard,
+            );
+            match admission {
+                SchedulerAdmissionOutcome::AlreadyScheduled => return Ok(()),
+                SchedulerAdmissionOutcome::Accepted { .. } => {}
+                SchedulerAdmissionOutcome::AtCapacity { capacity } => {
+                    return Err(JobError::MaxJobsExceeded {
+                        max: capacity.limit,
+                    });
+                }
             }
 
             self.context_manager
                 .update_context(job_id, |ctx| {
                     ctx.transition_to(
                         JobState::InProgress,
-                        Some("Scheduled for execution".to_string()),
+                        Some(
+                            SchedulerAdmissionKind::Standard
+                                .transition_reason()
+                                .to_string(),
+                        ),
                     )
                 })
                 .await?
@@ -437,15 +454,20 @@ impl Scheduler {
         {
             let mut jobs = self.jobs.write().await;
 
-            if jobs.contains_key(&job_id) {
-                return Ok(());
-            }
-
-            let capacity = SchedulerCapacity::new(jobs.len(), self.config.max_parallel_jobs);
-            if !capacity.allows_schedule() {
-                return Err(JobError::MaxJobsExceeded {
-                    max: capacity.limit,
-                });
+            let admission = scheduler_admission(
+                jobs.contains_key(&job_id),
+                jobs.len(),
+                self.config.max_parallel_jobs,
+                SchedulerAdmissionKind::Standard,
+            );
+            match admission {
+                SchedulerAdmissionOutcome::AlreadyScheduled => return Ok(()),
+                SchedulerAdmissionOutcome::Accepted { .. } => {}
+                SchedulerAdmissionOutcome::AtCapacity { capacity } => {
+                    return Err(JobError::MaxJobsExceeded {
+                        max: capacity.limit,
+                    });
+                }
             }
 
             // Transition job to in_progress
@@ -453,7 +475,11 @@ impl Scheduler {
                 .update_context(job_id, |ctx| {
                     ctx.transition_to(
                         JobState::InProgress,
-                        Some("Scheduled for execution".to_string()),
+                        Some(
+                            SchedulerAdmissionKind::Standard
+                                .transition_reason()
+                                .to_string(),
+                        ),
                     )
                 })
                 .await?
@@ -608,20 +634,23 @@ impl Scheduler {
                 tokio::time::Instant::now() + Duration::from_secs(SUBTASK_CLEANUP_TIMEOUT_SECS);
             for delay_ms in SUBTASK_CLEANUP_DELAYS_MS {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                if tokio::time::Instant::now() >= deadline {
-                    tracing::warn!("Subtask {} cleanup timed out, force-removing", task_id);
-                    subtasks_cleanup.write().await.remove(&task_id);
-                    break;
-                }
                 let finished = {
                     let subtasks_read = subtasks_cleanup.read().await;
                     subtasks_read
                         .get(&task_id)
                         .is_some_and(ScheduledSubtask::is_finished)
                 };
-                if finished {
-                    subtasks_cleanup.write().await.remove(&task_id);
-                    break;
+                match subtask_cleanup_decision(tokio::time::Instant::now() >= deadline, finished) {
+                    SubtaskCleanupDecision::KeepWaiting => {}
+                    SubtaskCleanupDecision::RemoveFinished => {
+                        subtasks_cleanup.write().await.remove(&task_id);
+                        break;
+                    }
+                    SubtaskCleanupDecision::ForceRemoveTimedOut => {
+                        tracing::warn!("Subtask {} cleanup timed out, force-removing", task_id);
+                        subtasks_cleanup.write().await.remove(&task_id);
+                        break;
+                    }
                 }
             }
         });

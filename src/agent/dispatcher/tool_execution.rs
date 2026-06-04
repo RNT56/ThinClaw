@@ -453,7 +453,12 @@ impl Agent {
                             )
                             .await;
                     }
-                    if let Ok(ref output) = tool_result {
+                    if let Ok(ref output) = tool_result
+                        && should_merge_tool_output_attachments(
+                            true,
+                            output.outbound_attachments.len(),
+                        )
+                    {
                         crate::agent::outbound_media::dedupe_extend(
                             generated_attachments,
                             output.outbound_attachments.clone(),
@@ -908,9 +913,7 @@ impl Agent {
                         advisor_state.real_tool_result_count += 1;
                         match &tool_result {
                             Ok(output) => {
-                                if output.content.contains("\"success\":false")
-                                    || output.content.contains("\"status\":\"error\"")
-                                {
+                                if tool_result_indicates_failure(&output.content) {
                                     advisor_state.last_failure = Some(AdvisorFailureContext {
                                         tool_name: tc.name.clone(),
                                         message: truncate_preview(&output.content, 240),

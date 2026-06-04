@@ -100,20 +100,27 @@ impl LearningOrchestrator {
             .map_err(|e| e.to_string())?;
         outcome.candidate_id = Some(candidate_id);
 
-        if self.safe_mode_tripped(&settings, &event.user_id).await {
-            outcome
-                .notes
-                .push("safe mode is active; candidate held for review".to_string());
-            return Ok(outcome);
-        }
+        let safe_mode_active = self.safe_mode_tripped(&settings, &event.user_id).await;
+        let route = route_learning_candidate(
+            class,
+            risk,
+            LearningRoutePolicy {
+                learning_enabled: settings.enabled,
+                safe_mode_active,
+                auto_apply_allowed: auto_apply_allowed_for_class(
+                    class,
+                    &settings.auto_apply_classes,
+                    settings.prompt_mutation.enabled,
+                ),
+                code_auto_apply_without_review: settings.code_proposals.auto_apply_without_review,
+            },
+        );
 
-        if risk.rank() >= RiskTier::High.rank() || class == ImprovementClass::Code {
+        if let LearningRouteAction::CodeProposal { auto_approve } = route {
             match self.create_code_proposal(event, &candidate).await {
                 Ok(proposal_id) => {
                     outcome.code_proposal_id = Some(proposal_id);
-                    if class == ImprovementClass::Code
-                        && settings.code_proposals.auto_apply_without_review
-                    {
+                    if auto_approve {
                         match self
                             .approve_code_proposal(
                                 &event.user_id,
@@ -152,24 +159,35 @@ impl LearningOrchestrator {
             return Ok(outcome);
         }
 
-        let auto_apply_allowed = settings
-            .auto_apply_classes
-            .iter()
-            .any(|entry| entry.eq_ignore_ascii_case(class.as_str()));
-        if auto_apply_allowed
-            && self
-                .auto_apply_candidate(&settings, class, &candidate)
-                .await
-                .unwrap_or(false)
-        {
-            outcome.auto_applied = true;
-            outcome
+        match route {
+            LearningRouteAction::AutoApply => {
+                if self
+                    .auto_apply_candidate(&settings, class, &candidate)
+                    .await
+                    .unwrap_or(false)
+                {
+                    outcome.auto_applied = true;
+                    outcome
+                        .notes
+                        .push("candidate auto-applied in Tier A".to_string());
+                } else {
+                    outcome
+                        .notes
+                        .push("candidate queued for manual review".to_string());
+                }
+            }
+            LearningRouteAction::ManualReview => {
+                outcome
+                    .notes
+                    .push("candidate queued for manual review".to_string());
+            }
+            LearningRouteAction::PersistedOnly => outcome
                 .notes
-                .push("candidate auto-applied in Tier A".to_string());
-        } else {
-            outcome
+                .push("learning disabled; event persisted only".to_string()),
+            LearningRouteAction::HeldForReview => outcome
                 .notes
-                .push("candidate queued for manual review".to_string());
+                .push("safe mode is active; candidate held for review".to_string()),
+            LearningRouteAction::CodeProposal { .. } => {}
         }
 
         Ok(outcome)
@@ -181,8 +199,8 @@ impl LearningOrchestrator {
         candidate: &DbLearningCandidate,
     ) -> Result<LearningOutcome, String> {
         let settings = self.load_settings_for_user(&candidate.user_id).await;
-        let class = ImprovementClass::from_str(&candidate.candidate_type);
-        let risk = RiskTier::from_str(&candidate.risk_tier);
+        let class = ImprovementClass::parse(&candidate.candidate_type);
+        let risk = RiskTier::parse(&candidate.risk_tier);
         let event_id = candidate.learning_event_id.unwrap_or(candidate.id);
         let mut outcome = LearningOutcome {
             trigger: trigger.to_string(),
@@ -201,20 +219,27 @@ impl LearningOrchestrator {
             return Ok(outcome);
         }
 
-        if self.safe_mode_tripped(&settings, &candidate.user_id).await {
-            outcome
-                .notes
-                .push("safe mode is active; outcome candidate held for review".to_string());
-            return Ok(outcome);
-        }
+        let safe_mode_active = self.safe_mode_tripped(&settings, &candidate.user_id).await;
+        let route = route_learning_candidate(
+            class,
+            risk,
+            LearningRoutePolicy {
+                learning_enabled: settings.enabled,
+                safe_mode_active,
+                auto_apply_allowed: auto_apply_allowed_for_class(
+                    class,
+                    &settings.auto_apply_classes,
+                    settings.prompt_mutation.enabled,
+                ),
+                code_auto_apply_without_review: settings.code_proposals.auto_apply_without_review,
+            },
+        );
 
-        if risk.rank() >= RiskTier::High.rank() || class == ImprovementClass::Code {
+        if let LearningRouteAction::CodeProposal { auto_approve } = route {
             match self.create_code_proposal_from_candidate(candidate).await {
                 Ok(proposal_id) => {
                     outcome.code_proposal_id = Some(proposal_id);
-                    if class == ImprovementClass::Code
-                        && settings.code_proposals.auto_apply_without_review
-                    {
+                    if auto_approve {
                         match self
                             .approve_code_proposal(
                                 &candidate.user_id,
@@ -253,24 +278,33 @@ impl LearningOrchestrator {
             return Ok(outcome);
         }
 
-        let auto_apply_allowed = settings
-            .auto_apply_classes
-            .iter()
-            .any(|entry| entry.eq_ignore_ascii_case(class.as_str()));
-        if auto_apply_allowed
-            && self
-                .auto_apply_candidate(&settings, class, candidate)
-                .await
-                .unwrap_or(false)
-        {
-            outcome.auto_applied = true;
-            outcome
+        match route {
+            LearningRouteAction::AutoApply => {
+                if self
+                    .auto_apply_candidate(&settings, class, candidate)
+                    .await
+                    .unwrap_or(false)
+                {
+                    outcome.auto_applied = true;
+                    outcome
+                        .notes
+                        .push("outcome candidate auto-applied in Tier A".to_string());
+                } else {
+                    outcome
+                        .notes
+                        .push("outcome candidate queued for manual review".to_string());
+                }
+            }
+            LearningRouteAction::ManualReview => outcome
                 .notes
-                .push("outcome candidate auto-applied in Tier A".to_string());
-        } else {
-            outcome
+                .push("outcome candidate queued for manual review".to_string()),
+            LearningRouteAction::PersistedOnly => outcome
                 .notes
-                .push("outcome candidate queued for manual review".to_string());
+                .push("learning disabled; outcome candidate persisted only".to_string()),
+            LearningRouteAction::HeldForReview => outcome
+                .notes
+                .push("safe mode is active; outcome candidate held for review".to_string()),
+            LearningRouteAction::CodeProposal { .. } => {}
         }
 
         Ok(outcome)
@@ -317,69 +351,14 @@ impl LearningOrchestrator {
         &self,
         event: &DbLearningEvent,
     ) -> (u32, String, ImprovementClass, RiskTier, f32) {
-        let success = event
-            .payload
-            .get("success")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let wasted_tool_calls = event
-            .payload
-            .get("wasted_tool_calls")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let repeated_failures = event
-            .payload
-            .get("repeated_failures")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let correction_count = event
-            .payload
-            .get("correction_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let safety_incident = event
-            .payload
-            .get("safety_incident")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let class = classify_event(event);
-        let mut risk = match class {
-            ImprovementClass::Code => RiskTier::Critical,
-            ImprovementClass::Prompt => RiskTier::Medium,
-            ImprovementClass::Routine => RiskTier::Medium,
-            ImprovementClass::Skill => RiskTier::Low,
-            ImprovementClass::Memory => RiskTier::Low,
-            ImprovementClass::Unknown => RiskTier::Medium,
-        };
-        if safety_incident {
-            risk = RiskTier::Critical;
-        }
-
-        let mut score: i32 = if success { 82 } else { 45 };
-        score -= (wasted_tool_calls as i32) * 4;
-        score -= (repeated_failures as i32) * 7;
-        score -= (correction_count as i32) * 5;
-        if safety_incident {
-            score -= 35;
-        }
-        score = score.clamp(0, 100);
-
-        let confidence = ((score as f32 / 100.0)
-            + if correction_count > 0 { 0.15 } else { 0.0 }
-            + if repeated_failures > 0 { 0.1 } else { 0.0 })
-        .clamp(0.0, 1.0);
-
-        let status = if score >= 70 {
-            "accepted"
-        } else if score >= 45 {
-            "review"
-        } else {
-            "poor"
-        }
-        .to_string();
-
-        (score as u32, status, class, risk, confidence)
+        let evaluation = evaluate_learning_event(&event.event_type, &event.payload);
+        (
+            evaluation.quality_score,
+            evaluation.evaluator_status,
+            evaluation.class,
+            evaluation.risk_tier,
+            evaluation.confidence,
+        )
     }
 
     pub(in crate::agent::learning) async fn safe_mode_tripped(
@@ -387,10 +366,6 @@ impl LearningOrchestrator {
         settings: &LearningSettings,
         user_id: &str,
     ) -> bool {
-        if !settings.safe_mode.enabled {
-            return false;
-        }
-
         let feedback = match self
             .store
             .list_learning_feedback(user_id, None, None, 100)
@@ -406,33 +381,29 @@ impl LearningOrchestrator {
             .await
             .unwrap_or_default();
 
-        let sample = feedback.len().max(rollbacks.len()) as u32;
-        if sample < settings.safe_mode.thresholds.min_samples {
-            return false;
-        }
-
         let negative_feedback = feedback
             .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.verdict.to_ascii_lowercase().as_str(),
-                    "harmful" | "revert" | "dont_learn" | "reject"
-                )
-            })
-            .count() as f64;
-
-        let feedback_ratio = negative_feedback / sample as f64;
-        let rollback_ratio = rollbacks.len() as f64 / sample as f64;
+            .filter(|entry| is_negative_learning_feedback_verdict(&entry.verdict))
+            .count();
         let outcome_stats = self
             .store
             .outcome_summary_stats(user_id)
             .await
             .unwrap_or_default();
-        let outcome_ratio = outcome_stats.negative_ratio_last_7d;
 
-        feedback_ratio >= settings.safe_mode.thresholds.negative_feedback_ratio
-            || rollback_ratio >= settings.safe_mode.thresholds.rollback_ratio
-            || (outcome_stats.evaluated_last_7d >= settings.safe_mode.thresholds.min_samples as u64
-                && outcome_ratio >= settings.safe_mode.thresholds.negative_feedback_ratio)
+        safe_mode_should_trip(SafeModeTripInput {
+            enabled: settings.safe_mode.enabled,
+            min_samples: settings.safe_mode.thresholds.min_samples,
+            negative_feedback_ratio_threshold: settings
+                .safe_mode
+                .thresholds
+                .negative_feedback_ratio,
+            rollback_ratio_threshold: settings.safe_mode.thresholds.rollback_ratio,
+            feedback_count: feedback.len(),
+            negative_feedback_count: negative_feedback,
+            rollback_count: rollbacks.len(),
+            outcome_evaluated_last_7d: outcome_stats.evaluated_last_7d,
+            outcome_negative_ratio_last_7d: outcome_stats.negative_ratio_last_7d,
+        })
     }
 }

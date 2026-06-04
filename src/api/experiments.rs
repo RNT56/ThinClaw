@@ -1,18 +1,18 @@
 //! Experiments API — optional research automation with local and remote runners.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use tokio::time::{Duration as TokioDuration, interval};
 use uuid::Uuid;
 
 use crate::agent::env::{
-    AgentAction, EnvRunner, SkillBenchCase, SkillBenchEnv, TerminalBenchCase, TerminalBenchEnv,
-    Trajectory,
+    AgentAction, AgentEnvBenchmarkConfig, EnvRunner, SkillBenchEnv, TerminalBenchEnv,
+    agent_env_benchmark_config, average_trajectory_score, render_trajectory_log,
+    trajectory_summary,
 };
 use crate::agent::run_artifact::{digest_json, digest_text};
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
@@ -21,17 +21,50 @@ use crate::api::{ApiError, ApiResult};
 use crate::db::Database;
 use crate::experiments::adapters::{self, RemoteLaunchAction, RunnerLaunchOutcome};
 use crate::experiments::{
-    ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign,
-    ExperimentCampaignQueueState, ExperimentCampaignStatus, ExperimentComparisonPolicy,
-    ExperimentGpuRequirement, ExperimentLease, ExperimentLeaseAuthentication,
-    ExperimentLeaseStatus, ExperimentMetricDefinition, ExperimentModelUsageRecord,
-    ExperimentOpportunity, ExperimentPreset, ExperimentProject, ExperimentProjectStatus,
-    ExperimentRunnerArtifactUpload, ExperimentRunnerBackend, ExperimentRunnerCompletion,
-    ExperimentRunnerJob, ExperimentRunnerProfile, ExperimentRunnerStatus, ExperimentStopPolicy,
-    ExperimentTarget, ExperimentTargetKind, ExperimentTargetLink, ExperimentTrial,
-    ExperimentTrialStatus, compare_metrics, extract_metrics, hash_lease_token,
+    CampaignStatusDecisionInput, ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign,
+    ExperimentCampaignQueueState, ExperimentCampaignStatus, ExperimentLease,
+    ExperimentLeaseAuthentication, ExperimentLeaseStatus, ExperimentPreset, ExperimentProject,
+    ExperimentProjectStatus, ExperimentRunnerArtifactUpload, ExperimentRunnerBackend,
+    ExperimentRunnerCompletion, ExperimentRunnerJob, ExperimentRunnerProfile,
+    ExperimentRunnerStatus, ExperimentTarget, ExperimentTargetKind, ExperimentTargetLink,
+    ExperimentTrial, ExperimentTrialStatus, LlmCostAttribution, MutatorResult, PlannerProposal,
+    ReviewerDecision, campaign_gateway_url, campaign_status_message, compare_metrics,
+    default_strategy_prompt, derive_opportunities, derive_outcome_opportunities,
+    enforce_mutable_paths as enforce_mutable_paths_policy,
+    ensure_unique_target_signature as ensure_unique_target_signature_policy, env_pairs_from_json,
+    experiment_base_branch_unavailable_message, experiment_campaign_cancelled_by_operator_message,
+    experiment_campaign_cancelled_message, experiment_campaign_has_no_accepted_commit_message,
+    experiment_campaign_has_no_trial_to_reissue_message,
+    experiment_campaign_has_no_worktree_message,
+    experiment_campaign_missing_experiment_branch_field_message,
+    experiment_campaign_missing_experiment_branch_message,
+    experiment_campaign_missing_worktree_path_field_message,
+    experiment_campaign_missing_worktree_path_message, experiment_campaign_not_found_message,
+    experiment_campaign_paused_by_operator_message, experiment_campaign_paused_message,
+    experiment_git_remote_unavailable_message, experiment_lease_expired_message,
+    experiment_lease_not_found_message, experiment_lease_reissue_remote_only_message,
+    experiment_lease_revoked_action_message, experiment_lease_revoked_message,
+    experiment_no_candidate_changes_message, experiment_opportunity_not_found_message,
+    experiment_primary_metric_not_found_message, experiment_project_missing_mutable_paths_message,
+    experiment_project_not_found_message, experiment_project_run_command_empty_message,
+    experiment_project_workdir_escapes_campaign_worktree_message,
+    experiment_project_workdir_missing_message,
+    experiment_project_workdir_outside_workspace_message, experiment_promotion_pr_body,
+    experiment_remote_trial_reissue_in_flight_only_message, experiment_runner_not_found_message,
+    experiment_runner_profile_id_required_message, experiment_target_id_required_message,
+    experiment_target_not_found_message, experiment_trial_not_found_message,
+    experiment_workspace_not_git_repository_message, experiment_workspace_path_missing_message,
+    experiment_workspace_path_missing_with_error_message, experiments_feature_disabled_message,
+    experiments_worktree_path, extract_metrics, filtered_changed_files, hash_lease_token,
+    invalid_experiment_lease_token_message, is_stale_lease as is_stale_lease_policy,
+    lease_runner_trial_status, merge_json, metadata_string_field, next_campaign_status,
+    normalize_trial_completion, parse_research_json_response, parse_secret_reference,
+    ready_project_status as ready_project_status_policy, recent_trial_context,
+    research_subagent_executor_unavailable_message, runner_cost_breakdown, short_id,
+    sort_experiment_opportunities, summarize_llm_usage, truncate_for_prompt,
+    validate_lease_completion_status, validate_project_workdir_fragment,
 };
-use crate::history::{OutcomeContract, OutcomeContractQuery};
+use crate::history::OutcomeContractQuery;
 use crate::llm::usage_tracking::{
     USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY, USAGE_TRACKING_EXPERIMENT_ROLE_KEY,
     USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY, USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY,
@@ -43,6 +76,8 @@ use crate::tools::execution_backend::{
     LocalHostExecutionBackend, ScriptExecutionRequest, experiment_runner_runtime_descriptor,
     subagent_executor_runtime_descriptor,
 };
+
+pub use thinclaw_gateway::web::experiments::*;
 
 const DEFAULT_REMOTE_LEASE_MINUTES: i64 = 60;
 const DEFAULT_EXPERIMENT_CONTROLLER_TICK_SECS: u64 = 30;
@@ -105,50 +140,6 @@ const RESEARCH_MUTATOR_TOOL_DENYLIST: &[&str] = &["canvas", "homeassistant"];
 static RESEARCH_SUBAGENT_EXECUTOR: OnceLock<Arc<SubagentExecutor>> = OnceLock::new();
 static RESEARCH_SECRETS_STORE: OnceLock<Arc<dyn SecretsStore + Send + Sync>> = OnceLock::new();
 
-#[derive(Clone)]
-struct OpportunityAggregate {
-    provider: String,
-    model: String,
-    route_key: Option<String>,
-    logical_role: Option<String>,
-    kind: ExperimentTargetKind,
-    class: UsageClass,
-    call_count: u32,
-    error_count: u32,
-    latency_sum_ms: u64,
-    cost_sum_usd: f64,
-    first_seen: DateTime<Utc>,
-    last_seen: DateTime<Utc>,
-    linked_target_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct PlannerProposal {
-    hypothesis: String,
-    #[serde(default)]
-    target_ids: Vec<String>,
-    #[serde(default)]
-    allowed_paths: Vec<String>,
-    #[serde(default)]
-    expected_metric_direction: Option<String>,
-    mutation_brief: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct MutatorResult {
-    #[serde(default)]
-    changed_paths: Vec<String>,
-    mutation_summary: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ReviewerDecision {
-    approved: bool,
-    scope_ok: bool,
-    benchmark_ready: bool,
-    reason: String,
-}
-
 #[derive(Debug, Clone)]
 struct ResearchSubagentOutput<T> {
     value: T,
@@ -198,266 +189,6 @@ impl CandidateGenerationError {
             run_artifacts,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentProjectListResponse {
-    pub projects: Vec<ExperimentProject>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentRunnerListResponse {
-    pub runners: Vec<ExperimentRunnerProfile>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentCampaignListResponse {
-    pub campaigns: Vec<ExperimentCampaign>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentTrialListResponse {
-    pub trials: Vec<ExperimentTrial>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentArtifactListResponse {
-    pub artifacts: Vec<ExperimentArtifactRef>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentTargetListResponse {
-    pub targets: Vec<ExperimentTarget>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentModelUsageListResponse {
-    pub usage: Vec<ExperimentModelUsageRecord>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentOpportunityListResponse {
-    pub opportunities: Vec<ExperimentOpportunity>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExperimentGpuCloudProviderInfo {
-    pub slug: String,
-    pub display_name: String,
-    pub backend: ExperimentRunnerBackend,
-    pub description: String,
-    pub signup_url: String,
-    pub docs_url: String,
-    pub secret_name: String,
-    #[serde(default)]
-    pub connected: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_hint: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentGpuCloudProviderListResponse {
-    pub providers: Vec<ExperimentGpuCloudProviderInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExperimentLaunchDetails {
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bootstrap_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_template: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_job_id: Option<String>,
-    #[serde(default)]
-    pub provider_job_metadata: serde_json::Value,
-    #[serde(default)]
-    pub auto_launched: bool,
-    #[serde(default)]
-    pub requires_operator_action: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentRunnerValidationResponse {
-    pub runner: ExperimentRunnerProfile,
-    pub valid: bool,
-    pub readiness_class: crate::experiments::ExperimentRunnerReadinessClass,
-    pub launch_eligible: bool,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ExperimentCampaignActionResponse {
-    pub campaign: ExperimentCampaign,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trial: Option<ExperimentTrial>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease: Option<ExperimentLeaseAuthentication>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub launch: Option<ExperimentLaunchDetails>,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExperimentLeaseJobResponse {
-    pub job: ExperimentRunnerJob,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExperimentLeaseCredentialsResponse {
-    pub credentials: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CreateExperimentProjectRequest {
-    pub name: String,
-    pub workspace_path: String,
-    pub git_remote_name: String,
-    pub base_branch: String,
-    #[serde(default)]
-    pub preset: Option<ExperimentPreset>,
-    #[serde(default)]
-    pub strategy_prompt: Option<String>,
-    pub workdir: String,
-    #[serde(default)]
-    pub prepare_command: Option<String>,
-    pub run_command: String,
-    #[serde(default)]
-    pub mutable_paths: Vec<String>,
-    #[serde(default)]
-    pub fixed_paths: Vec<String>,
-    pub primary_metric: ExperimentMetricDefinition,
-    #[serde(default)]
-    pub secondary_metrics: Vec<ExperimentMetricDefinition>,
-    #[serde(default)]
-    pub comparison_policy: Option<ExperimentComparisonPolicy>,
-    #[serde(default)]
-    pub stop_policy: Option<ExperimentStopPolicy>,
-    #[serde(default)]
-    pub default_runner_profile_id: Option<Uuid>,
-    #[serde(default)]
-    pub promotion_mode: Option<String>,
-    #[serde(default)]
-    pub autonomy_mode: Option<ExperimentAutonomyMode>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct UpdateExperimentProjectRequest {
-    pub name: Option<String>,
-    pub workspace_path: Option<String>,
-    pub git_remote_name: Option<String>,
-    pub base_branch: Option<String>,
-    pub preset: Option<ExperimentPreset>,
-    pub strategy_prompt: Option<String>,
-    pub workdir: Option<String>,
-    pub prepare_command: Option<String>,
-    pub run_command: Option<String>,
-    pub mutable_paths: Option<Vec<String>>,
-    pub fixed_paths: Option<Vec<String>>,
-    pub primary_metric: Option<ExperimentMetricDefinition>,
-    pub secondary_metrics: Option<Vec<ExperimentMetricDefinition>>,
-    pub comparison_policy: Option<ExperimentComparisonPolicy>,
-    pub stop_policy: Option<ExperimentStopPolicy>,
-    pub default_runner_profile_id: Option<Uuid>,
-    pub promotion_mode: Option<String>,
-    pub autonomy_mode: Option<ExperimentAutonomyMode>,
-    pub status: Option<ExperimentProjectStatus>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateExperimentRunnerProfileRequest {
-    pub name: String,
-    pub backend: ExperimentRunnerBackend,
-    #[serde(default)]
-    pub backend_config: serde_json::Value,
-    #[serde(default)]
-    pub image_or_runtime: Option<String>,
-    #[serde(default)]
-    pub gpu_requirements: serde_json::Value,
-    #[serde(default)]
-    pub env_grants: serde_json::Value,
-    #[serde(default)]
-    pub secret_references: Vec<String>,
-    #[serde(default)]
-    pub cache_policy: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct UpdateExperimentRunnerProfileRequest {
-    pub name: Option<String>,
-    pub backend: Option<ExperimentRunnerBackend>,
-    pub backend_config: Option<serde_json::Value>,
-    pub image_or_runtime: Option<String>,
-    pub gpu_requirements: Option<serde_json::Value>,
-    pub env_grants: Option<serde_json::Value>,
-    pub secret_references: Option<Vec<String>>,
-    pub cache_policy: Option<serde_json::Value>,
-    pub status: Option<ExperimentRunnerStatus>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StartExperimentCampaignRequest {
-    #[serde(default)]
-    pub runner_profile_id: Option<Uuid>,
-    #[serde(default)]
-    pub max_trials_override: Option<u32>,
-    #[serde(default)]
-    pub gateway_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CreateExperimentTargetRequest {
-    pub name: String,
-    #[serde(default)]
-    pub kind: ExperimentTargetKind,
-    #[serde(default)]
-    pub location: Option<String>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LinkExperimentTargetRequest {
-    pub opportunity_id: String,
-    #[serde(default)]
-    pub target_type: ExperimentTargetKind,
-    pub target_id: String,
-    #[serde(default)]
-    pub target_name: Option<String>,
-    #[serde(default)]
-    pub location: Option<String>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct UpdateExperimentTargetRequest {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub kind: Option<ExperimentTargetKind>,
-    #[serde(default)]
-    pub location: Option<String>,
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExperimentLeaseStatusRequest {
-    pub status: String,
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExperimentLeaseEventRequest {
-    pub message: String,
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-}
-
-fn default_strategy_prompt() -> String {
-    "Operate within the configured mutable paths only. Preserve the fixed harness, compare candidates against the best-known result, and stop when the campaign no longer improves.".to_string()
 }
 
 pub fn register_experiment_subagent_executor(executor: Arc<SubagentExecutor>) {
@@ -527,72 +258,33 @@ async fn ensure_experiments_enabled(
     let settings = Settings::from_db_map(&map);
     if !settings.experiments.enabled {
         return Err(ApiError::FeatureDisabled(
-            "Enable experiments in Settings → Features to use this API.".to_string(),
+            experiments_feature_disabled_message().to_string(),
         ));
     }
     Ok(settings)
-}
-
-fn ready_project_status(project: &ExperimentProject) -> ExperimentProjectStatus {
-    let workspace_exists = Path::new(&project.workspace_path).exists();
-    if workspace_exists
-        && !project.mutable_paths.is_empty()
-        && !project.run_command.trim().is_empty()
-    {
-        ExperimentProjectStatus::Ready
-    } else {
-        ExperimentProjectStatus::Draft
-    }
-}
-
-fn validate_project_workdir_fragment(workdir: &str) -> ApiResult<PathBuf> {
-    let trimmed = workdir.trim();
-    let candidate = if trimmed.is_empty() {
-        PathBuf::from(".")
-    } else {
-        PathBuf::from(trimmed)
-    };
-
-    if candidate.is_absolute() {
-        return Err(ApiError::InvalidInput(
-            "Project workdir must be relative to the workspace root.".to_string(),
-        ));
-    }
-
-    if candidate.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return Err(ApiError::InvalidInput(
-            "Project workdir must stay inside the workspace root.".to_string(),
-        ));
-    }
-
-    Ok(candidate)
 }
 
 async fn resolve_project_workdir(project: &ExperimentProject) -> ApiResult<PathBuf> {
     let workspace_root = tokio::fs::canonicalize(&project.workspace_path)
         .await
         .map_err(|e| {
-            ApiError::InvalidInput(format!(
-                "Workspace path does not exist: {} ({e})",
-                project.workspace_path
+            ApiError::InvalidInput(experiment_workspace_path_missing_with_error_message(
+                &project.workspace_path,
+                e,
             ))
         })?;
-    let workdir_fragment = validate_project_workdir_fragment(&project.workdir)?;
+    let workdir_fragment =
+        validate_project_workdir_fragment(&project.workdir).map_err(ApiError::InvalidInput)?;
     let workdir = workspace_root.join(workdir_fragment);
     let resolved = tokio::fs::canonicalize(&workdir).await.map_err(|e| {
-        ApiError::InvalidInput(format!(
-            "Project workdir does not exist: {} ({e})",
-            workdir.display()
+        ApiError::InvalidInput(experiment_project_workdir_missing_message(
+            workdir.display(),
+            e,
         ))
     })?;
     if !resolved.starts_with(&workspace_root) {
         return Err(ApiError::InvalidInput(
-            "Project workdir resolves outside the workspace root.".to_string(),
+            experiment_project_workdir_outside_workspace_message().to_string(),
         ));
     }
     Ok(resolved)
@@ -600,19 +292,18 @@ async fn resolve_project_workdir(project: &ExperimentProject) -> ApiResult<PathB
 
 async fn validate_project_launch_readiness(project: &ExperimentProject) -> ApiResult<()> {
     if !Path::new(&project.workspace_path).is_dir() {
-        return Err(ApiError::InvalidInput(format!(
-            "Workspace path does not exist: {}",
-            project.workspace_path
-        )));
+        return Err(ApiError::InvalidInput(
+            experiment_workspace_path_missing_message(&project.workspace_path),
+        ));
     }
     if project.mutable_paths.is_empty() {
         return Err(ApiError::InvalidInput(
-            "Project must define at least one mutable path before launch.".to_string(),
+            experiment_project_missing_mutable_paths_message().to_string(),
         ));
     }
     if project.run_command.trim().is_empty() {
         return Err(ApiError::InvalidInput(
-            "Project run_command must not be empty.".to_string(),
+            experiment_project_run_command_empty_message().to_string(),
         ));
     }
 
@@ -621,9 +312,7 @@ async fn validate_project_launch_readiness(project: &ExperimentProject) -> ApiRe
     git_output(&project.workspace_path, &["rev-parse", "--show-toplevel"])
         .await
         .map_err(|error| {
-            ApiError::InvalidInput(format!(
-                "Workspace path is not a git repository ThinClaw can use: {error}"
-            ))
+            ApiError::InvalidInput(experiment_workspace_not_git_repository_message(error))
         })?;
     git_output(
         &project.workspace_path,
@@ -631,9 +320,9 @@ async fn validate_project_launch_readiness(project: &ExperimentProject) -> ApiRe
     )
     .await
     .map_err(|error| {
-        ApiError::InvalidInput(format!(
-            "Base branch '{}' is not available locally: {error}",
-            project.base_branch
+        ApiError::InvalidInput(experiment_base_branch_unavailable_message(
+            &project.base_branch,
+            error,
         ))
     })?;
     git_output(
@@ -642,37 +331,13 @@ async fn validate_project_launch_readiness(project: &ExperimentProject) -> ApiRe
     )
     .await
     .map_err(|error| {
-        ApiError::InvalidInput(format!(
-            "Configured git remote '{}' is not available: {error}",
-            project.git_remote_name
+        ApiError::InvalidInput(experiment_git_remote_unavailable_message(
+            &project.git_remote_name,
+            error,
         ))
     })?;
 
     Ok(())
-}
-
-fn parse_secret_reference(reference: &str) -> Option<(String, Vec<String>)> {
-    let trimmed = reference.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    for separator in [':', '='] {
-        if let Some((secret_name, env_var)) = trimmed.split_once(separator) {
-            let secret_name = secret_name.trim();
-            let env_var = env_var.trim();
-            if !secret_name.is_empty() && !env_var.is_empty() {
-                return Some((secret_name.to_string(), vec![env_var.to_string()]));
-            }
-        }
-    }
-
-    let upper = trimmed.to_ascii_uppercase();
-    let env_names = if upper == trimmed {
-        vec![trimmed.to_string()]
-    } else {
-        vec![trimmed.to_string(), upper]
-    };
-    Some((trimmed.to_string(), env_names))
 }
 
 async fn resolved_secret_env_pairs(
@@ -750,7 +415,7 @@ pub async fn get_project(
         .get_experiment_project(id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment project {id} not found")))
+        .ok_or_else(|| ApiError::SessionNotFound(experiment_project_not_found_message(id)))
 }
 
 pub async fn create_project(
@@ -790,7 +455,8 @@ pub async fn create_project(
         created_at: now,
         updated_at: now,
     };
-    project.status = ready_project_status(&project);
+    project.status =
+        ready_project_status_policy(&project, Path::new(&project.workspace_path).exists());
     store
         .create_experiment_project(&project)
         .await
@@ -860,7 +526,9 @@ pub async fn update_project(
     if let Some(value) = req.autonomy_mode {
         project.autonomy_mode = value;
     }
-    project.status = req.status.unwrap_or_else(|| ready_project_status(&project));
+    project.status = req.status.unwrap_or_else(|| {
+        ready_project_status_policy(&project, Path::new(&project.workspace_path).exists())
+    });
     project.updated_at = Utc::now();
     store
         .update_experiment_project(&project)
@@ -899,7 +567,7 @@ pub async fn get_runner(
         .get_experiment_runner_profile(id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment runner {id} not found")))
+        .ok_or_else(|| ApiError::SessionNotFound(experiment_runner_not_found_message(id)))
 }
 
 pub async fn create_runner(
@@ -1034,7 +702,7 @@ pub async fn get_campaign(
         .get_experiment_campaign_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment campaign {id} not found")))?;
+        .ok_or_else(|| ApiError::SessionNotFound(experiment_campaign_not_found_message(id)))?;
     Ok(campaign)
 }
 
@@ -1062,7 +730,7 @@ pub async fn get_trial(
         .get_experiment_trial_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment trial {id} not found")))?;
+        .ok_or_else(|| ApiError::SessionNotFound(experiment_trial_not_found_message(id)))?;
     Ok(trial)
 }
 
@@ -1346,15 +1014,7 @@ async fn reconcile_active_campaign(
 }
 
 fn is_stale_lease(lease: &ExperimentLease, now: DateTime<Utc>) -> bool {
-    match lease.status {
-        ExperimentLeaseStatus::Pending => {
-            lease.expires_at + chrono::Duration::minutes(STALE_LEASE_GRACE_MINUTES) < now
-        }
-        ExperimentLeaseStatus::Claimed => {
-            lease.updated_at + chrono::Duration::minutes(STALE_LEASE_GRACE_MINUTES) < now
-        }
-        _ => false,
-    }
+    is_stale_lease_policy(lease, now, STALE_LEASE_GRACE_MINUTES)
 }
 
 async fn launch_next_trial_if_ready(
@@ -1517,7 +1177,9 @@ pub async fn link_target(
 ) -> ApiResult<ExperimentTarget> {
     ensure_experiments_enabled(store, user_id).await?;
     if req.target_id.trim().is_empty() {
-        return Err(ApiError::InvalidInput("target_id is required".to_string()));
+        return Err(ApiError::InvalidInput(
+            experiment_target_id_required_message().to_string(),
+        ));
     }
 
     let usage = store
@@ -1536,9 +1198,8 @@ pub async fn link_target(
         .into_iter()
         .find(|entry| entry.id == req.opportunity_id)
         .ok_or_else(|| {
-            ApiError::SessionNotFound(format!(
-                "Experiment opportunity {} not found",
-                req.opportunity_id
+            ApiError::SessionNotFound(experiment_opportunity_not_found_message(
+                &req.opportunity_id,
             ))
         })?;
 
@@ -1674,7 +1335,7 @@ pub async fn update_target(
         .get_experiment_target(id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment target {id} not found")))?;
+        .ok_or_else(|| ApiError::SessionNotFound(experiment_target_not_found_message(id)))?;
     let new_kind = req.kind.unwrap_or(target.kind);
     let new_metadata = req
         .metadata
@@ -1775,6 +1436,7 @@ pub async fn list_opportunities(
         &outcome_contracts,
         &targets,
         limit,
+        crate::workspace::paths::USER,
     ));
     sort_experiment_opportunities(&mut opportunities);
     opportunities.truncate(limit.max(1));
@@ -1839,7 +1501,9 @@ pub async fn start_campaign(
     let runner_id = req
         .runner_profile_id
         .or(project.default_runner_profile_id)
-        .ok_or_else(|| ApiError::InvalidInput("runner_profile_id is required".to_string()))?;
+        .ok_or_else(|| {
+            ApiError::InvalidInput(experiment_runner_profile_id_required_message().to_string())
+        })?;
     let runner = get_runner(store, user_id, runner_id).await?;
     let validation = validate_runner_profile_impl(user_id, &runner, &settings).await;
     if !validation.valid {
@@ -1944,15 +1608,6 @@ pub async fn start_campaign(
             Err(error)
         }
     }
-}
-
-fn campaign_gateway_url(campaign: &ExperimentCampaign) -> Option<String> {
-    campaign
-        .gateway_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn launch_details_from_outcome(outcome: RunnerLaunchOutcome) -> ExperimentLaunchDetails {
@@ -2165,14 +1820,14 @@ async fn launch_campaign_baseline(
     runner: &ExperimentRunnerProfile,
     mut campaign: ExperimentCampaign,
 ) -> ApiResult<ExperimentCampaignActionResponse> {
-    let worktree_path = campaign
-        .worktree_path
-        .clone()
-        .ok_or_else(|| ApiError::Internal("Campaign missing worktree_path".to_string()))?;
-    let branch = campaign
-        .experiment_branch
-        .clone()
-        .ok_or_else(|| ApiError::Internal("Campaign missing experiment_branch".to_string()))?;
+    let worktree_path = campaign.worktree_path.clone().ok_or_else(|| {
+        ApiError::Internal(experiment_campaign_missing_worktree_path_field_message().to_string())
+    })?;
+    let branch = campaign.experiment_branch.clone().ok_or_else(|| {
+        ApiError::Internal(
+            experiment_campaign_missing_experiment_branch_field_message().to_string(),
+        )
+    })?;
 
     prepare_campaign_worktree(project, Path::new(&worktree_path)).await?;
     let _ = git_output(
@@ -2257,14 +1912,13 @@ async fn prepare_candidate_trial_from_worktree(
     reviewer_decision: String,
     artifact_manifest_json: serde_json::Value,
 ) -> ApiResult<ExperimentTrial> {
-    let worktree_path = campaign
-        .worktree_path
-        .as_deref()
-        .ok_or_else(|| ApiError::InvalidInput("Campaign has no worktree".to_string()))?;
+    let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
+        ApiError::InvalidInput(experiment_campaign_has_no_worktree_message().to_string())
+    })?;
     let changed_files = filtered_changed_files(git_changed_files(worktree_path).await?);
     if changed_files.is_empty() {
         return Err(ApiError::InvalidInput(
-            "No candidate changes detected in the campaign worktree.".to_string(),
+            experiment_no_candidate_changes_message().to_string(),
         ));
     }
     enforce_mutable_paths(&project.mutable_paths, &changed_files)?;
@@ -2361,7 +2015,7 @@ async fn create_experiment_trial_commit(
         };
     let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
         CandidateGenerationError::new(
-            "Campaign has no worktree",
+            experiment_campaign_has_no_worktree_message(),
             vec![planner.run_artifact.clone(), mutator.run_artifact.clone()],
         )
     })?;
@@ -2374,10 +2028,7 @@ async fn create_experiment_trial_commit(
         })?);
     if changed_files.is_empty() {
         let mut mutator_artifact = mutator.run_artifact.clone();
-        mark_run_artifact_failed(
-            &mut mutator_artifact,
-            "Autonomous mutator did not produce any candidate changes.",
-        );
+        mutator_artifact.mark_failed("Autonomous mutator did not produce any candidate changes.");
         return Err(CandidateGenerationError::new(
             "Autonomous mutator did not produce any candidate changes.",
             vec![planner.run_artifact.clone(), mutator_artifact],
@@ -2385,7 +2036,7 @@ async fn create_experiment_trial_commit(
     }
     if let Err(error) = enforce_mutable_paths(&project.mutable_paths, &changed_files) {
         let mut mutator_artifact = mutator.run_artifact.clone();
-        mark_run_artifact_failed(&mut mutator_artifact, error.to_string());
+        mutator_artifact.mark_failed(error.to_string());
         return Err(CandidateGenerationError::new(
             error.to_string(),
             vec![planner.run_artifact.clone(), mutator_artifact],
@@ -2438,7 +2089,7 @@ async fn create_experiment_trial_commit(
     };
     if !(reviewer.value.approved && reviewer.value.scope_ok && reviewer.value.benchmark_ready) {
         let mut reviewer_artifact = reviewer.run_artifact.clone();
-        mark_run_artifact_failed(&mut reviewer_artifact, reviewer.value.reason.clone());
+        reviewer_artifact.mark_failed(reviewer.value.reason.clone());
         return Err(CandidateGenerationError::new(
             format!(
                 "Reviewer rejected the autonomous candidate: {}",
@@ -2560,7 +2211,7 @@ async fn revoke_lease_with_runner(
         None
     };
 
-    Ok(message.unwrap_or_else(|| "Lease revoked.".to_string()))
+    Ok(message.unwrap_or_else(|| experiment_lease_revoked_action_message().to_string()))
 }
 
 pub async fn pause_campaign(
@@ -2572,7 +2223,7 @@ pub async fn pause_campaign(
     let mut campaign = get_campaign(store, user_id, campaign_id).await?;
     campaign.status = ExperimentCampaignStatus::Paused;
     campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
-    campaign.pause_reason = Some("Paused by operator.".to_string());
+    campaign.pause_reason = Some(experiment_campaign_paused_by_operator_message().to_string());
     campaign.updated_at = Utc::now();
     store
         .update_experiment_campaign(&campaign)
@@ -2593,7 +2244,7 @@ pub async fn pause_campaign(
         trial: None,
         lease: None,
         launch: None,
-        message: launch_message.unwrap_or_else(|| "Campaign paused.".to_string()),
+        message: launch_message.unwrap_or_else(|| experiment_campaign_paused_message().to_string()),
     })
 }
 
@@ -2606,7 +2257,7 @@ pub async fn cancel_campaign(
     let mut campaign = get_campaign(store, user_id, campaign_id).await?;
     campaign.status = ExperimentCampaignStatus::Cancelled;
     campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
-    campaign.pause_reason = Some("Cancelled by operator.".to_string());
+    campaign.pause_reason = Some(experiment_campaign_cancelled_by_operator_message().to_string());
     campaign.ended_at = Some(Utc::now());
     campaign.updated_at = Utc::now();
     store
@@ -2634,7 +2285,8 @@ pub async fn cancel_campaign(
         trial: None,
         lease: None,
         launch: None,
-        message: launch_message.unwrap_or_else(|| "Campaign cancelled.".to_string()),
+        message: launch_message
+            .unwrap_or_else(|| experiment_campaign_cancelled_message().to_string()),
     })
 }
 
@@ -2678,10 +2330,9 @@ pub async fn resume_campaign(
         });
     }
 
-    let worktree_path = campaign
-        .worktree_path
-        .clone()
-        .ok_or_else(|| ApiError::InvalidInput("Campaign has no worktree".to_string()))?;
+    let worktree_path = campaign.worktree_path.clone().ok_or_else(|| {
+        ApiError::InvalidInput(experiment_campaign_has_no_worktree_message().to_string())
+    })?;
     let filtered_changed_files = filtered_changed_files(git_changed_files(&worktree_path).await?);
     let sequence = latest_trial(store, campaign.id)
         .await?
@@ -2740,11 +2391,11 @@ pub async fn reissue_lease(
     let runner = get_runner(store, user_id, campaign.runner_profile_id).await?;
     if !runner.backend.is_remote() {
         return Err(ApiError::InvalidInput(
-            "Lease reissue is only supported for remote runners.".to_string(),
+            experiment_lease_reissue_remote_only_message().to_string(),
         ));
     }
     let mut trial = latest_trial(store, campaign.id).await?.ok_or_else(|| {
-        ApiError::InvalidInput("Campaign has no trial to reissue a lease for.".to_string())
+        ApiError::InvalidInput(experiment_campaign_has_no_trial_to_reissue_message().to_string())
     })?;
     if matches!(
         trial.status,
@@ -2755,7 +2406,7 @@ pub async fn reissue_lease(
             | ExperimentTrialStatus::InfraFailed
     ) {
         return Err(ApiError::InvalidInput(
-            "Only in-flight remote trials can receive a new lease.".to_string(),
+            experiment_remote_trial_reissue_in_flight_only_message().to_string(),
         ));
     }
 
@@ -2837,7 +2488,7 @@ pub async fn promote_campaign(
         .clone()
         .or(campaign.baseline_commit.clone())
         .ok_or_else(|| {
-            ApiError::InvalidInput("Campaign has no accepted commit to promote".to_string())
+            ApiError::InvalidInput(experiment_campaign_has_no_accepted_commit_message().to_string())
         })?;
     let promotion_branch = format!("codex/experiment-review/{}", short_id(campaign.id));
     let _ = git_output(
@@ -2855,9 +2506,10 @@ pub async fn promote_campaign(
         .await;
         if push_result.is_ok() {
             let title = format!("Experiment promotion: {}", project.name);
-            let body = format!(
-                "Promoting best commit from experiment campaign {}\n\nBest commit: {}\nPrimary metric: {}",
-                campaign.id, best_commit, project.primary_metric.name
+            let body = experiment_promotion_pr_body(
+                campaign.id,
+                &best_commit,
+                &project.primary_metric.name,
             );
             let pr_result = run_command_capture(
                 Some(Path::new(&project.workspace_path)),
@@ -2911,7 +2563,9 @@ pub async fn lease_job(
     ensure_experiments_enabled(store, user_id).await?;
     let mut lease = verified_lease(store, lease_id, token).await?;
     if lease.status == ExperimentLeaseStatus::Revoked {
-        return Err(ApiError::Unavailable("Lease has been revoked".to_string()));
+        return Err(ApiError::Unavailable(
+            experiment_lease_revoked_message().to_string(),
+        ));
     }
     if lease.status == ExperimentLeaseStatus::Pending {
         lease.status = ExperimentLeaseStatus::Claimed;
@@ -2954,16 +2608,10 @@ pub async fn lease_status(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| {
-            ApiError::SessionNotFound(format!("Experiment trial {} not found", lease.trial_id))
+            ApiError::SessionNotFound(experiment_trial_not_found_message(lease.trial_id))
         })?;
     trial.summary = Some(req.status.clone());
-    trial.status = match req.status.as_str() {
-        "runner_started" | "running_prepare" | "running_benchmark" => {
-            ExperimentTrialStatus::Running
-        }
-        "evaluating" | "uploading_artifacts" | "completing" => ExperimentTrialStatus::Evaluating,
-        _ => trial.status,
-    };
+    trial.status = lease_runner_trial_status(&req.status, trial.status);
     if matches!(
         trial.status,
         ExperimentTrialStatus::Running | ExperimentTrialStatus::Evaluating
@@ -3003,7 +2651,7 @@ pub async fn lease_event(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| {
-            ApiError::SessionNotFound(format!("Experiment trial {} not found", lease.trial_id))
+            ApiError::SessionNotFound(experiment_trial_not_found_message(lease.trial_id))
         })?;
     let mut manifest = if trial.artifact_manifest_json.is_object() {
         trial.artifact_manifest_json.clone()
@@ -3118,10 +2766,7 @@ pub async fn lease_owner_user_id(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| {
-            ApiError::SessionNotFound(format!(
-                "Experiment campaign {} not found",
-                lease.campaign_id
-            ))
+            ApiError::SessionNotFound(experiment_campaign_not_found_message(lease.campaign_id))
         })?;
     Ok(campaign.owner_user_id)
 }
@@ -3208,51 +2853,6 @@ async fn launch_trial(
     })
 }
 
-fn normalize_trial_completion(
-    mut completion: ExperimentRunnerCompletion,
-) -> ExperimentRunnerCompletion {
-    if !completion.artifact_manifest_json.is_object() {
-        completion.artifact_manifest_json = serde_json::json!({});
-    }
-    let has_stage = completion
-        .artifact_manifest_json
-        .get("stage")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty());
-    if !has_stage {
-        let stage = if completion.exit_code == Some(0) {
-            "complete"
-        } else {
-            "run"
-        };
-        completion.artifact_manifest_json = merge_json(
-            &completion.artifact_manifest_json,
-            &serde_json::json!({ "stage": stage }),
-        );
-    }
-    completion
-}
-
-fn lease_completion_rejection(status: ExperimentLeaseStatus) -> ApiError {
-    match status {
-        ExperimentLeaseStatus::Claimed => {
-            ApiError::InvalidInput("lease is already claimed".to_string())
-        }
-        ExperimentLeaseStatus::Completed => ApiError::InvalidInput(
-            "lease completion was already recorded; repeated terminal completions are ignored"
-                .to_string(),
-        ),
-        ExperimentLeaseStatus::Revoked => ApiError::InvalidInput(
-            "lease was revoked before completion and can no longer transition to terminal"
-                .to_string(),
-        ),
-        ExperimentLeaseStatus::Pending => ApiError::InvalidInput(
-            "lease must be claimed before completion can be recorded".to_string(),
-        ),
-    }
-}
-
 async fn complete_trial_terminal(
     store: &Arc<dyn Database>,
     project: &ExperimentProject,
@@ -3262,9 +2862,9 @@ async fn complete_trial_terminal(
     completion: ExperimentRunnerCompletion,
 ) -> ApiResult<()> {
     if let Some(lease) = lease.as_ref()
-        && lease.status != ExperimentLeaseStatus::Claimed
+        && let Err(message) = validate_lease_completion_status(lease.status)
     {
-        return Err(lease_completion_rejection(lease.status));
+        return Err(ApiError::InvalidInput(message.to_string()));
     }
 
     let completion = normalize_trial_completion(completion);
@@ -3377,9 +2977,8 @@ async fn finalize_trial(
         campaign.failure_count += 1;
     } else if !has_primary_metric {
         trial.status = ExperimentTrialStatus::InfraFailed;
-        trial.decision_reason = Some(format!(
-            "Primary metric '{}' was not found in the runner result.",
-            project.primary_metric.name
+        trial.decision_reason = Some(experiment_primary_metric_not_found_message(
+            &project.primary_metric.name,
         ));
         campaign.failure_count += 1;
     } else if campaign
@@ -3463,7 +3062,7 @@ async fn finalize_trial(
             "Campaign paused: failed to restore campaign worktree: {error}"
         ));
     } else {
-        campaign.pause_reason = Some(campaign_status_message(
+        let status_decision = CampaignStatusDecisionInput {
             campaign,
             project,
             trial,
@@ -3472,17 +3071,11 @@ async fn finalize_trial(
             plateau_limit,
             runtime_limit_reached,
             cost_limit_reached,
-        ));
-        campaign.status = next_campaign_status(
-            campaign,
-            project,
-            trial,
-            non_improving,
-            max_trials,
-            plateau_limit,
-            runtime_limit_reached,
-            cost_limit_reached,
-        );
+        };
+        let pause_reason = campaign_status_message(status_decision);
+        let next_status = next_campaign_status(status_decision);
+        campaign.pause_reason = Some(pause_reason);
+        campaign.status = next_status;
     }
     if matches!(
         campaign.status,
@@ -3570,112 +3163,6 @@ async fn upsert_local_trial_artifact_refs(
     Ok(())
 }
 
-fn next_campaign_status(
-    campaign: &ExperimentCampaign,
-    project: &ExperimentProject,
-    trial: &ExperimentTrial,
-    non_improving: u32,
-    max_trials: Option<u32>,
-    plateau_limit: u32,
-    runtime_limit_reached: bool,
-    cost_limit_reached: bool,
-) -> ExperimentCampaignStatus {
-    if campaign.failure_count >= project.stop_policy.infra_failure_pause_threshold {
-        return ExperimentCampaignStatus::Paused;
-    }
-    if runtime_limit_reached {
-        return if campaign.best_commit.is_some() {
-            ExperimentCampaignStatus::AwaitingPromotion
-        } else {
-            ExperimentCampaignStatus::Failed
-        };
-    }
-    if cost_limit_reached {
-        return if campaign.best_commit.is_some() {
-            ExperimentCampaignStatus::AwaitingPromotion
-        } else {
-            ExperimentCampaignStatus::Failed
-        };
-    }
-    if non_improving >= plateau_limit {
-        return if campaign.best_commit.is_some() {
-            ExperimentCampaignStatus::AwaitingPromotion
-        } else {
-            ExperimentCampaignStatus::Paused
-        };
-    }
-    if let Some(max_trials) = max_trials
-        && trial.sequence >= max_trials
-    {
-        return ExperimentCampaignStatus::AwaitingPromotion;
-    }
-    match trial.status {
-        ExperimentTrialStatus::Accepted
-        | ExperimentTrialStatus::Rejected
-        | ExperimentTrialStatus::InfraFailed => ExperimentCampaignStatus::Running,
-        ExperimentTrialStatus::Crashed | ExperimentTrialStatus::TimedOut => {
-            ExperimentCampaignStatus::Paused
-        }
-        _ => ExperimentCampaignStatus::Paused,
-    }
-}
-
-fn campaign_status_message(
-    campaign: &ExperimentCampaign,
-    project: &ExperimentProject,
-    trial: &ExperimentTrial,
-    non_improving: u32,
-    max_trials: Option<u32>,
-    plateau_limit: u32,
-    runtime_limit_reached: bool,
-    cost_limit_reached: bool,
-) -> String {
-    if campaign.failure_count >= project.stop_policy.infra_failure_pause_threshold {
-        return format!(
-            "Paused after {} infrastructure failures.",
-            campaign.failure_count
-        );
-    }
-    if runtime_limit_reached {
-        return "Reached the campaign runtime budget. Promote the best commit when ready."
-            .to_string();
-    }
-    if cost_limit_reached {
-        return "Reached the campaign cost budget. Promote the best commit when ready.".to_string();
-    }
-    if non_improving >= plateau_limit {
-        return format!(
-            "Paused after {} consecutive non-improving trials (plateau window {}).",
-            non_improving, plateau_limit
-        );
-    }
-    if let Some(max_trials) = max_trials
-        && trial.sequence >= max_trials
-    {
-        return format!(
-            "Reached max_trials={}. Promote the best commit when ready.",
-            max_trials
-        );
-    }
-    match trial.status {
-        ExperimentTrialStatus::Accepted => {
-            "Trial accepted. Continue for another candidate."
-                .to_string()
-        }
-        ExperimentTrialStatus::Rejected => {
-            "Trial rejected. The worktree was reset to the best known commit and the controller can continue."
-                .to_string()
-        }
-        ExperimentTrialStatus::Crashed => {
-            "Trial crashed. Fix the benchmark or candidate, then resume.".to_string()
-        }
-        ExperimentTrialStatus::InfraFailed => {
-            "Trial failed before a canonical metric could be extracted; the controller may continue until the failure threshold is reached.".to_string()
-        }
-        _ => "Trial complete.".to_string(),
-    }
-}
-
 async fn create_lease(
     store: &Arc<dyn Database>,
     user_id: &str,
@@ -3691,10 +3178,9 @@ async fn create_lease(
     )
     .await?;
     let resolved_env_grants = resolved_runner_env_grants(user_id, runner).await;
-    let git_ref = campaign
-        .experiment_branch
-        .clone()
-        .ok_or_else(|| ApiError::Internal("Campaign missing experiment branch".to_string()))?;
+    let git_ref = campaign.experiment_branch.clone().ok_or_else(|| {
+        ApiError::Internal(experiment_campaign_missing_experiment_branch_message().to_string())
+    })?;
     let job = ExperimentRunnerJob {
         lease_id: Uuid::new_v4(),
         trial_id: trial.id,
@@ -3749,14 +3235,16 @@ async fn verified_lease(
         .get_experiment_lease(lease_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| {
-            ApiError::SessionNotFound(format!("Experiment lease {lease_id} not found"))
-        })?;
+        .ok_or_else(|| ApiError::SessionNotFound(experiment_lease_not_found_message(lease_id)))?;
     if lease.expires_at < Utc::now() {
-        return Err(ApiError::Unavailable("Lease has expired".to_string()));
+        return Err(ApiError::Unavailable(
+            experiment_lease_expired_message().to_string(),
+        ));
     }
     if lease.token_hash != hash_lease_token(token) {
-        return Err(ApiError::InvalidInput("Invalid lease token".to_string()));
+        return Err(ApiError::InvalidInput(
+            invalid_experiment_lease_token_message().to_string(),
+        ));
     }
     Ok(lease)
 }
@@ -3804,10 +3292,9 @@ async fn prepare_campaign_worktree(
     worktree_path: &Path,
 ) -> ApiResult<()> {
     if !Path::new(&project.workspace_path).exists() {
-        return Err(ApiError::InvalidInput(format!(
-            "Workspace path does not exist: {}",
-            project.workspace_path
-        )));
+        return Err(ApiError::InvalidInput(
+            experiment_workspace_path_missing_message(&project.workspace_path),
+        ));
     }
     if worktree_path.exists() {
         let worktree = worktree_path.to_string_lossy().to_string();
@@ -3839,16 +3326,6 @@ async fn push_experiment_branch(
     Ok(())
 }
 
-fn experiments_worktree_path(workspace_root: &str, campaign_id: Uuid) -> PathBuf {
-    Path::new(workspace_root)
-        .join(".thinclaw-experiments")
-        .join(short_id(campaign_id))
-}
-
-fn short_id(id: Uuid) -> String {
-    id.simple().to_string()[..12].to_string()
-}
-
 async fn git_changed_files(worktree_path: &str) -> ApiResult<Vec<String>> {
     let output = git_output_raw(worktree_path, &["status", "--porcelain", "-z"]).await?;
     let mut entries = output.split('\0').filter(|entry| !entry.is_empty());
@@ -3874,34 +3351,8 @@ async fn git_changed_files(worktree_path: &str) -> ApiResult<Vec<String>> {
     Ok(changed_files)
 }
 
-fn filtered_changed_files(changed_files: Vec<String>) -> Vec<String> {
-    changed_files
-        .into_iter()
-        .filter(|path| !path.starts_with(".thinclaw-experiments/"))
-        .collect()
-}
-
 fn enforce_mutable_paths(mutable_paths: &[String], changed_files: &[String]) -> ApiResult<()> {
-    for changed in changed_files {
-        let allowed = mutable_paths
-            .iter()
-            .any(|allowed| changed == allowed || changed.starts_with(&(allowed.clone() + "/")));
-        if !allowed {
-            return Err(ApiError::InvalidInput(format!(
-                "Changed file '{}' is outside the mutable_paths allowlist",
-                changed
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn truncate_for_prompt(value: &str, max_len: usize) -> String {
-    if value.chars().count() <= max_len {
-        return value.to_string();
-    }
-    let truncated: String = value.chars().take(max_len.saturating_sub(3)).collect();
-    format!("{truncated}...")
+    enforce_mutable_paths_policy(mutable_paths, changed_files).map_err(ApiError::InvalidInput)
 }
 
 fn push_run_artifact(manifest: &mut serde_json::Value, artifact: AgentRunArtifact) {
@@ -3937,12 +3388,6 @@ fn push_run_artifact(manifest: &mut serde_json::Value, artifact: AgentRunArtifac
     {
         items.push(value);
     }
-}
-
-fn mark_run_artifact_failed(artifact: &mut AgentRunArtifact, reason: impl Into<String>) {
-    artifact.status = AgentRunStatus::Failed;
-    artifact.completed_at = Some(Utc::now());
-    artifact.failure_reason = Some(reason.into());
 }
 
 fn record_campaign_candidate_generation(
@@ -4046,32 +3491,6 @@ fn research_channel_metadata(
     metadata
 }
 
-fn parse_json_response<T: DeserializeOwned>(raw: &str) -> ApiResult<T> {
-    let trimmed = raw.trim();
-    if let Ok(value) = serde_json::from_str::<T>(trimmed) {
-        return Ok(value);
-    }
-    if let Some(stripped) = trimmed
-        .strip_prefix("```json")
-        .and_then(|value| value.strip_suffix("```"))
-        .map(str::trim)
-        && let Ok(value) = serde_json::from_str::<T>(stripped)
-    {
-        return Ok(value);
-    }
-    if let Some(stripped) = trimmed
-        .strip_prefix("```")
-        .and_then(|value| value.strip_suffix("```"))
-        .map(str::trim)
-        && let Ok(value) = serde_json::from_str::<T>(stripped)
-    {
-        return Ok(value);
-    }
-    Err(ApiError::Internal(
-        "Research subagent returned invalid JSON output.".to_string(),
-    ))
-}
-
 fn research_subagent_run_artifact(
     role_name: &str,
     status: AgentRunStatus,
@@ -4132,7 +3551,7 @@ async fn spawn_research_subagent<T: DeserializeOwned>(
 ) -> Result<ResearchSubagentOutput<T>, ResearchSubagentError> {
     let started_at = Utc::now();
     let executor = research_subagent_executor().ok_or_else(|| ResearchSubagentError {
-        message: "Research subagent executor is not available.".to_string(),
+        message: research_subagent_executor_unavailable_message().to_string(),
         run_artifact: research_subagent_run_artifact(
             role_name,
             AgentRunStatus::Failed,
@@ -4143,7 +3562,7 @@ async fn spawn_research_subagent<T: DeserializeOwned>(
             &[],
             &None,
             None,
-            Some("Research subagent executor is not available."),
+            Some(research_subagent_executor_unavailable_message()),
         ),
     })?;
     let (allowed_tools, allowed_skills) =
@@ -4226,21 +3645,22 @@ async fn spawn_research_subagent<T: DeserializeOwned>(
             ),
         });
     }
-    let parsed = parse_json_response(&result.response).map_err(|error| ResearchSubagentError {
-        message: error.to_string(),
-        run_artifact: research_subagent_run_artifact(
-            role_name,
-            AgentRunStatus::Failed,
-            started_at,
-            &system_prompt,
-            &task,
-            &channel_metadata,
-            &allowed_tools,
-            &allowed_skills,
-            Some(&result.response),
-            Some(&error.to_string()),
-        ),
-    })?;
+    let parsed =
+        parse_research_json_response(&result.response).map_err(|error| ResearchSubagentError {
+            message: error.clone(),
+            run_artifact: research_subagent_run_artifact(
+                role_name,
+                AgentRunStatus::Failed,
+                started_at,
+                &system_prompt,
+                &task,
+                &channel_metadata,
+                &allowed_tools,
+                &allowed_skills,
+                Some(&result.response),
+                Some(&error),
+            ),
+        })?;
     let run_artifact = research_subagent_run_artifact(
         role_name,
         AgentRunStatus::Completed,
@@ -4263,7 +3683,7 @@ async fn research_subagent_capabilities(
     role_name: &str,
 ) -> ApiResult<(Vec<String>, Option<Vec<String>>)> {
     let executor = research_subagent_executor().ok_or_else(|| {
-        ApiError::Unavailable("Research subagent executor is not available.".to_string())
+        ApiError::Unavailable(research_subagent_executor_unavailable_message().to_string())
     })?;
 
     let mut denylist: HashSet<&'static str> =
@@ -4293,28 +3713,6 @@ async fn research_subagent_capabilities(
     Ok((allowed_tools, allowed_skills))
 }
 
-fn recent_trial_context(trials: &[ExperimentTrial]) -> String {
-    if trials.is_empty() {
-        return "No prior trials yet.".to_string();
-    }
-    trials
-        .iter()
-        .rev()
-        .take(5)
-        .map(|trial| {
-            format!(
-                "Trial #{seq}: status={status:?}; hypothesis={hyp}; summary={summary}; metrics={metrics}",
-                seq = trial.sequence,
-                status = trial.status,
-                hyp = trial.hypothesis.as_deref().unwrap_or("n/a"),
-                summary = trial.summary.as_deref().unwrap_or("n/a"),
-                metrics = truncate_for_prompt(&trial.metrics_json.to_string(), 500),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 async fn run_planner_subagent(
     store: &Arc<dyn Database>,
     campaign: &ExperimentCampaign,
@@ -4325,10 +3723,9 @@ async fn run_planner_subagent(
         .list_experiment_trials(campaign.id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let worktree_path = campaign
-        .worktree_path
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Campaign missing worktree path".to_string()))?;
+    let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
+        ApiError::Internal(experiment_campaign_missing_worktree_path_message().to_string())
+    })?;
     let task = format!(
         "You are planning the next experiment candidate.\n\
          Worktree: {worktree}\n\
@@ -4367,10 +3764,9 @@ async fn run_mutator_subagent(
     planner: &PlannerProposal,
     trial_id: Option<Uuid>,
 ) -> Result<ResearchSubagentOutput<MutatorResult>, ResearchSubagentInvocationError> {
-    let worktree_path = campaign
-        .worktree_path
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Campaign missing worktree path".to_string()))?;
+    let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
+        ApiError::Internal(experiment_campaign_missing_worktree_path_message().to_string())
+    })?;
     let allowed_paths = if planner.allowed_paths.is_empty() {
         project.mutable_paths.clone()
     } else {
@@ -4420,10 +3816,9 @@ async fn run_reviewer_subagent(
     diff_preview: &str,
     trial_id: Option<Uuid>,
 ) -> Result<ResearchSubagentOutput<ReviewerDecision>, ResearchSubagentInvocationError> {
-    let worktree_path = campaign
-        .worktree_path
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Campaign missing worktree path".to_string()))?;
+    let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
+        ApiError::Internal(experiment_campaign_missing_worktree_path_message().to_string())
+    })?;
     let task = format!(
         "Review the prepared experiment candidate.\n\
          Worktree root: {worktree}\n\
@@ -4461,21 +3856,21 @@ async fn execute_local_trial(
     campaign: &ExperimentCampaign,
     trial: &mut ExperimentTrial,
 ) -> ApiResult<ExperimentRunnerCompletion> {
-    let worktree_root = campaign
-        .worktree_path
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Campaign missing worktree_path".to_string()))?;
+    let worktree_root = campaign.worktree_path.as_deref().ok_or_else(|| {
+        ApiError::Internal(experiment_campaign_missing_worktree_path_field_message().to_string())
+    })?;
     let worktree_root = tokio::fs::canonicalize(worktree_root)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to resolve campaign worktree: {e}")))?;
-    let workdir_fragment = validate_project_workdir_fragment(&project.workdir)?;
+    let workdir_fragment =
+        validate_project_workdir_fragment(&project.workdir).map_err(ApiError::InvalidInput)?;
     let run_root = worktree_root.join(workdir_fragment);
     let run_root = tokio::fs::canonicalize(&run_root)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to resolve campaign workdir: {e}")))?;
     if !run_root.starts_with(&worktree_root) {
         return Err(ApiError::InvalidInput(
-            "Project workdir escapes the campaign worktree.".to_string(),
+            experiment_project_workdir_escapes_campaign_worktree_message().to_string(),
         ));
     }
     let started_at = std::time::Instant::now();
@@ -4494,7 +3889,9 @@ async fn execute_local_trial(
     trial.started_at = Some(Utc::now());
     trial.updated_at = Utc::now();
 
-    if let Some(config) = agent_env_benchmark_config(runner)? {
+    if let Some(config) =
+        agent_env_benchmark_config(&runner.backend_config).map_err(ApiError::InvalidInput)?
+    {
         return execute_agent_env_benchmark_trial(
             config,
             &run_root,
@@ -4613,35 +4010,6 @@ async fn execute_local_trial(
     })
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "benchmark", rename_all = "snake_case")]
-enum AgentEnvBenchmarkConfig {
-    TerminalBench {
-        #[serde(default)]
-        cases: Vec<TerminalBenchCase>,
-    },
-    SkillBench {
-        #[serde(default)]
-        cases: Vec<SkillBenchCase>,
-    },
-}
-
-fn agent_env_benchmark_config(
-    runner: &ExperimentRunnerProfile,
-) -> ApiResult<Option<AgentEnvBenchmarkConfig>> {
-    let source = runner
-        .backend_config
-        .get("agent_env")
-        .or_else(|| runner.backend_config.get("benchmark_config"))
-        .unwrap_or(&runner.backend_config);
-    if source.get("benchmark").is_none() {
-        return Ok(None);
-    }
-    serde_json::from_value(source.clone())
-        .map(Some)
-        .map_err(|err| ApiError::InvalidInput(format!("Invalid AgentEnv benchmark config: {err}")))
-}
-
 async fn execute_agent_env_benchmark_trial(
     config: AgentEnvBenchmarkConfig,
     run_root: &Path,
@@ -4695,7 +4063,7 @@ async fn execute_agent_env_benchmark_trial(
     tokio::fs::write(&trajectory_path, &trajectory_json)
         .await
         .map_err(|err| ApiError::Internal(err.to_string()))?;
-    let log = render_agent_env_log(&trajectories);
+    let log = render_trajectory_log(&trajectories);
     tokio::fs::write(log_path, &log)
         .await
         .map_err(|err| ApiError::Internal(err.to_string()))?;
@@ -4715,81 +4083,9 @@ async fn execute_agent_env_benchmark_trial(
         artifact_manifest_json: serde_json::json!({
             "stage": "agent_env_benchmark",
             "trajectory_json_path": trajectory_path.to_string_lossy(),
-            "trajectory_summary": agent_env_trajectory_summary(&trajectories),
+            "trajectory_summary": trajectory_summary(&trajectories),
         }),
     })
-}
-
-fn average_trajectory_score(trajectories: &[Trajectory]) -> f64 {
-    if trajectories.is_empty() {
-        0.0
-    } else {
-        trajectories
-            .iter()
-            .map(|trajectory| trajectory.score)
-            .sum::<f64>()
-            / trajectories.len() as f64
-    }
-}
-
-fn agent_env_trajectory_summary(trajectories: &[Trajectory]) -> serde_json::Value {
-    let mut env_names = trajectories
-        .iter()
-        .map(|trajectory| trajectory.env_name.clone())
-        .collect::<Vec<_>>();
-    env_names.sort();
-    env_names.dedup();
-
-    let mut exact_tokens_supported = false;
-    let mut logprobs_supported = false;
-    let mut captured_token_ids = 0usize;
-    let mut captured_logprobs = 0usize;
-    let mut token_capture_steps = 0usize;
-    let mut step_count = 0usize;
-
-    for trajectory in trajectories {
-        step_count += trajectory.steps.len();
-        for step in &trajectory.steps {
-            if let Some(capture) = step.token_capture.as_ref() {
-                token_capture_steps += 1;
-                exact_tokens_supported |= capture.exact_tokens_supported;
-                logprobs_supported |= capture.logprobs_supported;
-                captured_token_ids += capture.token_ids.len();
-                captured_logprobs += capture.logprobs.len();
-            }
-        }
-    }
-
-    serde_json::json!({
-        "env_names": env_names,
-        "episode_count": trajectories.len(),
-        "step_count": step_count,
-        "score": average_trajectory_score(trajectories),
-        "exact_tokens_supported": exact_tokens_supported,
-        "logprobs_supported": logprobs_supported,
-        "token_capture_steps": token_capture_steps,
-        "captured_token_ids": captured_token_ids,
-        "captured_logprobs": captured_logprobs,
-    })
-}
-
-fn render_agent_env_log(trajectories: &[Trajectory]) -> String {
-    let mut log = String::new();
-    for trajectory in trajectories {
-        log.push_str(&format!(
-            "== {} {} score {:.3} ==\n",
-            trajectory.env_name, trajectory.episode_id, trajectory.score
-        ));
-        for step in &trajectory.steps {
-            log.push_str(&format!(
-                "reward={:.3} done={}\n{}\n",
-                step.reward,
-                step.done,
-                step.response.as_deref().unwrap_or_default()
-            ));
-        }
-    }
-    log
 }
 
 async fn restore_campaign_worktree_after_trial(
@@ -4810,19 +4106,6 @@ async fn restore_campaign_worktree_after_trial(
         .await
         .map_err(|error| format!("failed to clean campaign worktree: {error}"))?;
     Ok(())
-}
-
-fn env_pairs_from_json(env_grants: &serde_json::Value) -> Vec<(String, String)> {
-    env_grants
-        .as_object()
-        .map(|map| {
-            map.iter()
-                .filter_map(|(key, value)| {
-                    value.as_str().map(|value| (key.clone(), value.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn experiment_sandbox_config(settings: &Settings) -> crate::sandbox::SandboxConfig {
@@ -4940,991 +4223,6 @@ async fn git_run(cwd: &str, prefix_args: &[&str], extra_args: &[&str]) -> ApiRes
     Ok(())
 }
 
-fn derive_opportunities(
-    usage: &[ExperimentModelUsageRecord],
-    targets: &[ExperimentTarget],
-    target_links: &[ExperimentTargetLink],
-) -> Vec<ExperimentOpportunity> {
-    let mut opportunities_by_key: HashMap<String, OpportunityAggregate> = HashMap::new();
-
-    for record in usage {
-        let class = usage_classification(record);
-        let route_key = record.route_key.clone();
-        let logical_role = record.logical_role.clone();
-        let candidate_kinds = candidate_kinds_for_usage(record, class, targets);
-
-        for kind in candidate_kinds {
-            let key = opportunity_key_string(
-                &record.provider,
-                &record.model,
-                route_key.as_deref(),
-                logical_role.as_deref(),
-                kind,
-            );
-            let linked_target_id = find_linked_target_id(target_links, targets, record, kind)
-                .or_else(|| find_linked_target(targets, record, kind).map(|target| target.id));
-            let aggregate =
-                opportunities_by_key
-                    .entry(key)
-                    .or_insert_with(|| OpportunityAggregate {
-                        provider: record.provider.clone(),
-                        model: record.model.clone(),
-                        route_key: route_key.clone(),
-                        logical_role: logical_role.clone(),
-                        kind,
-                        class,
-                        call_count: 0,
-                        error_count: 0,
-                        latency_sum_ms: 0,
-                        cost_sum_usd: 0.0,
-                        first_seen: record.created_at,
-                        last_seen: record.created_at,
-                        linked_target_id,
-                    });
-            aggregate.call_count = aggregate.call_count.saturating_add(1);
-            if !record.success {
-                aggregate.error_count = aggregate.error_count.saturating_add(1);
-            }
-            aggregate.last_seen = aggregate.last_seen.max(record.created_at);
-            aggregate.first_seen = aggregate.first_seen.min(record.created_at);
-            if let Some(linked_target_id) = linked_target_id {
-                aggregate.linked_target_id = Some(linked_target_id);
-            }
-            aggregate.latency_sum_ms = aggregate
-                .latency_sum_ms
-                .saturating_add(record.latency_ms.unwrap_or_default());
-            aggregate.cost_sum_usd += record.cost_usd.unwrap_or(0.0);
-        }
-    }
-
-    let mut aggregates: Vec<_> = opportunities_by_key.into_values().collect();
-    aggregates.sort_by(|left, right| {
-        aggregate_opportunity_score(right)
-            .partial_cmp(&aggregate_opportunity_score(left))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.call_count.cmp(&right.call_count).reverse())
-            .then_with(|| left.provider.cmp(&right.provider))
-            .then_with(|| left.model.cmp(&right.model))
-    });
-
-    let mut opportunities = Vec::with_capacity(aggregates.len());
-    for aggregate in aggregates {
-        let self_hosted = aggregate.class != UsageClass::Hosted;
-        let avg_latency_ms = if aggregate.call_count == 0 {
-            None
-        } else {
-            Some(aggregate.latency_sum_ms as f64 / aggregate.call_count as f64)
-        };
-        let avg_cost_usd = if aggregate.call_count == 0 {
-            None
-        } else {
-            Some(aggregate.cost_sum_usd / aggregate.call_count as f64)
-        };
-        let error_rate = if aggregate.call_count == 0 {
-            0.0
-        } else {
-            aggregate.error_count as f64 / aggregate.call_count as f64
-        };
-        let key = opportunity_key_string(
-            &aggregate.provider,
-            &aggregate.model,
-            aggregate.route_key.as_deref(),
-            aggregate.logical_role.as_deref(),
-            aggregate.kind,
-        );
-        let hash = blake3::hash(key.as_bytes()).to_hex().to_string();
-        let rank_score = aggregate_opportunity_score(&aggregate);
-        let route_key = aggregate.route_key.clone();
-        let logical_role = aggregate.logical_role.clone();
-        let signals =
-            opportunity_signals_for_usage(&aggregate, error_rate, avg_latency_ms, avg_cost_usd);
-        let summary = opportunity_summary(
-            aggregate.kind,
-            aggregate.provider.as_str(),
-            aggregate.model.as_str(),
-            route_key.as_deref(),
-            logical_role.as_deref(),
-            self_hosted,
-        );
-        opportunities.push(ExperimentOpportunity {
-            id: format!("opp_{}", &hash[..16]),
-            provider: aggregate.provider,
-            model: aggregate.model,
-            route_key: route_key.clone(),
-            logical_role,
-            opportunity_type: aggregate.kind,
-            summary,
-            gpu_requirement: opportunity_gpu_requirement(aggregate.kind, self_hosted),
-            suggested_preset: opportunity_preset(aggregate.kind, self_hosted),
-            linked_target_id: aggregate.linked_target_id,
-            source: Some("telemetry".to_string()),
-            confidence: Some((0.4 + (aggregate.call_count.min(8) as f64 * 0.05)).clamp(0.4, 0.9)),
-            signals,
-            project_hint: None,
-            metadata: serde_json::json!({
-                "usage_class": format!("{:?}", aggregate.class),
-                "call_count": aggregate.call_count,
-                "error_count": aggregate.error_count,
-                "error_rate": error_rate,
-                "avg_latency_ms": avg_latency_ms,
-                "avg_cost_usd": avg_cost_usd,
-                "rank_score": rank_score,
-                "linked_target": aggregate.linked_target_id.is_some(),
-                "route_key": route_key,
-            }),
-            created_at: aggregate.first_seen,
-            updated_at: aggregate.last_seen,
-        });
-    }
-
-    opportunities
-}
-
-#[derive(Debug, Clone)]
-struct OutcomeOpportunityAggregate {
-    kind: ExperimentTargetKind,
-    contract_type: String,
-    artifact_type: Option<String>,
-    artifact_name: Option<String>,
-    routine_id: Option<String>,
-    routine_name: Option<String>,
-    pattern_key: String,
-    count: u32,
-    first_seen: DateTime<Utc>,
-    last_seen: DateTime<Utc>,
-    rank_score: f64,
-    linked_target_id: Option<Uuid>,
-}
-
-fn derive_outcome_opportunities(
-    contracts: &[OutcomeContract],
-    targets: &[ExperimentTarget],
-    limit: usize,
-) -> Vec<ExperimentOpportunity> {
-    let cutoff = Utc::now() - chrono::Duration::days(30);
-    let mut aggregates: HashMap<String, OutcomeOpportunityAggregate> = HashMap::new();
-
-    for contract in contracts.iter().filter(|contract| {
-        contract.final_verdict.as_deref() == Some("negative")
-            && contract.evaluated_at.unwrap_or(contract.updated_at) >= cutoff
-    }) {
-        let Some(kind) = outcome_target_kind(contract) else {
-            continue;
-        };
-        let pattern_key = contract
-            .metadata
-            .get("pattern_key")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                format!(
-                    "{}:{}:{}",
-                    contract.contract_type, contract.source_kind, contract.source_id
-                )
-            });
-        let artifact_type = contract
-            .metadata
-            .get("artifact_type")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        let artifact_name = contract
-            .metadata
-            .get("artifact_name")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .or_else(|| outcome_default_artifact_name(contract));
-        let routine_id = contract
-            .metadata
-            .get("routine_id")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        let routine_name = contract
-            .metadata
-            .get("routine_name")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        let linked_target_id = find_outcome_linked_target_id(
-            targets,
-            kind,
-            artifact_name.as_deref(),
-            routine_id.as_deref(),
-            &pattern_key,
-        );
-        let evaluated_at = contract.evaluated_at.unwrap_or(contract.updated_at);
-        let aggregate =
-            aggregates
-                .entry(pattern_key.clone())
-                .or_insert_with(|| OutcomeOpportunityAggregate {
-                    kind,
-                    contract_type: contract.contract_type.clone(),
-                    artifact_type: artifact_type.clone(),
-                    artifact_name: artifact_name.clone(),
-                    routine_id: routine_id.clone(),
-                    routine_name: routine_name.clone(),
-                    pattern_key: pattern_key.clone(),
-                    count: 0,
-                    first_seen: evaluated_at,
-                    last_seen: evaluated_at,
-                    rank_score: 0.0,
-                    linked_target_id,
-                });
-        aggregate.count = aggregate.count.saturating_add(1);
-        aggregate.first_seen = aggregate.first_seen.min(evaluated_at);
-        aggregate.last_seen = aggregate.last_seen.max(evaluated_at);
-        if aggregate.linked_target_id.is_none() {
-            aggregate.linked_target_id = linked_target_id;
-        }
-    }
-
-    let mut aggregates: Vec<_> = aggregates.into_values().collect();
-    for aggregate in &mut aggregates {
-        let recency_bonus = ((Utc::now() - aggregate.last_seen).num_days().max(0) as f64).min(14.0);
-        aggregate.rank_score = aggregate.count as f64 * 4.0 - recency_bonus;
-    }
-    aggregates.sort_by(|left, right| {
-        right
-            .rank_score
-            .partial_cmp(&left.rank_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                experiment_target_kind_sort_key(left.kind)
-                    .cmp(experiment_target_kind_sort_key(right.kind))
-            })
-            .then_with(|| left.pattern_key.cmp(&right.pattern_key))
-    });
-
-    aggregates
-        .into_iter()
-        .take(limit.max(1))
-        .map(outcome_aggregate_to_opportunity)
-        .collect()
-}
-
-fn outcome_target_kind(contract: &OutcomeContract) -> Option<ExperimentTargetKind> {
-    match contract.contract_type.as_str() {
-        "turn_usefulness" => Some(ExperimentTargetKind::PromptAsset),
-        "routine_usefulness" => Some(ExperimentTargetKind::ToolPolicy),
-        "tool_durability" => match contract
-            .metadata
-            .get("artifact_type")
-            .and_then(|value| value.as_str())
-        {
-            Some("prompt") => Some(ExperimentTargetKind::PromptAsset),
-            Some("skill") | Some("routine") => Some(ExperimentTargetKind::ToolPolicy),
-            Some("parser") => Some(ExperimentTargetKind::Parser),
-            Some("evaluator") => Some(ExperimentTargetKind::Evaluator),
-            Some("inference") => Some(ExperimentTargetKind::InferenceConfig),
-            Some("serving") => Some(ExperimentTargetKind::ServingConfig),
-            Some("training") => Some(ExperimentTargetKind::TrainingConfig),
-            Some("training_code") | Some("code") => Some(ExperimentTargetKind::TrainingCode),
-            _ if contract.source_kind == "learning_code_proposal" => {
-                Some(ExperimentTargetKind::TrainingCode)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn outcome_default_artifact_name(contract: &OutcomeContract) -> Option<String> {
-    match contract.contract_type.as_str() {
-        "turn_usefulness" => Some(crate::workspace::paths::USER.to_string()),
-        _ => None,
-    }
-}
-
-fn find_outcome_linked_target_id(
-    targets: &[ExperimentTarget],
-    kind: ExperimentTargetKind,
-    artifact_name: Option<&str>,
-    routine_id: Option<&str>,
-    pattern_key: &str,
-) -> Option<Uuid> {
-    targets
-        .iter()
-        .find(|target| {
-            if target.kind != kind {
-                return false;
-            }
-            let asset_id = target
-                .metadata
-                .get("asset_id")
-                .and_then(|value| value.as_str());
-            let target_pattern = target
-                .metadata
-                .get("pattern_key")
-                .and_then(|value| value.as_str());
-            asset_id
-                .zip(artifact_name)
-                .is_some_and(|(left, right)| left == right)
-                || asset_id
-                    .zip(routine_id)
-                    .is_some_and(|(left, right)| left == right)
-                || target_pattern.is_some_and(|value| value == pattern_key)
-        })
-        .map(|target| target.id)
-}
-
-fn outcome_aggregate_to_opportunity(
-    aggregate: OutcomeOpportunityAggregate,
-) -> ExperimentOpportunity {
-    let (summary, project_hint) = outcome_summary_and_project_hint(&aggregate);
-    let id_source = format!("{}|{:?}", aggregate.pattern_key, aggregate.kind);
-    let hash = blake3::hash(id_source.as_bytes()).to_hex().to_string();
-    let signals = outcome_signals(&aggregate);
-    ExperimentOpportunity {
-        id: format!("opp_outcome_{}", &hash[..16]),
-        provider: "outcome_learning".to_string(),
-        model: aggregate
-            .artifact_name
-            .clone()
-            .or_else(|| aggregate.routine_name.clone())
-            .unwrap_or_else(|| "negative pattern".to_string()),
-        route_key: None,
-        logical_role: None,
-        opportunity_type: aggregate.kind,
-        summary,
-        gpu_requirement: outcome_gpu_requirement(aggregate.kind),
-        suggested_preset: outcome_preset(aggregate.kind),
-        linked_target_id: aggregate.linked_target_id,
-        source: Some("outcome_learning".to_string()),
-        confidence: Some((0.45 + aggregate.count.min(5) as f64 * 0.1).clamp(0.45, 0.95)),
-        signals,
-        project_hint: Some(project_hint),
-        metadata: serde_json::json!({
-            "rank_score": aggregate.rank_score,
-            "negative_outcome_count": aggregate.count,
-            "pattern_key": aggregate.pattern_key,
-            "contract_type": aggregate.contract_type,
-            "artifact_type": aggregate.artifact_type,
-            "artifact_name": aggregate.artifact_name,
-            "routine_id": aggregate.routine_id,
-            "routine_name": aggregate.routine_name,
-        }),
-        created_at: aggregate.first_seen,
-        updated_at: aggregate.last_seen,
-    }
-}
-
-fn outcome_summary_and_project_hint(
-    aggregate: &OutcomeOpportunityAggregate,
-) -> (String, serde_json::Value) {
-    match aggregate.kind {
-        ExperimentTargetKind::PromptAsset => {
-            let target = aggregate
-                .artifact_name
-                .clone()
-                .unwrap_or_else(|| crate::workspace::paths::USER.to_string());
-            (
-                format!(
-                    "Use repeated negative outcome signals to benchmark and improve prompt behavior for {}.",
-                    target
-                ),
-                serde_json::json!({
-                    "name": format!("Outcome prompt benchmark for {}", target),
-                    "mutable_paths": [target],
-                    "fixed_paths": ["README.md"],
-                    "metric_name": "outcome_success_rate",
-                    "comparator": "higher_is_better",
-                    "strategy": "Use the repeated negative outcome pattern as a benchmark seed, improve the prompt surface conservatively, and compare against the current baseline."
-                }),
-            )
-        }
-        ExperimentTargetKind::ToolPolicy => {
-            let label = aggregate
-                .routine_name
-                .clone()
-                .or_else(|| aggregate.artifact_name.clone())
-                .unwrap_or_else(|| "tool orchestration".to_string());
-            (
-                format!(
-                    "Investigate repeated negative outcome signals around {} and refine orchestration or notification policy.",
-                    label
-                ),
-                serde_json::json!({
-                    "name": format!("Outcome orchestration benchmark for {}", label),
-                    "mutable_paths": ["src/agent/routine_engine.rs", "src/agent/outcomes.rs"],
-                    "fixed_paths": ["README.md"],
-                    "metric_name": "negative_outcome_rate",
-                    "comparator": "lower_is_better",
-                    "strategy": "Reduce repeated negative outcome patterns without broadening scope, and keep operator-facing behavior benchmarkable."
-                }),
-            )
-        }
-        ExperimentTargetKind::TrainingCode => (
-            "Promote repeated negative durability signals into a benchmarked code-improvement search.".to_string(),
-            serde_json::json!({
-                "name": "Outcome-driven code benchmark",
-                "mutable_paths": aggregate.artifact_name.clone().map(|value| vec![value]).unwrap_or_default(),
-                "fixed_paths": ["README.md"],
-                "metric_name": "regression_rate",
-                "comparator": "lower_is_better",
-                "strategy": "Use repeated negative durability outcomes as the seed benchmark and only mutate the code surface implicated by the pattern."
-            }),
-        ),
-        kind => (
-            format!(
-                "Use repeated negative outcome signals to drive a focused {:?} benchmark.",
-                kind
-            ),
-            serde_json::json!({
-                "name": format!("Outcome-driven {:?} benchmark", kind),
-                "mutable_paths": [],
-                "fixed_paths": ["README.md"],
-                "metric_name": "outcome_success_rate",
-                "comparator": "higher_is_better",
-                "strategy": "Turn repeated negative outcome evidence into a repeatable benchmark and search only the target surface."
-            }),
-        ),
-    }
-}
-
-fn outcome_signals(aggregate: &OutcomeOpportunityAggregate) -> Vec<String> {
-    let mut signals = vec![
-        "outcome-backed evidence".to_string(),
-        format!(
-            "{} negative outcome{}",
-            aggregate.count,
-            if aggregate.count == 1 { "" } else { "s" }
-        ),
-    ];
-    if let Some(artifact_name) = aggregate.artifact_name.as_deref() {
-        signals.push(format!("target {}", artifact_name));
-    }
-    if let Some(routine_name) = aggregate.routine_name.as_deref() {
-        signals.push(format!("routine {}", routine_name));
-    }
-    signals
-}
-
-fn outcome_gpu_requirement(kind: ExperimentTargetKind) -> ExperimentGpuRequirement {
-    match kind {
-        ExperimentTargetKind::TrainingCode | ExperimentTargetKind::TrainingConfig => {
-            ExperimentGpuRequirement::Required
-        }
-        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig => {
-            ExperimentGpuRequirement::Recommended
-        }
-        _ => ExperimentGpuRequirement::NotNeeded,
-    }
-}
-
-fn outcome_preset(kind: ExperimentTargetKind) -> ExperimentPreset {
-    match kind {
-        ExperimentTargetKind::PromptAsset | ExperimentTargetKind::RoutingPolicy => {
-            ExperimentPreset::HostedPromptRouting
-        }
-        ExperimentTargetKind::RagConfig => ExperimentPreset::RagPipeline,
-        ExperimentTargetKind::ToolPolicy => ExperimentPreset::ToolOrchestration,
-        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig => {
-            ExperimentPreset::OpenWeightsInferenceTuning
-        }
-        ExperimentTargetKind::TrainingConfig => ExperimentPreset::SelfHostedFinetune,
-        ExperimentTargetKind::TrainingCode => ExperimentPreset::OpenWeightsTrainingCode,
-        ExperimentTargetKind::Evaluator | ExperimentTargetKind::Parser => {
-            ExperimentPreset::AutoresearchSingleFile
-        }
-    }
-}
-
-fn experiment_target_kind_sort_key(kind: ExperimentTargetKind) -> &'static str {
-    match kind {
-        ExperimentTargetKind::PromptAsset => "prompt_asset",
-        ExperimentTargetKind::RoutingPolicy => "routing_policy",
-        ExperimentTargetKind::RagConfig => "rag_config",
-        ExperimentTargetKind::ToolPolicy => "tool_policy",
-        ExperimentTargetKind::Evaluator => "evaluator",
-        ExperimentTargetKind::Parser => "parser",
-        ExperimentTargetKind::InferenceConfig => "inference_config",
-        ExperimentTargetKind::TrainingConfig => "training_config",
-        ExperimentTargetKind::TrainingCode => "training_code",
-        ExperimentTargetKind::ServingConfig => "serving_config",
-    }
-}
-
-fn opportunity_signals_for_usage(
-    aggregate: &OpportunityAggregate,
-    error_rate: f64,
-    avg_latency_ms: Option<f64>,
-    avg_cost_usd: Option<f64>,
-) -> Vec<String> {
-    let mut signals = vec![format!(
-        "{} model call{}",
-        aggregate.call_count,
-        if aggregate.call_count == 1 { "" } else { "s" }
-    )];
-    if error_rate > 0.0 {
-        signals.push(format!("{:.0}% error rate", error_rate * 100.0));
-    }
-    if let Some(avg_latency_ms) = avg_latency_ms {
-        signals.push(format!("{:.0} ms avg latency", avg_latency_ms));
-    }
-    if let Some(avg_cost_usd) = avg_cost_usd {
-        signals.push(format!("${:.4} avg cost", avg_cost_usd));
-    }
-    signals
-}
-
-fn sort_experiment_opportunities(opportunities: &mut [ExperimentOpportunity]) {
-    opportunities.sort_by(|left, right| {
-        let right_score = right
-            .metadata
-            .get("rank_score")
-            .and_then(|value| value.as_f64())
-            .unwrap_or_default();
-        let left_score = left
-            .metadata
-            .get("rank_score")
-            .and_then(|value| value.as_f64())
-            .unwrap_or_default();
-        right_score
-            .partial_cmp(&left_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| right.updated_at.cmp(&left.updated_at))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UsageClass {
-    Hosted,
-    SelfHosted,
-    CustomHostedOrSelf,
-}
-
-impl std::fmt::Debug for UsageClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Hosted => f.write_str("hosted"),
-            Self::SelfHosted => f.write_str("self_hosted"),
-            Self::CustomHostedOrSelf => f.write_str("custom_hosted_or_self_hosted"),
-        }
-    }
-}
-
-fn usage_classification(record: &ExperimentModelUsageRecord) -> UsageClass {
-    let provider = record.provider.to_ascii_lowercase();
-    let endpoint_type = record
-        .endpoint_type
-        .clone()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let base_url = metadata_string(&record.metadata, "base_url")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    if is_known_hosted_provider(&provider) {
-        return UsageClass::Hosted;
-    }
-
-    if is_known_self_hosted_provider(&provider)
-        || endpoint_type.contains("local")
-        || endpoint_type.contains("self")
-        || endpoint_type.contains("cluster")
-        || endpoint_type.contains("private")
-        || base_url.contains("localhost")
-        || base_url.contains("127.0.0.1")
-        || base_url.contains("0.0.0.0")
-    {
-        return UsageClass::SelfHosted;
-    }
-
-    if endpoint_type.contains("openai-compatible")
-        || metadata_bool(&record.metadata, "openai_compatible")
-        || metadata_bool(&record.metadata, "openai_compatible_or_self_hosted")
-    {
-        return UsageClass::CustomHostedOrSelf;
-    }
-
-    UsageClass::CustomHostedOrSelf
-}
-
-fn is_known_hosted_provider(provider: &str) -> bool {
-    const KNOWN_HOSTED: &[&str] = &[
-        "openai",
-        "anthropic",
-        "gemini",
-        "google",
-        "cohere",
-        "mistral",
-        "azure",
-        "perplexity",
-        "xai",
-        "deepseek",
-        "groq",
-    ];
-    let provider = provider.to_ascii_lowercase();
-    KNOWN_HOSTED
-        .iter()
-        .any(|name| provider == *name || provider.contains(name))
-}
-
-fn is_known_self_hosted_provider(provider: &str) -> bool {
-    const SELF_HOSTED: &[&str] = &[
-        "ollama",
-        "lmstudio",
-        "vllm",
-        "llama_cpp",
-        "llama-cpp",
-        "llamacpp",
-        "localai",
-        "tgi",
-    ];
-    let provider = provider.to_ascii_lowercase();
-    SELF_HOSTED
-        .iter()
-        .any(|name| provider == *name || provider.contains(name))
-}
-
-fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
-    metadata
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn metadata_bool(metadata: &serde_json::Value, key: &str) -> bool {
-    metadata
-        .get(key)
-        .and_then(|value| value.as_bool())
-        .unwrap_or_default()
-}
-
-fn candidate_kinds_for_usage(
-    record: &ExperimentModelUsageRecord,
-    class: UsageClass,
-    targets: &[ExperimentTarget],
-) -> Vec<ExperimentTargetKind> {
-    let mut kinds = Vec::new();
-
-    if record.route_key.is_some() || record.logical_role.is_some() {
-        kinds.push(ExperimentTargetKind::RoutingPolicy);
-    }
-    if !record.prompt_asset_ids.is_empty() || record.route_key.is_some() {
-        kinds.push(ExperimentTargetKind::PromptAsset);
-    }
-    if !record.retrieval_asset_ids.is_empty() {
-        kinds.push(ExperimentTargetKind::RagConfig);
-    }
-    if !record.tool_policy_ids.is_empty() {
-        kinds.push(ExperimentTargetKind::ToolPolicy);
-    }
-    if !record.success
-        || record
-            .workload_tag
-            .as_deref()
-            .map(|value| {
-                let value = value.to_ascii_lowercase();
-                value.contains("parse")
-                    || value.contains("json")
-                    || value.contains("structured")
-                    || value.contains("extract")
-            })
-            .unwrap_or(false)
-    {
-        kinds.push(ExperimentTargetKind::Parser);
-    }
-    if !record.parser_ids.is_empty() {
-        kinds.push(ExperimentTargetKind::Parser);
-    }
-    if record
-        .workload_tag
-        .as_deref()
-        .map(|value| {
-            let value = value.to_ascii_lowercase();
-            value.contains("eval") || value.contains("judge") || value.contains("score")
-        })
-        .unwrap_or(false)
-    {
-        kinds.push(ExperimentTargetKind::Evaluator);
-    }
-    if !record.evaluator_ids.is_empty() {
-        kinds.push(ExperimentTargetKind::Evaluator);
-    }
-
-    match class {
-        UsageClass::Hosted => {}
-        UsageClass::SelfHosted => {
-            kinds.extend([
-                ExperimentTargetKind::InferenceConfig,
-                ExperimentTargetKind::ServingConfig,
-                ExperimentTargetKind::TrainingConfig,
-                ExperimentTargetKind::TrainingCode,
-            ]);
-        }
-        UsageClass::CustomHostedOrSelf => {
-            kinds.extend(
-                [
-                    ExperimentTargetKind::InferenceConfig,
-                    ExperimentTargetKind::ServingConfig,
-                    ExperimentTargetKind::TrainingConfig,
-                    ExperimentTargetKind::TrainingCode,
-                ]
-                .into_iter()
-                .filter(|kind| find_linked_target(targets, record, *kind).is_some()),
-            );
-        }
-    }
-
-    if kinds.is_empty() {
-        kinds.push(ExperimentTargetKind::PromptAsset);
-    }
-
-    kinds.sort_by_key(|kind| *kind as u8);
-    kinds.dedup();
-    kinds
-}
-
-fn opportunity_key_string(
-    provider: &str,
-    model: &str,
-    route_key: Option<&str>,
-    logical_role: Option<&str>,
-    kind: ExperimentTargetKind,
-) -> String {
-    format!(
-        "{provider}|{model}|{}|{}|{:?}",
-        route_key.unwrap_or(""),
-        logical_role.unwrap_or(""),
-        kind,
-    )
-}
-
-fn aggregate_opportunity_score(aggregate: &OpportunityAggregate) -> f64 {
-    if aggregate.call_count == 0 {
-        return 0.0;
-    }
-    let error_rate = aggregate.error_count as f64 / aggregate.call_count as f64;
-    let avg_latency = aggregate.latency_sum_ms as f64 / aggregate.call_count as f64;
-    let avg_cost = aggregate.cost_sum_usd / aggregate.call_count as f64;
-    let missing_link_penalty = if aggregate.linked_target_id.is_none()
-        && matches!(
-            aggregate.kind,
-            ExperimentTargetKind::InferenceConfig
-                | ExperimentTargetKind::ServingConfig
-                | ExperimentTargetKind::TrainingConfig
-                | ExperimentTargetKind::TrainingCode,
-        ) {
-        1.25
-    } else {
-        0.0
-    };
-    let gpu_penalty = if matches!(aggregate.kind, ExperimentTargetKind::TrainingCode) {
-        -2.0
-    } else if matches!(
-        aggregate.kind,
-        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig
-    ) {
-        -1.0
-    } else {
-        0.0
-    };
-    aggregate.call_count as f64 * 2.0
-        - (error_rate * 100.0)
-        - (avg_latency.min(4000.0) / 60.0)
-        - avg_cost
-        + gpu_penalty
-        - missing_link_penalty
-}
-
-fn find_linked_target<'a>(
-    targets: &'a [ExperimentTarget],
-    record: &ExperimentModelUsageRecord,
-    kind: ExperimentTargetKind,
-) -> Option<&'a ExperimentTarget> {
-    targets.iter().find(|target| {
-        if target.kind != kind {
-            return false;
-        }
-        let provider_match = target
-            .metadata
-            .get("provider")
-            .and_then(|value| value.as_str())
-            .map(|value| value.eq_ignore_ascii_case(&record.provider))
-            .unwrap_or(false);
-        let model_match = target
-            .metadata
-            .get("model")
-            .and_then(|value| value.as_str())
-            .map(|value| value.eq_ignore_ascii_case(&record.model))
-            .unwrap_or(false);
-        let route_match = target
-            .metadata
-            .get("route_key")
-            .and_then(|value| value.as_str())
-            .zip(record.route_key.as_deref())
-            .map(|(left, right)| left == right)
-            .unwrap_or(false);
-        let asset_id_match = target
-            .metadata
-            .get("asset_id")
-            .and_then(|value| value.as_str())
-            .map(|asset_id| {
-                record.prompt_asset_ids.iter().any(|id| id == asset_id)
-                    || record.retrieval_asset_ids.iter().any(|id| id == asset_id)
-                    || record.tool_policy_ids.iter().any(|id| id == asset_id)
-            })
-            .unwrap_or(false);
-        provider_match || model_match || route_match || asset_id_match
-    })
-}
-
-fn find_linked_target_id(
-    target_links: &[ExperimentTargetLink],
-    targets: &[ExperimentTarget],
-    record: &ExperimentModelUsageRecord,
-    kind: ExperimentTargetKind,
-) -> Option<Uuid> {
-    let route_key = record.route_key.as_deref().unwrap_or_default();
-    let logical_role = record.logical_role.as_deref().unwrap_or_default();
-
-    target_links
-        .iter()
-        .find(|link| {
-            link.kind == kind
-                && link.provider.eq_ignore_ascii_case(&record.provider)
-                && link.model.eq_ignore_ascii_case(&record.model)
-                && link.route_key.as_deref().unwrap_or_default() == route_key
-                && link.logical_role.as_deref().unwrap_or_default() == logical_role
-                && targets
-                    .iter()
-                    .any(|target| target.id == link.target_id && target.kind == kind)
-        })
-        .map(|link| link.target_id)
-}
-
-fn opportunity_summary(
-    kind: ExperimentTargetKind,
-    provider: &str,
-    model: &str,
-    route_key: Option<&str>,
-    logical_role: Option<&str>,
-    self_hosted: bool,
-) -> String {
-    match kind {
-        ExperimentTargetKind::PromptAsset => format!(
-            "Optimize prompts and system instructions for {} on {}.",
-            model, provider
-        ),
-        ExperimentTargetKind::RoutingPolicy => format!(
-            "Tune routing and fallback policy for {} on {} (route: {}, role: {}).",
-            model,
-            provider,
-            route_key.unwrap_or("default route"),
-            logical_role.unwrap_or("default role")
-        ),
-        ExperimentTargetKind::RagConfig => format!(
-            "Improve retrieval and ranking for {} on {}.",
-            model, provider
-        ),
-        ExperimentTargetKind::ToolPolicy => format!(
-            "Refine tool selection and execution policy around {} on {}.",
-            model, provider
-        ),
-        ExperimentTargetKind::InferenceConfig => format!(
-            "Tune inference parameters for self-hosted model {} on {}.",
-            model, provider
-        ),
-        ExperimentTargetKind::ServingConfig => format!(
-            "Adjust serving/runtime settings for self-hosted model {} on {}.",
-            model, provider
-        ),
-        ExperimentTargetKind::TrainingConfig => format!(
-            "Benchmark fine-tuning or training configuration for {} on {}.",
-            model, provider
-        ),
-        ExperimentTargetKind::TrainingCode => format!(
-            "Improve training code or benchmark harness for {} on {}.",
-            model, provider
-        ),
-        ExperimentTargetKind::Evaluator | ExperimentTargetKind::Parser => {
-            if self_hosted {
-                format!(
-                    "Improve evaluator and parsing reliability around {} on {}.",
-                    model, provider
-                )
-            } else {
-                format!(
-                    "Tighten evaluator and output parsing around {} on {}.",
-                    model, provider
-                )
-            }
-        }
-    }
-}
-
-fn opportunity_gpu_requirement(
-    kind: ExperimentTargetKind,
-    self_hosted: bool,
-) -> ExperimentGpuRequirement {
-    if !self_hosted {
-        return ExperimentGpuRequirement::NotNeeded;
-    }
-    match kind {
-        ExperimentTargetKind::TrainingConfig | ExperimentTargetKind::TrainingCode => {
-            ExperimentGpuRequirement::Required
-        }
-        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig => {
-            ExperimentGpuRequirement::Recommended
-        }
-        _ => ExperimentGpuRequirement::NotNeeded,
-    }
-}
-
-fn opportunity_preset(kind: ExperimentTargetKind, self_hosted: bool) -> ExperimentPreset {
-    match kind {
-        ExperimentTargetKind::PromptAsset | ExperimentTargetKind::RoutingPolicy => {
-            ExperimentPreset::HostedPromptRouting
-        }
-        ExperimentTargetKind::RagConfig => ExperimentPreset::RagPipeline,
-        ExperimentTargetKind::ToolPolicy
-        | ExperimentTargetKind::Evaluator
-        | ExperimentTargetKind::Parser => ExperimentPreset::ToolOrchestration,
-        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig => {
-            ExperimentPreset::OpenWeightsInferenceTuning
-        }
-        ExperimentTargetKind::TrainingConfig => ExperimentPreset::SelfHostedFinetune,
-        ExperimentTargetKind::TrainingCode => {
-            if self_hosted {
-                ExperimentPreset::OpenWeightsTrainingCode
-            } else {
-                ExperimentPreset::AutoresearchSingleFile
-            }
-        }
-    }
-}
-
-fn merge_json(base: &serde_json::Value, overlay: &serde_json::Value) -> serde_json::Value {
-    match (base, overlay) {
-        (serde_json::Value::Object(base), serde_json::Value::Object(overlay)) => {
-            let mut merged = base.clone();
-            for (key, value) in overlay {
-                let next = merged
-                    .get(key)
-                    .map(|existing| merge_json(existing, value))
-                    .unwrap_or_else(|| value.clone());
-                merged.insert(key.clone(), next);
-            }
-            serde_json::Value::Object(merged)
-        }
-        (_, overlay) => overlay.clone(),
-    }
-}
-
-#[derive(Debug, Clone)]
-struct LlmCostAttribution {
-    total_usd: f64,
-    details: serde_json::Value,
-}
-
-#[derive(Debug, Clone)]
-struct RunnerCostBreakdown {
-    total_usd: f64,
-    details: serde_json::Value,
-    provider_metadata_overlay: Option<serde_json::Value>,
-}
-
 async fn attributed_llm_cost_for_trial(
     store: &Arc<dyn Database>,
     campaign: &ExperimentCampaign,
@@ -5968,340 +4266,28 @@ async fn attributed_llm_cost_for_trial(
     Ok(summarize_llm_usage(&fallback, "campaign_window"))
 }
 
-fn summarize_llm_usage(records: &[ExperimentModelUsageRecord], source: &str) -> LlmCostAttribution {
-    let mut total_usd = 0.0;
-    let mut latency_sum_ms: u64 = 0;
-    let mut latency_count: u64 = 0;
-    let mut by_role: BTreeMap<String, f64> = BTreeMap::new();
-    let mut by_provider: BTreeMap<String, f64> = BTreeMap::new();
-    let mut by_model: BTreeMap<String, f64> = BTreeMap::new();
-    for record in records {
-        let cost = record.cost_usd.unwrap_or(0.0);
-        total_usd += cost;
-        if let Some(latency_ms) = record.latency_ms {
-            latency_sum_ms += latency_ms;
-            latency_count += 1;
-        }
-        let role_key = record
-            .logical_role
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        *by_role.entry(role_key).or_insert(0.0) += cost;
-        *by_provider.entry(record.provider.clone()).or_insert(0.0) += cost;
-        *by_model
-            .entry(format!("{}/{}", record.provider, record.model))
-            .or_insert(0.0) += cost;
-    }
-    let avg_latency_ms = if latency_count == 0 {
-        None
-    } else {
-        Some(latency_sum_ms as f64 / latency_count as f64)
-    };
-    LlmCostAttribution {
-        total_usd,
-        details: serde_json::json!({
-            "source": source,
-            "usage_record_count": records.len(),
-            "total_usd": total_usd,
-            "avg_latency_ms": avg_latency_ms,
-            "by_role_usd": by_role,
-            "by_provider_usd": by_provider,
-            "by_model_usd": by_model,
-        }),
-    }
-}
-
-fn runner_cost_breakdown(
-    trial: &ExperimentTrial,
-    reported_runner_cost_usd: Option<f64>,
-) -> RunnerCostBreakdown {
-    if let Some(cost) = reported_runner_cost_usd.filter(|value| value.is_finite() && *value >= 0.0)
-    {
-        return RunnerCostBreakdown {
-            total_usd: cost,
-            details: serde_json::json!({
-                "source": "runner_completion",
-                "reported": true,
-                "total_usd": cost,
-            }),
-            provider_metadata_overlay: Some(serde_json::json!({
-                "cost_estimate": {
-                    "estimated": false,
-                    "usd": cost,
-                    "source": "runner_completion",
-                }
-            })),
-        };
-    }
-    if let Some(estimate) = estimated_provider_runtime_cost_usd(trial) {
-        return RunnerCostBreakdown {
-            total_usd: estimate.total_usd,
-            details: serde_json::json!({
-                "source": estimate.source,
-                "estimated": true,
-                "total_usd": estimate.total_usd,
-                "hourly_rate_usd": estimate.hourly_rate_usd,
-                "native_hourly_rate": estimate.native_hourly_rate,
-                "native_currency": estimate.native_currency,
-                "normalization": estimate.normalization,
-            }),
-            provider_metadata_overlay: Some(serde_json::json!({
-                "cost_estimate": {
-                    "estimated": true,
-                    "usd": estimate.total_usd,
-                    "hourly_rate_usd": estimate.hourly_rate_usd,
-                    "native_hourly_rate": estimate.native_hourly_rate,
-                    "native_currency": estimate.native_currency,
-                    "normalization": estimate.normalization,
-                    "source": estimate.source,
-                }
-            })),
-        };
-    }
-    RunnerCostBreakdown {
-        total_usd: 0.0,
-        details: serde_json::json!({
-            "source": "none",
-            "estimated": false,
-            "total_usd": 0.0,
-        }),
-        provider_metadata_overlay: None,
-    }
-}
-
-fn metadata_string_field(metadata: &serde_json::Value, key: &str) -> Option<String> {
-    metadata
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
-}
-
-#[derive(Debug, Clone)]
-struct ProviderCostEstimate {
-    total_usd: f64,
-    hourly_rate_usd: f64,
-    source: String,
-    native_hourly_rate: Option<f64>,
-    native_currency: Option<String>,
-    normalization: Option<String>,
-}
-
-type ProviderHourlyRate = (f64, String, Option<f64>, Option<String>, Option<String>);
-
-fn estimated_provider_runtime_cost_usd(trial: &ExperimentTrial) -> Option<ProviderCostEstimate> {
-    let runtime_ms = trial.runtime_ms?;
-    if runtime_ms == 0 {
-        return Some(ProviderCostEstimate {
-            total_usd: 0.0,
-            hourly_rate_usd: 0.0,
-            source: "runtime_ms".to_string(),
-            native_hourly_rate: None,
-            native_currency: None,
-            normalization: None,
-        });
-    }
-    let (hourly_rate_usd, source, native_hourly_rate, native_currency, normalization) =
-        provider_hourly_rate_usd(&trial.provider_job_metadata, trial.runner_backend)?;
-    if !hourly_rate_usd.is_finite() || hourly_rate_usd < 0.0 {
-        return None;
-    }
-    Some(ProviderCostEstimate {
-        total_usd: hourly_rate_usd * (runtime_ms as f64 / 3_600_000.0),
-        hourly_rate_usd,
-        source,
-        native_hourly_rate,
-        native_currency,
-        normalization,
-    })
-}
-
-fn provider_hourly_rate_usd(
-    metadata: &serde_json::Value,
-    backend: ExperimentRunnerBackend,
-) -> Option<ProviderHourlyRate> {
-    match backend {
-        ExperimentRunnerBackend::Runpod => numeric_pointer_candidates(
-            metadata,
-            &[
-                "/pod/adjustedCostPerHr",
-                "/pod/costPerHr",
-                "/launch_request/costPerHr",
-            ],
-        )
-        .map(|(credits_per_hour, source)| {
-            (
-                credits_per_hour,
-                source,
-                Some(credits_per_hour),
-                Some("runpod_credits".to_string()),
-                Some("assumed_1_credit_equals_1_usd".to_string()),
-            )
-        }),
-        ExperimentRunnerBackend::Vast => numeric_pointer_candidates(
-            metadata,
-            &[
-                "/selected_offer/dph_total",
-                "/selected_offer/search/totalHour",
-                "/selected_offer/totalHour",
-                "/instance/dph_total",
-                "/instance/search/totalHour",
-            ],
-        )
-        .map(|(usd_per_hour, source)| {
-            (
-                usd_per_hour,
-                source,
-                Some(usd_per_hour),
-                Some("usd".to_string()),
-                None,
-            )
-        }),
-        ExperimentRunnerBackend::Lambda => numeric_pointer_candidates(
-            metadata,
-            &[
-                "/instance/hourly_cost_usd",
-                "/instance/usd_per_hour",
-                "/instance/price_usd_per_hour",
-                "/launch_request/hourly_cost_usd",
-                "/launch_request/usd_per_hour",
-                "/launch_request/price_usd_per_hour",
-            ],
-        )
-        .map(|(usd_per_hour, source)| {
-            (
-                usd_per_hour,
-                source,
-                Some(usd_per_hour),
-                Some("usd".to_string()),
-                None,
-            )
-        })
-        .or_else(|| {
-            numeric_pointer_candidates(
-                metadata,
-                &[
-                    "/instance/price_cents_per_hour",
-                    "/launch_request/price_cents_per_hour",
-                ],
-            )
-            .map(|(cents, source)| {
-                (
-                    cents / 100.0,
-                    format!("{source} (converted_from_cents)"),
-                    Some(cents),
-                    Some("cents".to_string()),
-                    Some("converted_from_cents".to_string()),
-                )
-            })
-        }),
-        _ => None,
-    }
-}
-
-fn numeric_pointer_candidates(
-    value: &serde_json::Value,
-    pointers: &[&str],
-) -> Option<(f64, String)> {
-    pointers.iter().find_map(|pointer| {
-        value
-            .pointer(pointer)
-            .and_then(json_value_as_f64)
-            .map(|value| (value, pointer.trim_start_matches('/').replace('/', ".")))
-    })
-}
-
-fn json_value_as_f64(value: &serde_json::Value) -> Option<f64> {
-    match value {
-        serde_json::Value::Number(number) => number.as_f64(),
-        serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-fn target_signature(kind: ExperimentTargetKind, metadata: &serde_json::Value) -> Option<String> {
-    let provider = metadata
-        .get("provider")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default();
-    let model = metadata
-        .get("model")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default();
-    let route_key = metadata
-        .get("route_key")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default();
-    let asset_id = metadata
-        .get("asset_id")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default();
-
-    let mut parts = vec![format!("{kind:?}")];
-    if !provider.is_empty() {
-        parts.push(provider);
-    }
-    if !model.is_empty() {
-        parts.push(model);
-    }
-    if !route_key.is_empty() {
-        parts.push(route_key);
-    }
-    if !asset_id.is_empty() {
-        parts.push(asset_id);
-    }
-    if parts.len() == 1 {
-        return None;
-    }
-    Some(parts.join("|"))
-}
-
 fn ensure_unique_target_signature(
     kind: ExperimentTargetKind,
     metadata: &serde_json::Value,
     skip_target_id: Option<Uuid>,
     targets: &[ExperimentTarget],
 ) -> ApiResult<()> {
-    let Some(signature) = target_signature(kind, metadata) else {
-        return Ok(());
-    };
-    if targets.iter().any(|existing| {
-        existing.kind == kind
-            && skip_target_id != Some(existing.id)
-            && target_signature(existing.kind, &existing.metadata).as_deref()
-                == Some(signature.as_str())
-    }) {
-        return Err(ApiError::InvalidInput(format!(
-            "Duplicate target for linked identity '{signature}'"
-        )));
-    }
-    Ok(())
+    ensure_unique_target_signature_policy(kind, metadata, skip_target_id, targets)
+        .map_err(ApiError::InvalidInput)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        git_changed_files, mark_run_artifact_failed, provider_hourly_rate_usd,
-        record_campaign_candidate_generation, summarize_llm_usage,
-        validate_project_workdir_fragment,
-    };
+    use super::{git_changed_files, record_campaign_candidate_generation};
     use crate::agent::subagent_executor::{SubagentConfig, SubagentExecutor};
     use crate::agent::{AgentRunArtifact, AgentRunStatus};
     use crate::channels::ChannelManager;
     use crate::experiments::{
         ExperimentAutonomyMode, ExperimentCampaign, ExperimentCampaignQueueState,
         ExperimentCampaignStatus, ExperimentLease, ExperimentLeaseStatus,
-        ExperimentMetricComparator, ExperimentMetricDefinition, ExperimentModelUsageRecord,
-        ExperimentProject, ExperimentProjectStatus, ExperimentRunnerBackend,
-        ExperimentRunnerCompletion, ExperimentRunnerProfile, ExperimentRunnerStatus,
-        ExperimentTrial, ExperimentTrialStatus,
+        ExperimentMetricComparator, ExperimentMetricDefinition, ExperimentProject,
+        ExperimentProjectStatus, ExperimentRunnerBackend, ExperimentRunnerCompletion,
+        ExperimentRunnerProfile, ExperimentRunnerStatus, ExperimentTrial, ExperimentTrialStatus,
     };
     use crate::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role,
@@ -6479,96 +4465,6 @@ mod tests {
     }
 
     #[test]
-    fn runpod_cost_is_normalized_from_credits() {
-        let (usd_per_hour, source, native_hourly_rate, native_currency, normalization) =
-            provider_hourly_rate_usd(
-                &serde_json::json!({
-                    "pod": {
-                        "adjustedCostPerHr": 1.75
-                    }
-                }),
-                ExperimentRunnerBackend::Runpod,
-            )
-            .expect("runpod metadata should produce a cost");
-        assert!((usd_per_hour - 1.75).abs() < 1e-9);
-        assert_eq!(source, "pod.adjustedCostPerHr");
-        assert_eq!(native_hourly_rate, Some(1.75));
-        assert_eq!(native_currency.as_deref(), Some("runpod_credits"));
-        assert_eq!(
-            normalization.as_deref(),
-            Some("assumed_1_credit_equals_1_usd")
-        );
-    }
-
-    #[test]
-    fn llm_usage_summary_groups_costs_by_role_and_provider() {
-        let records = vec![
-            ExperimentModelUsageRecord {
-                id: Uuid::new_v4(),
-                provider: "openai".to_string(),
-                model: "gpt-5.4-mini".to_string(),
-                route_key: Some("planner|openai|gpt-5.4-mini".to_string()),
-                logical_role: Some("planner".to_string()),
-                endpoint_type: None,
-                workload_tag: None,
-                latency_ms: Some(100),
-                cost_usd: Some(0.12),
-                success: true,
-                prompt_asset_ids: Vec::new(),
-                retrieval_asset_ids: Vec::new(),
-                tool_policy_ids: Vec::new(),
-                evaluator_ids: Vec::new(),
-                parser_ids: Vec::new(),
-                metadata: serde_json::json!({}),
-                created_at: Utc::now(),
-            },
-            ExperimentModelUsageRecord {
-                id: Uuid::new_v4(),
-                provider: "openai".to_string(),
-                model: "gpt-5.4-mini".to_string(),
-                route_key: Some("mutator|openai|gpt-5.4-mini".to_string()),
-                logical_role: Some("mutator".to_string()),
-                endpoint_type: None,
-                workload_tag: None,
-                latency_ms: Some(200),
-                cost_usd: Some(0.08),
-                success: true,
-                prompt_asset_ids: Vec::new(),
-                retrieval_asset_ids: Vec::new(),
-                tool_policy_ids: Vec::new(),
-                evaluator_ids: Vec::new(),
-                parser_ids: Vec::new(),
-                metadata: serde_json::json!({}),
-                created_at: Utc::now(),
-            },
-        ];
-        let summary = summarize_llm_usage(&records, "trial_id");
-        assert!((summary.total_usd - 0.20).abs() < 1e-9);
-        assert_eq!(summary.details["source"], "trial_id");
-        assert_eq!(summary.details["usage_record_count"], 2);
-        assert_eq!(summary.details["by_role_usd"]["planner"], 0.12);
-        assert_eq!(summary.details["by_role_usd"]["mutator"], 0.08);
-        assert_eq!(summary.details["by_provider_usd"]["openai"], 0.20);
-    }
-
-    #[test]
-    fn mark_run_artifact_failed_updates_status_and_reason() {
-        let mut artifact = AgentRunArtifact::new(
-            "experiment_subagent:mutator",
-            AgentRunStatus::Completed,
-            Utc::now(),
-            None,
-        );
-        mark_run_artifact_failed(&mut artifact, "no candidate diff");
-        assert_eq!(artifact.status, AgentRunStatus::Failed);
-        assert_eq!(
-            artifact.failure_reason.as_deref(),
-            Some("no candidate diff")
-        );
-        assert!(artifact.completed_at.is_some());
-    }
-
-    #[test]
     fn record_campaign_candidate_generation_tracks_last_failure_and_artifacts() {
         let mut campaign = ExperimentCampaign {
             id: Uuid::new_v4(),
@@ -6638,17 +4534,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_project_workdir_fragment_rejects_parent_traversal() {
-        let error = validate_project_workdir_fragment("../escape")
-            .expect_err("parent traversal should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("Project workdir must stay inside the workspace root")
-        );
-    }
-
-    #[test]
     fn research_subagent_tool_denylist_blocks_memory_and_session_recall() {
         for tool_name in ["memory_read", "memory_search", "session_search"] {
             assert!(
@@ -6690,39 +4575,6 @@ mod tests {
             .await
             .expect("changed files");
         assert_eq!(changed, vec!["after.txt".to_string()]);
-    }
-
-    #[test]
-    fn ready_project_status_requires_non_empty_mutable_paths_and_command() {
-        let now = Utc::now();
-        let project = ExperimentProject {
-            id: Uuid::new_v4(),
-            name: "demo".to_string(),
-            workspace_path: ".".to_string(),
-            git_remote_name: "origin".to_string(),
-            base_branch: "main".to_string(),
-            preset: Default::default(),
-            strategy_prompt: "test".to_string(),
-            workdir: ".".to_string(),
-            prepare_command: None,
-            run_command: "echo ok".to_string(),
-            mutable_paths: vec!["src".to_string()],
-            fixed_paths: Vec::new(),
-            primary_metric: ExperimentMetricDefinition::default(),
-            secondary_metrics: Vec::new(),
-            comparison_policy: Default::default(),
-            stop_policy: Default::default(),
-            default_runner_profile_id: None,
-            promotion_mode: "manual".to_string(),
-            autonomy_mode: Default::default(),
-            status: ExperimentProjectStatus::Draft,
-            created_at: now,
-            updated_at: now,
-        };
-        assert_eq!(
-            super::ready_project_status(&project),
-            ExperimentProjectStatus::Ready
-        );
     }
 
     #[tokio::test]

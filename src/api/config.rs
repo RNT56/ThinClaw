@@ -6,6 +6,11 @@ use std::sync::Arc;
 
 use crate::channels::web::types::*;
 use crate::db::Database;
+use thinclaw_config::setting_not_found_message;
+use thinclaw_gateway::web::settings::{
+    GatewaySettingRow, setting_response_from_row, settings_export_response_from_map,
+    settings_list_response_from_rows,
+};
 
 use super::error::{ApiError, ApiResult};
 
@@ -19,16 +24,13 @@ pub async fn list_settings(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let settings = rows
-        .into_iter()
-        .map(|r| SettingResponse {
-            key: r.key,
-            value: r.value,
-            updated_at: r.updated_at.to_rfc3339(),
-        })
-        .collect();
+    let settings = rows.into_iter().map(|r| GatewaySettingRow {
+        key: r.key,
+        value: r.value,
+        updated_at: r.updated_at.to_rfc3339(),
+    });
 
-    Ok(SettingsListResponse { settings })
+    Ok(settings_list_response_from_rows(settings))
 }
 
 /// Get a single setting by key.
@@ -41,13 +43,13 @@ pub async fn get_setting(
         .get_setting_full(user_id, key)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::SessionNotFound(format!("Setting '{}' not found", key)))?;
+        .ok_or_else(|| ApiError::SessionNotFound(setting_not_found_message(key)))?;
 
-    Ok(SettingResponse {
+    Ok(setting_response_from_row(GatewaySettingRow {
         key: row.key,
         value: row.value,
         updated_at: row.updated_at.to_rfc3339(),
-    })
+    }))
 }
 
 /// Set a setting value.
@@ -82,7 +84,7 @@ pub async fn export_settings(
         .get_all_settings(user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(SettingsExportResponse { settings })
+    Ok(settings_export_response_from_map(settings))
 }
 
 /// Import settings (bulk set).

@@ -61,7 +61,7 @@ docker compose up -d
 curl http://localhost:3000/api/health
 ```
 
-Scrappy connects to:
+ThinClaw Desktop connects to:
 
 ```text
 http://<server-ip>:3000

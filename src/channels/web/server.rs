@@ -31,19 +31,35 @@ use crate::extensions::ExtensionManager;
 use crate::sandbox_types::{ContainerJobManager, PendingPrompt};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
-use thinclaw_gateway::web::ports::{AgentSubmissionPort, IdentityLookupPort, RouteStatePort};
+use thinclaw_gateway::web::identity::{GatewayAuthSource, GatewayRequestIdentity};
+use thinclaw_gateway::web::ports::{
+    AgentSubmissionPort, ConversationPort, ExtensionAuthPort, GatewayConversationMessage,
+    GatewayConversationQuery, GatewayConversationRef, GatewayConversationSummary,
+    GatewayExtensionAuthStatus, GatewayJobStatus, GatewayJobSummary, GatewayLlmCompletionRequest,
+    GatewayLlmCompletionResponse, GatewayModelSummary, GatewayPortError,
+    GatewayRuntimeStatusSnapshot, GatewaySettingsPatch, GatewaySettingsSnapshot,
+    GatewayVisibilitySubject, GatewayVisibilityTarget, IdentityLookupPort, JobPort, LlmPort,
+    RouteStatePort, RuntimeStatusPort, SettingsPort, VisibilityPort,
+    gateway_message_to_chat_message, gateway_port_error, gateway_unavailable as unavailable,
+    with_activation_metadata,
+};
+use thinclaw_llm_core::CompletionRequest;
 
-pub(crate) use crate::channels::web::handlers::chat::build_turns_from_db_messages;
 #[cfg(test)]
 pub(crate) use crate::channels::web::handlers::providers::{
-    ProviderConfigEntry, build_provider_models_response, build_routing_provider_entries,
-    provider_model_options_from_discovery, resolve_saved_provider_models,
-    route_target_is_available_for_enabled_providers, stale_provider_namespace_keys,
-    sync_legacy_llm_settings,
+    build_provider_models_response, build_routing_provider_entries,
+    provider_model_options_from_discovery,
 };
 #[cfg(test)]
 use crate::channels::web::identity_helpers::*;
 #[cfg(test)]
+use thinclaw_gateway::web::chat::turns_from_history_messages as build_turns_from_db_messages;
+#[cfg(test)]
+use thinclaw_gateway::web::providers::{
+    ProviderConfigEntry, ProviderModelSlotsSnapshot, SavedProviderModelInput,
+    route_target_is_available_for_enabled_providers, stale_provider_namespace_keys,
+    sync_legacy_llm_settings,
+};
 use uuid::Uuid;
 
 /// Shared prompt queue: maps job IDs to pending follow-up prompts for Claude Code bridges.
@@ -125,6 +141,9 @@ pub struct GatewayState {
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Shared cost tracker — richer historical data (daily/monthly/per-agent).
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    /// Shared response cache for remote dashboard cache stats.
+    pub response_cache:
+        Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
     /// Routine engine for webhook-triggered routine execution.
     pub routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
     /// Server startup time for uptime calculation.
@@ -135,6 +154,8 @@ pub struct GatewayState {
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// Channel manager for hot-reloading channel settings (e.g., stream mode).
     pub channel_manager: Option<Arc<crate::channels::ChannelManager>>,
+    /// Lifecycle hook registry for hook management APIs.
+    pub hooks: Option<Arc<crate::hooks::HookRegistry>>,
 }
 
 #[async_trait]
@@ -193,6 +214,569 @@ impl RouteStatePort for GatewayState {
             actor_id: identity.actor_id.clone(),
         });
         Ok(())
+    }
+}
+
+fn conversation_summary_to_gateway(
+    summary: crate::history::ConversationSummary,
+) -> GatewayConversationSummary {
+    GatewayConversationSummary {
+        id: summary.id,
+        title: summary.title.clone(),
+        channel: summary.channel,
+        thread_id: summary
+            .stable_external_conversation_key
+            .or(summary.thread_type),
+        preview: summary.title,
+        turn_count: (summary.message_count / 2).max(0) as usize,
+        updated_at: summary.last_activity,
+        metadata: serde_json::json!({
+            "user_id": summary.user_id,
+            "actor_id": summary.actor_id,
+            "conversation_scope_id": summary.conversation_scope_id.map(|id| id.to_string()),
+            "conversation_kind": format!("{:?}", summary.conversation_kind).to_ascii_lowercase(),
+            "started_at": summary.started_at.to_rfc3339(),
+        }),
+    }
+}
+
+fn conversation_message_to_gateway(
+    message: crate::history::ConversationMessage,
+    conversation_id: Uuid,
+) -> GatewayConversationMessage {
+    GatewayConversationMessage {
+        id: message.id,
+        conversation_id,
+        role: message.role,
+        content: message.content,
+        created_at: message.created_at,
+        metadata: message.metadata,
+    }
+}
+
+fn job_state_to_gateway(state: crate::context::JobState) -> GatewayJobStatus {
+    match state {
+        crate::context::JobState::Pending => GatewayJobStatus::Pending,
+        crate::context::JobState::InProgress
+        | crate::context::JobState::Submitted
+        | crate::context::JobState::Accepted => GatewayJobStatus::Running,
+        crate::context::JobState::Completed => GatewayJobStatus::Completed,
+        crate::context::JobState::Failed => GatewayJobStatus::Failed,
+        crate::context::JobState::Stuck => GatewayJobStatus::Stuck,
+        crate::context::JobState::Cancelled | crate::context::JobState::Abandoned => {
+            GatewayJobStatus::Cancelled
+        }
+    }
+}
+
+fn job_context_to_gateway(job: crate::context::JobContext) -> GatewayJobSummary {
+    GatewayJobSummary {
+        id: job.job_id,
+        title: job.title,
+        status: job_state_to_gateway(job.state),
+        message: job
+            .transitions
+            .last()
+            .and_then(|transition| transition.reason.clone()),
+        created_at: job.created_at,
+        completed_at: job.completed_at,
+        metadata: job.metadata,
+    }
+}
+
+fn auth_context_for_gateway(
+    identity: &GatewayConversationRef,
+) -> crate::extensions::manager::AuthRequestContext {
+    crate::extensions::manager::AuthRequestContext {
+        callback_base_url: None,
+        callback_type: Some("web".to_string()),
+        thread_id: identity
+            .external_thread_id
+            .clone()
+            .or_else(|| identity.thread_id.map(|id| id.to_string())),
+    }
+}
+
+fn auth_result_to_gateway(result: crate::extensions::AuthResult) -> GatewayExtensionAuthStatus {
+    let kind = result.kind.to_string();
+    GatewayExtensionAuthStatus {
+        extension_name: result.name,
+        auth_status: result.auth_status,
+        auth_mode: result.auth_mode,
+        auth_url: result.auth_url,
+        missing_scopes: result.missing_scopes,
+        metadata: serde_json::json!({
+            "kind": kind,
+            "status": result.status,
+            "callback_type": result.callback_type,
+            "instructions": result.instructions,
+            "setup_url": result.setup_url,
+            "shared_auth_provider": result.shared_auth_provider,
+            "awaiting_token": result.awaiting_token,
+        }),
+    }
+}
+
+#[async_trait]
+impl ConversationPort for GatewayState {
+    async fn get_or_create_conversation(
+        &self,
+        identity: GatewayConversationRef,
+    ) -> Result<GatewayConversationSummary, GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        let channel = identity.channel.as_deref().unwrap_or("gateway");
+        let id = if let Some(thread_id) = identity.thread_id {
+            store
+                .ensure_conversation(
+                    thread_id,
+                    channel,
+                    &identity.principal_id,
+                    identity.external_thread_id.as_deref(),
+                )
+                .await
+                .map_err(|error| gateway_port_error("ensure conversation", error))?;
+            thread_id
+        } else {
+            crate::channels::web::identity_helpers::get_or_create_gateway_assistant_conversation(
+                store.as_ref(),
+                &identity.principal_id,
+                &identity.actor_id,
+            )
+            .await
+            .map_err(|error| gateway_port_error("get or create gateway conversation", error))?
+        };
+
+        let summaries = store
+            .list_actor_conversations_for_recall(
+                &identity.principal_id,
+                &identity.actor_id,
+                false,
+                200,
+            )
+            .await
+            .map_err(|error| gateway_port_error("list conversations", error))?;
+        Ok(summaries
+            .into_iter()
+            .find(|summary| summary.id == id)
+            .map(conversation_summary_to_gateway)
+            .unwrap_or_else(|| GatewayConversationSummary {
+                id,
+                title: None,
+                channel: channel.to_string(),
+                thread_id: identity.external_thread_id,
+                preview: None,
+                turn_count: 0,
+                updated_at: chrono::Utc::now(),
+                metadata: serde_json::Value::Null,
+            }))
+    }
+
+    async fn conversation_belongs_to_actor(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+    ) -> Result<bool, GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        store
+            .conversation_belongs_to_actor(conversation_id, principal_id, actor_id)
+            .await
+            .map_err(|error| gateway_port_error("conversation visibility", error))
+    }
+
+    async fn list_conversations(
+        &self,
+        identity: GatewayConversationRef,
+        include_group_history: bool,
+        limit: i64,
+    ) -> Result<Vec<GatewayConversationSummary>, GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        store
+            .list_actor_conversations_for_recall(
+                &identity.principal_id,
+                &identity.actor_id,
+                include_group_history,
+                limit,
+            )
+            .await
+            .map(|summaries| {
+                summaries
+                    .into_iter()
+                    .map(conversation_summary_to_gateway)
+                    .collect()
+            })
+            .map_err(|error| gateway_port_error("list conversations", error))
+    }
+
+    async fn list_messages(
+        &self,
+        query: GatewayConversationQuery,
+    ) -> Result<(Vec<GatewayConversationMessage>, bool), GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        let conversation_id =
+            query
+                .identity
+                .thread_id
+                .ok_or_else(|| GatewayPortError::InvalidRequest {
+                    reason: "conversation thread_id is required to list messages".to_string(),
+                })?;
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(conversation_id, query.before, query.limit)
+            .await
+            .map_err(|error| gateway_port_error("list conversation messages", error))?;
+        Ok((
+            messages
+                .into_iter()
+                .map(|message| conversation_message_to_gateway(message, conversation_id))
+                .collect(),
+            has_more,
+        ))
+    }
+
+    async fn delete_conversation(
+        &self,
+        identity: GatewayConversationRef,
+        conversation_id: Uuid,
+    ) -> Result<(), GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        let belongs = store
+            .conversation_belongs_to_actor(
+                conversation_id,
+                &identity.principal_id,
+                &identity.actor_id,
+            )
+            .await
+            .map_err(|error| gateway_port_error("conversation visibility", error))?;
+        if !belongs {
+            return Err(GatewayPortError::NotFound {
+                resource: "conversation".to_string(),
+            });
+        }
+        store
+            .delete_conversation(conversation_id)
+            .await
+            .map_err(|error| gateway_port_error("delete conversation", error))?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SettingsPort for GatewayState {
+    async fn load_settings(
+        &self,
+        user_id: &str,
+    ) -> Result<GatewaySettingsSnapshot, GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        let rows = store
+            .list_settings(user_id)
+            .await
+            .map_err(|error| gateway_port_error("list settings", error))?;
+        let updated_at = rows
+            .iter()
+            .map(|row| row.updated_at)
+            .max()
+            .unwrap_or_else(chrono::Utc::now);
+        let values = rows
+            .into_iter()
+            .map(|row| (row.key, row.value))
+            .collect::<serde_json::Map<_, _>>();
+        Ok(GatewaySettingsSnapshot {
+            user_id: user_id.to_string(),
+            values: serde_json::Value::Object(values),
+            updated_at,
+        })
+    }
+
+    async fn save_settings(
+        &self,
+        patch: GatewaySettingsPatch,
+    ) -> Result<GatewaySettingsSnapshot, GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        let values = patch
+            .values
+            .as_object()
+            .ok_or_else(|| GatewayPortError::InvalidRequest {
+                reason: "settings patch values must be an object".to_string(),
+            })?;
+        for (key, value) in values {
+            store
+                .set_setting(&patch.user_id, key, value)
+                .await
+                .map_err(|error| gateway_port_error("save setting", error))?;
+        }
+        self.load_settings(&patch.user_id).await
+    }
+}
+
+#[async_trait]
+impl JobPort for GatewayState {
+    async fn list_jobs(
+        &self,
+        identity: GatewayConversationRef,
+        limit: i64,
+    ) -> Result<Vec<GatewayJobSummary>, GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        let mut jobs = store
+            .list_jobs_for_actor(&identity.principal_id, &identity.actor_id)
+            .await
+            .map_err(|error| gateway_port_error("list jobs", error))?;
+        jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        if limit > 0 {
+            jobs.truncate(limit as usize);
+        }
+        Ok(jobs.into_iter().map(job_context_to_gateway).collect())
+    }
+
+    async fn load_job(
+        &self,
+        identity: GatewayConversationRef,
+        job_id: Uuid,
+    ) -> Result<Option<GatewayJobSummary>, GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        let Some(job) = store
+            .get_job(job_id)
+            .await
+            .map_err(|error| gateway_port_error("load job", error))?
+        else {
+            return Ok(None);
+        };
+        if job.principal_id != identity.principal_id || job.owner_actor_id() != identity.actor_id {
+            return Ok(None);
+        }
+        Ok(Some(job_context_to_gateway(job)))
+    }
+
+    async fn cancel_job(
+        &self,
+        identity: GatewayConversationRef,
+        job_id: Uuid,
+    ) -> Result<GatewayJobSummary, GatewayPortError> {
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        let Some(job) = self.load_job(identity, job_id).await? else {
+            return Err(GatewayPortError::NotFound {
+                resource: "job".to_string(),
+            });
+        };
+        store
+            .update_job_status(
+                job_id,
+                crate::context::JobState::Cancelled,
+                Some("Cancelled by gateway"),
+            )
+            .await
+            .map_err(|error| gateway_port_error("cancel job", error))?;
+        Ok(GatewayJobSummary {
+            status: GatewayJobStatus::Cancelled,
+            message: Some("Cancelled by gateway".to_string()),
+            completed_at: Some(chrono::Utc::now()),
+            ..job
+        })
+    }
+}
+
+#[async_trait]
+impl ExtensionAuthPort for GatewayState {
+    async fn auth_status(
+        &self,
+        identity: GatewayConversationRef,
+        extension_name: &str,
+    ) -> Result<GatewayExtensionAuthStatus, GatewayPortError> {
+        let extension_manager = self
+            .extension_manager
+            .as_ref()
+            .ok_or_else(|| unavailable("extension manager"))?;
+        extension_manager
+            .auth_with_context(extension_name, None, auth_context_for_gateway(&identity))
+            .await
+            .map(auth_result_to_gateway)
+            .map_err(|error| gateway_port_error("extension auth status", error))
+    }
+
+    async fn submit_auth_token(
+        &self,
+        identity: GatewayConversationRef,
+        extension_name: &str,
+        token: String,
+    ) -> Result<GatewayExtensionAuthStatus, GatewayPortError> {
+        let extension_manager = self
+            .extension_manager
+            .as_ref()
+            .ok_or_else(|| unavailable("extension manager"))?;
+        let result = extension_manager
+            .auth_with_context(
+                extension_name,
+                Some(token.as_str()),
+                auth_context_for_gateway(&identity),
+            )
+            .await
+            .map_err(|error| gateway_port_error("extension auth token", error))?;
+        let authenticated =
+            result.auth_status == "authenticated" || result.auth_status == "no_auth_required";
+        let status = auth_result_to_gateway(result);
+        if !authenticated {
+            return Ok(status);
+        }
+
+        match extension_manager.activate(extension_name).await {
+            Ok(activation) => Ok(with_activation_metadata(
+                status,
+                true,
+                activation.message,
+                activation.tools_loaded,
+            )),
+            Err(error) => Ok(with_activation_metadata(
+                status,
+                false,
+                format!("{extension_name} authenticated but activation failed: {error}"),
+                Vec::new(),
+            )),
+        }
+    }
+
+    async fn cancel_auth(
+        &self,
+        identity: GatewayConversationRef,
+        extension_name: &str,
+    ) -> Result<(), GatewayPortError> {
+        let _extension_manager = self
+            .extension_manager
+            .as_ref()
+            .ok_or_else(|| unavailable("extension manager"))?;
+        let request_identity = GatewayRequestIdentity::new(
+            identity.principal_id,
+            identity.actor_id,
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+        crate::channels::web::handlers::chat::clear_auth_mode_for_identity(self, &request_identity)
+            .await;
+        tracing::debug!(extension_name, "cancelled gateway extension auth prompt");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LlmPort for GatewayState {
+    async fn complete(
+        &self,
+        request: GatewayLlmCompletionRequest,
+    ) -> Result<GatewayLlmCompletionResponse, GatewayPortError> {
+        let llm = self
+            .llm_provider
+            .as_ref()
+            .ok_or_else(|| unavailable("llm"))?;
+        let mut completion = CompletionRequest::new(
+            request
+                .messages
+                .into_iter()
+                .map(gateway_message_to_chat_message)
+                .collect(),
+        );
+        completion.model = request.model;
+        if let Some(object) = request.metadata.as_object() {
+            completion.metadata = object
+                .iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_string()))
+                })
+                .collect();
+        }
+        let response = llm
+            .complete(completion)
+            .await
+            .map_err(|error| gateway_port_error("llm completion", error))?;
+        Ok(GatewayLlmCompletionResponse {
+            content: response.content,
+            model: response.provider_model,
+            finish_reason: Some(format!("{:?}", response.finish_reason).to_ascii_lowercase()),
+            input_tokens: Some(response.input_tokens),
+            output_tokens: Some(response.output_tokens),
+        })
+    }
+
+    async fn list_models(&self) -> Result<Vec<GatewayModelSummary>, GatewayPortError> {
+        let llm = self
+            .llm_provider
+            .as_ref()
+            .ok_or_else(|| unavailable("llm"))?;
+        let active = llm.active_model_name();
+        let mut models = llm
+            .list_models()
+            .await
+            .map_err(|error| gateway_port_error("list models", error))?;
+        if models.is_empty() {
+            models.push(active.clone());
+        }
+        Ok(models
+            .into_iter()
+            .map(|id| GatewayModelSummary {
+                is_primary: id == active,
+                id,
+                provider: Some(llm.model_name().to_string()),
+            })
+            .collect())
+    }
+}
+
+#[async_trait]
+impl RuntimeStatusPort for GatewayState {
+    async fn runtime_status(&self) -> Result<GatewayRuntimeStatusSnapshot, GatewayPortError> {
+        let status = self.llm_runtime.as_ref().map(|runtime| runtime.status());
+        Ok(GatewayRuntimeStatusSnapshot {
+            status: if status
+                .as_ref()
+                .and_then(|status| status.last_error.as_ref())
+                .is_some()
+            {
+                "degraded".to_string()
+            } else {
+                "ok".to_string()
+            },
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            channels: Vec::new(),
+            capabilities: serde_json::json!({
+                "llm_runtime": status.as_ref().map(|status| {
+                    serde_json::json!({
+                        "revision": status.revision,
+                        "primary_model": status.primary_model,
+                        "cheap_model": status.cheap_model,
+                        "routing_enabled": status.routing_enabled,
+                        "routing_mode": format!("{:?}", status.routing_mode).to_ascii_lowercase(),
+                        "primary_provider": status.primary_provider,
+                        "last_error": status.last_error,
+                    })
+                }),
+                "extensions": self.extension_manager.is_some(),
+                "jobs": self.job_manager.is_some() || self.context_manager.is_some(),
+                "skills": self.skill_registry.is_some(),
+            }),
+            updated_at: Some(chrono::Utc::now()),
+        })
+    }
+}
+
+#[async_trait]
+impl VisibilityPort for GatewayState {
+    async fn can_view_conversation(
+        &self,
+        subject: GatewayVisibilitySubject,
+        target: GatewayVisibilityTarget,
+    ) -> Result<bool, GatewayPortError> {
+        let Some(conversation_id) = target.conversation_id else {
+            return Ok(
+                target.principal_id.as_deref() == Some(subject.principal_id.as_str())
+                    && target.actor_id.as_deref() == Some(subject.actor_id.as_str()),
+            );
+        };
+        let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        store
+            .conversation_belongs_to_actor(
+                conversation_id,
+                &subject.principal_id,
+                &subject.actor_id,
+            )
+            .await
+            .map_err(|error| gateway_port_error("conversation visibility", error))
     }
 }
 
@@ -286,6 +870,7 @@ pub async fn start_server(
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
+        .route("/api/chat/abort", post(chat_abort_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
         .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
@@ -294,6 +879,18 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
+        .route(
+            "/api/chat/thread/{id}/reset",
+            post(chat_thread_reset_handler),
+        )
+        .route(
+            "/api/chat/thread/{id}/compact",
+            post(chat_thread_compact_handler),
+        )
+        .route(
+            "/api/chat/thread/{id}/export",
+            get(chat_thread_export_handler),
+        )
         .route("/api/chat/thread/{id}", delete(chat_delete_thread_handler))
         // Autonomy
         .route("/api/autonomy/status", get(autonomy_status_handler))
@@ -313,6 +910,7 @@ pub async fn start_server(
         .route("/api/memory/list", get(memory_list_handler))
         .route("/api/memory/read", get(memory_read_handler))
         .route("/api/memory/write", post(memory_write_handler))
+        .route("/api/memory/delete", post(memory_delete_handler))
         .route("/api/memory/search", post(memory_search_handler))
         // Jobs
         .route("/api/jobs", get(jobs_list_handler))
@@ -326,6 +924,7 @@ pub async fn start_server(
         .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
         // Logs
         .route("/api/logs/events", get(logs_events_handler))
+        .route("/api/logs/recent", get(logs_recent_handler))
         .route("/api/logs/level", get(logs_level_get_handler))
         .route(
             "/api/logs/level",
@@ -398,6 +997,12 @@ pub async fn start_server(
         )
         // Gateway management
         .route("/api/gateway/restart", post(gateway_restart_handler))
+        // Hooks
+        .route(
+            "/api/hooks",
+            get(hooks_list_handler).post(hooks_register_handler),
+        )
+        .route("/api/hooks/{name}", delete(hooks_unregister_handler))
         // Pairing
         .route("/api/pairing/{channel}", get(pairing_list_handler))
         .route(
@@ -405,9 +1010,16 @@ pub async fn start_server(
             post(pairing_approve_handler),
         )
         // Routines
-        .route("/api/routines", get(routines_list_handler))
+        .route(
+            "/api/routines",
+            get(routines_list_handler).post(routines_create_handler),
+        )
         .route("/api/routines/summary", get(routines_summary_handler))
         .route("/api/routines/events", get(routines_events_handler))
+        .route(
+            "/api/routines/runs",
+            axum::routing::delete(routines_clear_runs_handler),
+        )
         .route("/api/routines/{id}", get(routines_detail_handler))
         .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
         .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
@@ -678,6 +1290,7 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        .route("/api/cache/stats", get(cache_stats_handler))
         // Cost dashboard (rich historical data from CostTracker)
         .route("/api/costs/summary", get(costs_summary_handler))
         .route("/api/costs/export", get(costs_export_handler))
@@ -836,6 +1449,35 @@ mod tests {
         assert_eq!(model_ids, vec!["gpt-4o", "gpt-4o-mini"]);
         assert_eq!(suggested_primary.as_deref(), Some("gpt-4o"));
         assert_eq!(suggested_cheap.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn auth_result_to_gateway_preserves_setup_metadata() {
+        let status = auth_result_to_gateway(crate::extensions::AuthResult {
+            name: "calendar".to_string(),
+            kind: crate::extensions::ExtensionKind::WasmTool,
+            auth_mode: "manual_token".to_string(),
+            auth_status: "awaiting_token".to_string(),
+            auth_url: None,
+            callback_type: Some("web".to_string()),
+            instructions: Some("Paste a token".to_string()),
+            setup_url: Some("https://example.test/setup".to_string()),
+            shared_auth_provider: Some("google".to_string()),
+            missing_scopes: vec!["calendar.read".to_string()],
+            awaiting_token: true,
+            status: "awaiting_token".to_string(),
+        });
+
+        assert_eq!(status.extension_name, "calendar");
+        assert_eq!(status.auth_mode, "manual_token");
+        assert_eq!(status.auth_status, "awaiting_token");
+        assert_eq!(status.missing_scopes, vec!["calendar.read"]);
+        assert_eq!(status.metadata["kind"], "wasm_tool");
+        assert_eq!(status.metadata["callback_type"], "web");
+        assert_eq!(status.metadata["instructions"], "Paste a token");
+        assert_eq!(status.metadata["setup_url"], "https://example.test/setup");
+        assert_eq!(status.metadata["shared_auth_provider"], "google");
+        assert_eq!(status.metadata["awaiting_token"], true);
     }
 
     #[test]
@@ -1106,8 +1748,30 @@ mod tests {
             cheap: Some("gemini-2.5-flash-lite-preview".to_string()),
         };
 
-        let (primary_model, cheap_model, should_persist) =
-            resolve_saved_provider_models(&provider, Some(&previous_slots), None);
+        let input = SavedProviderModelInput {
+            default_model: provider.default_model.clone(),
+            enabled: provider.enabled,
+            primary: provider.primary,
+            preferred_cheap: provider.preferred_cheap,
+            primary_model: provider.primary_model.clone(),
+            cheap_model: provider.cheap_model.clone(),
+            suggested_primary_model: provider.suggested_primary_model.clone(),
+            suggested_cheap_model: provider.suggested_cheap_model.clone(),
+        };
+        let previous_slots = ProviderModelSlotsSnapshot {
+            primary: previous_slots.primary.clone(),
+            cheap: previous_slots.cheap.clone(),
+        };
+        let resolved = thinclaw_gateway::web::providers::resolve_saved_provider_models(
+            &input,
+            Some(&previous_slots),
+            None,
+        );
+        let (primary_model, cheap_model, should_persist) = (
+            resolved.primary_model,
+            resolved.cheap_model,
+            resolved.should_persist_slots,
+        );
 
         assert_eq!(
             primary_model.as_deref(),
@@ -1152,8 +1816,30 @@ mod tests {
             cheap: Some("gemini-1.5-flash".to_string()),
         };
 
-        let (primary_model, cheap_model, should_persist) =
-            resolve_saved_provider_models(&provider, Some(&previous_slots), None);
+        let input = SavedProviderModelInput {
+            default_model: provider.default_model.clone(),
+            enabled: provider.enabled,
+            primary: provider.primary,
+            preferred_cheap: provider.preferred_cheap,
+            primary_model: provider.primary_model.clone(),
+            cheap_model: provider.cheap_model.clone(),
+            suggested_primary_model: provider.suggested_primary_model.clone(),
+            suggested_cheap_model: provider.suggested_cheap_model.clone(),
+        };
+        let previous_slots = ProviderModelSlotsSnapshot {
+            primary: previous_slots.primary.clone(),
+            cheap: previous_slots.cheap.clone(),
+        };
+        let resolved = thinclaw_gateway::web::providers::resolve_saved_provider_models(
+            &input,
+            Some(&previous_slots),
+            None,
+        );
+        let (primary_model, cheap_model, should_persist) = (
+            resolved.primary_model,
+            resolved.cheap_model,
+            resolved.should_persist_slots,
+        );
 
         assert_eq!(
             primary_model.as_deref(),
@@ -1497,11 +2183,13 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            response_cache: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
         }
     }
 
@@ -1597,11 +2285,13 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            response_cache: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
         };
 
         assert_eq!(

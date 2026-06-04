@@ -1,0 +1,19 @@
+name = "Model Comparison"
+description = "Compares AI models by provider and modality."
+version = "1.0.0"
+author = "ThinClaw Team"
+tools_used = ["models"]
+script_file = "model_comparison.rhai"
+
+[[parameters]]
+name = "provider"
+description = "Provider name (anthropic, openai, meta, etc)"
+param_type = "string"
+required = false
+
+[[parameters]]
+name = "modality"
+description = "Modality (text, image, audio)"
+param_type = "string"
+required = false
+default = "text"

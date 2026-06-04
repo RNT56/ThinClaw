@@ -2,18 +2,13 @@ use super::*;
 impl LearningOrchestrator {
     pub(in crate::agent::learning) async fn auto_apply_candidate(
         &self,
-        settings: &LearningSettings,
+        _settings: &LearningSettings,
         class: ImprovementClass,
         candidate: &DbLearningCandidate,
     ) -> Result<bool, String> {
         match class {
             ImprovementClass::Memory => self.auto_apply_memory(candidate).await,
-            ImprovementClass::Prompt => {
-                if !settings.prompt_mutation.enabled {
-                    return Ok(false);
-                }
-                self.auto_apply_prompt(candidate).await
-            }
+            ImprovementClass::Prompt => self.auto_apply_prompt(candidate).await,
             ImprovementClass::Routine => self.auto_apply_routine(candidate).await,
             ImprovementClass::Skill => self.auto_apply_skill(candidate).await,
             _ => Ok(false),

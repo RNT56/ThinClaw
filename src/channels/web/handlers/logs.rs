@@ -12,14 +12,19 @@ use axum::{
 use futures::StreamExt;
 
 use crate::channels::web::server::GatewayState;
+use crate::channels::web::types::{LogLevelRequest, LogLevelResponse, LogsRecentResponse};
+use thinclaw_gateway::web::logs::{
+    invalid_log_level_error, log_broadcaster_unavailable_error,
+    log_level_control_unavailable_error, log_level_response, logs_recent_response,
+};
 
 pub(crate) async fn logs_events_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let broadcaster = state.log_broadcaster.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Log broadcaster not available".to_string(),
-    ))?;
+    let broadcaster = state
+        .log_broadcaster
+        .as_ref()
+        .ok_or_else(log_broadcaster_unavailable_error)?;
 
     let rx = broadcaster.subscribe();
     let history = broadcaster.recent_entries();
@@ -48,34 +53,40 @@ pub(crate) async fn logs_events_handler(
     ))
 }
 
+pub(crate) async fn logs_recent_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<LogsRecentResponse>, (StatusCode, String)> {
+    let broadcaster = state
+        .log_broadcaster
+        .as_ref()
+        .ok_or_else(log_broadcaster_unavailable_error)?;
+    let logs = broadcaster.recent_entries();
+    Ok(Json(logs_recent_response(logs)))
+}
+
 pub(crate) async fn logs_level_get_handler(
     State(state): State<Arc<GatewayState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let handle = state.log_level_handle.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Log level control not available".to_string(),
-    ))?;
-    Ok(Json(serde_json::json!({ "level": handle.current_level() })))
+) -> Result<Json<LogLevelResponse>, (StatusCode, String)> {
+    let handle = state
+        .log_level_handle
+        .as_ref()
+        .ok_or_else(log_level_control_unavailable_error)?;
+    Ok(Json(log_level_response(handle.current_level())))
 }
 
 pub(crate) async fn logs_level_set_handler(
     State(state): State<Arc<GatewayState>>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let handle = state.log_level_handle.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Log level control not available".to_string(),
-    ))?;
-
-    let level = body
-        .get("level")
-        .and_then(|v| v.as_str())
-        .ok_or((StatusCode::BAD_REQUEST, "missing 'level' field".to_string()))?;
+    Json(body): Json<LogLevelRequest>,
+) -> Result<Json<LogLevelResponse>, (StatusCode, String)> {
+    let handle = state
+        .log_level_handle
+        .as_ref()
+        .ok_or_else(log_level_control_unavailable_error)?;
 
     handle
-        .set_level(level)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .set_level(&body.level)
+        .map_err(invalid_log_level_error)?;
 
     tracing::info!("Log level changed to '{}'", handle.current_level());
-    Ok(Json(serde_json::json!({ "level": handle.current_level() })))
+    Ok(Json(log_level_response(handle.current_level())))
 }

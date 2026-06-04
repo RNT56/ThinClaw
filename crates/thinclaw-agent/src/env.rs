@@ -103,6 +103,78 @@ pub struct Trajectory {
     pub metadata: serde_json::Value,
 }
 
+pub fn average_trajectory_score(trajectories: &[Trajectory]) -> f64 {
+    if trajectories.is_empty() {
+        0.0
+    } else {
+        trajectories
+            .iter()
+            .map(|trajectory| trajectory.score)
+            .sum::<f64>()
+            / trajectories.len() as f64
+    }
+}
+
+pub fn trajectory_summary(trajectories: &[Trajectory]) -> serde_json::Value {
+    let mut env_names = trajectories
+        .iter()
+        .map(|trajectory| trajectory.env_name.clone())
+        .collect::<Vec<_>>();
+    env_names.sort();
+    env_names.dedup();
+
+    let mut exact_tokens_supported = false;
+    let mut logprobs_supported = false;
+    let mut captured_token_ids = 0usize;
+    let mut captured_logprobs = 0usize;
+    let mut token_capture_steps = 0usize;
+    let mut step_count = 0usize;
+
+    for trajectory in trajectories {
+        step_count += trajectory.steps.len();
+        for step in &trajectory.steps {
+            if let Some(capture) = step.token_capture.as_ref() {
+                token_capture_steps += 1;
+                exact_tokens_supported |= capture.exact_tokens_supported;
+                logprobs_supported |= capture.logprobs_supported;
+                captured_token_ids += capture.token_ids.len();
+                captured_logprobs += capture.logprobs.len();
+            }
+        }
+    }
+
+    serde_json::json!({
+        "env_names": env_names,
+        "episode_count": trajectories.len(),
+        "step_count": step_count,
+        "score": average_trajectory_score(trajectories),
+        "exact_tokens_supported": exact_tokens_supported,
+        "logprobs_supported": logprobs_supported,
+        "token_capture_steps": token_capture_steps,
+        "captured_token_ids": captured_token_ids,
+        "captured_logprobs": captured_logprobs,
+    })
+}
+
+pub fn render_trajectory_log(trajectories: &[Trajectory]) -> String {
+    let mut log = String::new();
+    for trajectory in trajectories {
+        log.push_str(&format!(
+            "== {} {} score {:.3} ==\n",
+            trajectory.env_name, trajectory.episode_id, trajectory.score
+        ));
+        for step in &trajectory.steps {
+            log.push_str(&format!(
+                "reward={:.3} done={}\n{}\n",
+                step.reward,
+                step.done,
+                step.response.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    log
+}
+
 #[async_trait]
 pub trait AgentEnv: Send + Sync {
     fn name(&self) -> &str;
@@ -433,6 +505,34 @@ pub struct SkillBenchCase {
     pub skill_content: String,
     #[serde(default, alias = "requiredSubstrings")]
     pub required_substrings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "benchmark", rename_all = "snake_case")]
+pub enum AgentEnvBenchmarkConfig {
+    TerminalBench {
+        #[serde(default)]
+        cases: Vec<TerminalBenchCase>,
+    },
+    SkillBench {
+        #[serde(default)]
+        cases: Vec<SkillBenchCase>,
+    },
+}
+
+pub fn agent_env_benchmark_config(
+    backend_config: &serde_json::Value,
+) -> Result<Option<AgentEnvBenchmarkConfig>, String> {
+    let source = backend_config
+        .get("agent_env")
+        .or_else(|| backend_config.get("benchmark_config"))
+        .unwrap_or(backend_config);
+    if source.get("benchmark").is_none() {
+        return Ok(None);
+    }
+    serde_json::from_value(source.clone())
+        .map(Some)
+        .map_err(|err| format!("Invalid AgentEnv benchmark config: {err}"))
 }
 
 pub struct SkillBenchEnv {
@@ -873,6 +973,47 @@ mod tests {
     }
 
     #[test]
+    fn trajectory_summary_counts_scores_steps_and_token_capture() {
+        let trajectory = Trajectory {
+            env_name: "skill_bench".to_string(),
+            episode_id: "episode-1".to_string(),
+            score: 0.5,
+            steps: vec![TrajectoryStep {
+                action: AgentAction::UserMessage {
+                    content: "check".to_string(),
+                },
+                response: Some("ok".to_string()),
+                reward: 0.5,
+                done: true,
+                at: Utc::now(),
+                token_capture: Some(TokenTrajectoryCapture {
+                    exact_tokens_supported: true,
+                    logprobs_supported: true,
+                    token_ids: vec![1, 2],
+                    tokens: vec!["o".to_string(), "k".to_string()],
+                    logprobs: vec![-0.1, -0.2],
+                    provider: Some("test".to_string()),
+                    model: Some("model".to_string()),
+                }),
+                metadata: serde_json::json!({}),
+            }],
+            metadata: serde_json::json!({}),
+        };
+
+        let summary = trajectory_summary(&[trajectory.clone()]);
+        assert_eq!(average_trajectory_score(&[trajectory.clone()]), 0.5);
+        assert_eq!(summary["env_names"], serde_json::json!(["skill_bench"]));
+        assert_eq!(summary["episode_count"], serde_json::json!(1));
+        assert_eq!(summary["step_count"], serde_json::json!(1));
+        assert_eq!(summary["exact_tokens_supported"], serde_json::json!(true));
+        assert_eq!(summary["captured_token_ids"], serde_json::json!(2));
+        let log = render_trajectory_log(&[trajectory]);
+        assert!(log.contains("== skill_bench episode-1 score 0.500 =="));
+        assert!(log.contains("reward=0.500 done=true"));
+        assert!(log.contains("ok"));
+    }
+
+    #[test]
     fn benchmark_cases_accept_webui_camel_case_fields() {
         let terminal: TerminalBenchCase = serde_json::from_value(serde_json::json!({
             "name": "smoke",
@@ -894,6 +1035,37 @@ mod tests {
         .expect("skill bench camelCase");
         assert_eq!(skill.skill_content, "# Skill");
         assert_eq!(skill.required_substrings, vec!["Skill"]);
+    }
+
+    #[test]
+    fn agent_env_benchmark_config_parses_nested_backend_config() {
+        let config = agent_env_benchmark_config(&serde_json::json!({
+            "agent_env": {
+                "benchmark": "terminal_bench",
+                "cases": [{
+                    "name": "smoke",
+                    "command": "printf ok",
+                    "expectedExitCode": 0
+                }]
+            }
+        }))
+        .expect("parse benchmark config")
+        .expect("benchmark config present");
+
+        match config {
+            AgentEnvBenchmarkConfig::TerminalBench { cases } => {
+                assert_eq!(cases.len(), 1);
+                assert_eq!(cases[0].name, "smoke");
+                assert_eq!(cases[0].expected_exit_code, Some(0));
+            }
+            AgentEnvBenchmarkConfig::SkillBench { .. } => panic!("expected terminal bench"),
+        }
+
+        assert!(
+            agent_env_benchmark_config(&serde_json::json!({ "other": true }))
+                .expect("empty config should parse")
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -22,6 +22,10 @@ use crate::routine::{
     RoutineTriggerDecision, RunStatus,
 };
 
+pub use crate::ports_context::*;
+pub use crate::ports_learning::*;
+pub use crate::ports_llm::*;
+
 /// Common runtime identity and routing scope for agent-owned ports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentScope {
@@ -210,6 +214,15 @@ pub struct ChannelSubmission {
     pub source: ChannelSubmissionSource,
 }
 
+impl ChannelSubmission {
+    pub fn parsed_thread_id(&self) -> Option<Uuid> {
+        self.message
+            .thread_id
+            .as_deref()
+            .and_then(|value| Uuid::parse_str(value).ok())
+    }
+}
+
 /// Source of an accepted runtime submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -239,6 +252,24 @@ pub enum SubmissionStatus {
     Running,
     Completed,
     Rejected,
+}
+
+#[cfg(test)]
+mod channel_submission_tests {
+    use super::*;
+
+    #[test]
+    fn channel_submission_parses_uuid_thread_ids() {
+        let thread_id = Uuid::new_v4();
+        let submission = ChannelSubmission {
+            message: IncomingMessage::new("web", "user-1", "hello")
+                .with_thread(thread_id.to_string()),
+            scope: AgentScope::new("user-1", "user-1").with_channel("web"),
+            source: ChannelSubmissionSource::User,
+        };
+
+        assert_eq!(submission.parsed_thread_id(), Some(thread_id));
+    }
 }
 
 /// Tool invocation request for host-mediated execution.

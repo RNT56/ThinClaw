@@ -167,10 +167,20 @@ impl ToolRpcLanguageAdapter for JavaScriptToolRpcAdapter {
 
     fn augment_env(
         &self,
-        _extra_env: &mut std::collections::HashMap<String, String>,
+        extra_env: &mut std::collections::HashMap<String, String>,
         _temp_dir: &Path,
-        _workdir: &Path,
+        workdir: &Path,
     ) {
+        let mut path_entries = vec![workdir.join("node_modules").join(".bin")];
+        if let Some(existing_path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&existing_path));
+        }
+        if let Ok(joined_path) = std::env::join_paths(path_entries) {
+            extra_env.insert(
+                "PATH".to_string(),
+                joined_path.to_string_lossy().to_string(),
+            );
+        }
     }
 }
 
@@ -197,10 +207,20 @@ impl ToolRpcLanguageAdapter for TypeScriptToolRpcAdapter {
 
     fn augment_env(
         &self,
-        _extra_env: &mut std::collections::HashMap<String, String>,
+        extra_env: &mut std::collections::HashMap<String, String>,
         _temp_dir: &Path,
-        _workdir: &Path,
+        workdir: &Path,
     ) {
+        let mut path_entries = vec![workdir.join("node_modules").join(".bin")];
+        if let Some(existing_path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&existing_path));
+        }
+        if let Ok(joined_path) = std::env::join_paths(path_entries) {
+            extra_env.insert(
+                "PATH".to_string(),
+                joined_path.to_string_lossy().to_string(),
+            );
+        }
     }
 }
 
@@ -356,8 +376,8 @@ impl ExecuteCodeTool {
                 extension: ".js",
             }),
             "typescript" | "ts" => Ok(InterpreterConfig {
-                program: "npx".to_string(),
-                prefix_args: vec!["tsx".to_string()],
+                program: Self::find_in_path(&["tsx"]).unwrap_or_else(|| "tsx".to_string()),
+                prefix_args: Vec::new(),
                 extension: ".ts",
             }),
             "bash" | "sh" | "shell" if !cfg!(target_os = "windows") => Ok(InterpreterConfig {

@@ -7,8 +7,25 @@ use std::sync::Arc;
 use crate::channels::web::types::*;
 use crate::extensions::ExtensionManager;
 use crate::tools::ToolRegistry;
+use thinclaw_gateway::web::extensions::{
+    ExtensionAuthRequiredResponseInput, ExtensionInfoInput, ExtensionKindHint,
+    ExtensionReconnectSupportInput, WasmChannelActivationStatusInput, activation_error_needs_auth,
+    classify_extension_reconnect_support, classify_wasm_channel_activation_status,
+    extension_action_error_response, extension_action_success_response,
+    extension_auth_required_response, extension_auth_status_is_authenticated,
+    extension_authentication_failed_response, extension_info, parse_extension_kind_hint, tool_info,
+    wasm_channel_activation_status_needs_pairing_state,
+};
 
 use super::error::{ApiError, ApiResult};
+
+pub(crate) fn extension_kind_hint(kind: Option<&str>) -> Option<crate::extensions::ExtensionKind> {
+    match parse_extension_kind_hint(kind)? {
+        ExtensionKindHint::McpServer => Some(crate::extensions::ExtensionKind::McpServer),
+        ExtensionKindHint::WasmTool => Some(crate::extensions::ExtensionKind::WasmTool),
+        ExtensionKindHint::WasmChannel => Some(crate::extensions::ExtensionKind::WasmChannel),
+    }
+}
 
 /// List all installed extensions.
 pub async fn list_extensions(ext_mgr: &Arc<ExtensionManager>) -> ApiResult<Vec<ExtensionInfo>> {
@@ -20,38 +37,38 @@ pub async fn list_extensions(ext_mgr: &Arc<ExtensionManager>) -> ApiResult<Vec<E
     let pairing_store = crate::pairing::PairingStore::new();
     let mut extensions = Vec::with_capacity(installed.len());
     for ext in installed {
-        let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-            Some(if ext.activation_error.is_some() {
-                "failed".to_string()
-            } else if !ext.authenticated {
-                "installed".to_string()
-            } else if ext.active && ext.name == "telegram" {
-                let has_paired = pairing_store
-                    .read_allow_from(&ext.name)
-                    .map(|list| !list.is_empty())
-                    .unwrap_or(false);
-                if has_paired {
-                    "active".to_string()
-                } else {
-                    "pairing".to_string()
-                }
-            } else {
-                "configured".to_string()
-            })
-        } else {
-            None
+        let kind = ext.kind.to_string();
+        let activation_status_active = ext.active && ext.name == "telegram";
+        let mut activation_status_input = WasmChannelActivationStatusInput {
+            kind: &kind,
+            name: &ext.name,
+            authenticated: ext.authenticated,
+            active: activation_status_active,
+            activation_error: ext.activation_error.is_some(),
+            has_paired: false,
         };
+        if wasm_channel_activation_status_needs_pairing_state(activation_status_input) {
+            activation_status_input.has_paired = pairing_store
+                .read_allow_from(&ext.name)
+                .map(|list| !list.is_empty())
+                .unwrap_or(false);
+        }
+        let activation_status =
+            classify_wasm_channel_activation_status(activation_status_input).map(str::to_string);
         let reconnect_supported =
-            ext.kind == crate::extensions::ExtensionKind::WasmChannel && ext.name == "telegram";
+            classify_extension_reconnect_support(ExtensionReconnectSupportInput {
+                kind: &kind,
+                name: &ext.name,
+            });
         let setup = ext_mgr
             .integration_setup_status(
                 &ext,
                 crate::extensions::manager::AuthRequestContext::default(),
             )
             .await;
-        extensions.push(ExtensionInfo {
+        extensions.push(extension_info(ExtensionInfoInput {
             name: ext.name,
-            kind: ext.kind.to_string(),
+            kind,
             description: ext.description,
             url: ext.url,
             authenticated: ext.authenticated,
@@ -67,7 +84,7 @@ pub async fn list_extensions(ext_mgr: &Arc<ExtensionManager>) -> ApiResult<Vec<E
             channel_diagnostics: None,
             reconnect_supported,
             setup,
-        });
+        }));
     }
 
     Ok(extensions)
@@ -78,10 +95,7 @@ pub async fn list_tools(tool_registry: &Arc<ToolRegistry>) -> ApiResult<Vec<Tool
     let definitions = tool_registry.tool_definitions().await;
     let tools = definitions
         .into_iter()
-        .map(|td| ToolInfo {
-            name: td.name,
-            description: td.description,
-        })
+        .map(|td| tool_info(td.name, td.description))
         .collect();
     Ok(tools)
 }
@@ -93,16 +107,11 @@ pub async fn install_extension(
     url: Option<&str>,
     kind: Option<&str>,
 ) -> ApiResult<ActionResponse> {
-    let kind_hint = kind.and_then(|k| match k {
-        "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
-        "wasm_tool" => Some(crate::extensions::ExtensionKind::WasmTool),
-        "wasm_channel" => Some(crate::extensions::ExtensionKind::WasmChannel),
-        _ => None,
-    });
+    let kind_hint = extension_kind_hint(kind);
 
     match ext_mgr.install(name, url, kind_hint).await {
-        Ok(result) => Ok(ActionResponse::ok(result.message)),
-        Err(e) => Ok(ActionResponse::fail(e.to_string())),
+        Ok(result) => Ok(extension_action_success_response(result.message)),
+        Err(e) => Ok(extension_action_error_response(e.to_string())),
     }
 }
 
@@ -112,41 +121,37 @@ pub async fn activate_extension(
     name: &str,
 ) -> ApiResult<ActionResponse> {
     match ext_mgr.activate(name).await {
-        Ok(result) => Ok(ActionResponse::ok(result.message)),
+        Ok(result) => Ok(extension_action_success_response(result.message)),
         Err(activate_err) => {
             let err_str = activate_err.to_string();
-            let needs_auth = err_str.contains("authentication")
-                || err_str.contains("401")
-                || err_str.contains("Unauthorized");
+            let needs_auth = activation_error_needs_auth(&err_str);
 
             if !needs_auth {
-                return Ok(ActionResponse::fail(err_str));
+                return Ok(extension_action_error_response(err_str));
             }
 
             // Try authenticating first, then retry activation.
             match ext_mgr.auth(name, None).await {
-                Ok(auth_result) if auth_result.status == "authenticated" => {
+                Ok(auth_result) if extension_auth_status_is_authenticated(&auth_result.status) => {
                     match ext_mgr.activate(name).await {
-                        Ok(result) => Ok(ActionResponse::ok(result.message)),
-                        Err(e) => Ok(ActionResponse::fail(e.to_string())),
+                        Ok(result) => Ok(extension_action_success_response(result.message)),
+                        Err(e) => Ok(extension_action_error_response(e.to_string())),
                     }
                 }
-                Ok(auth_result) => {
-                    let mut resp = ActionResponse::fail(
-                        auth_result
-                            .instructions
-                            .clone()
-                            .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
-                    );
-                    resp.auth_url = auth_result.auth_url;
-                    resp.awaiting_token = Some(auth_result.awaiting_token);
-                    resp.instructions = auth_result.instructions;
-                    Ok(resp)
-                }
-                Err(auth_err) => Ok(ActionResponse::fail(format!(
-                    "Authentication failed: {}",
-                    auth_err
-                ))),
+                Ok(auth_result) => Ok(extension_auth_required_response(
+                    ExtensionAuthRequiredResponseInput {
+                        extension_name: name,
+                        auth_url: auth_result.auth_url,
+                        setup_url: None,
+                        auth_mode: None,
+                        auth_status: None,
+                        awaiting_token: auth_result.awaiting_token,
+                        instructions: auth_result.instructions,
+                        shared_auth_provider: None,
+                        missing_scopes: Vec::new(),
+                    },
+                )),
+                Err(auth_err) => Ok(extension_authentication_failed_response(auth_err)),
             }
         }
     }
@@ -158,7 +163,7 @@ pub async fn remove_extension(
     name: &str,
 ) -> ApiResult<ActionResponse> {
     match ext_mgr.remove(name).await {
-        Ok(message) => Ok(ActionResponse::ok(message)),
-        Err(e) => Ok(ActionResponse::fail(e.to_string())),
+        Ok(message) => Ok(extension_action_success_response(message)),
+        Err(e) => Ok(extension_action_error_response(e.to_string())),
     }
 }

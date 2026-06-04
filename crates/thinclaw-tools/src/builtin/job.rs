@@ -1,7 +1,15 @@
 //! Root-independent job tool policy helpers.
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+
 use crate::execution::JobExecutionResult;
-use thinclaw_tools_core::{ToolError, require_str};
+#[cfg(test)]
+use crate::ports::ToolOperationScope;
+use crate::ports::{JobToolHostPort, ToolJobActionRequest, tool_scope_from_job_context};
+use thinclaw_tools_core::{Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str};
 use thinclaw_types::{JobContext, JobState, sandbox::JobMode};
 use uuid::Uuid;
 
@@ -121,6 +129,30 @@ pub fn resolve_sandbox_mode(
 pub struct CredentialRequest {
     pub secret_name: String,
     pub env_var: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobExecutionMetadataPolicy {
+    pub allowed_tools: Option<Vec<String>>,
+    pub allowed_skills: Option<Vec<String>>,
+    pub tool_profile: Option<String>,
+}
+
+pub fn job_execution_metadata_policy(metadata: &serde_json::Value) -> JobExecutionMetadataPolicy {
+    JobExecutionMetadataPolicy {
+        allowed_tools: crate::registry::ToolRegistry::metadata_string_list(
+            metadata,
+            "allowed_tools",
+        ),
+        allowed_skills: crate::registry::ToolRegistry::metadata_string_list(
+            metadata,
+            "allowed_skills",
+        ),
+        tool_profile: metadata
+            .get("tool_profile")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    }
 }
 
 pub fn parse_credential_requests(
@@ -462,6 +494,61 @@ pub fn sandbox_status_summary_bucket(status: &str) -> JobSummaryBucket {
         "stuck" => JobSummaryBucket::Stuck,
         _ => JobSummaryBucket::None,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxContainerState {
+    Creating,
+    Running,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SandboxJobLookupStatusInput<'a> {
+    pub live_state: Option<SandboxContainerState>,
+    pub live_completion_status: Option<&'a str>,
+    pub stored_status: Option<&'a str>,
+}
+
+pub fn sandbox_lookup_status(input: SandboxJobLookupStatusInput<'_>) -> String {
+    match input.live_state {
+        Some(SandboxContainerState::Creating) => "creating".to_string(),
+        Some(SandboxContainerState::Running) => "running".to_string(),
+        Some(SandboxContainerState::Stopped) => input
+            .live_completion_status
+            .or(input.stored_status)
+            .unwrap_or("completed")
+            .to_string(),
+        Some(SandboxContainerState::Failed) => {
+            input.live_completion_status.unwrap_or("failed").to_string()
+        }
+        None => input.stored_status.unwrap_or("unknown").to_string(),
+    }
+}
+
+pub fn sandbox_lookup_failure_reason(
+    stored_failure_reason: Option<&str>,
+    live_completion_message: Option<&str>,
+) -> Option<String> {
+    stored_failure_reason
+        .or(live_completion_message)
+        .map(str::to_string)
+}
+
+pub fn sandbox_lookup_accepts_prompts(
+    interactive: bool,
+    live_state: Option<SandboxContainerState>,
+) -> bool {
+    interactive
+        && matches!(
+            live_state,
+            Some(SandboxContainerState::Creating | SandboxContainerState::Running)
+        )
+}
+
+pub fn sandbox_ui_status(status: &str) -> &str {
+    thinclaw_types::normalize_sandbox_ui_state(status)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -819,11 +906,327 @@ pub fn sandbox_job_output(result: &JobExecutionResult) -> serde_json::Value {
     })
 }
 
+async fn execute_job_action<F, Fut>(
+    host: &Arc<dyn JobToolHostPort>,
+    params: serde_json::Value,
+    ctx: &JobContext,
+    action: F,
+) -> Result<ToolOutput, ToolError>
+where
+    F: FnOnce(Arc<dyn JobToolHostPort>, ToolJobActionRequest) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<crate::ports::ToolJobActionResult, crate::ports::ToolHostError>,
+        >,
+{
+    let start = Instant::now();
+    let request = ToolJobActionRequest {
+        scope: tool_scope_from_job_context(ctx),
+        params,
+    };
+    let result = action(Arc::clone(host), request)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+    Ok(ToolOutput::success(result.output, start.elapsed()))
+}
+
+pub struct CreateJobHostTool {
+    host: Arc<dyn JobToolHostPort>,
+    sandbox_enabled: bool,
+    claude_code_enabled: bool,
+    codex_code_enabled: bool,
+}
+
+impl CreateJobHostTool {
+    pub fn new(
+        host: Arc<dyn JobToolHostPort>,
+        sandbox_enabled: bool,
+        claude_code_enabled: bool,
+        codex_code_enabled: bool,
+    ) -> Self {
+        Self {
+            host,
+            sandbox_enabled,
+            claude_code_enabled,
+            codex_code_enabled,
+        }
+    }
+
+    fn available_sandbox_modes(&self) -> Vec<&'static str> {
+        available_sandbox_modes(self.claude_code_enabled, self.codex_code_enabled)
+    }
+
+    fn sandbox_mode_schema_description(&self) -> String {
+        sandbox_mode_schema_description(self.claude_code_enabled, self.codex_code_enabled)
+    }
+}
+
+#[async_trait]
+impl Tool for CreateJobHostTool {
+    fn name(&self) -> &str {
+        "create_job"
+    }
+
+    fn description(&self) -> &str {
+        create_job_description(self.sandbox_enabled)
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        create_job_parameters_schema(
+            self.sandbox_enabled,
+            self.available_sandbox_modes(),
+            self.sandbox_mode_schema_description(),
+        )
+    }
+
+    fn execution_timeout(&self) -> Duration {
+        if self.sandbox_enabled {
+            Duration::from_secs(660)
+        } else {
+            Duration::from_secs(30)
+        }
+    }
+
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+        Some(ToolRateLimitConfig::new(5, 30))
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let _ = parse_create_job_params(
+            &params,
+            self.sandbox_enabled,
+            self.claude_code_enabled,
+            self.codex_code_enabled,
+        )?;
+        execute_job_action(&self.host, params, ctx, |host, request| async move {
+            host.create_job_action(request).await
+        })
+        .await
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
+macro_rules! job_host_tool {
+    (
+        $tool:ident,
+        $name:literal,
+        $description:literal,
+        $schema:expr,
+        $validate:expr,
+        $method:ident
+    ) => {
+        pub struct $tool {
+            host: Arc<dyn JobToolHostPort>,
+        }
+
+        impl $tool {
+            pub fn new(host: Arc<dyn JobToolHostPort>) -> Self {
+                Self { host }
+            }
+        }
+
+        #[async_trait]
+        impl Tool for $tool {
+            fn name(&self) -> &str {
+                $name
+            }
+
+            fn description(&self) -> &str {
+                $description
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                $schema()
+            }
+
+            async fn execute(
+                &self,
+                params: serde_json::Value,
+                ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                $validate(&params)?;
+                execute_job_action(&self.host, params, ctx, |host, request| async move {
+                    host.$method(request).await
+                })
+                .await
+            }
+
+            fn requires_sanitization(&self) -> bool {
+                false
+            }
+        }
+    };
+}
+
+fn validate_list_jobs_params(params: &serde_json::Value) -> Result<(), ToolError> {
+    let _ = params;
+    Ok(())
+}
+
+job_host_tool!(
+    ListJobsHostTool,
+    "list_jobs",
+    "List all jobs or filter by status. Shows job IDs, titles, and current status.",
+    list_jobs_parameters_schema,
+    validate_list_jobs_params,
+    list_jobs_action
+);
+
+job_host_tool!(
+    JobStatusHostTool,
+    "job_status",
+    "Check the status and details of a specific job by its ID.",
+    job_id_parameters_schema,
+    parse_job_id_param,
+    job_status_action
+);
+
+job_host_tool!(
+    CancelJobHostTool,
+    "cancel_job",
+    "Cancel a running or pending job. The job will be marked as cancelled and stopped.",
+    job_id_parameters_schema,
+    parse_job_id_param,
+    cancel_job_action
+);
+
+job_host_tool!(
+    JobEventsHostTool,
+    "job_events",
+    "Read recent event messages for a sandbox job.",
+    job_events_parameters_schema,
+    parse_job_events_params,
+    job_events_action
+);
+
+job_host_tool!(
+    JobPromptHostTool,
+    "job_prompt",
+    "Send a follow-up prompt to an interactive sandbox job, or mark the prompt complete.",
+    job_prompt_parameters_schema,
+    parse_job_prompt_params,
+    job_prompt_action
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::JobExecutionResult;
     use uuid::Uuid;
+
+    struct StubJobHost;
+
+    impl StubJobHost {
+        fn output(
+            action: &str,
+            request: ToolJobActionRequest,
+        ) -> crate::ports::ToolJobActionResult {
+            crate::ports::ToolJobActionResult {
+                output: serde_json::json!({
+                    "action": action,
+                    "principal_id": request.scope.principal_id,
+                    "actor_id": request.scope.actor_id,
+                    "thread_id": request.scope.thread_id,
+                    "params": request.params,
+                }),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl JobToolHostPort for StubJobHost {
+        async fn create_job(
+            &self,
+            _request: crate::ports::ToolCreateJobRequest,
+        ) -> Result<crate::ports::ToolJobSnapshot, crate::ports::ToolHostError> {
+            Err(crate::ports::ToolHostError::Unavailable {
+                service: "job_create_structured".to_string(),
+            })
+        }
+
+        async fn load_job(
+            &self,
+            _scope: ToolOperationScope,
+            _job_id: Uuid,
+        ) -> Result<Option<crate::ports::ToolJobSnapshot>, crate::ports::ToolHostError> {
+            Err(crate::ports::ToolHostError::Unavailable {
+                service: "job_load_structured".to_string(),
+            })
+        }
+
+        async fn list_jobs(
+            &self,
+            _query: crate::ports::ToolJobQuery,
+        ) -> Result<Vec<crate::ports::ToolJobSnapshot>, crate::ports::ToolHostError> {
+            Err(crate::ports::ToolHostError::Unavailable {
+                service: "job_list_structured".to_string(),
+            })
+        }
+
+        async fn send_job_prompt(
+            &self,
+            _scope: ToolOperationScope,
+            _job_id: Uuid,
+            _content: Option<String>,
+            _done: bool,
+        ) -> Result<crate::ports::ToolJobSnapshot, crate::ports::ToolHostError> {
+            Err(crate::ports::ToolHostError::Unavailable {
+                service: "job_prompt_structured".to_string(),
+            })
+        }
+
+        async fn create_job_action(
+            &self,
+            request: ToolJobActionRequest,
+        ) -> Result<crate::ports::ToolJobActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("create", request))
+        }
+
+        async fn list_jobs_action(
+            &self,
+            request: ToolJobActionRequest,
+        ) -> Result<crate::ports::ToolJobActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("list", request))
+        }
+
+        async fn job_status_action(
+            &self,
+            request: ToolJobActionRequest,
+        ) -> Result<crate::ports::ToolJobActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("status", request))
+        }
+
+        async fn cancel_job_action(
+            &self,
+            request: ToolJobActionRequest,
+        ) -> Result<crate::ports::ToolJobActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("cancel", request))
+        }
+
+        async fn job_events_action(
+            &self,
+            request: ToolJobActionRequest,
+        ) -> Result<crate::ports::ToolJobActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("events", request))
+        }
+
+        async fn job_prompt_action(
+            &self,
+            request: ToolJobActionRequest,
+        ) -> Result<crate::ports::ToolJobActionResult, crate::ports::ToolHostError> {
+            Ok(Self::output("prompt", request))
+        }
+    }
+
+    fn stub_job_host() -> Arc<dyn JobToolHostPort> {
+        Arc::new(StubJobHost)
+    }
 
     #[test]
     fn env_var_name_allows_safe_uppercase_names() {
@@ -886,6 +1289,33 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn job_execution_metadata_policy_extracts_capability_scope() {
+        let policy = job_execution_metadata_policy(&serde_json::json!({
+            "allowed_tools": ["memory_read", 7, "skill_list"],
+            "allowed_skills": ["github"],
+            "tool_profile": "sandbox",
+        }));
+
+        assert_eq!(
+            policy.allowed_tools,
+            Some(vec!["memory_read".to_string(), "skill_list".to_string()])
+        );
+        assert_eq!(policy.allowed_skills, Some(vec!["github".to_string()]));
+        assert_eq!(policy.tool_profile.as_deref(), Some("sandbox"));
+    }
+
+    #[test]
+    fn job_execution_metadata_policy_omits_missing_or_non_string_values() {
+        let policy = job_execution_metadata_policy(&serde_json::json!({
+            "tool_profile": 5
+        }));
+
+        assert_eq!(policy.allowed_tools, None);
+        assert_eq!(policy.allowed_skills, None);
+        assert_eq!(policy.tool_profile, None);
     }
 
     #[test]
@@ -953,6 +1383,94 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn job_host_tools_delegate_action_outputs() {
+        let mut ctx = JobContext::with_identity("user-1", "actor-1", "jobs", "test");
+        ctx.metadata = serde_json::json!({ "thread_id": "thread-1" });
+        let host = stub_job_host();
+
+        let create = CreateJobHostTool::new(Arc::clone(&host), true, false, true);
+        assert_eq!(create.name(), "create_job");
+        assert!(!create.requires_sanitization());
+        assert!(create.rate_limit_config().is_some());
+        assert_eq!(create.execution_timeout(), Duration::from_secs(660));
+        assert_eq!(
+            create.parameters_schema()["properties"]["mode"]["enum"][1],
+            "codex_code"
+        );
+        let output = create
+            .execute(
+                serde_json::json!({
+                    "title": "Build",
+                    "description": "Run tests",
+                    "mode": "codex_code",
+                    "wait": false
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "create");
+        assert_eq!(output.result["principal_id"], "user-1");
+        assert_eq!(output.result["actor_id"], "actor-1");
+        assert_eq!(output.result["thread_id"], "thread-1");
+        assert_eq!(output.result["params"]["title"], "Build");
+
+        let list = ListJobsHostTool::new(Arc::clone(&host));
+        let output = list
+            .execute(serde_json::json!({ "filter": "active" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "list");
+        assert_eq!(output.result["params"]["filter"], "active");
+
+        let job_id = Uuid::nil().to_string();
+        let status = JobStatusHostTool::new(Arc::clone(&host));
+        let output = status
+            .execute(serde_json::json!({ "job_id": job_id }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "status");
+
+        let cancel = CancelJobHostTool::new(Arc::clone(&host));
+        let output = cancel
+            .execute(
+                serde_json::json!({ "job_id": Uuid::nil().to_string() }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "cancel");
+
+        let events = JobEventsHostTool::new(Arc::clone(&host));
+        let output = events
+            .execute(
+                serde_json::json!({
+                    "job_id": Uuid::nil().to_string(),
+                    "limit": 2
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "events");
+        assert_eq!(output.result["params"]["limit"], 2);
+
+        let prompt = JobPromptHostTool::new(host);
+        let output = prompt
+            .execute(
+                serde_json::json!({
+                    "job_id": Uuid::nil().to_string(),
+                    "content": "continue"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["action"], "prompt");
+        assert_eq!(output.result["params"]["content"], "continue");
+    }
+
     #[test]
     fn job_filters_and_buckets_match_direct_and_sandbox_statuses() {
         assert!(direct_job_matches_filter(JobState::Pending, "active"));
@@ -988,6 +1506,68 @@ mod tests {
         assert_eq!(summary.pending, 1);
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.interrupted, 1);
+    }
+
+    #[test]
+    fn sandbox_lookup_policy_shapes_status_failure_and_prompt_acceptance() {
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: Some(SandboxContainerState::Creating),
+                live_completion_status: None,
+                stored_status: Some("failed"),
+            }),
+            "creating"
+        );
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: Some(SandboxContainerState::Stopped),
+                live_completion_status: None,
+                stored_status: Some("cancelled"),
+            }),
+            "cancelled"
+        );
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: Some(SandboxContainerState::Stopped),
+                live_completion_status: None,
+                stored_status: None,
+            }),
+            "completed"
+        );
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: Some(SandboxContainerState::Failed),
+                live_completion_status: None,
+                stored_status: Some("running"),
+            }),
+            "failed"
+        );
+        assert_eq!(
+            sandbox_lookup_status(SandboxJobLookupStatusInput {
+                live_state: None,
+                live_completion_status: None,
+                stored_status: None,
+            }),
+            "unknown"
+        );
+        assert_eq!(sandbox_ui_status("creating"), "pending");
+        assert_eq!(sandbox_ui_status("running"), "in_progress");
+        assert_eq!(
+            sandbox_lookup_failure_reason(Some("stored"), Some("live")),
+            Some("stored".to_string())
+        );
+        assert!(sandbox_lookup_accepts_prompts(
+            true,
+            Some(SandboxContainerState::Running)
+        ));
+        assert!(!sandbox_lookup_accepts_prompts(
+            false,
+            Some(SandboxContainerState::Running)
+        ));
+        assert!(!sandbox_lookup_accepts_prompts(
+            true,
+            Some(SandboxContainerState::Stopped)
+        ));
     }
 
     #[test]

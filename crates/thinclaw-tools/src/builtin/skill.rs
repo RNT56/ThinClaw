@@ -1,10 +1,27 @@
 //! Root-independent skill tool policy helpers.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use thinclaw_tools_core::ToolError;
+use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+use thinclaw_types::JobContext;
 
+#[cfg(test)]
+use crate::ports::ToolOperationScope;
+use crate::ports::{
+    SkillInstallToolHostPort, SkillPublishToolHostPort, SkillSearchToolHostPort,
+    SkillTapToolHostPort, SkillToolHostPort, ToolHostError, ToolSkillCheckRequest,
+    ToolSkillCheckSource, ToolSkillInstallActionRequest, ToolSkillPublishRequest,
+    ToolSkillPublishResult, ToolSkillQuery, ToolSkillRead, ToolSkillSearchCatalogEntry,
+    ToolSkillSearchLocalEntry, ToolSkillSearchRemoteEntry, ToolSkillSearchRequest,
+    ToolSkillSearchResult, ToolSkillSummary, ToolSkillTap, ToolSkillTapAddRequest,
+    ToolSkillTapQuery, ToolSkillTapRefreshRequest, ToolSkillTapRemoveRequest, ToolSkillTapTrust,
+    ToolSkillTrust, ToolSkillTrustMutationRequest, ToolSkillUpdateActionRequest,
+    tool_scope_from_job_context,
+};
 use crate::registry::ToolRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +123,26 @@ impl SkillCheckInput {
         match self {
             Self::InlineContent(content) => Some(content),
             Self::Url(_) | Self::Path(_) => None,
+        }
+    }
+}
+
+impl From<ToolSkillCheckSource> for SkillCheckInput {
+    fn from(source: ToolSkillCheckSource) -> Self {
+        match source {
+            ToolSkillCheckSource::InlineContent { content } => Self::InlineContent(content),
+            ToolSkillCheckSource::Path { path } => Self::Path(path),
+            ToolSkillCheckSource::Url { url } => Self::Url(url),
+        }
+    }
+}
+
+impl From<SkillCheckInput> for ToolSkillCheckSource {
+    fn from(input: SkillCheckInput) -> Self {
+        match input {
+            SkillCheckInput::InlineContent(content) => Self::InlineContent { content },
+            SkillCheckInput::Path(path) => Self::Path { path },
+            SkillCheckInput::Url(url) => Self::Url { url },
         }
     }
 }
@@ -474,6 +511,62 @@ pub fn skill_finding_output(kind: &str, severity: &str, excerpt: &str) -> serde_
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SkillFindingPolicy<'a> {
+    pub kind: &'a str,
+    pub severity: &'a str,
+    pub excerpt: &'a str,
+    pub rule_id: Option<&'a str>,
+    pub file: Option<&'a str>,
+    pub line: Option<usize>,
+    pub recommendation: Option<&'a str>,
+    pub scanner_version: Option<&'a str>,
+}
+
+pub fn skill_finding_detail_output(finding: SkillFindingPolicy<'_>) -> serde_json::Value {
+    let mut value = skill_finding_output(finding.kind, finding.severity, finding.excerpt);
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(rule_id) = finding.rule_id {
+            obj.insert(
+                "rule_id".to_string(),
+                serde_json::Value::String(rule_id.to_string()),
+            );
+        }
+        if let Some(file) = finding.file {
+            obj.insert(
+                "file".to_string(),
+                serde_json::Value::String(file.to_string()),
+            );
+        }
+        if let Some(line) = finding.line {
+            obj.insert("line".to_string(), serde_json::json!(line));
+        }
+        if let Some(recommendation) = finding.recommendation {
+            obj.insert(
+                "recommendation".to_string(),
+                serde_json::Value::String(recommendation.to_string()),
+            );
+        }
+        if let Some(scanner_version) = finding.scanner_version {
+            obj.insert(
+                "scanner_version".to_string(),
+                serde_json::Value::String(scanner_version.to_string()),
+            );
+        }
+    }
+    value
+}
+
+pub fn skill_finding_detail_outputs<'a, I>(findings: I) -> Vec<serde_json::Value>
+where
+    I: IntoIterator<Item = SkillFindingPolicy<'a>>,
+{
+    findings
+        .into_iter()
+        .map(skill_finding_detail_output)
+        .collect()
+}
+
 pub fn skill_finding_summary(kind: &str, severity: &str, excerpt: &str) -> String {
     format!("{} ({}): {}", kind, severity, excerpt)
 }
@@ -485,8 +578,99 @@ where
     findings.into_iter().collect::<Vec<_>>().join("; ")
 }
 
+pub fn skill_findings_detail_summary<'a, I>(findings: I) -> String
+where
+    I: IntoIterator<Item = SkillFindingPolicy<'a>>,
+{
+    skill_findings_summary(
+        findings
+            .into_iter()
+            .map(|finding| skill_finding_summary(finding.kind, finding.severity, finding.excerpt)),
+    )
+}
+
 pub fn skill_findings_require_approval(trust_level: &str, finding_count: usize) -> bool {
     trust_level.eq_ignore_ascii_case("community") && finding_count > 0
+}
+
+pub fn skill_findings_require_approval_by_counts(
+    trust_level: &str,
+    critical: usize,
+    warnings: usize,
+) -> bool {
+    match trust_level.to_ascii_lowercase().as_str() {
+        "community" => critical > 0 || warnings > 1,
+        "trusted" | "builtin" => critical > 0,
+        _ => critical > 0,
+    }
+}
+
+pub fn skill_findings_require_approval_for_details<'a, I>(trust_level: &str, findings: I) -> bool
+where
+    I: IntoIterator<Item = SkillFindingPolicy<'a>>,
+{
+    let mut critical = 0;
+    let mut warnings = 0;
+    for finding in findings {
+        match finding.severity {
+            severity if severity.eq_ignore_ascii_case("critical") => critical += 1,
+            severity if severity.eq_ignore_ascii_case("warning") => warnings += 1,
+            _ => {}
+        }
+    }
+    skill_findings_require_approval_by_counts(trust_level, critical, warnings)
+}
+
+pub fn skill_finding_requires_rejection(kind: &str, severity: &str) -> bool {
+    severity.eq_ignore_ascii_case("critical") && kind == "path_traversal"
+}
+
+pub fn skill_findings_require_rejection_for_details<'a, I>(findings: I) -> bool
+where
+    I: IntoIterator<Item = SkillFindingPolicy<'a>>,
+{
+    findings
+        .into_iter()
+        .any(|finding| skill_finding_requires_rejection(finding.kind, finding.severity))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillFindingSummary {
+    pub total: usize,
+    pub warnings: usize,
+    pub critical: usize,
+    pub categories: Vec<String>,
+}
+
+pub fn skill_finding_summary_output(summary: SkillFindingSummary) -> serde_json::Value {
+    serde_json::json!({
+        "total": summary.total,
+        "warnings": summary.warnings,
+        "critical": summary.critical,
+        "categories": summary.categories,
+    })
+}
+
+pub fn add_skill_scan_report_fields(
+    output: &mut serde_json::Value,
+    scanner_version: &str,
+    content_sha256: &str,
+    summary: SkillFindingSummary,
+) {
+    if let Some(obj) = output.as_object_mut() {
+        obj.insert(
+            "scanner_version".to_string(),
+            serde_json::Value::String(scanner_version.to_string()),
+        );
+        obj.insert(
+            "content_sha256".to_string(),
+            serde_json::Value::String(content_sha256.to_string()),
+        );
+        obj.insert(
+            "finding_summary".to_string(),
+            skill_finding_summary_output(summary),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -800,6 +984,158 @@ pub fn skill_publish_plan_output(
     })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillPublishScanProjection {
+    pub scanner_version: String,
+    pub content_sha256: String,
+    pub finding_summary: SkillFindingSummary,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillPublishProjection {
+    pub status: String,
+    pub name: String,
+    pub target_repo: String,
+    pub tap_path: String,
+    pub package_path: String,
+    pub branch: String,
+    pub base_branch: Option<String>,
+    pub package_hash: String,
+    pub files: Vec<serde_json::Value>,
+    pub findings: Vec<serde_json::Value>,
+    pub trust: String,
+    pub source_tier: String,
+    pub source: serde_json::Value,
+    pub scan: Option<SkillPublishScanProjection>,
+    pub remote_write_plan: Option<serde_json::Value>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+pub fn skill_publish_projection_output(projection: SkillPublishProjection) -> serde_json::Value {
+    let mut output = skill_publish_plan_output(
+        &projection.status,
+        &projection.name,
+        &projection.target_repo,
+        &projection.tap_path,
+        &projection.package_path,
+        &projection.branch,
+        projection.base_branch.as_deref(),
+        &projection.package_hash,
+        projection.files,
+        projection.findings,
+        &projection.trust,
+        &projection.source_tier,
+        projection.source,
+    );
+
+    if let Some(scan) = projection.scan {
+        add_skill_scan_report_fields(
+            &mut output,
+            &scan.scanner_version,
+            &scan.content_sha256,
+            scan.finding_summary,
+        );
+    }
+    if let Some(remote_write_plan) = projection.remote_write_plan
+        && !remote_write_plan.is_null()
+    {
+        output["remote_write_plan"] = remote_write_plan;
+    }
+    if let Some(metadata) = projection.metadata
+        && let Some(metadata_object) = metadata.as_object()
+        && let Some(output_object) = output.as_object_mut()
+    {
+        for (key, value) in metadata_object {
+            output_object.insert(key.clone(), value.clone());
+        }
+    }
+    output
+}
+
+pub fn skill_publish_result_projection(result: &ToolSkillPublishResult) -> SkillPublishProjection {
+    SkillPublishProjection {
+        status: result.status.clone(),
+        name: result.name.clone(),
+        target_repo: result.target_repo.clone(),
+        tap_path: result.tap_path.clone(),
+        package_path: result.package_path.clone(),
+        branch: result.branch.clone(),
+        base_branch: result.base_branch.clone(),
+        package_hash: result.package_hash.clone(),
+        files: result.files.clone(),
+        findings: result.findings.clone(),
+        trust: result.trust.clone(),
+        source_tier: result.source_tier.clone(),
+        source: result.source.clone(),
+        scan: None,
+        remote_write_plan: Some(result.remote_write_plan.clone()),
+        metadata: Some(result.metadata.clone()),
+    }
+}
+
+pub fn skill_publish_result_tool_output(result: &ToolSkillPublishResult) -> serde_json::Value {
+    skill_publish_projection_output(skill_publish_result_projection(result))
+}
+
+pub fn skill_publish_metadata_output<I>(
+    scanner_version: &str,
+    content_sha256: &str,
+    finding_summary: SkillFindingSummary,
+    extras: I,
+) -> serde_json::Value
+where
+    I: IntoIterator<Item = (&'static str, serde_json::Value)>,
+{
+    let mut metadata = serde_json::json!({
+        "scanner_version": scanner_version,
+        "content_sha256": content_sha256,
+        "finding_summary": skill_finding_summary_output(finding_summary),
+    });
+    if let Some(object) = metadata.as_object_mut() {
+        for (key, value) in extras {
+            object.insert(key.to_string(), value);
+        }
+    }
+    metadata
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn skill_publish_result_output(
+    status: &str,
+    name: &str,
+    target_repo: &str,
+    tap_path: &str,
+    package_path: &str,
+    branch: &str,
+    base_branch: Option<String>,
+    package_hash: &str,
+    files: Vec<serde_json::Value>,
+    findings: Vec<serde_json::Value>,
+    trust: &str,
+    source_tier: &str,
+    source: serde_json::Value,
+    remote_write_plan: serde_json::Value,
+    metadata: serde_json::Value,
+) -> ToolSkillPublishResult {
+    ToolSkillPublishResult {
+        status: status.to_string(),
+        name: name.to_string(),
+        target_repo: target_repo.to_string(),
+        tap_path: tap_path.to_string(),
+        package_path: package_path.to_string(),
+        branch: branch.to_string(),
+        base_branch,
+        package_hash: package_hash.to_string(),
+        files,
+        findings,
+        trust: trust.to_string(),
+        source_tier: source_tier.to_string(),
+        source,
+        remote_write_plan,
+        metadata,
+    }
+}
+
 pub fn skill_tap_list_parameters_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1005,6 +1341,1118 @@ pub fn skill_tap_refresh_output(
         },
         "hub_enabled": hub_enabled,
     })
+}
+
+fn tool_host_error(error: ToolHostError) -> ToolError {
+    ToolError::ExecutionFailed(error.to_string())
+}
+
+fn tool_skill_trust_label(trust: ToolSkillTrust) -> &'static str {
+    match trust {
+        ToolSkillTrust::Installed => "installed",
+        ToolSkillTrust::Trusted => "trusted",
+        ToolSkillTrust::Community => "community",
+    }
+}
+
+fn metadata_string<'a>(metadata: &'a serde_json::Value, key: &str, fallback: &'a str) -> &'a str {
+    metadata
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or(fallback)
+}
+
+fn metadata_value_or(
+    metadata: &serde_json::Value,
+    key: &str,
+    fallback: serde_json::Value,
+) -> serde_json::Value {
+    metadata.get(key).cloned().unwrap_or(fallback)
+}
+
+fn tool_skill_list_entry(summary: &ToolSkillSummary, verbose: bool) -> serde_json::Value {
+    let metadata = &summary.metadata;
+    let mut entry = skill_list_entry(
+        &summary.name,
+        summary.description.as_deref().unwrap_or_default(),
+        tool_skill_trust_label(summary.trust),
+        metadata_string(metadata, "source_tier", "community"),
+        metadata_string(metadata, "source", ""),
+        metadata_value_or(metadata, "keywords", serde_json::json!([])),
+    );
+
+    if verbose {
+        add_skill_list_verbose_fields(
+            &mut entry,
+            SkillListVerboseFields {
+                version: metadata_string(metadata, "version", "").to_string(),
+                tags: metadata_value_or(metadata, "tags", serde_json::json!([])),
+                content_hash: metadata_string(metadata, "content_hash", "").to_string(),
+                max_context_tokens: metadata_value_or(
+                    metadata,
+                    "max_context_tokens",
+                    serde_json::Value::Null,
+                ),
+                provenance: metadata.get("provenance").cloned(),
+                lifecycle_status: metadata.get("lifecycle_status").cloned(),
+                outcome_score: metadata.get("outcome_score").cloned(),
+                reuse_count: metadata.get("reuse_count").cloned(),
+                activation_reason: metadata.get("activation_reason").cloned(),
+            },
+        );
+    }
+
+    entry
+}
+
+pub struct SkillListHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillListHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillListHostTool {
+    fn name(&self) -> &str {
+        "skill_list"
+    }
+
+    fn description(&self) -> &str {
+        "List all loaded skills with their trust level, source, and activation keywords."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_list_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = Instant::now();
+        let parsed = parse_skill_list_params(&params);
+        let summaries = self
+            .host
+            .list_skills(ToolSkillQuery {
+                scope: tool_scope_from_job_context(ctx),
+                query: None,
+                source: None,
+            })
+            .await
+            .map_err(tool_host_error)?;
+        let skills = summaries
+            .iter()
+            .map(|summary| tool_skill_list_entry(summary, parsed.verbose))
+            .collect();
+        Ok(ToolOutput::success(
+            skill_list_output(skills),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
+fn tool_skill_search_catalog_entry(entry: &ToolSkillSearchCatalogEntry) -> serde_json::Value {
+    skill_search_catalog_entry(
+        &entry.slug,
+        &entry.name,
+        &entry.description,
+        &entry.version,
+        entry.score,
+        entry.installed,
+        entry.stars,
+        entry.downloads,
+        entry.owner.as_deref(),
+    )
+}
+
+fn tool_skill_search_remote_entry(entry: &ToolSkillSearchRemoteEntry) -> serde_json::Value {
+    skill_search_remote_entry(
+        &entry.slug,
+        &entry.name,
+        &entry.description,
+        &entry.version,
+        &entry.source,
+        &entry.source_label,
+        &entry.source_ref,
+        entry.manifest_url.as_deref(),
+        entry.manifest_digest.as_deref(),
+        entry.repo.as_deref(),
+        entry.path.as_deref(),
+        entry.branch.as_deref(),
+        &entry.trust_level,
+    )
+}
+
+fn tool_skill_search_local_entry(entry: &ToolSkillSearchLocalEntry) -> serde_json::Value {
+    skill_search_local_entry(
+        &entry.name,
+        &entry.description,
+        &entry.trust,
+        &entry.source_tier,
+    )
+}
+
+fn tool_skill_search_output(
+    source_filter: &str,
+    result: &ToolSkillSearchResult,
+) -> serde_json::Value {
+    skill_search_output(
+        source_filter,
+        result
+            .catalog
+            .iter()
+            .map(tool_skill_search_catalog_entry)
+            .collect(),
+        result
+            .remote
+            .iter()
+            .map(tool_skill_search_remote_entry)
+            .collect(),
+        result
+            .local
+            .iter()
+            .map(tool_skill_search_local_entry)
+            .collect(),
+        &result.registry_url,
+        result.catalog_error.clone(),
+    )
+}
+
+pub struct SkillSearchHostTool {
+    host: Arc<dyn SkillSearchToolHostPort>,
+}
+
+impl SkillSearchHostTool {
+    pub fn new(host: Arc<dyn SkillSearchToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillSearchHostTool {
+    fn name(&self) -> &str {
+        "skill_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search for skills in the ClawHub catalog and among locally loaded skills."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_search_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_search_params(&params)?;
+        let result = self
+            .host
+            .search_skills(ToolSkillSearchRequest {
+                scope: tool_scope_from_job_context(ctx),
+                query: parsed.query,
+                source: parsed.source.clone(),
+            })
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(
+            tool_skill_search_output(&parsed.source, &result),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
+fn tool_skill_read_output(read: &ToolSkillRead) -> serde_json::Value {
+    skill_read_output(
+        &read.name,
+        &read.version,
+        &read.description,
+        tool_skill_trust_label(read.trust),
+        &read.source_tier,
+        &read.content,
+    )
+}
+
+pub struct SkillReadHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillReadHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillReadHostTool {
+    fn name(&self) -> &str {
+        "skill_read"
+    }
+
+    fn description(&self) -> &str {
+        "Read a skill's full instructions by name. Use when you need detailed guidance for a specific skill."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_read_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = Instant::now();
+        let name = parse_skill_name_param(&params)?;
+        ensure_skill_allowed(&ctx.metadata, &name)?;
+        let output = self
+            .host
+            .read_skill(tool_scope_from_job_context(ctx), name)
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(
+            tool_skill_read_output(&output),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
+pub struct SkillReloadHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillReloadHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillReloadHostTool {
+    fn name(&self) -> &str {
+        "skill_reload"
+    }
+
+    fn description(&self) -> &str {
+        "Reload a skill (or all skills) from disk after editing SKILL.md files. \
+         Use after making on-disk changes so they take effect immediately without restarting. \
+         Provide a skill name to reload just that skill, or set all=true to rediscover all skills."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_reload_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_reload_params(&params);
+        let scope = tool_scope_from_job_context(ctx);
+
+        if parsed.all {
+            let loaded = self
+                .host
+                .reload_skills(scope, None)
+                .await
+                .map_err(tool_host_error)?
+                .into_iter()
+                .map(|summary| summary.name)
+                .collect::<Vec<_>>();
+            return Ok(ToolOutput::success(
+                skill_reload_all_output(loaded),
+                start.elapsed(),
+            ));
+        }
+
+        let name = parsed.name.ok_or_else(|| {
+            ToolError::InvalidParameters("missing required parameter: name".to_string())
+        })?;
+        let mut loaded = self
+            .host
+            .reload_skills(scope, Some(name.clone()))
+            .await
+            .map_err(tool_host_error)?;
+        let reloaded_name = loaded.pop().map(|summary| summary.name).unwrap_or(name);
+        Ok(ToolOutput::success(
+            skill_reload_output(&reloaded_name),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+pub struct SkillSnapshotHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillSnapshotHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillSnapshotHostTool {
+    fn name(&self) -> &str {
+        "skill_snapshot"
+    }
+
+    fn description(&self) -> &str {
+        "Write a JSON snapshot of loaded skills, hashes, and provenance tiers to the local skills state directory."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_snapshot_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let result = self
+            .host
+            .snapshot_skills(tool_scope_from_job_context(ctx))
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(
+            skill_snapshot_output(&result.path, result.count),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+pub struct SkillCheckHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillCheckHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillCheckHostTool {
+    fn name(&self) -> &str {
+        "skill_check"
+    }
+
+    fn description(&self) -> &str {
+        "Validate SKILL.md content, a local SKILL.md path, or a direct HTTPS SKILL.md URL without installing it."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_check_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let input = parse_skill_check_input(&params)?;
+        let result = self
+            .host
+            .check_skill(ToolSkillCheckRequest {
+                scope: tool_scope_from_job_context(ctx),
+                source: input.into(),
+            })
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(result.output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
+pub struct SkillInstallHostTool {
+    host: Arc<dyn SkillInstallToolHostPort>,
+}
+
+impl SkillInstallHostTool {
+    pub fn new(host: Arc<dyn SkillInstallToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillInstallHostTool {
+    fn name(&self) -> &str {
+        "skill_install"
+    }
+
+    fn description(&self) -> &str {
+        "Install a skill by name from the catalog, a URL, or inline SKILL.md content."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_install_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_install_params(&params)?;
+        let result = self
+            .host
+            .install_skill_action(ToolSkillInstallActionRequest {
+                scope: tool_scope_from_job_context(ctx),
+                name: parsed.name,
+                url: params
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                content: params
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                force: parsed.force,
+                approve_risky: parsed.approve_risky,
+            })
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(result.output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+pub struct SkillUpdateHostTool {
+    host: Arc<dyn SkillInstallToolHostPort>,
+}
+
+impl SkillUpdateHostTool {
+    pub fn new(host: Arc<dyn SkillInstallToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillUpdateHostTool {
+    fn name(&self) -> &str {
+        "skill_update"
+    }
+
+    fn description(&self) -> &str {
+        "Update an installed skill from its recorded provenance source."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_update_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_update_params(&params)?;
+        let result = self
+            .host
+            .update_skill_action(ToolSkillUpdateActionRequest {
+                scope: tool_scope_from_job_context(ctx),
+                name: parsed.name,
+                approve_risky: parsed.approve_risky,
+            })
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(result.output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+pub struct SkillRemoveHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillRemoveHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillRemoveHostTool {
+    fn name(&self) -> &str {
+        "skill_remove"
+    }
+
+    fn description(&self) -> &str {
+        "Remove an installed skill by name. Only user-installed skills can be removed."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_remove_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let name = parse_skill_name_param(&params)?;
+        let result = self
+            .host
+            .remove_skill(tool_scope_from_job_context(ctx), name)
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(
+            skill_remove_output(&result.name),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+pub struct SkillAuditHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillAuditHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillAuditHostTool {
+    fn name(&self) -> &str {
+        "skill_audit"
+    }
+
+    fn description(&self) -> &str {
+        "Audit loaded skills for risky patterns using the quarantine scanner without modifying or removing them."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_audit_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let target = parse_skill_audit_target_name(&params).map(str::to_string);
+        let audited = self
+            .host
+            .audit_skills(tool_scope_from_job_context(ctx), target)
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(
+            skill_audit_output(audited),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
+fn tool_skill_trust_from_label(label: &str) -> Result<ToolSkillTrust, ToolError> {
+    match label {
+        "installed" => Ok(ToolSkillTrust::Installed),
+        "trusted" => Ok(ToolSkillTrust::Trusted),
+        _ => Err(ToolError::InvalidParameters(format!(
+            "Unsupported target_trust '{}'",
+            label
+        ))),
+    }
+}
+
+pub struct SkillPromoteTrustHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillPromoteTrustHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillPromoteTrustHostTool {
+    fn name(&self) -> &str {
+        "skill_trust_promote"
+    }
+
+    fn description(&self) -> &str {
+        "Promote or demote a user-managed skill between installed and trusted trust ceilings."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_trust_promote_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_trust_promote_params(&params)?;
+        let result = self
+            .host
+            .promote_skill_trust(ToolSkillTrustMutationRequest {
+                scope: tool_scope_from_job_context(ctx),
+                name: parsed.name,
+                target_trust: tool_skill_trust_from_label(&parsed.target_trust)?,
+            })
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(
+            skill_trust_promote_output(
+                &result.name,
+                tool_skill_trust_label(result.trust),
+                &result.source_tier,
+            ),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+pub struct SkillInspectHostTool {
+    host: Arc<dyn SkillToolHostPort>,
+}
+
+impl SkillInspectHostTool {
+    pub fn new(host: Arc<dyn SkillToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillInspectHostTool {
+    fn name(&self) -> &str {
+        "skill_inspect"
+    }
+
+    fn description(&self) -> &str {
+        "Inspect one loaded skill with metadata, provenance, files, and optional audit findings."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_inspect_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = Instant::now();
+        let parsed = parse_skill_inspect_params(&params)?;
+        ensure_skill_allowed(&ctx.metadata, &parsed.name)?;
+        let output = self
+            .host
+            .inspect_skill(
+                tool_scope_from_job_context(ctx),
+                parsed.name,
+                parsed.include_content,
+                parsed.include_files,
+                parsed.audit,
+            )
+            .await
+            .map_err(tool_host_error)?;
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
+fn tool_skill_publish_output(result: &ToolSkillPublishResult) -> serde_json::Value {
+    skill_publish_result_tool_output(result)
+}
+
+pub struct SkillPublishHostTool {
+    host: Arc<dyn SkillPublishToolHostPort>,
+}
+
+impl SkillPublishHostTool {
+    pub fn new(host: Arc<dyn SkillPublishToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillPublishHostTool {
+    fn name(&self) -> &str {
+        "skill_publish"
+    }
+
+    fn description(&self) -> &str {
+        "Dry-run or publish a local skill to a configured GitHub skill tap as a draft pull request."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_publish_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_publish_params(&params)?;
+        let result = self
+            .host
+            .publish_skill(ToolSkillPublishRequest {
+                scope: tool_scope_from_job_context(ctx),
+                name: parsed.name,
+                target_repo: parsed.target_repo,
+                dry_run: parsed.dry_run,
+                remote_write: parsed.remote_write,
+                confirm_remote_write: parsed.confirm_remote_write,
+                approve_risky: parsed.approve_risky,
+            })
+            .await
+            .map_err(tool_host_error)?;
+
+        Ok(ToolOutput::success(
+            tool_skill_publish_output(&result),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        if params
+            .get("remote_write")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            ApprovalRequirement::UnlessAutoApproved
+        } else {
+            ApprovalRequirement::Never
+        }
+    }
+}
+
+fn tool_tap_trust_level(value: &str) -> ToolSkillTapTrust {
+    match value {
+        "builtin" => ToolSkillTapTrust::Builtin,
+        "trusted" => ToolSkillTapTrust::Trusted,
+        _ => ToolSkillTapTrust::Community,
+    }
+}
+
+fn tool_tap_trust_level_label(value: ToolSkillTapTrust) -> &'static str {
+    match value {
+        ToolSkillTapTrust::Builtin => "builtin",
+        ToolSkillTapTrust::Trusted => "trusted",
+        ToolSkillTapTrust::Community => "community",
+    }
+}
+
+fn tool_skill_tap_json(tap: &ToolSkillTap) -> serde_json::Value {
+    skill_tap_json(
+        &tap.repo,
+        &tap.path,
+        tap.branch.as_deref(),
+        tool_tap_trust_level_label(tap.trust_level),
+    )
+}
+
+pub struct SkillTapListHostTool {
+    host: Arc<dyn SkillTapToolHostPort>,
+}
+
+pub struct SkillTapAddHostTool {
+    host: Arc<dyn SkillTapToolHostPort>,
+}
+
+pub struct SkillTapRemoveHostTool {
+    host: Arc<dyn SkillTapToolHostPort>,
+}
+
+pub struct SkillTapRefreshHostTool {
+    host: Arc<dyn SkillTapToolHostPort>,
+}
+
+impl SkillTapListHostTool {
+    pub fn new(host: Arc<dyn SkillTapToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+impl SkillTapAddHostTool {
+    pub fn new(host: Arc<dyn SkillTapToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+impl SkillTapRemoveHostTool {
+    pub fn new(host: Arc<dyn SkillTapToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+impl SkillTapRefreshHostTool {
+    pub fn new(host: Arc<dyn SkillTapToolHostPort>) -> Self {
+        Self { host }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTapListHostTool {
+    fn name(&self) -> &str {
+        "skill_tap_list"
+    }
+
+    fn description(&self) -> &str {
+        "List configured GitHub skill taps."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_tap_list_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let include_health = params
+            .get("include_health")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let result = self
+            .host
+            .list_skill_taps(ToolSkillTapQuery {
+                scope: tool_scope_from_job_context(ctx),
+                include_health,
+            })
+            .await
+            .map_err(tool_host_error)?;
+
+        Ok(ToolOutput::success(
+            skill_tap_list_output(
+                result
+                    .taps
+                    .iter()
+                    .map(tool_skill_tap_json)
+                    .collect::<Vec<_>>(),
+                result.hub_enabled,
+            ),
+            start.elapsed(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTapAddHostTool {
+    fn name(&self) -> &str {
+        "skill_tap_add"
+    }
+
+    fn description(&self) -> &str {
+        "Persist a GitHub skill tap and refresh remote skill discovery."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_tap_add_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_tap_add_params(&params)?;
+        let result = self
+            .host
+            .add_skill_tap(ToolSkillTapAddRequest {
+                scope: tool_scope_from_job_context(ctx),
+                repo: parsed.repo,
+                path: parsed.path,
+                branch: parsed.branch,
+                trust_level: tool_tap_trust_level(&parsed.trust_level),
+                replace: parsed.replace,
+            })
+            .await
+            .map_err(tool_host_error)?;
+        let tap = result
+            .tap
+            .as_ref()
+            .map(tool_skill_tap_json)
+            .unwrap_or(serde_json::Value::Null);
+
+        Ok(ToolOutput::success(
+            skill_tap_add_output(result.status == "replaced", tap, result.tap_count),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTapRemoveHostTool {
+    fn name(&self) -> &str {
+        "skill_tap_remove"
+    }
+
+    fn description(&self) -> &str {
+        "Remove a persisted GitHub skill tap and refresh remote skill discovery."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_tap_remove_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_tap_remove_params(&params)?;
+        let result = self
+            .host
+            .remove_skill_tap(ToolSkillTapRemoveRequest {
+                scope: tool_scope_from_job_context(ctx),
+                repo: parsed.repo.clone(),
+                path: parsed.path.clone(),
+                branch: parsed.branch.clone(),
+            })
+            .await
+            .map_err(tool_host_error)?;
+
+        Ok(ToolOutput::success(
+            skill_tap_remove_output(
+                &parsed.repo,
+                &parsed.path,
+                parsed.branch.as_deref(),
+                result.tap_count,
+            ),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTapRefreshHostTool {
+    fn name(&self) -> &str {
+        "skill_tap_refresh"
+    }
+
+    fn description(&self) -> &str {
+        "Rebuild remote skill discovery from persisted skill tap settings."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        skill_tap_refresh_parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(&ctx.metadata, self.name())?;
+        let start = Instant::now();
+        let parsed = parse_skill_tap_refresh_params(&params)?;
+        let result = self
+            .host
+            .refresh_skill_taps(ToolSkillTapRefreshRequest {
+                scope: tool_scope_from_job_context(ctx),
+                repo: parsed.repo,
+                path: parsed.path,
+            })
+            .await
+            .map_err(tool_host_error)?;
+
+        Ok(ToolOutput::success(
+            skill_tap_refresh_output(
+                result.tap_count,
+                result.repo.as_deref(),
+                result.path.as_deref(),
+                result.hub_enabled,
+            ),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
 }
 
 pub fn skill_snapshot_parameters_schema() -> serde_json::Value {
@@ -1697,6 +3145,367 @@ pub fn validate_repo_path_component(value: &str, field: &str) -> Result<(), Tool
 mod tests {
     use super::*;
 
+    use crate::ports::{
+        SkillInstallToolHostPort, SkillSearchToolHostPort, ToolSkillCheckRequest,
+        ToolSkillCheckResult, ToolSkillCheckSource, ToolSkillInstallActionRequest,
+        ToolSkillInstallRequest, ToolSkillMutationActionResult, ToolSkillPublishRequest,
+        ToolSkillPublishResult, ToolSkillQuery, ToolSkillRead, ToolSkillRemoveResult,
+        ToolSkillSearchCatalogEntry, ToolSkillSearchLocalEntry, ToolSkillSearchRemoteEntry,
+        ToolSkillSearchRequest, ToolSkillSearchResult, ToolSkillSnapshotResult, ToolSkillSummary,
+        ToolSkillTapList, ToolSkillTapMutationResult, ToolSkillTapRefreshResult, ToolSkillTrust,
+        ToolSkillTrustMutationRequest, ToolSkillTrustMutationResult, ToolSkillUpdateActionRequest,
+    };
+
+    struct StubSkillHost;
+
+    struct StubSkillSearchHost;
+
+    struct StubSkillInstallHost;
+
+    #[async_trait]
+    impl SkillInstallToolHostPort for StubSkillInstallHost {
+        async fn install_skill_action(
+            &self,
+            request: ToolSkillInstallActionRequest,
+        ) -> Result<ToolSkillMutationActionResult, ToolHostError> {
+            Ok(ToolSkillMutationActionResult {
+                output: skill_install_output(
+                    &request.name,
+                    request.force,
+                    vec![skill_finding_output("network", "high", "curl")],
+                ),
+            })
+        }
+
+        async fn update_skill_action(
+            &self,
+            request: ToolSkillUpdateActionRequest,
+        ) -> Result<ToolSkillMutationActionResult, ToolHostError> {
+            Ok(ToolSkillMutationActionResult {
+                output: skill_install_output(&request.name, true, Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SkillSearchToolHostPort for StubSkillSearchHost {
+        async fn search_skills(
+            &self,
+            request: ToolSkillSearchRequest,
+        ) -> Result<ToolSkillSearchResult, ToolHostError> {
+            Ok(ToolSkillSearchResult {
+                catalog: vec![ToolSkillSearchCatalogEntry {
+                    slug: "owner/docs".to_string(),
+                    name: "docs".to_string(),
+                    description: "Documentation helper".to_string(),
+                    version: "1.0.0".to_string(),
+                    score: 0.95,
+                    installed: true,
+                    stars: Some(10),
+                    downloads: Some(20),
+                    owner: Some("owner".to_string()),
+                }],
+                remote: vec![ToolSkillSearchRemoteEntry {
+                    slug: "owner/review".to_string(),
+                    name: "review".to_string(),
+                    description: "Review helper".to_string(),
+                    version: "0.1.0".to_string(),
+                    source: "github_tap".to_string(),
+                    source_label: "GitHub".to_string(),
+                    source_ref: "owner/skills".to_string(),
+                    manifest_url: Some("https://example.test/SKILL.md".to_string()),
+                    manifest_digest: Some("sha256:remote".to_string()),
+                    repo: Some("owner/skills".to_string()),
+                    path: Some("skills/review".to_string()),
+                    branch: Some("main".to_string()),
+                    trust_level: "trusted".to_string(),
+                }],
+                local: vec![ToolSkillSearchLocalEntry {
+                    name: "docs".to_string(),
+                    description: "Documentation helper".to_string(),
+                    trust: "trusted".to_string(),
+                    source_tier: "user".to_string(),
+                }],
+                registry_url: "https://registry.test".to_string(),
+                catalog_error: (request.source == "clawhub").then(|| "offline".to_string()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SkillToolHostPort for StubSkillHost {
+        async fn list_skills(
+            &self,
+            _query: ToolSkillQuery,
+        ) -> Result<Vec<ToolSkillSummary>, ToolHostError> {
+            Ok(vec![ToolSkillSummary {
+                name: "docs".to_string(),
+                description: Some("Documentation helper".to_string()),
+                trust: ToolSkillTrust::Trusted,
+                enabled: true,
+                metadata: serde_json::json!({
+                    "source_tier": "user",
+                    "source": "User",
+                    "keywords": ["docs"],
+                    "version": "1.0.0",
+                    "tags": ["writing"],
+                    "content_hash": "sha256:abc",
+                    "max_context_tokens": 1200,
+                    "provenance": {"kind": "test"},
+                    "lifecycle_status": "active",
+                    "outcome_score": 0.9,
+                    "reuse_count": 3,
+                    "activation_reason": "keyword"
+                }),
+            }])
+        }
+
+        async fn inspect_skill(
+            &self,
+            _scope: ToolOperationScope,
+            name: String,
+            include_content: bool,
+            include_files: bool,
+            audit: bool,
+        ) -> Result<serde_json::Value, ToolHostError> {
+            Ok(serde_json::json!({
+                "name": name,
+                "include_content": include_content,
+                "include_files": include_files,
+                "audit": audit
+            }))
+        }
+
+        async fn read_skill(
+            &self,
+            _scope: ToolOperationScope,
+            name: String,
+        ) -> Result<ToolSkillRead, ToolHostError> {
+            Ok(ToolSkillRead {
+                name,
+                version: "1.0.0".to_string(),
+                description: "Documentation helper".to_string(),
+                trust: ToolSkillTrust::Trusted,
+                source_tier: "user".to_string(),
+                content: "Use this skill for docs.".to_string(),
+            })
+        }
+
+        async fn install_skill(
+            &self,
+            request: ToolSkillInstallRequest,
+        ) -> Result<ToolSkillSummary, ToolHostError> {
+            Ok(ToolSkillSummary {
+                name: request.name,
+                description: None,
+                trust: ToolSkillTrust::Community,
+                enabled: true,
+                metadata: serde_json::Value::Null,
+            })
+        }
+
+        async fn check_skill(
+            &self,
+            request: ToolSkillCheckRequest,
+        ) -> Result<ToolSkillCheckResult, ToolHostError> {
+            let (source_kind, source_ref) = match request.source {
+                ToolSkillCheckSource::InlineContent { .. } => {
+                    ("content".to_string(), "(inline content)".to_string())
+                }
+                ToolSkillCheckSource::Path { path } => ("path".to_string(), path),
+                ToolSkillCheckSource::Url { url } => ("url".to_string(), url),
+            };
+            Ok(ToolSkillCheckResult {
+                output: skill_check_success_output(
+                    &source_kind,
+                    &source_ref,
+                    "docs",
+                    "1.0.0",
+                    "Documentation helper",
+                    serde_json::json!({"keywords": ["docs"]}),
+                    "installed",
+                    "user",
+                    64,
+                    1200,
+                    "sha256:abc",
+                    "sha256:def",
+                    Vec::new(),
+                ),
+            })
+        }
+
+        async fn remove_skill(
+            &self,
+            _scope: ToolOperationScope,
+            name: String,
+        ) -> Result<ToolSkillRemoveResult, ToolHostError> {
+            Ok(ToolSkillRemoveResult { name })
+        }
+
+        async fn promote_skill_trust(
+            &self,
+            request: ToolSkillTrustMutationRequest,
+        ) -> Result<ToolSkillTrustMutationResult, ToolHostError> {
+            Ok(ToolSkillTrustMutationResult {
+                name: request.name,
+                trust: request.target_trust,
+                source_tier: "user".to_string(),
+            })
+        }
+
+        async fn audit_skills(
+            &self,
+            _scope: ToolOperationScope,
+            name: Option<String>,
+        ) -> Result<Vec<serde_json::Value>, ToolHostError> {
+            Ok(vec![skill_audit_entry_output(
+                name.as_deref().unwrap_or("docs"),
+                "trusted",
+                "user",
+                "/tmp/docs",
+                vec![skill_finding_output("network", "high", "curl")],
+            )])
+        }
+
+        async fn reload_skills(
+            &self,
+            _scope: ToolOperationScope,
+            name: Option<String>,
+        ) -> Result<Vec<ToolSkillSummary>, ToolHostError> {
+            let names = name
+                .map(|name| vec![name])
+                .unwrap_or_else(|| vec!["docs".to_string(), "review".to_string()]);
+            Ok(names
+                .into_iter()
+                .map(|name| ToolSkillSummary {
+                    name,
+                    description: None,
+                    trust: ToolSkillTrust::Trusted,
+                    enabled: true,
+                    metadata: serde_json::Value::Null,
+                })
+                .collect())
+        }
+
+        async fn snapshot_skills(
+            &self,
+            _scope: ToolOperationScope,
+        ) -> Result<ToolSkillSnapshotResult, ToolHostError> {
+            Ok(ToolSkillSnapshotResult {
+                path: "/tmp/skills/snapshot.json".to_string(),
+                count: 2,
+            })
+        }
+    }
+
+    struct StubSkillPublishHost;
+
+    #[async_trait]
+    impl SkillPublishToolHostPort for StubSkillPublishHost {
+        async fn publish_skill(
+            &self,
+            request: ToolSkillPublishRequest,
+        ) -> Result<ToolSkillPublishResult, ToolHostError> {
+            Ok(ToolSkillPublishResult {
+                status: if request.remote_write {
+                    "published".to_string()
+                } else {
+                    "dry_run".to_string()
+                },
+                name: request.name,
+                target_repo: request.target_repo,
+                tap_path: "community".to_string(),
+                package_path: "community/docs".to_string(),
+                branch: "codex/skill-publish/docs-1234abcd".to_string(),
+                base_branch: Some("main".to_string()),
+                package_hash: "sha256:1234".to_string(),
+                files: vec![serde_json::json!({"path": "SKILL.md", "bytes": 10})],
+                findings: Vec::new(),
+                trust: "trusted".to_string(),
+                source_tier: "user".to_string(),
+                source: skill_source_output("user", "/tmp/docs"),
+                remote_write_plan: serde_json::Value::Null,
+                metadata: serde_json::json!({
+                    "scanner_version": "test",
+                    "content_sha256": "sha256:content"
+                }),
+            })
+        }
+    }
+
+    struct StubSkillTapHost;
+
+    #[async_trait]
+    impl SkillTapToolHostPort for StubSkillTapHost {
+        async fn list_skill_taps(
+            &self,
+            query: ToolSkillTapQuery,
+        ) -> Result<ToolSkillTapList, ToolHostError> {
+            Ok(ToolSkillTapList::new(
+                vec![ToolSkillTap {
+                    repo: "owner/skills".to_string(),
+                    path: "packs/core".to_string(),
+                    branch: Some("main".to_string()),
+                    trust_level: ToolSkillTapTrust::Trusted,
+                }],
+                Some(query.include_health),
+            ))
+        }
+
+        async fn add_skill_tap(
+            &self,
+            request: ToolSkillTapAddRequest,
+        ) -> Result<ToolSkillTapMutationResult, ToolHostError> {
+            Ok(ToolSkillTapMutationResult {
+                status: if request.replace {
+                    "replaced".to_string()
+                } else {
+                    "added".to_string()
+                },
+                tap: Some(ToolSkillTap {
+                    repo: request.repo,
+                    path: request.path,
+                    branch: request.branch,
+                    trust_level: request.trust_level,
+                }),
+                tap_count: 1,
+            })
+        }
+
+        async fn remove_skill_tap(
+            &self,
+            request: ToolSkillTapRemoveRequest,
+        ) -> Result<ToolSkillTapMutationResult, ToolHostError> {
+            Ok(ToolSkillTapMutationResult {
+                status: "removed".to_string(),
+                tap: Some(ToolSkillTap {
+                    repo: request.repo,
+                    path: request.path,
+                    branch: request.branch,
+                    trust_level: ToolSkillTapTrust::Community,
+                }),
+                tap_count: 0,
+            })
+        }
+
+        async fn refresh_skill_taps(
+            &self,
+            request: ToolSkillTapRefreshRequest,
+        ) -> Result<ToolSkillTapRefreshResult, ToolHostError> {
+            Ok(ToolSkillTapRefreshResult {
+                status: "refreshed".to_string(),
+                tap_count: 1,
+                repo: request.repo,
+                path: request.path,
+                hub_enabled: true,
+            })
+        }
+    }
+
+    fn stub_tap_host() -> Arc<dyn SkillTapToolHostPort> {
+        Arc::new(StubSkillTapHost)
+    }
+
     #[test]
     fn package_skip_policy_filters_generated_and_hidden_names() {
         assert!(is_skipped_package_name(".git"));
@@ -1716,6 +3525,35 @@ mod tests {
         );
         assert!(ensure_skill_admin_available(&metadata, "skill_install").is_err());
         assert!(ensure_skill_admin_available(&serde_json::json!({}), "skill_install").is_ok());
+    }
+
+    #[test]
+    fn skill_check_input_converts_to_and_from_port_source() {
+        let input = SkillCheckInput::InlineContent("name: test".to_string());
+        let source: ToolSkillCheckSource = input.clone().into();
+        assert_eq!(
+            source,
+            ToolSkillCheckSource::InlineContent {
+                content: "name: test".to_string(),
+            }
+        );
+        assert_eq!(SkillCheckInput::from(source), input);
+
+        let path_source = ToolSkillCheckSource::Path {
+            path: "/tmp/example".to_string(),
+        };
+        assert_eq!(
+            SkillCheckInput::from(path_source),
+            SkillCheckInput::Path("/tmp/example".to_string())
+        );
+
+        let url_input = SkillCheckInput::Url("https://example.test/SKILL.md".to_string());
+        assert_eq!(
+            ToolSkillCheckSource::from(url_input),
+            ToolSkillCheckSource::Url {
+                url: "https://example.test/SKILL.md".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -2107,6 +3945,559 @@ mod tests {
             skill_findings_summary([skill_finding_summary("network", "high", "curl")]),
             "network (high): curl"
         );
+    }
+
+    #[test]
+    fn finding_policy_outputs_details_and_scan_metadata() {
+        let finding = SkillFindingPolicy {
+            kind: "network",
+            severity: "warning",
+            excerpt: "curl example.com",
+            rule_id: Some("net-001"),
+            file: Some("SKILL.md"),
+            line: Some(12),
+            recommendation: Some("Review network access"),
+            scanner_version: Some("test-scanner"),
+        };
+
+        let outputs = skill_finding_detail_outputs([finding]);
+        assert_eq!(outputs[0]["kind"], "network");
+        assert_eq!(outputs[0]["severity"], "warning");
+        assert_eq!(outputs[0]["rule_id"], "net-001");
+        assert_eq!(outputs[0]["line"], 12);
+        assert_eq!(
+            skill_findings_detail_summary([finding]),
+            "network (warning): curl example.com"
+        );
+
+        let mut output = serde_json::json!({"ok": true});
+        add_skill_scan_report_fields(
+            &mut output,
+            "test-scanner",
+            "sha256:content",
+            SkillFindingSummary {
+                total: 1,
+                warnings: 1,
+                critical: 0,
+                categories: vec!["network".to_string()],
+            },
+        );
+        assert_eq!(output["scanner_version"], "test-scanner");
+        assert_eq!(output["finding_summary"]["categories"][0], "network");
+    }
+
+    #[test]
+    fn finding_policy_applies_approval_and_rejection_thresholds() {
+        let warning = SkillFindingPolicy {
+            kind: "network",
+            severity: "warning",
+            excerpt: "curl",
+            rule_id: None,
+            file: None,
+            line: None,
+            recommendation: None,
+            scanner_version: None,
+        };
+        let critical = SkillFindingPolicy {
+            severity: "critical",
+            ..warning
+        };
+        let traversal = SkillFindingPolicy {
+            kind: "path_traversal",
+            ..critical
+        };
+
+        assert!(!skill_findings_require_approval_for_details(
+            "community",
+            [warning]
+        ));
+        assert!(skill_findings_require_approval_for_details(
+            "community",
+            [warning, warning]
+        ));
+        assert!(skill_findings_require_approval_for_details(
+            "trusted",
+            [critical]
+        ));
+        assert!(!skill_findings_require_approval_for_details(
+            "builtin",
+            [warning]
+        ));
+        assert!(skill_findings_require_rejection_for_details([traversal]));
+        assert!(!skill_findings_require_rejection_for_details([critical]));
+    }
+
+    #[test]
+    fn publish_metadata_and_result_helpers_preserve_policy_shape() {
+        let metadata = skill_publish_metadata_output(
+            "test-scanner",
+            "sha256:content",
+            SkillFindingSummary {
+                total: 0,
+                warnings: 0,
+                critical: 0,
+                categories: Vec::new(),
+            },
+            [(
+                "pr_url",
+                serde_json::json!("https://github.com/owner/repo/pull/1"),
+            )],
+        );
+        assert_eq!(metadata["scanner_version"], "test-scanner");
+        assert_eq!(metadata["pr_url"], "https://github.com/owner/repo/pull/1");
+
+        let result = skill_publish_result_output(
+            "published",
+            "docs",
+            "owner/repo",
+            "community",
+            "community/docs",
+            "codex/skill-publish/docs-1234abcd",
+            Some("main".to_string()),
+            "sha256:1234",
+            vec![serde_json::json!({"path": "SKILL.md", "bytes": 10})],
+            Vec::new(),
+            "trusted",
+            "user",
+            skill_source_output("user", "/tmp/docs"),
+            serde_json::Value::Null,
+            metadata,
+        );
+        assert_eq!(result.status, "published");
+        assert_eq!(result.package_path, "community/docs");
+        assert_eq!(result.files[0]["path"], "SKILL.md");
+        assert_eq!(result.metadata["scanner_version"], "test-scanner");
+    }
+
+    #[test]
+    fn publish_projection_output_preserves_plan_scan_and_remote_shape() {
+        let output = skill_publish_projection_output(SkillPublishProjection {
+            status: "published".to_string(),
+            name: "docs".to_string(),
+            target_repo: "owner/repo".to_string(),
+            tap_path: "community".to_string(),
+            package_path: "community/docs".to_string(),
+            branch: "codex/skill-publish/docs-1234abcd".to_string(),
+            base_branch: Some("main".to_string()),
+            package_hash: "sha256:1234".to_string(),
+            files: vec![serde_json::json!({"path": "SKILL.md", "bytes": 10})],
+            findings: vec![skill_finding_output("network", "warning", "curl")],
+            trust: "trusted".to_string(),
+            source_tier: "user".to_string(),
+            source: skill_source_output("user", "/tmp/docs"),
+            scan: Some(SkillPublishScanProjection {
+                scanner_version: "test-scanner".to_string(),
+                content_sha256: "sha256:content".to_string(),
+                finding_summary: SkillFindingSummary {
+                    total: 1,
+                    warnings: 1,
+                    critical: 0,
+                    categories: vec!["network".to_string()],
+                },
+            }),
+            remote_write_plan: Some(serde_json::json!({
+                "pull_request": {
+                    "title": "custom title"
+                }
+            })),
+            metadata: Some(serde_json::json!({
+                "pr_url": "https://github.com/owner/repo/pull/1"
+            })),
+        });
+
+        assert_eq!(output["status"], "published");
+        assert_eq!(output["file_count"], 1);
+        assert_eq!(output["finding_count"], 1);
+        assert_eq!(output["scanner_version"], "test-scanner");
+        assert_eq!(output["content_sha256"], "sha256:content");
+        assert_eq!(output["finding_summary"]["warnings"], 1);
+        assert_eq!(
+            output["remote_write_plan"]["pull_request"]["title"],
+            "custom title"
+        );
+        assert_eq!(output["pr_url"], "https://github.com/owner/repo/pull/1");
+    }
+
+    #[tokio::test]
+    async fn skill_list_host_tool_preserves_basic_and_verbose_output_shapes() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "list", "test");
+        let tool = SkillListHostTool::new(Arc::new(StubSkillHost));
+
+        let output = tool
+            .execute(serde_json::json!({ "verbose": true }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["count"], 1);
+        assert_eq!(output.result["skills"][0]["name"], "docs");
+        assert_eq!(
+            output.result["skills"][0]["description"],
+            "Documentation helper"
+        );
+        assert_eq!(output.result["skills"][0]["trust"], "trusted");
+        assert_eq!(output.result["skills"][0]["source_tier"], "user");
+        assert_eq!(output.result["skills"][0]["keywords"][0], "docs");
+        assert_eq!(output.result["skills"][0]["version"], "1.0.0");
+        assert_eq!(output.result["skills"][0]["content_hash"], "sha256:abc");
+        assert_eq!(output.result["skills"][0]["reuse_count"], 3);
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_search_host_tool_preserves_existing_output_shape() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "search", "test");
+        let tool = SkillSearchHostTool::new(Arc::new(StubSkillSearchHost));
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "query": "docs",
+                    "source": "all"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["installed_count"], 1);
+        assert_eq!(output.result["catalog_count"], 1);
+        assert_eq!(output.result["github_count"], 1);
+        assert_eq!(output.result["registry_url"], "https://registry.test");
+        assert_eq!(
+            output.result["catalog"][0]["slug"],
+            serde_json::json!("owner/docs")
+        );
+        assert_eq!(
+            output.result["github"][0]["source"],
+            serde_json::json!("github_tap")
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_snapshot_host_tool_preserves_existing_output_shape() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "snapshot", "test");
+        let tool = SkillSnapshotHostTool::new(Arc::new(StubSkillHost));
+
+        let output = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
+
+        assert_eq!(output.result["path"], "/tmp/skills/snapshot.json");
+        assert_eq!(output.result["count"], 2);
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_check_host_tool_preserves_existing_output_shape_and_restrictions() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "check", "test");
+        let tool = SkillCheckHostTool::new(Arc::new(StubSkillHost));
+
+        let output = tool
+            .execute(serde_json::json!({ "content": "# docs" }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["ok"], true);
+        assert_eq!(output.result["source_kind"], "content");
+        assert_eq!(output.result["source_ref"], "(inline content)");
+        assert_eq!(output.result["name"], "docs");
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+
+        let mut restricted = ctx.clone();
+        restricted.metadata = serde_json::json!({ "allowed_skills": ["docs"] });
+        let err = tool
+            .execute(serde_json::json!({ "content": "# docs" }), &restricted)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not available"));
+    }
+
+    #[tokio::test]
+    async fn skill_install_and_update_host_tools_preserve_output_shapes() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "install", "test");
+
+        let install = SkillInstallHostTool::new(Arc::new(StubSkillInstallHost));
+        let output = install
+            .execute(
+                serde_json::json!({
+                    "name": "docs",
+                    "force": true,
+                    "approve_risky": true,
+                    "content": "---\nname: docs\n---\nBody\n"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["status"], "updated");
+        assert_eq!(output.result["name"], "docs");
+        assert_eq!(output.result["findings"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            install.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+
+        let update = SkillUpdateHostTool::new(Arc::new(StubSkillInstallHost));
+        let output = update
+            .execute(
+                serde_json::json!({
+                    "name": "docs",
+                    "approve_risky": true
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["status"], "updated");
+        assert_eq!(output.result["name"], "docs");
+        assert_eq!(
+            update.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_remove_and_promote_host_tools_preserve_output_shapes() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "mutate", "test");
+
+        let remove = SkillRemoveHostTool::new(Arc::new(StubSkillHost));
+        let output = remove
+            .execute(serde_json::json!({ "name": "docs" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["status"], "removed");
+        assert_eq!(output.result["name"], "docs");
+        assert_eq!(
+            remove.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+
+        let promote = SkillPromoteTrustHostTool::new(Arc::new(StubSkillHost));
+        let output = promote
+            .execute(
+                serde_json::json!({
+                    "name": "docs",
+                    "target_trust": "trusted"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["status"], "updated");
+        assert_eq!(output.result["name"], "docs");
+        assert_eq!(output.result["trust"], "trusted");
+        assert_eq!(output.result["source_tier"], "user");
+        assert_eq!(
+            promote.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_audit_host_tool_preserves_existing_output_shape() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "audit", "test");
+        let tool = SkillAuditHostTool::new(Arc::new(StubSkillHost));
+
+        let output = tool
+            .execute(serde_json::json!({ "name": "docs" }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["audited_count"], 1);
+        assert_eq!(output.result["total_findings"], 1);
+        assert_eq!(output.result["audited"][0]["name"], "docs");
+        assert_eq!(output.result["audited"][0]["finding_count"], 1);
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_reload_host_tool_preserves_single_and_all_output_shapes() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "reload", "test");
+        let tool = SkillReloadHostTool::new(Arc::new(StubSkillHost));
+
+        let single = tool
+            .execute(serde_json::json!({ "name": "docs" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(single.result["status"], "reloaded");
+        assert_eq!(single.result["name"], "docs");
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+
+        let all = tool
+            .execute(serde_json::json!({ "all": true }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(all.result["status"], "reloaded_all");
+        assert_eq!(all.result["count"], 2);
+        assert_eq!(all.result["skills"][0], "docs");
+    }
+
+    #[tokio::test]
+    async fn skill_read_host_tool_preserves_existing_output_shape() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "read", "test");
+        let tool = SkillReadHostTool::new(Arc::new(StubSkillHost));
+
+        let output = tool
+            .execute(serde_json::json!({ "name": "docs" }), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["name"], "docs");
+        assert_eq!(output.result["version"], "1.0.0");
+        assert_eq!(output.result["description"], "Documentation helper");
+        assert_eq!(output.result["trust"], "trusted");
+        assert_eq!(output.result["source_tier"], "user");
+        assert_eq!(output.result["content"], "Use this skill for docs.");
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_inspect_host_tool_preserves_request_shape_and_restrictions() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "inspect", "test");
+        let tool = SkillInspectHostTool::new(Arc::new(StubSkillHost));
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "docs",
+                    "include_content": true,
+                    "include_files": false,
+                    "audit": false
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["name"], "docs");
+        assert_eq!(output.result["include_content"], true);
+        assert_eq!(output.result["include_files"], false);
+        assert_eq!(output.result["audit"], false);
+
+        let mut restricted = ctx.clone();
+        restricted.metadata = serde_json::json!({ "allowed_skills": ["other"] });
+        let err = tool
+            .execute(serde_json::json!({ "name": "docs" }), &restricted)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn skill_publish_host_tool_preserves_existing_output_shape() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "publish", "test");
+        let tool = SkillPublishHostTool::new(Arc::new(StubSkillPublishHost));
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "docs",
+                    "target_repo": "owner/skills",
+                    "dry_run": true
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["status"], "dry_run");
+        assert_eq!(output.result["name"], "docs");
+        assert_eq!(output.result["target_repo"], "owner/skills");
+        assert_eq!(output.result["package_path"], "community/docs");
+        assert_eq!(output.result["file_count"], 1);
+        assert_eq!(output.result["scanner_version"], "test");
+        assert_eq!(
+            output.result["remote_write_plan"]["pull_request"]["title"],
+            "[skills] publish docs"
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"remote_write": true})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_tap_host_tools_preserve_existing_output_shapes() {
+        let ctx = JobContext::with_identity("user-1", "actor-1", "tap", "test");
+
+        let list = SkillTapListHostTool::new(stub_tap_host());
+        let output = list
+            .execute(serde_json::json!({ "include_health": true }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(output.result["count"], 1);
+        assert_eq!(output.result["hub_enabled"], true);
+        assert_eq!(output.result["taps"][0]["trust_level"], "trusted");
+
+        let add = SkillTapAddHostTool::new(stub_tap_host());
+        let output = add
+            .execute(
+                serde_json::json!({
+                    "repo": "owner/skills",
+                    "path": "/packs/core/",
+                    "branch": "main",
+                    "trust_level": "trusted",
+                    "replace": true
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["status"], "replaced");
+        assert_eq!(output.result["tap"]["path"], "packs/core");
+        assert_eq!(
+            add.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+
+        let remove = SkillTapRemoveHostTool::new(stub_tap_host());
+        let output = remove
+            .execute(
+                serde_json::json!({
+                    "repo": "owner/skills",
+                    "path": "packs/core",
+                    "branch": "main"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["status"], "removed");
+        assert_eq!(output.result["tap_count"], 0);
+
+        let refresh = SkillTapRefreshHostTool::new(stub_tap_host());
+        let output = refresh
+            .execute(
+                serde_json::json!({
+                    "repo": "owner/skills",
+                    "path": "packs/core"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.result["status"], "refreshed");
+        assert_eq!(output.result["filter"]["repo"], "owner/skills");
+        assert_eq!(output.result["hub_enabled"], true);
     }
 
     #[test]

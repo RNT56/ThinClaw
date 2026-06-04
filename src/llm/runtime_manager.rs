@@ -23,7 +23,10 @@ use crate::llm::route_planner::{
     RequiredCapabilities, RoutePlanner, RoutePlannerInput, log_routing_decision,
     validate_providers_settings as validate_planner_settings,
 };
-use crate::llm::routing_policy::{RouteCandidate, RoutingContext, RoutingPolicy, RoutingRule};
+use crate::llm::routing_policy::{
+    RouteCandidate, RoutingContext, RoutingPolicy, RoutingPolicyConfig, RoutingRule,
+    build_routing_policy as build_core_routing_policy, policy_rule_targets,
+};
 use crate::llm::usage_tracking::{
     USAGE_TRACKING_ENDPOINT_TYPE_KEY, USAGE_TRACKING_TELEMETRY_KEY, USAGE_TRACKING_WORKLOAD_TAG_KEY,
 };
@@ -2095,20 +2098,15 @@ fn apply_model_override(config: &mut crate::config::LlmConfig, model: &str) {
 }
 
 fn build_routing_policy(settings: &ProvidersSettings) -> RoutingPolicy {
-    let default_target = if settings.routing_mode == RoutingMode::Policy
+    let prefer_cheap_default = settings.routing_mode == RoutingMode::Policy
         && settings.smart_routing_enabled
-        && !provider_slot_selectors(settings, ProviderModelRole::Cheap).is_empty()
-    {
-        "cheap"
-    } else {
-        "primary"
-    };
-    let mut policy = RoutingPolicy::new(default_target);
-    policy.set_enabled(settings.smart_routing_enabled);
-    for rule in &settings.policy_rules {
-        policy.add_rule(rule.clone());
-    }
-    policy
+        && !provider_slot_selectors(settings, ProviderModelRole::Cheap).is_empty();
+
+    build_core_routing_policy(RoutingPolicyConfig {
+        smart_routing_enabled: settings.smart_routing_enabled,
+        prefer_cheap_default,
+        rules: &settings.policy_rules,
+    })
 }
 
 fn legacy_primary_slug_from_config(config: &Config) -> Option<String> {
@@ -2450,38 +2448,6 @@ fn parse_provider_slot_selector(selector: &str) -> Option<(&str, ProviderModelRo
         return Some((slug, ProviderModelRole::Cheap));
     }
     None
-}
-
-fn policy_rule_targets(rules: &[RoutingRule]) -> Vec<String> {
-    let mut targets = Vec::new();
-    let mut push_unique = |target: &str| {
-        if !targets.iter().any(|existing| existing == target) {
-            targets.push(target.to_string());
-        }
-    };
-
-    for rule in rules {
-        match rule {
-            RoutingRule::LargeContext { provider, .. }
-            | RoutingRule::VisionContent { provider } => {
-                push_unique(provider);
-            }
-            RoutingRule::RoundRobin { providers } => {
-                for provider in providers {
-                    push_unique(provider);
-                }
-            }
-            RoutingRule::Fallback { primary, fallbacks } => {
-                push_unique(primary);
-                for fallback in fallbacks {
-                    push_unique(fallback);
-                }
-            }
-            RoutingRule::CostOptimized { .. } | RoutingRule::LowestLatency => {}
-        }
-    }
-
-    targets
 }
 
 fn route_target_resolves_in_settings(settings: &ProvidersSettings, target: &str) -> bool {
@@ -2998,29 +2964,6 @@ mod tests {
                 .and_then(|slots| slots.cheap.as_deref()),
             Some("gpt-4o-mini")
         );
-    }
-
-    #[test]
-    fn policy_rule_targets_collect_direct_and_fallback_targets() {
-        let rules = vec![
-            RoutingRule::LargeContext {
-                threshold: 8_000,
-                provider: "openai/gpt-4o".to_string(),
-            },
-            RoutingRule::RoundRobin {
-                providers: vec!["openai@cheap".to_string(), "anthropic@primary".to_string()],
-            },
-            RoutingRule::Fallback {
-                primary: "primary".to_string(),
-                fallbacks: vec!["openai/gpt-4o-mini".to_string()],
-            },
-        ];
-
-        let targets = policy_rule_targets(&rules);
-        assert!(targets.iter().any(|target| target == "openai/gpt-4o"));
-        assert!(targets.iter().any(|target| target == "openai@cheap"));
-        assert!(targets.iter().any(|target| target == "anthropic@primary"));
-        assert!(targets.iter().any(|target| target == "openai/gpt-4o-mini"));
     }
 
     #[test]

@@ -18,28 +18,23 @@ use crate::api::{
 };
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use thinclaw_gateway::web::api::{FeatureDisabledStatus, gateway_api_error_response};
+use thinclaw_gateway::web::mcp::{
+    mcp_extension_manager_unavailable_error, mcp_interaction_response_action_response,
+    mcp_log_level_action_response,
+};
 
 fn api_error_response(error: ApiError) -> (StatusCode, String) {
-    match error {
-        ApiError::InvalidInput(message) => (StatusCode::BAD_REQUEST, message),
-        ApiError::Unavailable(message) | ApiError::FeatureDisabled(message) => {
-            (StatusCode::SERVICE_UNAVAILABLE, message)
-        }
-        ApiError::SessionNotFound(message) => (StatusCode::NOT_FOUND, message),
-        ApiError::Agent(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-        ApiError::Serialization(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-        ApiError::UuidParse(error) => (StatusCode::BAD_REQUEST, error.to_string()),
-        ApiError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
-    }
+    gateway_api_error_response(error, FeatureDisabledStatus::ServiceUnavailable)
 }
 
 fn extension_manager(
     state: &GatewayState,
 ) -> Result<&Arc<crate::extensions::ExtensionManager>, (StatusCode, String)> {
-    state.extension_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Extension manager not available".to_string(),
-    ))
+    state
+        .extension_manager
+        .as_ref()
+        .ok_or_else(mcp_extension_manager_unavailable_error)
 }
 
 pub(crate) async fn mcp_servers_handler(
@@ -151,10 +146,7 @@ pub(crate) async fn mcp_server_log_level_handler(
     mcp_api::set_logging_level(ext_mgr, &name, &req.level)
         .await
         .map_err(api_error_response)?;
-    Ok(Json(ActionResponse::ok(format!(
-        "Updated MCP log level for '{}'",
-        name
-    ))))
+    Ok(Json(mcp_log_level_action_response(&name)))
 }
 
 pub(crate) async fn mcp_interactions_handler(
@@ -176,7 +168,5 @@ pub(crate) async fn mcp_interaction_respond_handler(
     mcp_api::respond_to_interaction(ext_mgr, &interaction_id, req)
         .await
         .map_err(api_error_response)?;
-    Ok(Json(ActionResponse::ok(
-        "Submitted MCP interaction response",
-    )))
+    Ok(Json(mcp_interaction_response_action_response()))
 }

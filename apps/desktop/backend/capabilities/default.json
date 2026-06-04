@@ -1,0 +1,69 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": [
+    "main",
+    "spotlight"
+  ],
+  "permissions": [
+    "opener:default",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        {
+          "path": "$APPDATA/**"
+        },
+        {
+          "path": "$APP_DATA/**"
+        },
+        {
+          "path": "$HOME/**"
+        },
+        {
+          "path": "$HOME/Library/Application Support/com.thinclaw.desktop/**"
+        },
+        {
+          "path": "/Users/mt/Library/Application Support/com.thinclaw.desktop/**"
+        },
+        {
+          "path": "/Users/mt/Library/Application Support/com.schack.scrappy/**"
+        }
+      ]
+    },
+    "shell:allow-execute",
+    "core:event:default",
+    "core:window:default",
+    "fs:default",
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [
+        {
+          "path": "$DOWNLOAD/**"
+        }
+      ]
+    },
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [
+        {
+          "path": "$DOWNLOAD/**"
+        }
+      ]
+    },
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$APP_DATA/**",
+        "$RESOURCE/**",
+        "$HOME/Library/Application Support/com.thinclaw.desktop/**",
+        "/Users/mt/Library/Application Support/com.thinclaw.desktop/**",
+        "$HOME/Library/Application Support/com.schack.scrappy/**",
+        "/Users/mt/Library/Application Support/com.schack.scrappy/**",
+        "$DOWNLOAD/**"
+      ]
+    },
+    "updater:default",
+    "process:default"
+  ]
+}

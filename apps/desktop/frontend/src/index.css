@@ -1,0 +1,262 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+
+    --radius: 0.5rem;
+
+    /* Theme-derived accent palette fallbacks (Zinc) */
+    --chart-1: 240 10% 35%;
+    --chart-2: 240 8% 50%;
+    --chart-3: 200 15% 45%;
+    --chart-4: 260 12% 42%;
+    --chart-5: 220 10% 55%;
+
+    /* Syntax Highlighting Fallbacks */
+    --hljs-bg: 0 0% 99%;
+    --hljs-color: 240 10% 20%;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+
+    /* Theme-derived accent palette fallbacks (Zinc dark) */
+    --chart-1: 240 10% 70%;
+    --chart-2: 240 8% 60%;
+    --chart-3: 200 15% 65%;
+    --chart-4: 260 12% 62%;
+    --chart-5: 220 10% 55%;
+  }
+}
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Outfit', sans-serif;
+  }
+
+  /* Spotlight window needs to be fully transparent */
+  body.spotlight-window,
+  body.spotlight-window #root {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+  }
+}
+
+/* Syntax Highlighting Overrides - Controlled via ThemeProvider */
+.hljs {
+  color: hsl(var(--hljs-color)) !important;
+  background: transparent !important;
+}
+pre code.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+/* Comments & Quotes */
+.hljs-comment, .hljs-quote {
+  color: hsl(var(--hljs-comment)) !important;
+  font-style: italic;
+}
+
+/* Keywords, Tags & Structure */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-type,
+.hljs-tag,
+.hljs-name {
+  color: hsl(var(--hljs-keyword)) !important;
+  font-weight: 500;
+}
+
+/* Numbers, Literals & Constants */
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet {
+  color: hsl(var(--hljs-number)) !important;
+}
+
+/* Variables & Attributes */
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attr,
+.hljs-tag .hljs-attr {
+  color: hsl(var(--hljs-attr)) !important;
+}
+
+/* Strings, Regex & Markup-specific */
+.hljs-string,
+.hljs-doctag,
+.hljs-regexp {
+  color: hsl(var(--hljs-string)) !important;
+}
+
+/* Titles, Sections & Classes */
+.hljs-title,
+.hljs-section,
+.hljs-selector-id,
+.hljs-class .hljs-title,
+.hljs-title.class_ {
+  color: hsl(var(--hljs-title)) !important;
+  font-weight: 600;
+}
+
+/* Functions & Methods */
+.hljs-function .hljs-title,
+.hljs-title.function_,
+.hljs-attribute,
+.hljs-link,
+.hljs-subst {
+  color: hsl(var(--hljs-function)) !important;
+}
+
+/* Built-ins */
+.hljs-built_in,
+.hljs-builtin-name {
+  color: hsl(var(--hljs-title)) !important;
+}
+
+/* Diffs */
+.hljs-addition {
+  color: hsl(var(--hljs-addition)) !important;
+  background-color: hsla(120, 100%, 50%, 0.1);
+}
+.hljs-deletion {
+  color: hsl(var(--hljs-deletion)) !important;
+  background-color: hsla(0, 100%, 50%, 0.1);
+}
+
+/* Meta-tags & Misc */
+.hljs-meta {
+  color: hsl(var(--hljs-comment)) !important;
+  font-weight: bold;
+}
+.hljs-params {
+  color: hsl(var(--hljs-color)) !important;
+}
+
+/* Formatting Highlights */
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: bold; }
+
+@layer utilities {
+  @keyframes stop-pulse {
+    0% {
+      box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+      transform: scale(1);
+    }
+    50% {
+      box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+      transform: scale(1.05);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+      transform: scale(1);
+    }
+  }
+
+  .animate-stop-pulse {
+    animation: stop-pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+  }
+
+  @keyframes skeleton-loading {
+      0%, 100% { opacity: 0.8; }
+      50% { opacity: 1; }
+  }
+
+  .animate-skeleton {
+      animation: skeleton-loading 4s linear infinite;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 3px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+  }
+
+  @keyframes progress-bar-stripes {
+    0% { background-position: 24px 0; }
+    100% { background-position: 0 0; }
+  }
+
+  /* Utility for fading content at the top */
+  .mask-fade-top {
+      mask-image: linear-gradient(to bottom, transparent 0px, black 120px);
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0px, black 120px);
+  }
+}

@@ -52,6 +52,16 @@ pub trait PgBackendConfig {
     fn postgres_pool_size(&self) -> usize;
 }
 
+impl PgBackendConfig for thinclaw_config::database::DatabaseConfig {
+    fn postgres_url(&self) -> &str {
+        self.url()
+    }
+
+    fn postgres_pool_size(&self) -> usize {
+        self.pool_size
+    }
+}
+
 /// PostgreSQL database backend.
 ///
 /// Wraps the existing `Store` (for history/conversations/jobs/routines/settings)

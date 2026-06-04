@@ -21,6 +21,92 @@ pub enum ToolExtensionKind {
     WasmChannel,
 }
 
+/// Infer the extension kind from a URL.
+///
+/// WASM artifacts are treated as WASM tools; all other URLs default to MCP
+/// servers. This preserves the historical install fallback behavior.
+pub fn infer_kind_from_url(url: &str) -> ToolExtensionKind {
+    if url.ends_with(".wasm") || url.ends_with(".tar.gz") {
+        ToolExtensionKind::WasmTool
+    } else {
+        ToolExtensionKind::McpServer
+    }
+}
+
+/// Portable summary of the primary install attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionInstallOutcome {
+    Success,
+    AlreadyInstalled,
+    Failed,
+}
+
+/// Decision from `fallback_decision`: should we try the fallback source or
+/// return the primary result as-is?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackDecision {
+    /// Return the primary result directly (success or non-retriable error).
+    Return,
+    /// Primary failed with a retriable error and a fallback source is available.
+    TryFallback,
+}
+
+/// Decide whether to attempt a fallback install based on the primary result
+/// and the availability of a fallback source.
+pub fn fallback_decision(
+    primary_outcome: ExtensionInstallOutcome,
+    fallback_source_available: bool,
+) -> FallbackDecision {
+    match (primary_outcome, fallback_source_available) {
+        // Success: no fallback needed.
+        (ExtensionInstallOutcome::Success, _) => FallbackDecision::Return,
+        // AlreadyInstalled: don't try building from source.
+        (ExtensionInstallOutcome::AlreadyInstalled, _) => FallbackDecision::Return,
+        // Failed with a fallback available: try it.
+        (ExtensionInstallOutcome::Failed, true) => FallbackDecision::TryFallback,
+        // Failed with no fallback: return the error.
+        (ExtensionInstallOutcome::Failed, false) => FallbackDecision::Return,
+    }
+}
+
+/// Portable fallback error category for install error combination policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionInstallErrorKind {
+    AlreadyInstalled,
+    Other,
+}
+
+/// Portable result of combining primary and fallback install errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CombinedInstallError {
+    /// Preserve the concrete fallback error as-is.
+    PreserveFallback,
+    /// Wrap both install error messages in the concrete adapter's generic error.
+    CombinedMessage(String),
+}
+
+/// Combine primary and fallback errors into a root-independent disposition.
+///
+/// Preserves `AlreadyInstalled` from the fallback directly; otherwise combines
+/// both error messages into one string for the concrete adapter to wrap.
+pub fn combine_install_errors(
+    primary_error: &str,
+    fallback_error: &str,
+    fallback_error_kind: ExtensionInstallErrorKind,
+) -> CombinedInstallError {
+    if matches!(
+        fallback_error_kind,
+        ExtensionInstallErrorKind::AlreadyInstalled
+    ) {
+        return CombinedInstallError::PreserveFallback;
+    }
+
+    CombinedInstallError::CombinedMessage(format!(
+        "Primary install failed: {}; fallback install also failed: {}",
+        primary_error, fallback_error
+    ))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ToolAuthRequestContext {
     pub callback_base_url: Option<String>,
@@ -287,6 +373,84 @@ mod tests {
 
     fn test_port() -> Arc<dyn ExtensionManagementPort> {
         Arc::new(StubExtensionPort)
+    }
+
+    #[test]
+    fn infer_kind_from_url_detects_wasm_artifacts() {
+        assert_eq!(
+            infer_kind_from_url("https://example.com/tool.wasm"),
+            ToolExtensionKind::WasmTool
+        );
+        assert_eq!(
+            infer_kind_from_url("https://example.com/tool-wasm32-wasip2.tar.gz"),
+            ToolExtensionKind::WasmTool
+        );
+        assert_eq!(
+            infer_kind_from_url("https://mcp.notion.com"),
+            ToolExtensionKind::McpServer
+        );
+        assert_eq!(
+            infer_kind_from_url("https://example.com/mcp"),
+            ToolExtensionKind::McpServer
+        );
+    }
+
+    #[test]
+    fn fallback_decision_success_returns_directly() {
+        assert_eq!(
+            fallback_decision(ExtensionInstallOutcome::Success, true),
+            FallbackDecision::Return
+        );
+    }
+
+    #[test]
+    fn fallback_decision_already_installed_skips_fallback() {
+        assert_eq!(
+            fallback_decision(ExtensionInstallOutcome::AlreadyInstalled, true),
+            FallbackDecision::Return
+        );
+    }
+
+    #[test]
+    fn fallback_decision_failed_with_fallback_tries_fallback() {
+        assert_eq!(
+            fallback_decision(ExtensionInstallOutcome::Failed, true),
+            FallbackDecision::TryFallback
+        );
+    }
+
+    #[test]
+    fn fallback_decision_failed_without_fallback_returns_directly() {
+        assert_eq!(
+            fallback_decision(ExtensionInstallOutcome::Failed, false),
+            FallbackDecision::Return
+        );
+    }
+
+    #[test]
+    fn combine_errors_includes_both_messages() {
+        let combined = combine_install_errors(
+            "Download failed: 404 Not Found",
+            "Installation failed: cargo not found",
+            ExtensionInstallErrorKind::Other,
+        );
+        let CombinedInstallError::CombinedMessage(msg) = combined else {
+            panic!("expected combined message");
+        };
+        assert!(msg.contains("404 Not Found"), "missing primary: {msg}");
+        assert!(msg.contains("cargo not found"), "missing fallback: {msg}");
+    }
+
+    #[test]
+    fn combine_errors_preserves_already_installed_from_fallback() {
+        assert_eq!(
+            combine_install_errors(
+                "Download failed: 404",
+                "Extension already installed: test",
+                ExtensionInstallErrorKind::AlreadyInstalled,
+            ),
+            CombinedInstallError::PreserveFallback
+        );
     }
 
     #[test]

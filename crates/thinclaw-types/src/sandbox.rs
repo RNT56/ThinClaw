@@ -1,11 +1,148 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 pub const DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 
 const SANDBOX_METADATA_KEY: &str = "_sandbox";
 const RAW_METADATA_KEY: &str = "_raw_metadata";
+
+/// Configuration for the sandbox system.
+#[derive(Debug, Clone)]
+pub struct SandboxConfig {
+    /// Whether the sandbox is enabled.
+    pub enabled: bool,
+    /// Security policy for sandbox execution.
+    pub policy: SandboxPolicy,
+    /// Default timeout for command execution.
+    pub timeout: Duration,
+    /// Memory limit in megabytes.
+    pub memory_limit_mb: u64,
+    /// CPU shares (relative weight, default 1024).
+    pub cpu_shares: u32,
+    /// Network allowlist for proxied requests.
+    pub network_allowlist: Vec<String>,
+    /// Docker image to use for the sandbox.
+    pub image: String,
+    /// Whether to auto-pull the image if not found.
+    pub auto_pull_image: bool,
+    /// Port for the HTTP proxy (0 = auto-assign).
+    pub proxy_port: u16,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            policy: SandboxPolicy::ReadOnly,
+            timeout: Duration::from_secs(120),
+            memory_limit_mb: 2048,
+            cpu_shares: 1024,
+            network_allowlist: default_allowlist(),
+            image: "thinclaw-worker:latest".to_string(),
+            auto_pull_image: true,
+            proxy_port: 0,
+        }
+    }
+}
+
+/// Security policy for sandbox execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxPolicy {
+    /// Read-only access to workspace, proxied network.
+    #[default]
+    ReadOnly,
+    /// Read/write access to workspace, proxied network.
+    WorkspaceWrite,
+    /// Full access (no sandbox). Use with caution.
+    FullAccess,
+}
+
+impl SandboxPolicy {
+    /// Returns true if filesystem writes are allowed.
+    pub fn allows_writes(&self) -> bool {
+        matches!(
+            self,
+            SandboxPolicy::WorkspaceWrite | SandboxPolicy::FullAccess
+        )
+    }
+
+    /// Returns true if network requests bypass the proxy.
+    pub fn has_full_network(&self) -> bool {
+        matches!(self, SandboxPolicy::FullAccess)
+    }
+
+    /// Returns true if running in a container.
+    pub fn is_sandboxed(&self) -> bool {
+        !matches!(self, SandboxPolicy::FullAccess)
+    }
+}
+
+impl std::str::FromStr for SandboxPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "readonly" | "read_only" | "ro" => Ok(SandboxPolicy::ReadOnly),
+            "workspacewrite" | "workspace_write" | "rw" => Ok(SandboxPolicy::WorkspaceWrite),
+            "fullaccess" | "full_access" | "full" | "none" => Ok(SandboxPolicy::FullAccess),
+            _ => Err(format!(
+                "invalid sandbox policy '{}', expected 'readonly', 'workspace_write', or 'full_access'",
+                s
+            )),
+        }
+    }
+}
+
+/// Resource limits for container execution.
+#[derive(Debug, Clone)]
+pub struct ResourceLimits {
+    /// Maximum memory in bytes.
+    pub memory_bytes: u64,
+    /// CPU shares (relative weight).
+    pub cpu_shares: u32,
+    /// Maximum execution time.
+    pub timeout: Duration,
+    /// Maximum output size in bytes.
+    pub max_output_bytes: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            memory_bytes: 2 * 1024 * 1024 * 1024,
+            cpu_shares: 1024,
+            timeout: Duration::from_secs(120),
+            max_output_bytes: 64 * 1024,
+        }
+    }
+}
+
+/// Default network allowlist for common development operations.
+pub fn default_allowlist() -> Vec<String> {
+    vec![
+        "crates.io".to_string(),
+        "static.crates.io".to_string(),
+        "index.crates.io".to_string(),
+        "registry.npmjs.org".to_string(),
+        "proxy.golang.org".to_string(),
+        "pypi.org".to_string(),
+        "files.pythonhosted.org".to_string(),
+        "docs.rs".to_string(),
+        "doc.rust-lang.org".to_string(),
+        "nodejs.org".to_string(),
+        "go.dev".to_string(),
+        "docs.python.org".to_string(),
+        "github.com".to_string(),
+        "raw.githubusercontent.com".to_string(),
+        "api.github.com".to_string(),
+        "codeload.github.com".to_string(),
+        "api.openai.com".to_string(),
+        "api.anthropic.com".to_string(),
+        "api.near.ai".to_string(),
+    ]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobMode {
@@ -200,6 +337,22 @@ pub fn normalize_sandbox_ui_state(status: &str) -> &str {
     }
 }
 
+pub fn is_terminal_sandbox_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
+}
+
+pub fn normalize_terminal_sandbox_status(status: &str, success: bool) -> String {
+    match status {
+        "completed" | "success" if success => "completed".to_string(),
+        "cancelled" => "cancelled".to_string(),
+        "interrupted" => "interrupted".to_string(),
+        "completed" | "success" => "failed".to_string(),
+        "error" | "failed" => "failed".to_string(),
+        other if success => other.to_string(),
+        _ => "failed".to_string(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SandboxJobRecord {
     pub id: Uuid,
@@ -223,4 +376,65 @@ pub struct SandboxJobSummary {
     pub cancelled: usize,
     pub interrupted: usize,
     pub stuck: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_policy_parses_known_aliases() {
+        assert_eq!(
+            "readonly".parse::<SandboxPolicy>().unwrap(),
+            SandboxPolicy::ReadOnly
+        );
+        assert_eq!(
+            "workspace_write".parse::<SandboxPolicy>().unwrap(),
+            SandboxPolicy::WorkspaceWrite
+        );
+        assert_eq!(
+            "full_access".parse::<SandboxPolicy>().unwrap(),
+            SandboxPolicy::FullAccess
+        );
+        assert!("invalid".parse::<SandboxPolicy>().is_err());
+    }
+
+    #[test]
+    fn sandbox_policy_flags_match_policy() {
+        assert!(!SandboxPolicy::ReadOnly.allows_writes());
+        assert!(SandboxPolicy::WorkspaceWrite.allows_writes());
+        assert!(SandboxPolicy::FullAccess.allows_writes());
+        assert!(!SandboxPolicy::ReadOnly.has_full_network());
+        assert!(!SandboxPolicy::WorkspaceWrite.has_full_network());
+        assert!(SandboxPolicy::FullAccess.has_full_network());
+        assert!(SandboxPolicy::ReadOnly.is_sandboxed());
+        assert!(SandboxPolicy::WorkspaceWrite.is_sandboxed());
+        assert!(!SandboxPolicy::FullAccess.is_sandboxed());
+    }
+
+    #[test]
+    fn default_allowlist_contains_package_registries() {
+        let allowlist = default_allowlist();
+        assert!(allowlist.contains(&"crates.io".to_string()));
+        assert!(allowlist.contains(&"registry.npmjs.org".to_string()));
+        assert!(allowlist.contains(&"api.openai.com".to_string()));
+    }
+
+    #[test]
+    fn sandbox_status_helpers_classify_terminal_and_normalize_completion() {
+        assert!(is_terminal_sandbox_status("completed"));
+        assert!(is_terminal_sandbox_status("interrupted"));
+        assert!(!is_terminal_sandbox_status("running"));
+
+        assert_eq!(
+            normalize_terminal_sandbox_status("success", true),
+            "completed"
+        );
+        assert_eq!(
+            normalize_terminal_sandbox_status("completed", false),
+            "failed"
+        );
+        assert_eq!(normalize_terminal_sandbox_status("custom", true), "custom");
+        assert_eq!(normalize_terminal_sandbox_status("custom", false), "failed");
+    }
 }

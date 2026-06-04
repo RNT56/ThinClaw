@@ -16,14 +16,19 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Timelike, Utc};
 use regex::Regex;
 use thinclaw_agent::routine_engine::{
-    EVENT_CONTENT_PREVIEW_LIMIT, FullJobRuntimeMetadata, active_hour_allows,
-    build_heartbeat_prompt, build_lightweight_routine_prompt, build_routine_event_from_message,
-    build_routine_notification, build_scheduled_routine_triggers,
-    classify_lightweight_routine_response, effective_lightweight_max_tokens, event_run_trigger_key,
-    full_job_metadata, heartbeat_job_metadata, increment_decision_count,
-    lightweight_routine_messages, metadata_contains_subset, routine_cooldown_allows,
-    routine_requests_desktop_capabilities, sanitize_routine_name, scheduled_run_trigger_key,
-    should_refresh_event_cache, summarize_runtime_capabilities, truncate,
+    ClaimedScheduledTriggerDecisionInput, EVENT_CONTENT_PREVIEW_LIMIT, FullJobRuntimeMetadata,
+    RoutineEventEvaluationPlan, RoutineEventFilterOutcome, ScheduledTriggerAction,
+    active_hour_allows, build_heartbeat_prompt, build_lightweight_routine_prompt,
+    build_routine_event_from_message, build_routine_notification, build_scheduled_routine_triggers,
+    classify_lightweight_routine_response, compare_event_cache_routines,
+    decide_claimed_scheduled_trigger, decide_missing_scheduled_trigger_routine,
+    decide_routine_event_dispatch, effective_lightweight_max_tokens,
+    evaluate_routine_event_filters, full_job_metadata, heartbeat_job_metadata,
+    increment_decision_count, lightweight_routine_messages, routine_cooldown_allows,
+    routine_event_evaluation_details, routine_event_owner_matches,
+    routine_requests_desktop_capabilities, routine_runtime_update_for_run, sanitize_routine_name,
+    scheduled_run_trigger_key, should_continue_queue_drain, should_refresh_event_cache,
+    summarize_runtime_capabilities, truncate,
 };
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
@@ -31,10 +36,9 @@ use uuid::Uuid;
 use crate::agent::Scheduler;
 use crate::agent::outcomes;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineCatchUpMode, RoutineEvent, RoutineEventDecision,
-    RoutineEventEvaluation, RoutineRun, RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind,
-    RunStatus, Trigger, compile_event_trigger_pattern, next_fire_for_routine,
-    routine_state_with_runtime_advance,
+    NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventEvaluation, RoutineRun,
+    RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind, RunStatus, Trigger,
+    compile_event_trigger_pattern, next_fire_for_routine,
 };
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
 use crate::agent::{AgentRunArtifact, AgentRunStatus};
@@ -179,13 +183,7 @@ impl RoutineEngine {
                     }
                 }
                 cache.sort_by(|left, right| {
-                    right
-                        .routine
-                        .event_priority()
-                        .cmp(&left.routine.event_priority())
-                        .then_with(|| left.routine.created_at.cmp(&right.routine.created_at))
-                        .then_with(|| left.routine.name.cmp(&right.routine.name))
-                        .then_with(|| left.routine.id.cmp(&right.routine.id))
+                    compare_event_cache_routines(&left.routine, &right.routine)
                 });
                 let count = cache.len();
                 *self.event_cache.write().await = cache;
@@ -423,7 +421,7 @@ impl RoutineEngine {
                 }
             }
 
-            if batch_len < TRIGGER_QUEUE_BATCH_LIMIT as usize {
+            if !should_continue_queue_drain(batch_len, TRIGGER_QUEUE_BATCH_LIMIT as usize) {
                 break;
             }
         }
@@ -440,18 +438,14 @@ impl RoutineEngine {
                 reason: error.to_string(),
             })?
         else {
+            let plan = decide_missing_scheduled_trigger_routine();
             let diagnostics = serde_json::json!({
-                "decision": RoutineTriggerDecision::SkippedDisabled.to_string(),
-                "reason": "routine no longer exists",
+                "decision": plan.decision.to_string(),
+                "reason": plan.reason,
                 "claimed_by": self.worker_id,
             });
             self.store
-                .complete_routine_trigger(
-                    trigger.id,
-                    Utc::now(),
-                    RoutineTriggerDecision::SkippedDisabled,
-                    &diagnostics,
-                )
+                .complete_routine_trigger(trigger.id, Utc::now(), plan.decision, &diagnostics)
                 .await
                 .map_err(|error| RoutineError::Database {
                     reason: error.to_string(),
@@ -459,115 +453,29 @@ impl RoutineEngine {
             return Ok(false);
         };
 
-        if !routine.enabled {
-            let diagnostics = serde_json::json!({
-                "decision": RoutineTriggerDecision::SkippedDisabled.to_string(),
-                "reason": "routine is disabled",
-                "claimed_by": self.worker_id,
-            });
-            self.store
-                .complete_routine_trigger(
-                    trigger.id,
-                    Utc::now(),
-                    RoutineTriggerDecision::SkippedDisabled,
-                    &diagnostics,
-                )
-                .await
-                .map_err(|error| RoutineError::Database {
-                    reason: error.to_string(),
-                })?;
-            return Ok(false);
-        }
-
         let trigger_key = scheduled_run_trigger_key(&trigger);
-        if self
-            .store
-            .routine_run_exists_for_trigger_key(routine.id, &trigger_key)
-            .await
-            .map_err(|error| RoutineError::Database {
-                reason: error.to_string(),
-            })?
+        let duplicate_exists = if routine.enabled {
+            self.store
+                .routine_run_exists_for_trigger_key(routine.id, &trigger_key)
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?
+        } else {
+            false
+        };
+        let cooldown_allowed = duplicate_exists || self.check_cooldown(&routine);
+        let routine_capacity_available = duplicate_exists
+            || !cooldown_allowed
+            || matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent)
+            || self.check_concurrent(&routine).await;
+        let global_capacity_available = if duplicate_exists
+            || !cooldown_allowed
+            || !routine_capacity_available
+            || matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent)
         {
-            let diagnostics = serde_json::json!({
-                "decision": RoutineTriggerDecision::SkippedDuplicate.to_string(),
-                "reason": "a run already exists for this logical scheduled trigger",
-                "claimed_by": self.worker_id,
-                "idempotency_key": trigger.idempotency_key,
-            });
-            self.store
-                .complete_routine_trigger(
-                    trigger.id,
-                    Utc::now(),
-                    RoutineTriggerDecision::SkippedDuplicate,
-                    &diagnostics,
-                )
-                .await
-                .map_err(|error| RoutineError::Database {
-                    reason: error.to_string(),
-                })?;
-            return Ok(false);
-        }
-
-        if matches!(routine.policy.catch_up_mode, RoutineCatchUpMode::Skip) {
-            let next_fire =
-                next_fire_for_routine(&routine, self.user_timezone.as_deref(), Utc::now())?;
-            self.reschedule_without_run(&routine, next_fire).await?;
-            let diagnostics = serde_json::json!({
-                "decision": RoutineTriggerDecision::SkippedCatchUp.to_string(),
-                "reason": "catch-up mode is skip; backlog was collapsed without execution",
-                "claimed_by": self.worker_id,
-                "backlog_collapsed": trigger.backlog_collapsed,
-                "next_fire_at": next_fire.map(|value| value.to_rfc3339()),
-            });
-            self.store
-                .complete_routine_trigger(
-                    trigger.id,
-                    Utc::now(),
-                    RoutineTriggerDecision::SkippedCatchUp,
-                    &diagnostics,
-                )
-                .await
-                .map_err(|error| RoutineError::Database {
-                    reason: error.to_string(),
-                })?;
-            return Ok(false);
-        }
-
-        if !self.check_cooldown(&routine) {
-            let diagnostics = serde_json::json!({
-                "decision": RoutineTriggerDecision::DeferredCooldown.to_string(),
-                "reason": "routine cooldown is still active",
-                "claimed_by": self.worker_id,
-                "due_at": trigger.due_at.to_rfc3339(),
-            });
-            self.store
-                .release_routine_trigger(trigger.id, &diagnostics)
-                .await
-                .map_err(|error| RoutineError::Database {
-                    reason: error.to_string(),
-                })?;
-            return Ok(false);
-        }
-
-        if !matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent)
-            && !self.check_concurrent(&routine).await
-        {
-            let diagnostics = serde_json::json!({
-                "decision": RoutineTriggerDecision::DeferredConcurrency.to_string(),
-                "reason": "routine is already at max concurrent runs",
-                "claimed_by": self.worker_id,
-                "due_at": trigger.due_at.to_rfc3339(),
-            });
-            self.store
-                .release_routine_trigger(trigger.id, &diagnostics)
-                .await
-                .map_err(|error| RoutineError::Database {
-                    reason: error.to_string(),
-                })?;
-            return Ok(false);
-        }
-
-        if !matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent) {
+            true
+        } else {
             let global_running =
                 self.store
                     .count_all_running_routine_runs()
@@ -575,10 +483,46 @@ impl RoutineEngine {
                     .map_err(|error| RoutineError::Database {
                         reason: error.to_string(),
                     })?;
-            if global_running >= self.config.max_concurrent_routines as i64 {
+            global_running < self.config.max_concurrent_routines as i64
+        };
+
+        let plan = decide_claimed_scheduled_trigger(ClaimedScheduledTriggerDecisionInput {
+            routine: &routine,
+            trigger: &trigger,
+            duplicate_exists,
+            cooldown_allowed,
+            routine_capacity_available,
+            global_capacity_available,
+            user_timezone: self.user_timezone.as_deref(),
+            now: Utc::now(),
+        })?;
+
+        match plan.action {
+            ScheduledTriggerAction::Complete if plan.decision != RoutineTriggerDecision::Fired => {
+                if plan.decision == RoutineTriggerDecision::SkippedCatchUp {
+                    self.reschedule_without_run(&routine, plan.next_fire_at)
+                        .await?;
+                }
                 let diagnostics = serde_json::json!({
-                    "decision": RoutineTriggerDecision::DeferredGlobalCapacity.to_string(),
-                    "reason": "global routine capacity is currently full",
+                    "decision": plan.decision.to_string(),
+                    "reason": plan.reason,
+                    "claimed_by": self.worker_id,
+                    "idempotency_key": trigger.idempotency_key,
+                    "backlog_collapsed": trigger.backlog_collapsed,
+                    "next_fire_at": plan.next_fire_at.map(|value| value.to_rfc3339()),
+                });
+                self.store
+                    .complete_routine_trigger(trigger.id, Utc::now(), plan.decision, &diagnostics)
+                    .await
+                    .map_err(|error| RoutineError::Database {
+                        reason: error.to_string(),
+                    })?;
+                return Ok(false);
+            }
+            ScheduledTriggerAction::Release => {
+                let diagnostics = serde_json::json!({
+                    "decision": plan.decision.to_string(),
+                    "reason": plan.reason,
                     "claimed_by": self.worker_id,
                     "due_at": trigger.due_at.to_rfc3339(),
                 });
@@ -590,6 +534,8 @@ impl RoutineEngine {
                     })?;
                 return Ok(false);
             }
+            ScheduledTriggerAction::Dispatch => {}
+            ScheduledTriggerAction::Complete => {}
         }
 
         match trigger.trigger_kind {
@@ -815,7 +761,7 @@ impl RoutineEngine {
                 }
             }
 
-            if batch_len < EVENT_QUEUE_BATCH_LIMIT as usize {
+            if !should_continue_queue_drain(batch_len, EVENT_QUEUE_BATCH_LIMIT as usize) {
                 break;
             }
         }
@@ -847,166 +793,80 @@ impl RoutineEngine {
 
         for cached in cache.iter() {
             let routine = &cached.routine;
-            if routine.user_id != event.principal_id || routine.owner_actor_id() != event.actor_id {
+            if !routine_event_owner_matches(routine, &event) {
                 continue;
             }
 
             owner_candidate_routines += 1;
             let sequence_num = plans.len() as u32;
-            let age_secs = now
-                .signed_duration_since(event.created_at)
-                .num_seconds()
-                .max(0) as u64;
-            let mut details = serde_json::json!({
-                "claimed_by": self.worker_id,
-                "event_age_secs": age_secs,
-                "event_type": event.event_type,
-                "content_hash": event.content_hash,
-            });
-
-            let Trigger::Event {
-                channel,
-                event_type,
-                actor,
-                metadata,
-                ..
-            } = &routine.trigger
-            else {
-                continue;
-            };
-
-            let (decision, reason, should_fire, trigger_key) = if age_secs
-                > routine.effective_event_max_age_secs(self.config.default_event_max_age_secs)
-            {
-                (
-                    RoutineEventDecision::SkippedExpired,
-                    Some("durably queued event exceeded the routine max age".to_string()),
-                    false,
-                    None,
-                )
-            } else if channel
-                .as_ref()
-                .is_some_and(|value| value != &event.channel)
-            {
-                (
-                    RoutineEventDecision::IgnoredChannel,
-                    Some(format!(
-                        "event channel '{}' does not match routine channel '{}'",
-                        event.channel,
-                        channel.as_deref().unwrap_or_default()
-                    )),
-                    false,
-                    None,
-                )
-            } else if event_type
-                .as_ref()
-                .is_some_and(|value| value != &event.event_type)
-            {
-                (
-                    RoutineEventDecision::IgnoredEventType,
-                    Some(format!(
-                        "event type '{}' does not match routine event type '{}'",
-                        event.event_type,
-                        event_type.as_deref().unwrap_or_default()
-                    )),
-                    false,
-                    None,
-                )
-            } else if actor
-                .as_ref()
-                .is_some_and(|value| value != &event.actor_id && value != &event.raw_sender_id)
-            {
-                (
-                    RoutineEventDecision::IgnoredActor,
-                    Some("event actor did not match the routine actor filter".to_string()),
-                    false,
-                    None,
-                )
-            } else if metadata
-                .as_ref()
-                .is_some_and(|expected| !metadata_contains_subset(expected, &event.metadata))
-            {
-                (
-                    RoutineEventDecision::IgnoredMetadata,
-                    Some("event metadata did not match the routine metadata filter".to_string()),
-                    false,
-                    None,
-                )
-            } else if cached
+            let pattern_matches = cached
                 .regex
                 .as_ref()
-                .is_some_and(|regex| !regex.is_match(&event.content))
-            {
-                (
-                    RoutineEventDecision::IgnoredPattern,
-                    Some("pattern did not match event content".to_string()),
-                    false,
-                    None,
-                )
-            } else {
-                matched_routines += 1;
-                let candidate_trigger_key = event_run_trigger_key(&event);
-                if self
-                    .store
-                    .routine_run_exists_for_trigger_key(routine.id, &candidate_trigger_key)
-                    .await
-                    .map_err(|error| RoutineError::Database {
-                        reason: error.to_string(),
-                    })?
-                {
+                .map(|regex| regex.is_match(&event.content))
+                .unwrap_or(true);
+
+            let (decision, reason, should_fire, trigger_key) = match evaluate_routine_event_filters(
+                routine,
+                &event,
+                pattern_matches,
+                now,
+                self.config.default_event_max_age_secs,
+            ) {
+                RoutineEventFilterOutcome::Ignored { decision, reason } => {
+                    (decision, Some(reason), false, None)
+                }
+                RoutineEventFilterOutcome::Matched {
+                    trigger_key: candidate_trigger_key,
+                } => {
+                    matched_routines += 1;
+                    let duplicate_exists = self
+                        .store
+                        .routine_run_exists_for_trigger_key(routine.id, &candidate_trigger_key)
+                        .await
+                        .map_err(|error| RoutineError::Database {
+                            reason: error.to_string(),
+                        })?;
+                    let cooldown_allowed = self.check_cooldown(routine);
+                    let routine_capacity_available = if duplicate_exists || !cooldown_allowed {
+                        true
+                    } else {
+                        self.check_concurrent(routine).await
+                    };
+                    let global_capacity_available = duplicate_exists
+                        || !cooldown_allowed
+                        || !routine_capacity_available
+                        || (global_running + fired_routines as i64)
+                            < self.config.max_concurrent_routines as i64;
+                    let dispatch = decide_routine_event_dispatch(
+                        duplicate_exists,
+                        cooldown_allowed,
+                        routine_capacity_available,
+                        global_capacity_available,
+                    );
+                    has_deferred |= dispatch.deferred;
+                    if dispatch.should_fire {
+                        fired_routines += 1;
+                    }
                     (
-                        RoutineEventDecision::SkippedDuplicate,
-                        Some(
-                            "this event already produced a logical run for the routine".to_string(),
-                        ),
-                        false,
-                        None,
-                    )
-                } else if !self.check_cooldown(routine) {
-                    (
-                        RoutineEventDecision::SkippedCooldown,
-                        Some("routine cooldown is still active".to_string()),
-                        false,
-                        None,
-                    )
-                } else if !self.check_concurrent(routine).await {
-                    has_deferred = true;
-                    (
-                        RoutineEventDecision::DeferredConcurrency,
-                        Some("routine is already at max concurrent runs".to_string()),
-                        false,
-                        None,
-                    )
-                } else if (global_running + fired_routines as i64)
-                    >= self.config.max_concurrent_routines as i64
-                {
-                    has_deferred = true;
-                    (
-                        RoutineEventDecision::DeferredGlobalCapacity,
-                        Some("global routine capacity is currently full".to_string()),
-                        false,
-                        None,
-                    )
-                } else {
-                    fired_routines += 1;
-                    (
-                        RoutineEventDecision::Fired,
-                        Some("event matched and the routine was dispatched".to_string()),
-                        true,
-                        Some(candidate_trigger_key),
+                        dispatch.decision,
+                        Some(dispatch.reason),
+                        dispatch.should_fire,
+                        dispatch.should_fire.then_some(candidate_trigger_key),
                     )
                 }
             };
 
             increment_decision_count(&mut decision_counts, decision);
-            if let Some(trigger_key) = &trigger_key {
-                details["trigger_key"] = serde_json::json!(trigger_key);
-            }
-            plans.push(EventEvaluationPlan {
+            plans.push(RoutineEventEvaluationPlan {
                 routine: routine.clone(),
                 decision,
                 reason,
-                details,
+                details: routine_event_evaluation_details(
+                    &self.worker_id,
+                    &event,
+                    now,
+                    trigger_key.as_deref(),
+                ),
                 should_fire,
                 sequence_num,
                 trigger_key,
@@ -1208,16 +1068,6 @@ impl RoutineEngine {
     }
 }
 
-struct EventEvaluationPlan {
-    routine: Routine,
-    decision: RoutineEventDecision,
-    reason: Option<String>,
-    details: serde_json::Value,
-    should_fire: bool,
-    sequence_num: u32,
-    trigger_key: Option<String>,
-}
-
 /// Shared context passed to the execution function.
 struct EngineContext {
     store: Arc<dyn Database>,
@@ -1417,53 +1267,70 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     // so skip all post-processing here to avoid conflicts.
     if status == RunStatus::Running {
         // Still update the routine schedule so next_fire_at advances
-        let now = Utc::now();
-        let next_fire =
-            next_fire_for_routine(&routine, ctx.user_timezone.as_deref(), now).unwrap_or(None);
-        let state = routine_state_with_runtime_advance(&routine.state, run.id, now);
-        if let Err(error) = persist_routine_runtime_update(
-            &ctx.store,
-            routine.id,
-            now,
-            next_fire,
-            routine.run_count + 1,
-            routine.consecutive_failures,
-            &state,
-        )
-        .await
-        {
-            tracing::error!(
-                routine = %routine.name,
-                run_id = %run.id,
-                "Failed to persist dispatched routine runtime state: {}",
-                error
-            );
+        match routine_runtime_update_for_run(
+            &routine,
+            run.id,
+            status,
+            ctx.user_timezone.as_deref(),
+            Utc::now(),
+        ) {
+            Ok(plan) => {
+                if let Err(error) = persist_routine_runtime_update(
+                    &ctx.store,
+                    routine.id,
+                    plan.last_run_at,
+                    plan.next_fire_at,
+                    plan.run_count,
+                    plan.consecutive_failures,
+                    &plan.state,
+                )
+                .await
+                {
+                    tracing::error!(
+                        routine = %routine.name,
+                        run_id = %run.id,
+                        "Failed to persist dispatched routine runtime state: {}",
+                        error
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    routine = %routine.name,
+                    run_id = %run.id,
+                    "Failed to plan dispatched routine runtime state: {}",
+                    error
+                );
+            }
         }
         return;
     }
 
-    let now = Utc::now();
-    let next_fire =
-        next_fire_for_routine(&routine, ctx.user_timezone.as_deref(), now).unwrap_or(None);
-
-    let new_failures = if status == RunStatus::Failed {
-        routine.consecutive_failures + 1
-    } else {
-        0
-    };
-
-    if let Err(e) = persist_routine_runtime_update(
-        &ctx.store,
-        routine.id,
-        now,
-        next_fire,
-        routine.run_count + 1,
-        new_failures,
-        &routine.state,
-    )
-    .await
-    {
-        tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
+    match routine_runtime_update_for_run(
+        &routine,
+        run.id,
+        status,
+        ctx.user_timezone.as_deref(),
+        Utc::now(),
+    ) {
+        Ok(plan) => {
+            if let Err(e) = persist_routine_runtime_update(
+                &ctx.store,
+                routine.id,
+                plan.last_run_at,
+                plan.next_fire_at,
+                plan.run_count,
+                plan.consecutive_failures,
+                &plan.state,
+            )
+            .await
+            {
+                tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
+            }
+        }
+        Err(error) => {
+            tracing::error!(routine = %routine.name, "Failed to plan runtime state: {}", error);
+        }
     }
 
     // Complete the run record after advancing the parent routine state so a
@@ -2121,7 +1988,9 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     use super::*;
-    use crate::agent::routine::{NotifyConfig, RoutineEventStatus, RunStatus, content_hash};
+    use crate::agent::routine::{
+        NotifyConfig, RoutineEventDecision, RoutineEventStatus, RunStatus, content_hash,
+    };
     use crate::error::LlmError;
     use crate::llm::{
         CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
@@ -2241,6 +2110,45 @@ mod tests {
         ] {
             let _ = status.to_string();
         }
+    }
+
+    #[test]
+    fn root_event_policy_adapter_builds_dispatch_details() {
+        let now = Utc::now();
+        let event = RoutineEvent {
+            id: Uuid::new_v4(),
+            principal_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            channel: "slack".to_string(),
+            event_type: "message".to_string(),
+            raw_sender_id: "default".to_string(),
+            conversation_scope_id: Uuid::new_v4().to_string(),
+            stable_external_conversation_key: "test://root-event-policy".to_string(),
+            idempotency_key: "event:slack:default:default:message:root".to_string(),
+            content: "deploy".to_string(),
+            content_hash: content_hash("deploy").to_string(),
+            metadata: serde_json::json!({}),
+            status: RoutineEventStatus::Pending,
+            diagnostics: serde_json::json!({}),
+            claimed_by: None,
+            claimed_at: None,
+            lease_expires_at: None,
+            processed_at: None,
+            error_message: None,
+            matched_routines: 0,
+            fired_routines: 0,
+            attempt_count: 0,
+            created_at: now - ChronoDuration::seconds(42),
+        };
+
+        let details = routine_event_evaluation_details("worker-l", &event, now, Some("event-key"));
+        assert_eq!(details["claimed_by"], "worker-l");
+        assert_eq!(details["event_age_secs"], serde_json::json!(42));
+        assert_eq!(details["trigger_key"], "event-key");
+
+        let dispatch = decide_routine_event_dispatch(false, true, true, true);
+        assert_eq!(dispatch.decision, RoutineEventDecision::Fired);
+        assert!(dispatch.should_fire);
     }
 
     #[cfg(feature = "libsql")]
@@ -2425,7 +2333,7 @@ mod tests {
                 max_tokens: 32,
             },
         );
-        routine.policy.catch_up_mode = RoutineCatchUpMode::Skip;
+        routine.policy.catch_up_mode = crate::agent::routine::RoutineCatchUpMode::Skip;
         routine.next_fire_at = Some(Utc::now() - ChronoDuration::days(90));
         db.create_routine(&routine).await.unwrap();
 

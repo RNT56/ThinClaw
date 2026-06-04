@@ -267,59 +267,20 @@ impl Agent {
         consecutive_same_calls: u32,
         last_call_signature: Option<u64>,
     ) -> Option<(AdvisorAutoTrigger, String, Option<u64>)> {
-        let status = runtime_status?;
-        if !status.advisor_ready
-            || status.advisor_auto_escalation_mode == AdvisorAutoEscalationMode::ManualOnly
-        {
-            return None;
-        }
-        let awareness = TurnAwareness::from_messages(context_messages);
-
-        if let Some(failure) = advisor_state.last_failure.as_ref() {
-            let checkpoint = advisor_state.checkpoint_for(
-                AdvisorAutoTrigger::ToolFailure,
-                failure.checkpoint.to_string(),
-            );
-            if advisor_state.should_fire(&checkpoint) {
-                return Some((
-                    AdvisorAutoTrigger::ToolFailure,
-                    checkpoint,
-                    failure.signature,
-                ));
-            }
-        }
-
-        if consecutive_same_calls >= 3
-            && let Some(signature) = last_call_signature
-        {
-            let checkpoint = advisor_state.checkpoint_for(
-                AdvisorAutoTrigger::StuckLoop,
-                format!("{}:{}", signature, consecutive_same_calls),
-            );
-            if advisor_state.should_fire(&checkpoint) {
-                return Some((AdvisorAutoTrigger::StuckLoop, checkpoint, Some(signature)));
-            }
-        }
-
-        let vision_checkpoint =
-            advisor_state.checkpoint_for(AdvisorAutoTrigger::VisionInput, "vision");
-        if awareness.has_vision && advisor_state.should_fire(&vision_checkpoint) {
-            return Some((AdvisorAutoTrigger::VisionInput, vision_checkpoint, None));
-        }
-
-        let large_context_checkpoint =
-            advisor_state.checkpoint_for(AdvisorAutoTrigger::LargeContext, "large_context");
-        if awareness.estimated_tokens >= 12_000
-            && advisor_state.should_fire(&large_context_checkpoint)
-        {
-            return Some((
-                AdvisorAutoTrigger::LargeContext,
-                large_context_checkpoint,
-                None,
-            ));
-        }
-
-        None
+        thinclaw_agent::dispatcher_policy::next_auto_advisor_trigger(
+            dispatcher_runtime_policy_status(runtime_status),
+            context_messages,
+            advisor_state,
+            consecutive_same_calls,
+            last_call_signature,
+        )
+        .map(|decision| {
+            (
+                decision.trigger,
+                decision.checkpoint,
+                decision.blocked_signature,
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

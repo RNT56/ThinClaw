@@ -45,6 +45,11 @@ use crate::tools::wasm::{
     WasmToolAuthCheck, WasmToolAuthMode, WasmToolAuthStatus, WasmToolAuthorizationRequest,
     WasmToolLoader, WasmToolOAuthFlow, WasmToolRuntime, discover_tools,
 };
+use thinclaw_tools::builtin::extension_tools as extension_tool_policy;
+use thinclaw_tools::builtin::extension_tools::{
+    CombinedInstallError, ExtensionInstallErrorKind, ExtensionInstallOutcome, FallbackDecision,
+    ToolExtensionKind,
+};
 use thinclaw_types::{
     IntegrationSetupStatus, SetupAction, SetupAuthMode, SetupSecretDescriptor, SetupState,
 };
@@ -564,7 +569,9 @@ impl ExtensionManager {
 
         // If a URL was provided, determine kind and install
         if let Some(url) = url {
-            let kind = kind_hint.unwrap_or_else(|| infer_kind_from_url(url));
+            let kind = kind_hint.unwrap_or_else(|| {
+                extension_kind_from_tool_kind(extension_tool_policy::infer_kind_from_url(url))
+            });
             let result = match kind {
                 ExtensionKind::McpServer => self.install_mcp_from_url(name, url).await,
                 ExtensionKind::WasmTool => self.install_wasm_tool_from_url(name, url).await,
@@ -1249,7 +1256,10 @@ impl ExtensionManager {
         entry: &RegistryEntry,
     ) -> Result<InstallResult, ExtensionError> {
         let primary_result = self.try_install_from_source(entry, &entry.source).await;
-        match fallback_decision(&primary_result, &entry.fallback_source) {
+        match extension_tool_policy::fallback_decision(
+            install_outcome(&primary_result),
+            entry.fallback_source.is_some(),
+        ) {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
                 let primary_err =
@@ -1271,7 +1281,16 @@ impl ExtensionManager {
                             fallback_error = %fallback_err,
                             "Fallback install also failed"
                         );
-                        combine_install_errors(&primary_err, fallback_err)
+                        match extension_tool_policy::combine_install_errors(
+                            &primary_err.to_string(),
+                            &fallback_err.to_string(),
+                            install_error_kind(&fallback_err),
+                        ) {
+                            CombinedInstallError::PreserveFallback => fallback_err,
+                            CombinedInstallError::CombinedMessage(message) => {
+                                ExtensionError::Other(message)
+                            }
+                        }
                     })
             }
         }
@@ -3300,165 +3319,25 @@ impl ExtensionManager {
     }
 }
 
-/// Infer the extension kind from a URL.
-fn infer_kind_from_url(url: &str) -> ExtensionKind {
-    if url.ends_with(".wasm") || url.ends_with(".tar.gz") {
-        ExtensionKind::WasmTool
-    } else {
-        ExtensionKind::McpServer
+fn extension_kind_from_tool_kind(kind: ToolExtensionKind) -> ExtensionKind {
+    match kind {
+        ToolExtensionKind::McpServer => ExtensionKind::McpServer,
+        ToolExtensionKind::WasmTool => ExtensionKind::WasmTool,
+        ToolExtensionKind::WasmChannel => ExtensionKind::WasmChannel,
     }
 }
 
-/// Decision from `fallback_decision`: should we try the fallback source or
-/// return the primary result as-is?
-enum FallbackDecision {
-    /// Return the primary result directly (success or non-retriable error).
-    Return,
-    /// Primary failed with a retriable error and a fallback source is available.
-    TryFallback,
-}
-
-/// Decide whether to attempt a fallback install based on the primary result
-/// and the availability of a fallback source.
-fn fallback_decision(
-    primary_result: &Result<InstallResult, ExtensionError>,
-    fallback_source: &Option<Box<ExtensionSource>>,
-) -> FallbackDecision {
-    match (primary_result, fallback_source) {
-        // Success — no fallback needed
-        (Ok(_), _) => FallbackDecision::Return,
-        // AlreadyInstalled — don't try building from source
-        (Err(ExtensionError::AlreadyInstalled(_)), _) => FallbackDecision::Return,
-        // Failed with a fallback available — try it
-        (Err(_), Some(_)) => FallbackDecision::TryFallback,
-        // Failed with no fallback — return the error
-        (Err(_), None) => FallbackDecision::Return,
+fn install_outcome(result: &Result<InstallResult, ExtensionError>) -> ExtensionInstallOutcome {
+    match result {
+        Ok(_) => ExtensionInstallOutcome::Success,
+        Err(ExtensionError::AlreadyInstalled(_)) => ExtensionInstallOutcome::AlreadyInstalled,
+        Err(_) => ExtensionInstallOutcome::Failed,
     }
 }
 
-/// Combine primary and fallback errors into a single error.
-///
-/// Preserves `AlreadyInstalled` from the fallback directly; otherwise wraps
-/// both error messages into `ExtensionError::Other`.
-fn combine_install_errors(
-    primary_err: &ExtensionError,
-    fallback_err: ExtensionError,
-) -> ExtensionError {
-    if matches!(fallback_err, ExtensionError::AlreadyInstalled(_)) {
-        return fallback_err;
-    }
-    ExtensionError::Other(format!(
-        "Primary install failed: {}; fallback install also failed: {}",
-        primary_err, fallback_err
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::extensions::manager::{
-        FallbackDecision, combine_install_errors, fallback_decision, infer_kind_from_url,
-    };
-    use crate::extensions::{ExtensionError, ExtensionKind, ExtensionSource, InstallResult};
-
-    #[test]
-    fn test_infer_kind_from_url() {
-        assert_eq!(
-            infer_kind_from_url("https://example.com/tool.wasm"),
-            ExtensionKind::WasmTool
-        );
-        assert_eq!(
-            infer_kind_from_url("https://example.com/tool-wasm32-wasip2.tar.gz"),
-            ExtensionKind::WasmTool
-        );
-        assert_eq!(
-            infer_kind_from_url("https://mcp.notion.com"),
-            ExtensionKind::McpServer
-        );
-        assert_eq!(
-            infer_kind_from_url("https://example.com/mcp"),
-            ExtensionKind::McpServer
-        );
-    }
-
-    // ---- fallback install logic tests ----
-
-    fn make_ok_result() -> Result<InstallResult, ExtensionError> {
-        Ok(InstallResult {
-            name: "test".to_string(),
-            kind: ExtensionKind::WasmTool,
-            message: "Installed".to_string(),
-        })
-    }
-
-    fn make_fallback_source() -> Option<Box<ExtensionSource>> {
-        Some(Box::new(ExtensionSource::WasmBuildable {
-            repo_url: "tools-src/test".to_string(),
-            build_dir: Some("tools-src/test".to_string()),
-            crate_name: Some("test-tool".to_string()),
-        }))
-    }
-
-    #[test]
-    fn test_fallback_decision_success_returns_directly() {
-        let result = make_ok_result();
-        let fallback = make_fallback_source();
-        assert!(matches!(
-            fallback_decision(&result, &fallback),
-            FallbackDecision::Return
-        ));
-    }
-
-    #[test]
-    fn test_fallback_decision_already_installed_skips_fallback() {
-        let result: Result<InstallResult, ExtensionError> =
-            Err(ExtensionError::AlreadyInstalled("test".to_string()));
-        let fallback = make_fallback_source();
-        assert!(matches!(
-            fallback_decision(&result, &fallback),
-            FallbackDecision::Return
-        ));
-    }
-
-    #[test]
-    fn test_fallback_decision_download_failed_triggers_fallback() {
-        let result: Result<InstallResult, ExtensionError> =
-            Err(ExtensionError::DownloadFailed("404 Not Found".to_string()));
-        let fallback = make_fallback_source();
-        assert!(matches!(
-            fallback_decision(&result, &fallback),
-            FallbackDecision::TryFallback
-        ));
-    }
-
-    #[test]
-    fn test_fallback_decision_error_without_fallback_returns() {
-        let result: Result<InstallResult, ExtensionError> =
-            Err(ExtensionError::DownloadFailed("404 Not Found".to_string()));
-        let fallback = None;
-        assert!(matches!(
-            fallback_decision(&result, &fallback),
-            FallbackDecision::Return
-        ));
-    }
-
-    #[test]
-    fn test_combine_errors_includes_both_messages() {
-        let primary = ExtensionError::DownloadFailed("404 Not Found".to_string());
-        let fallback = ExtensionError::InstallFailed("cargo not found".to_string());
-        let combined = combine_install_errors(&primary, fallback);
-        let msg = combined.to_string();
-        assert!(msg.contains("404 Not Found"), "missing primary: {msg}");
-        assert!(msg.contains("cargo not found"), "missing fallback: {msg}");
-    }
-
-    #[test]
-    fn test_combine_errors_forwards_already_installed_from_fallback() {
-        let primary = ExtensionError::DownloadFailed("404".to_string());
-        let fallback = ExtensionError::AlreadyInstalled("test".to_string());
-        let combined = combine_install_errors(&primary, fallback);
-        assert!(
-            matches!(combined, ExtensionError::AlreadyInstalled(ref name) if name == "test"),
-            "Expected AlreadyInstalled, got: {combined:?}"
-        );
+fn install_error_kind(error: &ExtensionError) -> ExtensionInstallErrorKind {
+    match error {
+        ExtensionError::AlreadyInstalled(_) => ExtensionInstallErrorKind::AlreadyInstalled,
+        _ => ExtensionInstallErrorKind::Other,
     }
 }

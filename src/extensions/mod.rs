@@ -34,7 +34,8 @@ pub use native::NativePluginRuntime;
 pub use registry::ExtensionRegistry;
 
 use serde::{Deserialize, Serialize};
-use thinclaw_types::{IntegrationSetupStatus, SetupAction, SetupAuthMode, SetupState};
+use thinclaw_gateway::web::extensions::{ExtensionSetupStatusInput, extension_setup_status};
+use thinclaw_types::IntegrationSetupStatus;
 
 /// The kind of extension, determining how it's installed, authenticated, and activated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -236,125 +237,54 @@ pub struct InstalledExtension {
 
 impl InstalledExtension {
     pub fn setup_status(&self) -> IntegrationSetupStatus {
-        let auth_mode = setup_auth_mode_from_status(&self.auth_mode);
-        if !self.installed {
-            return IntegrationSetupStatus::not_installed(auth_mode);
-        }
-        if let Some(error) = &self.activation_error {
-            return IntegrationSetupStatus::failed(auth_mode, error.clone());
-        }
-
-        let state = if self.active && self.authenticated {
-            SetupState::Ready
-        } else if !self.authenticated {
-            SetupState::NeedsAuth
-        } else if self.authenticated && !self.active {
-            SetupState::InstalledUnconfigured
-        } else {
-            SetupState::Degraded
-        };
-
-        let mut actions = vec![SetupAction::Validate];
-        if self.needs_setup {
-            actions.push(SetupAction::ConfigureSecrets);
-        }
-        if matches!(auth_mode, SetupAuthMode::OAuth | SetupAuthMode::SharedOAuth)
-            && !self.authenticated
-        {
-            actions.push(SetupAction::StartOAuth);
-        }
-        if self.active {
-            actions.push(SetupAction::Disable);
-        } else {
-            actions.push(SetupAction::Activate);
-        }
-        actions.push(SetupAction::Remove);
-
-        IntegrationSetupStatus {
-            state,
-            auth_mode,
-            actions,
-            message: (!self.auth_status.is_empty()).then(|| self.auth_status.clone()),
-            ..IntegrationSetupStatus::default()
-        }
-    }
-}
-
-fn setup_auth_mode_from_status(auth_mode: &str) -> SetupAuthMode {
-    match auth_mode {
-        "oauth" => SetupAuthMode::OAuth,
-        "shared_oauth" | "external_oauth_sync" => SetupAuthMode::SharedOAuth,
-        "manual_token" | "secrets" | "manual_secrets" => SetupAuthMode::ManualSecrets,
-        "native_plugin" => SetupAuthMode::NativePlugin,
-        "remote_secret_backend" => SetupAuthMode::RemoteSecretBackend,
-        _ => SetupAuthMode::None,
+        extension_setup_status(ExtensionSetupStatusInput {
+            installed: self.installed,
+            authenticated: self.authenticated,
+            auth_mode: &self.auth_mode,
+            auth_status: &self.auth_status,
+            active: self.active,
+            needs_setup: self.needs_setup,
+            activation_error: self.activation_error.as_deref(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thinclaw_types::{SetupAction, SetupAuthMode, SetupState};
 
-    fn extension_status(
-        installed: bool,
-        authenticated: bool,
-        active: bool,
-        auth_mode: &str,
-    ) -> InstalledExtension {
-        InstalledExtension {
+    #[test]
+    fn installed_extension_setup_status_adapts_domain_fields() {
+        let setup = InstalledExtension {
             name: "example".to_string(),
             kind: ExtensionKind::WasmChannel,
             description: None,
             url: None,
-            authenticated,
-            auth_mode: auth_mode.to_string(),
-            auth_status: if authenticated {
-                "authenticated".to_string()
-            } else {
-                "awaiting_authorization".to_string()
-            },
-            active,
+            authenticated: false,
+            auth_mode: "secrets".to_string(),
+            auth_status: "awaiting_authorization".to_string(),
+            active: false,
             tools: Vec::new(),
-            needs_setup: !authenticated,
+            needs_setup: true,
             shared_auth_provider: None,
             missing_scopes: Vec::new(),
-            installed,
+            installed: true,
             activation_error: None,
         }
-    }
-
-    #[test]
-    fn setup_status_marks_available_extension_installable() {
-        let setup = extension_status(false, false, false, "none").setup_status();
-        assert_eq!(setup.state, SetupState::NotInstalled);
-        assert_eq!(setup.actions, vec![SetupAction::Install]);
-    }
-
-    #[test]
-    fn setup_status_marks_manual_secret_extension_needing_auth() {
-        let setup = extension_status(true, false, false, "secrets").setup_status();
+        .setup_status();
         assert_eq!(setup.state, SetupState::NeedsAuth);
         assert_eq!(setup.auth_mode, SetupAuthMode::ManualSecrets);
-        assert!(setup.actions.contains(&SetupAction::ConfigureSecrets));
-        assert!(setup.actions.contains(&SetupAction::Activate));
-    }
-
-    #[test]
-    fn setup_status_marks_active_extension_ready() {
-        let setup = extension_status(true, true, true, "oauth").setup_status();
-        assert_eq!(setup.state, SetupState::Ready);
-        assert_eq!(setup.auth_mode, SetupAuthMode::OAuth);
-        assert!(setup.actions.contains(&SetupAction::Validate));
-        assert!(setup.actions.contains(&SetupAction::Disable));
-    }
-
-    #[test]
-    fn setup_status_preserves_activation_failure() {
-        let mut ext = extension_status(true, true, false, "secrets");
-        ext.activation_error = Some("bad config".to_string());
-        let setup = ext.setup_status();
-        assert_eq!(setup.state, SetupState::Failed);
-        assert_eq!(setup.message.as_deref(), Some("bad config"));
+        assert_eq!(
+            setup.actions,
+            vec![
+                SetupAction::Validate,
+                SetupAction::ConfigureSecrets,
+                SetupAction::Activate,
+                SetupAction::Remove
+            ]
+        );
+        assert_eq!(setup.message.as_deref(), Some("awaiting_authorization"));
     }
 }
 

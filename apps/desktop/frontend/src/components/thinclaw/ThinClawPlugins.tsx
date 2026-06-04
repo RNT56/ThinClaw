@@ -1,0 +1,998 @@
+import { useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+    RefreshCw,
+    Package,
+    Plug,
+    Trash2,
+    Power,
+    CheckCircle2,
+    AlertCircle,
+    XCircle,
+    Wrench,
+    ChevronDown,
+    Puzzle,
+    Globe,
+    Shield,
+    Search,
+    Download,
+    Clock,
+    FileCheck2,
+    RotateCw,
+} from 'lucide-react';
+import { cn } from '../../lib/utils';
+import * as thinclaw from '../../lib/thinclaw';
+import { toast } from 'sonner';
+
+const KIND_STYLES: Record<string, { icon: React.ReactNode; label: string; color: string }> = {
+    wasm_tool: { icon: <Puzzle className="w-4 h-4" />, label: 'WASM Tool', color: 'bg-blue-500/15 text-blue-400 border-blue-500/20' },
+    wasm_channel: { icon: <Globe className="w-4 h-4" />, label: 'WASM Channel', color: 'bg-purple-500/15 text-primary border-purple-500/20' },
+    mcp_server: { icon: <Plug className="w-4 h-4" />, label: 'MCP Server', color: 'bg-green-500/15 text-green-400 border-green-500/20' },
+};
+
+const STATUS_STYLES: Record<string, { color: string; label: string; icon: React.ReactNode }> = {
+    active: { color: 'text-green-400', label: 'Active', icon: <CheckCircle2 className="w-3.5 h-3.5" /> },
+    configured: { color: 'text-blue-400', label: 'Configured', icon: <Wrench className="w-3.5 h-3.5" /> },
+    installed: { color: 'text-muted-foreground', label: 'Installed', icon: <Package className="w-3.5 h-3.5" /> },
+    pairing: { color: 'text-primary', label: 'Pairing', icon: <Plug className="w-3.5 h-3.5" /> },
+    failed: { color: 'text-red-400', label: 'Failed', icon: <XCircle className="w-3.5 h-3.5" /> },
+};
+
+function ExtensionCard({
+    ext,
+    onActivate,
+    onReconnect,
+    onSetup,
+    onValidate,
+    onRemove,
+    channelHealth,
+}: {
+    ext: thinclaw.ExtensionInfoItem;
+    onActivate: (name: string) => void;
+    onReconnect: (name: string) => void;
+    onSetup: (name: string) => void;
+    onValidate: (name: string) => void;
+    onRemove: (name: string) => void;
+    channelHealth?: thinclaw.ChannelStatusEntry;
+}) {
+    const [expanded, setExpanded] = useState(false);
+    const [activating, setActivating] = useState(false);
+    const [removing, setRemoving] = useState(false);
+
+    const kindStyle = KIND_STYLES[ext.kind] || {
+        icon: <Package className="w-4 h-4" />,
+        label: ext.kind,
+        color: 'bg-white/5 text-muted-foreground border-border/40',
+    };
+    const statusStyle = ext.activation_status
+        ? STATUS_STYLES[ext.activation_status] || STATUS_STYLES['installed']
+        : ext.active
+            ? STATUS_STYLES['active']
+            : STATUS_STYLES['installed'];
+
+    const handleActivate = async () => {
+        setActivating(true);
+        try {
+            onActivate(ext.name);
+        } finally {
+            setTimeout(() => setActivating(false), 1000);
+        }
+    };
+
+    const handleRemove = async () => {
+        setRemoving(true);
+        try {
+            onRemove(ext.name);
+        } finally {
+            setTimeout(() => setRemoving(false), 1000);
+        }
+    };
+
+    return (
+        <motion.div
+            layout
+            className={cn(
+                "rounded-2xl border transition-all duration-300",
+                ext.active
+                    ? "bg-primary/[0.03] border-primary/20 shadow-sm shadow-primary/5"
+                    : "bg-white/[0.02] border-white/5",
+                "hover:border-border/40"
+            )}
+        >
+            <div className="p-5 flex items-start gap-4">
+                {/* Icon */}
+                <div className={cn(
+                    "p-2.5 rounded-xl border transition-colors flex items-center justify-center",
+                    ext.active
+                        ? "bg-primary/10 border-primary/20 text-primary"
+                        : "bg-white/5 border-border/40 text-muted-foreground"
+                )}>
+                    {kindStyle.icon}
+                </div>
+
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-semibold text-sm">{ext.name}</h3>
+                        <span className={cn(
+                            'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border',
+                            kindStyle.color
+                        )}>
+                            {kindStyle.label}
+                        </span>
+                        <span className={cn(
+                            'inline-flex items-center gap-1 text-[10px] font-medium',
+                            statusStyle.color
+                        )}>
+                            {statusStyle.icon}
+                            {statusStyle.label}
+                        </span>
+                        {channelHealth && (
+                            <span className={cn(
+                                'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border',
+                                channelHealth.state === 'Running' ? 'text-primary bg-emerald-500/10 border-emerald-500/20' :
+                                    channelHealth.state === 'Connecting' ? 'text-muted-foreground bg-amber-500/10 border-amber-500/20' :
+                                        channelHealth.state === 'Degraded' ? 'text-muted-foreground bg-orange-500/10 border-orange-500/20' :
+                                            channelHealth.state === 'Error' ? 'text-red-400 bg-red-500/10 border-red-500/20' :
+                                                'text-muted-foreground bg-zinc-500/10 border-zinc-500/20'
+                            )}>
+                                <span className={cn("w-1.5 h-1.5 rounded-full",
+                                    channelHealth.state === 'Running' ? 'bg-emerald-500' :
+                                        channelHealth.state === 'Connecting' ? 'bg-amber-500 animate-pulse' :
+                                            channelHealth.state === 'Degraded' ? 'bg-orange-500' :
+                                                channelHealth.state === 'Error' ? 'bg-red-500' : 'bg-zinc-500'
+                                )} />
+                                {channelHealth.state}
+                            </span>
+                        )}
+                    </div>
+
+                    {ext.description && (
+                        <p className="text-xs text-muted-foreground mt-1.5 line-clamp-2 leading-relaxed">
+                            {ext.description}
+                        </p>
+                    )}
+
+                    {ext.tools.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                            {ext.tools.slice(0, 5).map(tool => (
+                                <span
+                                    key={tool}
+                                    className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-white/5 border border-white/5 text-muted-foreground"
+                                >
+                                    {tool}
+                                </span>
+                            ))}
+                            {ext.tools.length > 5 && (
+                                <span className="px-2 py-0.5 rounded-md text-[10px] font-mono text-muted-foreground/50">
+                                    +{ext.tools.length - 5} more
+                                </span>
+                            )}
+                        </div>
+                    )}
+
+                    {ext.activation_error && (
+                        <div className="mt-2 flex items-start gap-1.5 text-[10px] text-red-400 font-medium">
+                            <XCircle className="w-3 h-3 mt-0.5 flex-none" />
+                            <span className="line-clamp-2">{ext.activation_error}</span>
+                        </div>
+                    )}
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-1.5 flex-none">
+                    {!ext.active && (
+                        <button
+                            onClick={handleActivate}
+                            disabled={activating}
+                            className="p-2 rounded-lg hover:bg-green-500/10 text-muted-foreground hover:text-green-400 transition-colors"
+                            title="Activate"
+                        >
+                            {activating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
+                        </button>
+                    )}
+                    <button
+                        onClick={() => onSetup(ext.name)}
+                        className="p-2 rounded-lg hover:bg-blue-500/10 text-muted-foreground hover:text-blue-400 transition-colors"
+                        title="Setup"
+                    >
+                        <Wrench className="w-4 h-4" />
+                    </button>
+                    {ext.reconnect_supported && (
+                        <button
+                            onClick={() => onReconnect(ext.name)}
+                            className="p-2 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary transition-colors"
+                            title="Reconnect"
+                        >
+                            <RotateCw className="w-4 h-4" />
+                        </button>
+                    )}
+                    <button
+                        onClick={() => onValidate(ext.name)}
+                        className="p-2 rounded-lg hover:bg-white/5 text-muted-foreground hover:text-foreground transition-colors"
+                        title="Validate setup"
+                    >
+                        <FileCheck2 className="w-4 h-4" />
+                    </button>
+                    <button
+                        onClick={handleRemove}
+                        disabled={removing}
+                        className="p-2 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-400 transition-colors"
+                        title="Remove"
+                    >
+                        {removing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                    </button>
+                    <button
+                        onClick={() => setExpanded(!expanded)}
+                        className="p-2 rounded-lg hover:bg-white/5 text-muted-foreground transition-colors"
+                    >
+                        <ChevronDown className={cn("w-4 h-4 transition-transform", expanded && "rotate-180")} />
+                    </button>
+                </div>
+            </div>
+
+            <AnimatePresence>
+                {expanded && (
+                    <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden"
+                    >
+                        <div className="px-5 pb-5 pt-0 border-t border-white/5">
+                            <div className="mt-4 grid grid-cols-3 gap-3">
+                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                    <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1 flex items-center gap-1">
+                                        <Shield className="w-3 h-3" />
+                                        Auth
+                                    </div>
+                                    <p className={cn(
+                                        "text-sm font-medium",
+                                        ext.authenticated ? "text-green-400" : "text-muted-foreground"
+                                    )}>
+                                        {ext.authenticated ? 'Authenticated' : 'Not Authenticated'}
+                                    </p>
+                                    <p className="text-[10px] text-muted-foreground mt-1">{ext.auth_mode} · {ext.auth_status}</p>
+                                </div>
+                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                    <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1 flex items-center gap-1">
+                                        <Wrench className="w-3 h-3" />
+                                        Setup
+                                    </div>
+                                    <p className={cn(
+                                        "text-sm font-medium",
+                                        ext.needs_setup ? "text-muted-foreground" : "text-green-400"
+                                    )}>
+                                        {ext.needs_setup ? 'Needs Setup' : 'Ready'}
+                                    </p>
+                                    {ext.shared_auth_provider && (
+                                        <p className="text-[10px] text-muted-foreground mt-1">{ext.shared_auth_provider}</p>
+                                    )}
+                                </div>
+                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                    <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1 flex items-center gap-1">
+                                        <Puzzle className="w-3 h-3" />
+                                        Tools
+                                    </div>
+                                    <p className="text-sm font-mono font-medium">
+                                        {ext.tools.length}
+                                    </p>
+                                </div>
+                            </div>
+                            {ext.url && (
+                                <div className="mt-3 text-[10px] text-muted-foreground font-mono truncate">
+                                    {ext.url}
+                                </div>
+                            )}
+                            {ext.missing_scopes.length > 0 && (
+                                <div className="mt-3 flex flex-wrap gap-1">
+                                    {ext.missing_scopes.map(scope => (
+                                        <span key={scope} className="px-2 py-0.5 rounded-md text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                            {scope}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                            {ext.channel_diagnostics && (
+                                <pre className="mt-3 p-3 rounded-lg bg-white/[0.03] border border-white/5 text-[10px] text-muted-foreground overflow-auto max-h-32">
+                                    {JSON.stringify(ext.channel_diagnostics, null, 2)}
+                                </pre>
+                            )}
+                            {ext.tools.length > 5 && (
+                                <div className="mt-3">
+                                    <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-2">All Tools</div>
+                                    <div className="flex flex-wrap gap-1">
+                                        {ext.tools.map(tool => (
+                                            <span
+                                                key={tool}
+                                                className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-white/5 border border-white/5 text-muted-foreground"
+                                            >
+                                                {tool}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </motion.div>
+    );
+}
+
+export function ThinClawPlugins() {
+    const [extensions, setExtensions] = useState<thinclaw.ExtensionInfoItem[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [activeTab, setActiveTab] = useState<'installed' | 'clawhub' | 'lifecycle'>('installed');
+
+    // ClawHub state
+    const [hubQuery, setHubQuery] = useState('');
+    const [hubResults, setHubResults] = useState<thinclaw.ClawHubEntry[]>([]);
+    const [hubSearching, setHubSearching] = useState(false);
+
+    // Lifecycle state
+    const [lifecycleEvents, setLifecycleEvents] = useState<thinclaw.LifecycleEventItem[]>([]);
+    const [lifecycleLoading, setLifecycleLoading] = useState(false);
+
+    // Manifest validation
+    const [validating, setValidating] = useState<string | null>(null);
+    const [validationResult, setValidationResult] = useState<thinclaw.ManifestValidation | null>(null);
+
+    // Channel health
+    const [channelStatuses, setChannelStatuses] = useState<thinclaw.ChannelStatusEntry[]>([]);
+    const [setupTarget, setSetupTarget] = useState<string | null>(null);
+    const [setupSchema, setSetupSchema] = useState<any>(null);
+    const [setupSecrets, setSetupSecrets] = useState<Record<string, string>>({});
+    const [registryQuery, setRegistryQuery] = useState('');
+    const [registryResults, setRegistryResults] = useState<any[]>([]);
+    const [manualName, setManualName] = useState('');
+    const [manualUrl, setManualUrl] = useState('');
+    const [manualKind, setManualKind] = useState('mcp_server');
+
+    const fetchChannelHealth = useCallback(async () => {
+        try {
+            const statuses = await thinclaw.getChannelStatusList();
+            setChannelStatuses(statuses);
+        } catch { /* silently fail — health badges are supplementary */ }
+    }, []);
+
+    useEffect(() => { fetchChannelHealth(); }, [fetchChannelHealth]);
+
+    const fetchExtensions = async () => {
+        try {
+            const data = await thinclaw.listExtensions();
+            setExtensions(data.extensions || []);
+        } catch (e) {
+            console.error('Failed to fetch extensions:', e);
+            toast.error('Failed to load extensions');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchExtensions();
+    }, []);
+
+    const handleActivate = async (name: string) => {
+        try {
+            const resp = await thinclaw.activateExtension(name);
+            if (resp.ok) {
+                toast.success(`Activated ${name}`);
+            } else {
+                toast.error(resp.message || `Failed to activate ${name}`);
+            }
+            fetchExtensions();
+        } catch (e) {
+            toast.error(`Activation error: ${e}`);
+        }
+    };
+
+    const handleRemove = async (name: string) => {
+        try {
+            const resp = await thinclaw.removeExtension(name);
+            if (resp.ok) {
+                toast.success(`Removed ${name}`);
+            } else {
+                toast.error(resp.message || `Failed to remove ${name}`);
+            }
+            fetchExtensions();
+        } catch (e) {
+            toast.error(`Remove error: ${e}`);
+        }
+    };
+
+    const handleReconnect = async (name: string) => {
+        try {
+            const resp = await thinclaw.reconnectExtension(name);
+            resp.ok ? toast.success(resp.message || `Reconnected ${name}`) : toast.error(resp.message || `Reconnect failed for ${name}`);
+            fetchExtensions();
+            fetchChannelHealth();
+        } catch (e) {
+            toast.error(`Reconnect error: ${e}`);
+        }
+    };
+
+    const handleValidateSetup = async (name: string) => {
+        try {
+            const resp = await thinclaw.validateExtensionSetup(name);
+            resp.ok ? toast.success(resp.message || `${name} is valid`) : toast.error(resp.message || `Validation failed for ${name}`);
+            if (resp.auth_url) window.open(resp.auth_url, '_blank');
+            fetchExtensions();
+        } catch (e) {
+            toast.error(`Validation error: ${e}`);
+        }
+    };
+
+    const handleOpenSetup = async (name: string) => {
+        setSetupTarget(name);
+        setSetupSchema(null);
+        setSetupSecrets({});
+        try {
+            const schema = await thinclaw.getExtensionSetup(name);
+            setSetupSchema(schema);
+        } catch (e) {
+            toast.error(`Setup unavailable: ${e}`);
+        }
+    };
+
+    const handleSubmitSetup = async () => {
+        if (!setupTarget) return;
+        try {
+            const resp = await thinclaw.submitExtensionSetup(setupTarget, setupSecrets);
+            resp.ok ? toast.success(resp.message || `Saved ${setupTarget}`) : toast.error(resp.message || `Setup failed for ${setupTarget}`);
+            setSetupTarget(null);
+            fetchExtensions();
+        } catch (e) {
+            toast.error(`Setup failed: ${e}`);
+        }
+    };
+
+    const handleSearchClawHub = async () => {
+        if (!hubQuery.trim()) return;
+        setHubSearching(true);
+        try {
+            const result = await thinclaw.searchClawHub(hubQuery.trim());
+            setHubResults(result.entries || []);
+        } catch (e) {
+            toast.error(`ClawHub search failed: ${e}`);
+        } finally {
+            setHubSearching(false);
+        }
+    };
+
+    const handleInstallFromHub = async (pluginId: string) => {
+        try {
+            await thinclaw.installFromClawHub(pluginId);
+            toast.success(`Installed ${pluginId}`);
+            fetchExtensions();
+        } catch (e) {
+            toast.error(`Install failed: ${e}`);
+        }
+    };
+
+    const handleRegistrySearch = async () => {
+        try {
+            const result = await thinclaw.searchExtensionRegistry(registryQuery);
+            setRegistryResults(result.entries || []);
+        } catch (e) {
+            toast.error(`Registry search failed: ${e}`);
+        }
+    };
+
+    const handleInstallExtension = async (name: string, url?: string | null, kind?: string | null) => {
+        try {
+            const resp = await thinclaw.installExtension(name, url ?? null, kind ?? null);
+            resp.ok ? toast.success(resp.message || `Installed ${name}`) : toast.error(resp.message || `Install failed for ${name}`);
+            fetchExtensions();
+            handleRegistrySearch();
+        } catch (e) {
+            toast.error(`Install failed: ${e}`);
+        }
+    };
+
+    const fetchLifecycle = useCallback(async () => {
+        setLifecycleLoading(true);
+        try {
+            const events = await thinclaw.getPluginLifecycleList();
+            setLifecycleEvents(events);
+        } catch (e) {
+            console.error('Failed to fetch lifecycle events:', e);
+        } finally {
+            setLifecycleLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (activeTab === 'lifecycle') fetchLifecycle();
+    }, [activeTab, fetchLifecycle]);
+
+    const handleValidateManifest = async (pluginId: string) => {
+        setValidating(pluginId);
+        try {
+            const result = await thinclaw.validateManifest(pluginId);
+            setValidationResult(result);
+            if (result.errors.length === 0 && result.warnings.length === 0) {
+                toast.success('Manifest is valid');
+            } else {
+                toast.warning(`${result.errors.length} errors, ${result.warnings.length} warnings`);
+            }
+        } catch (e) {
+            toast.error(`Validation failed: ${e}`);
+        } finally {
+            setValidating(null);
+        }
+    };
+
+    const activeCount = extensions.filter(e => e.active).length;
+
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex-1 flex flex-col h-full overflow-hidden"
+        >
+            <div className="p-8 pb-4 space-y-6 flex-none max-w-5xl w-full mx-auto">
+                <div className="flex items-center justify-between gap-4 flex-wrap">
+                    <div>
+                        <h1 className="text-3xl font-bold tracking-tight">Extensions & Plugins</h1>
+                        <p className="text-muted-foreground mt-1">
+                            Manage WASM tools, channels, and MCP servers that extend agent capabilities.
+                        </p>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <div className="px-4 py-2 rounded-xl bg-primary/10 border border-primary/20 text-primary flex items-center gap-2 text-sm font-bold shadow-lg shadow-primary/5">
+                            <Plug className="w-4 h-4" />
+                            {activeCount} / {extensions.length} active
+                        </div>
+                        <button
+                            onClick={() => {
+                                setIsLoading(true);
+                                fetchExtensions();
+                            }}
+                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-sm"
+                        >
+                            <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
+                        </button>
+                    </div>
+                </div>
+
+                {/* Tabs */}
+                <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.03] border border-white/5 w-fit">
+                    {(['installed', 'clawhub', 'lifecycle'] as const).map(tab => (
+                        <button
+                            key={tab}
+                            onClick={() => setActiveTab(tab)}
+                            className={cn(
+                                "px-4 py-1.5 rounded-lg text-xs font-medium transition-all",
+                                activeTab === tab
+                                    ? "bg-primary/15 text-primary"
+                                    : "text-muted-foreground hover:text-foreground"
+                            )}
+                        >
+                            {tab === 'installed' ? `Installed (${extensions.length})` : tab === 'clawhub' ? 'ClawHub Browser' : 'Lifecycle'}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Extension kind summary */}
+                {activeTab === 'installed' && extensions.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                        {Object.entries(
+                            extensions.reduce((acc, e) => {
+                                acc[e.kind] = (acc[e.kind] || 0) + 1;
+                                return acc;
+                            }, {} as Record<string, number>)
+                        )
+                            .sort(([, a], [, b]) => b - a)
+                            .map(([kind, count]) => {
+                                const style = KIND_STYLES[kind] || {
+                                    icon: <Package className="w-3.5 h-3.5" />,
+                                    label: kind,
+                                    color: 'bg-white/5 text-muted-foreground border-border/40',
+                                };
+                                return (
+                                    <div
+                                        key={kind}
+                                        className={cn(
+                                            "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border",
+                                            style.color
+                                        )}
+                                    >
+                                        {style.icon}
+                                        {style.label}
+                                        <span className="font-bold ml-0.5">× {count}</span>
+                                    </div>
+                                );
+                            })}
+                    </div>
+                )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-8 pb-8 scrollbar-hide">
+                <div className="max-w-5xl mx-auto space-y-3">
+                    {/* ═══ Installed Tab ═══ */}
+                    {activeTab === 'installed' && (
+                        <>
+                            {isLoading && extensions.length === 0 ? (
+                                <div className="space-y-3">
+                                    {[1, 2, 3].map(i => (
+                                        <div key={i} className="h-28 rounded-2xl border border-white/5 bg-white/[0.02] animate-pulse" />
+                                    ))}
+                                </div>
+                            ) : extensions.length > 0 ? (
+                                <AnimatePresence mode="popLayout">
+                                    {extensions.map(ext => {
+                                        const health = channelStatuses.find(
+                                            ch => ch.id === ext.name.toLowerCase() || ch.name.toLowerCase() === ext.name.toLowerCase()
+                                        );
+                                        return (
+                                            <div key={ext.name} className="space-y-2">
+                                                <ExtensionCard
+                                                    ext={ext}
+                                                    onActivate={handleActivate}
+                                                    onReconnect={handleReconnect}
+                                                    onSetup={handleOpenSetup}
+                                                    onValidate={handleValidateSetup}
+                                                    onRemove={handleRemove}
+                                                    channelHealth={health}
+                                                />
+                                                {/* Validate manifest button */}
+                                                <div className="flex items-center gap-2 pl-4">
+                                                    <button
+                                                        onClick={() => handleValidateManifest(ext.name)}
+                                                        disabled={validating === ext.name}
+                                                        className="flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+                                                    >
+                                                        {validating === ext.name ? (
+                                                            <RefreshCw className="w-3 h-3 animate-spin" />
+                                                        ) : (
+                                                            <FileCheck2 className="w-3 h-3" />
+                                                        )}
+                                                        Validate Manifest
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </AnimatePresence>
+                            ) : (
+                                <div className="py-20 flex flex-col items-center justify-center text-center space-y-4">
+                                    <div className="p-4 rounded-full bg-white/5 border border-border/40">
+                                        <Package className="w-8 h-8 text-muted-foreground" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-semibold">No extensions installed</h3>
+                                        <p className="text-sm text-muted-foreground mt-1">
+                                            Browse ClawHub or install extensions via URL.
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Validation result display */}
+                            {validationResult && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: -5 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    className="p-4 rounded-xl border border-border/40 bg-card/30 space-y-2"
+                                >
+                                    <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Manifest Validation</h4>
+                                    {validationResult.errors.length > 0 && (
+                                        <div className="space-y-1">
+                                            {validationResult.errors.map((err, i) => (
+                                                <p key={i} className="text-xs text-red-400 flex items-center gap-1.5">
+                                                    <XCircle className="w-3 h-3" /> {err}
+                                                </p>
+                                            ))}
+                                        </div>
+                                    )}
+                                    {validationResult.warnings.length > 0 && (
+                                        <div className="space-y-1">
+                                            {validationResult.warnings.map((w, i) => (
+                                                <p key={i} className="text-xs text-muted-foreground flex items-center gap-1.5">
+                                                    <AlertCircle className="w-3 h-3" /> {w}
+                                                </p>
+                                            ))}
+                                        </div>
+                                    )}
+                                    {validationResult.errors.length === 0 && validationResult.warnings.length === 0 && (
+                                        <p className="text-xs text-primary flex items-center gap-1.5">
+                                            <CheckCircle2 className="w-3 h-3" /> Manifest is valid — no issues found
+                                        </p>
+                                    )}
+                                    <button
+                                        onClick={() => setValidationResult(null)}
+                                        className="text-[10px] text-muted-foreground hover:text-foreground"
+                                    >
+                                        Dismiss
+                                    </button>
+                                </motion.div>
+                            )}
+                        </>
+                    )}
+
+                    {/* ═══ ClawHub Browser Tab ═══ */}
+                    {activeTab === 'clawhub' && (
+                        <div className="space-y-4">
+                            <div className="p-4 rounded-2xl border border-border/40 bg-card/30 space-y-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <h3 className="text-sm font-semibold">Extension Registry</h3>
+                                        <p className="text-xs text-muted-foreground">Install known WASM tools, channels, and MCP servers.</p>
+                                    </div>
+                                    <button onClick={handleRegistrySearch} className="px-3 py-1.5 rounded-lg bg-primary/15 text-primary text-xs font-medium border border-primary/20 hover:bg-primary/20">
+                                        Browse
+                                    </button>
+                                </div>
+                                <div className="flex gap-2">
+                                    <input
+                                        value={registryQuery}
+                                        onChange={(e) => setRegistryQuery(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && handleRegistrySearch()}
+                                        placeholder="Search registry..."
+                                        className="flex-1 px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30"
+                                    />
+                                    <button onClick={handleRegistrySearch} className="px-4 py-2 rounded-xl bg-white/[0.04] border border-border/40 text-xs font-medium hover:bg-white/[0.07]">
+                                        Search
+                                    </button>
+                                </div>
+                                {registryResults.length > 0 && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                        {registryResults.slice(0, 8).map(entry => (
+                                            <div key={`${entry.name}-${entry.kind}`} className="p-3 rounded-xl bg-white/[0.03] border border-white/5 flex items-start gap-3">
+                                                <Plug className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <p className="text-sm font-semibold truncate">{entry.display_name || entry.name}</p>
+                                                        <span className="text-[10px] text-muted-foreground">{entry.kind}</span>
+                                                    </div>
+                                                    <p className="text-xs text-muted-foreground line-clamp-2 mt-1">{entry.description}</p>
+                                                </div>
+                                                <button
+                                                    onClick={() => handleInstallExtension(entry.name, null, entry.kind)}
+                                                    disabled={entry.installed}
+                                                    className="px-2 py-1 rounded-lg bg-primary/15 text-primary text-[10px] font-medium border border-primary/20 hover:bg-primary/20 disabled:opacity-40"
+                                                >
+                                                    {entry.installed ? 'Installed' : 'Install'}
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="p-4 rounded-2xl border border-border/40 bg-card/30 space-y-3">
+                                <h3 className="text-sm font-semibold">Direct Install</h3>
+                                <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_150px_auto] gap-2">
+                                    <input value={manualName} onChange={(e) => setManualName(e.target.value)} placeholder="name" className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30" />
+                                    <input value={manualUrl} onChange={(e) => setManualUrl(e.target.value)} placeholder="https://..." className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30" />
+                                    <select value={manualKind} onChange={(e) => setManualKind(e.target.value)} className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none">
+                                        <option value="mcp_server">MCP Server</option>
+                                        <option value="wasm_tool">WASM Tool</option>
+                                        <option value="wasm_channel">WASM Channel</option>
+                                    </select>
+                                    <button
+                                        onClick={() => handleInstallExtension(manualName, manualUrl || null, manualKind)}
+                                        disabled={!manualName.trim()}
+                                        className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold disabled:opacity-50"
+                                    >
+                                        Install
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                                <div className="flex-1 relative">
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                                    <input
+                                        value={hubQuery}
+                                        onChange={(e) => setHubQuery(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && handleSearchClawHub()}
+                                        placeholder="Search ClawHub for plugins..."
+                                        className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30 placeholder:text-muted-foreground/50"
+                                    />
+                                </div>
+                                <button
+                                    onClick={handleSearchClawHub}
+                                    disabled={hubSearching}
+                                    className="px-4 py-2.5 rounded-xl bg-primary/15 text-primary text-xs font-bold border border-primary/20 hover:bg-primary/20 transition-all"
+                                >
+                                    {hubSearching ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : 'Search'}
+                                </button>
+                            </div>
+
+                            {hubResults.length === 0 && !hubSearching ? (
+                                <div className="py-16 text-center space-y-2">
+                                    <Globe className="w-8 h-8 text-muted-foreground/30 mx-auto" />
+                                    <p className="text-sm text-muted-foreground">Search ClawHub to discover plugins</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {hubResults.map(entry => (
+                                        <motion.div
+                                            key={entry.id}
+                                            initial={{ opacity: 0, y: 5 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            className="p-4 rounded-2xl border border-border/40 bg-card/30 flex items-start gap-4"
+                                        >
+                                            <div className="p-2 rounded-lg bg-primary/10 border border-primary/20">
+                                                <Puzzle className="w-5 h-5 text-primary" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <h3 className="font-semibold">{entry.name}</h3>
+                                                <p className="text-xs text-muted-foreground mt-0.5">{entry.description}</p>
+                                                <div className="flex items-center gap-3 mt-2 text-[10px] text-muted-foreground">
+                                                    <span>v{entry.version}</span>
+                                                    <span>by {entry.author}</span>
+                                                    <span>{entry.install_count} installs</span>
+                                                </div>
+                                                {entry.tags.length > 0 && (
+                                                    <div className="flex gap-1 mt-2">
+                                                        {entry.tags.slice(0, 4).map(tag => (
+                                                            <span key={tag} className="px-1.5 py-0.5 rounded text-[9px] bg-white/5 text-muted-foreground border border-white/5">
+                                                                {tag}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <button
+                                                onClick={() => handleInstallFromHub(entry.id)}
+                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/15 text-primary text-xs font-medium border border-primary/20 hover:bg-primary/20 transition-all shrink-0"
+                                            >
+                                                <Download className="w-3.5 h-3.5" />
+                                                Install
+                                            </button>
+                                        </motion.div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* ═══ Lifecycle Tab ═══ */}
+                    {activeTab === 'lifecycle' && (
+                        <div className="space-y-4">
+                            {lifecycleLoading ? (
+                                <div className="py-16 flex items-center justify-center">
+                                    <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
+                                </div>
+                            ) : lifecycleEvents.length === 0 ? (
+                                <div className="py-16 text-center space-y-2">
+                                    <Clock className="w-8 h-8 text-muted-foreground/30 mx-auto" />
+                                    <p className="text-sm text-muted-foreground">No lifecycle events recorded</p>
+                                    <p className="text-xs text-muted-foreground/60">Events appear when plugins are installed, activated, or removed</p>
+                                </div>
+                            ) : (
+                                <div className="relative">
+                                    {/* Timeline line */}
+                                    <div className="absolute left-6 top-0 bottom-0 w-px bg-white/10" />
+
+                                    {lifecycleEvents.map((event, i) => {
+                                        const typeColors: Record<string, string> = {
+                                            installed: 'bg-blue-500',
+                                            activated: 'bg-emerald-500',
+                                            deactivated: 'bg-amber-500',
+                                            removed: 'bg-red-500',
+                                            error: 'bg-red-600',
+                                        };
+                                        const dotColor = typeColors[event.event_type] || 'bg-zinc-500';
+
+                                        return (
+                                            <motion.div
+                                                key={`${event.timestamp}-${i}`}
+                                                initial={{ opacity: 0, x: -10 }}
+                                                animate={{ opacity: 1, x: 0 }}
+                                                transition={{ delay: i * 0.03 }}
+                                                className="relative pl-14 pb-6"
+                                            >
+                                                {/* Dot */}
+                                                <div className={cn("absolute left-[19px] w-3 h-3 rounded-full border-2 border-background", dotColor)} />
+
+                                                <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
+                                                    <div className="flex items-center justify-between">
+                                                        <span className="font-medium text-sm">{event.plugin_id}</span>
+                                                        <span className={cn(
+                                                            "text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded",
+                                                            event.event_type === 'error' ? 'bg-red-500/10 text-red-400' :
+                                                                event.event_type === 'removed' ? 'bg-red-500/10 text-red-300' :
+                                                                    event.event_type === 'activated' ? 'bg-emerald-500/10 text-primary' :
+                                                                        'bg-blue-500/10 text-blue-400'
+                                                        )}>
+                                                            {event.event_type}
+                                                        </span>
+                                                    </div>
+                                                    {event.details && (
+                                                        <p className="text-xs text-muted-foreground mt-1">{event.details}</p>
+                                                    )}
+                                                    <p className="text-[10px] text-muted-foreground/60 mt-1">{event.timestamp}</p>
+                                                </div>
+                                            </motion.div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Info section */}
+                    {activeTab === 'installed' && (
+                        <div className="mt-8 p-6 rounded-2xl border bg-primary/5 border-primary/10 flex gap-4">
+                            <div className="p-2 bg-primary/10 rounded-xl h-fit">
+                                <AlertCircle className="w-5 h-5 text-primary" />
+                            </div>
+                            <div>
+                                <h4 className="text-sm font-semibold text-primary uppercase tracking-wider">Extension Types</h4>
+                                <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
+                                    <strong>WASM Tools</strong> add new tool capabilities to the agent. <strong>WASM Channels</strong> enable
+                                    messaging integrations (Telegram, Slack). <strong>MCP Servers</strong> connect external tool providers
+                                    via the Model Context Protocol.
+                                </p>
+                            </div>
+                        </div>
+                    )}
+
+                    <AnimatePresence>
+                        {setupTarget && (
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+                                onClick={() => setSetupTarget(null)}
+                            >
+                                <div className="w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-2xl border border-border bg-background shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                                    <div className="p-4 border-b border-border flex items-center justify-between">
+                                        <div>
+                                            <h3 className="font-semibold">Setup {setupTarget}</h3>
+                                            <p className="text-xs text-muted-foreground">{setupSchema?.mode || 'Loading'} · {setupSchema?.auth_status || 'pending'}</p>
+                                        </div>
+                                        <button className="text-xs text-muted-foreground hover:text-foreground" onClick={() => setSetupTarget(null)}>Close</button>
+                                    </div>
+                                    <div className="p-4 space-y-4 overflow-auto max-h-[65vh]">
+                                        {!setupSchema ? (
+                                            <div className="py-10 flex justify-center"><RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" /></div>
+                                        ) : (
+                                            <>
+                                                {setupSchema.instructions && <p className="text-sm text-muted-foreground">{setupSchema.instructions}</p>}
+                                                {(setupSchema.auth_url || setupSchema.setup_url) && (
+                                                    <div className="flex gap-2">
+                                                        {setupSchema.auth_url && <button onClick={() => window.open(setupSchema.auth_url, '_blank')} className="px-3 py-2 rounded-lg bg-primary/15 text-primary text-xs font-medium border border-primary/20">Open Auth</button>}
+                                                        {setupSchema.setup_url && <button onClick={() => window.open(setupSchema.setup_url, '_blank')} className="px-3 py-2 rounded-lg bg-white/[0.04] text-xs font-medium border border-border/40">Open Setup</button>}
+                                                    </div>
+                                                )}
+                                                {(setupSchema.fields || []).map((field: any) => (
+                                                    <label key={field.name} className="block space-y-1">
+                                                        <span className="text-xs font-medium">{field.prompt || field.name}{field.optional ? '' : ' *'}</span>
+                                                        <input
+                                                            type="password"
+                                                            value={setupSecrets[field.name] || ''}
+                                                            onChange={(e) => setSetupSecrets(prev => ({ ...prev, [field.name]: e.target.value }))}
+                                                            placeholder={field.provided ? 'Already saved' : field.auto_generate ? 'Auto-generated if empty' : field.name}
+                                                            className="w-full px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30"
+                                                        />
+                                                    </label>
+                                                ))}
+                                                {setupSchema.missing_scopes?.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {setupSchema.missing_scopes.map((scope: string) => <span key={scope} className="px-2 py-0.5 rounded-md text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20">{scope}</span>)}
+                                                    </div>
+                                                )}
+                                                <button onClick={handleSubmitSetup} className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold">
+                                                    Save Setup
+                                                </button>
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+                </div>
+            </div>
+        </motion.div>
+    );
+}

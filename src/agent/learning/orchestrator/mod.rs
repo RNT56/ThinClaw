@@ -13,19 +13,13 @@ pub(super) use super::{
     DbLearningEvent, DbLearningFeedbackRecord, FindingSeverity, HonchoProvider, ImprovementClass,
     LearningEvent, LearningOutcome, LearningSettings, LettaProvider, Mem0Provider, MemoryProvider,
     MemoryProviderManager, OpenMemoryProvider, ProviderHealthStatus, ProviderMemoryHit,
-    ProviderPrefetchContext, ProviderReadiness, QdrantProvider, QuarantineManager, RiskTier,
-    RoutineEngine, SkillContent, SkillRegistry, SkillTapTrustLevel, Workspace, ZepProvider,
-    outcomes, paths,
+    ProviderPrefetchContext, QdrantProvider, QuarantineManager, RiskTier, RoutineEngine,
+    SkillContent, SkillRegistry, SkillTapTrustLevel, Workspace, ZepProvider, outcomes, paths,
 };
 pub(super) use chrono::{DateTime, Utc};
 pub(super) use helpers::*;
 pub use provider_manager::LearningOrchestrator;
-pub(super) use provider_manager::{
-    GeneratedSkillLifecycle, PROPOSAL_SUPPRESSION_WINDOW_HOURS, SkillSynthesisTrigger,
-};
-pub(super) use std::collections::BTreeMap;
-pub(super) use std::collections::hash_map::DefaultHasher;
-pub(super) use std::hash::{Hash, Hasher};
+pub(super) use provider_manager::{GeneratedSkillLifecycle, PROPOSAL_SUPPRESSION_WINDOW_HOURS};
 pub(super) use std::path::PathBuf;
 pub(super) use std::sync::Arc;
 pub(super) use tokio::process::Command;

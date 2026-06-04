@@ -6,52 +6,32 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::context::{JobContext, JobState};
-use crate::history::{SandboxJobRecord, SandboxJobSummary};
-use crate::sandbox_jobs::{SandboxJobController, normalize_sandbox_ui_state};
-use crate::sandbox_types::{
-    ContainerHandle, ContainerState, CredentialGrant, JobMode, PendingPrompt,
+use crate::history::SandboxJobRecord;
+use crate::sandbox_jobs::SandboxJobController;
+use crate::sandbox_types::{ContainerHandle, ContainerState, CredentialGrant, PendingPrompt};
+use thinclaw_gateway::web::jobs::{
+    GatewayLocalJobDetailInput, GatewayLocalJobListInput, GatewaySandboxJobDetailInput,
+    GatewaySandboxJobListInput, JobEventInfoInput, JobEventsResponse, JobPromptQueuedResponse,
+    JobPromptRequest, JobRestartResponse, JobStatusActionResponse, JobSummaryCounts,
+    JobTransitionProjection, ProjectFileEntryInput, SandboxContainerState,
+    SandboxJobLookupProjection, SandboxJobSpecProjection, direct_job_scheduler_unavailable_error,
+    elapsed_secs as gateway_elapsed_secs, job_database_unavailable_error, job_event_info,
+    job_events_response, job_list_response, job_not_found_error,
+    job_prompt_queue_unavailable_error, job_prompt_queued_response, job_restart_response,
+    job_summary_response, local_job_detail_response, local_job_info,
+    missing_job_prompt_content_error, parse_job_id, project_cannot_read_directory_error,
+    project_cannot_read_file_error, project_dir_not_found_error, project_file_entry,
+    project_file_not_found_error, project_file_path_required_error, project_file_read_response,
+    project_files_response, project_forbidden_error, project_path_not_found_error,
+    sandbox_job_detail_response, sandbox_job_info, sandbox_job_metadata_unavailable_error,
+    sandbox_unavailable_error,
 };
-use crate::tools::execution_backend::{
-    ExecutionBackendKind, RuntimeDescriptor, local_job_runtime_descriptor,
-    sandbox_job_runtime_descriptor,
-};
-
-#[derive(Debug, Clone)]
-struct ParsedJobMode {
-    resolved: JobMode,
-    unknown_raw: Option<String>,
-}
-
-fn runtime_descriptor_for_mode(parsed: &ParsedJobMode) -> RuntimeDescriptor {
-    let mut descriptor = sandbox_job_runtime_descriptor(parsed.resolved);
-    if parsed.unknown_raw.is_some() {
-        descriptor.runtime_mode = "unknown".to_string();
-    }
-    descriptor
-}
-
-fn normalized_job_mode_for_response(parsed: &ParsedJobMode) -> Option<String> {
-    if parsed.unknown_raw.is_some() {
-        return Some("unknown".to_string());
-    }
-    match parsed.resolved {
-        JobMode::Worker => None,
-        JobMode::ClaudeCode => Some("claude_code".to_string()),
-        JobMode::CodexCode => Some("codex_code".to_string()),
-    }
-}
-
-#[derive(Deserialize)]
-pub(crate) struct FilePathQuery {
-    path: Option<String>,
-}
 
 #[derive(Debug, Clone, Default)]
 struct SandboxJobLookup {
@@ -67,94 +47,46 @@ impl SandboxJobLookup {
             .or_else(|| self.stored.as_ref().map(|job| &job.spec))
     }
 
-    fn status(&self) -> String {
-        if let Some(handle) = self.live.as_ref() {
-            return match handle.state {
-                ContainerState::Creating => "creating".to_string(),
-                ContainerState::Running => "running".to_string(),
-                ContainerState::Stopped => handle
-                    .completion_result
-                    .as_ref()
-                    .map(|result| result.status.clone())
-                    .or_else(|| self.stored.as_ref().map(|job| job.status.clone()))
-                    .unwrap_or_else(|| "completed".to_string()),
-                ContainerState::Failed => handle
-                    .completion_result
-                    .as_ref()
-                    .map(|result| result.status.clone())
-                    .unwrap_or_else(|| "failed".to_string()),
-            };
-        }
-
-        self.stored
-            .as_ref()
-            .map(|job| job.status.clone())
-            .unwrap_or_else(|| "unknown".to_string())
+    fn live_state(&self) -> Option<SandboxContainerState> {
+        self.live.as_ref().map(|handle| match handle.state {
+            ContainerState::Creating => SandboxContainerState::Creating,
+            ContainerState::Running => SandboxContainerState::Running,
+            ContainerState::Stopped => SandboxContainerState::Stopped,
+            ContainerState::Failed => SandboxContainerState::Failed,
+        })
     }
 
-    fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.live
-            .as_ref()
-            .map(|handle| handle.created_at)
-            .or_else(|| self.stored.as_ref().map(|job| job.created_at))
-    }
-
-    fn started_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.stored
-            .as_ref()
-            .and_then(|job| job.started_at)
-            .or_else(|| {
-                self.live.as_ref().and_then(|handle| match handle.state {
-                    ContainerState::Creating => None,
-                    ContainerState::Running | ContainerState::Stopped | ContainerState::Failed => {
-                        Some(handle.created_at)
-                    }
-                })
-            })
-    }
-
-    fn completed_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.stored.as_ref().and_then(|job| job.completed_at)
-    }
-
-    fn failure_reason(&self) -> Option<String> {
-        self.stored
-            .as_ref()
-            .and_then(|job| job.failure_reason.clone())
-            .or_else(|| {
-                self.live
-                    .as_ref()
-                    .and_then(|handle| handle.completion_result.as_ref())
-                    .and_then(|result| result.message.clone())
-            })
-    }
-
-    fn accepts_prompts(&self) -> bool {
-        self.is_interactive()
-            && self
+    fn projection(&self) -> SandboxJobLookupProjection {
+        SandboxJobLookupProjection {
+            live_state: self.live_state(),
+            live_created_at: self.live.as_ref().map(|handle| handle.created_at),
+            live_completion_status: self
                 .live
                 .as_ref()
-                .map(|handle| {
-                    matches!(
-                        handle.state,
-                        ContainerState::Creating | ContainerState::Running
-                    )
-                })
-                .unwrap_or(false)
-    }
-
-    fn is_interactive(&self) -> bool {
-        self.spec().map(|spec| spec.interactive).unwrap_or(false)
-    }
-
-    fn is_cancellable(&self) -> bool {
-        matches!(self.status().as_str(), "creating" | "running")
-    }
-
-    fn project_dir(&self) -> Option<String> {
-        self.spec()
-            .and_then(|spec| spec.project_dir.clone())
-            .filter(|path| !path.trim().is_empty())
+                .and_then(|handle| handle.completion_result.as_ref())
+                .map(|result| result.status.clone()),
+            live_completion_message: self
+                .live
+                .as_ref()
+                .and_then(|handle| handle.completion_result.as_ref())
+                .and_then(|result| result.message.clone()),
+            stored_status: self.stored.as_ref().map(|job| job.status.clone()),
+            stored_created_at: self.stored.as_ref().map(|job| job.created_at),
+            stored_started_at: self.stored.as_ref().and_then(|job| job.started_at),
+            stored_completed_at: self.stored.as_ref().and_then(|job| job.completed_at),
+            stored_failure_reason: self
+                .stored
+                .as_ref()
+                .and_then(|job| job.failure_reason.clone()),
+            spec: self.spec().map(|spec| SandboxJobSpecProjection {
+                title: spec.title.clone(),
+                description: spec.description.clone(),
+                principal_id: spec.principal_id.clone(),
+                project_dir: spec.project_dir.clone(),
+                mode: spec.mode,
+                interactive: spec.interactive,
+            }),
+        }
     }
 }
 
@@ -292,32 +224,6 @@ async fn load_owned_direct_job(
     Ok(job)
 }
 
-fn browse_id_for_project_dir(project_dir: &str, job_id: Uuid) -> String {
-    std::path::Path::new(project_dir)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| job_id.to_string())
-}
-
-fn local_job_elapsed_secs(job: &JobContext) -> Option<u64> {
-    job.started_at.map(|start| {
-        let end = job.completed_at.unwrap_or_else(chrono::Utc::now);
-        (end - start).num_seconds().max(0) as u64
-    })
-}
-
-fn local_job_transition_infos(job: &JobContext) -> Vec<TransitionInfo> {
-    job.transitions
-        .iter()
-        .map(|transition| TransitionInfo {
-            from: transition.from.to_string(),
-            to: transition.to.to_string(),
-            timestamp: transition.timestamp.to_rfc3339(),
-            reason: transition.reason.clone(),
-        })
-        .collect()
-}
-
 pub(crate) async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -326,49 +232,32 @@ pub(crate) async fn jobs_list_handler(
     let sandbox_jobs = load_owned_sandbox_jobs(state.as_ref(), &request_identity).await?;
     let mut jobs = Vec::new();
     for (job_id, job) in direct_jobs {
-        let runtime = local_job_runtime_descriptor();
-        jobs.push(JobInfo {
+        jobs.push(local_job_info(GatewayLocalJobListInput {
             id: job_id,
-            title: job.title.clone(),
+            title: job.title,
             state: job.state.to_string(),
-            user_id: job.user_id.clone(),
-            created_at: job.created_at.to_rfc3339(),
-            started_at: job.started_at.map(|dt| dt.to_rfc3339()),
-            execution_backend: Some(ExecutionBackendKind::LocalHost.as_str().to_string()),
-            runtime_family: Some(runtime.runtime_family),
-            runtime_mode: Some(runtime.runtime_mode),
-            unknown_job_mode_raw: None,
-        });
+            user_id: job.user_id,
+            created_at: job.created_at,
+            started_at: job.started_at,
+        }));
     }
     for (job_id, lookup) in sandbox_jobs {
-        let Some(spec) = lookup.spec() else {
+        let projection = lookup.projection();
+        let Some(spec) = projection.spec.as_ref() else {
             continue;
         };
-        let parsed_mode = ParsedJobMode {
-            resolved: spec.mode,
-            unknown_raw: None,
-        };
-        let runtime = runtime_descriptor_for_mode(&parsed_mode);
-        jobs.push(JobInfo {
+        jobs.push(sandbox_job_info(GatewaySandboxJobListInput {
             id: job_id,
             title: spec.title.clone(),
-            state: normalize_sandbox_ui_state(&lookup.status()).to_string(),
+            state: projection.ui_state(),
             user_id: spec.principal_id.clone(),
-            created_at: lookup
-                .created_at()
-                .unwrap_or_else(chrono::Utc::now)
-                .to_rfc3339(),
-            started_at: lookup.started_at().map(|dt| dt.to_rfc3339()),
-            execution_backend: Some(ExecutionBackendKind::DockerSandbox.as_str().to_string()),
-            runtime_family: Some(runtime.runtime_family),
-            runtime_mode: Some(runtime.runtime_mode),
-            unknown_job_mode_raw: parsed_mode.unknown_raw,
-        });
+            created_at: projection.created_at().unwrap_or_else(chrono::Utc::now),
+            started_at: projection.started_at(),
+            mode: spec.mode,
+        }));
     }
 
-    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-    Ok(Json(JobListResponse { jobs }))
+    Ok(Json(job_list_response(jobs)))
 }
 
 pub(crate) async fn jobs_summary_handler(
@@ -377,43 +266,15 @@ pub(crate) async fn jobs_summary_handler(
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
     let direct_jobs = load_owned_direct_jobs(state.as_ref(), &request_identity).await?;
     let sandbox_jobs = load_owned_sandbox_jobs(state.as_ref(), &request_identity).await?;
-    let mut s = SandboxJobSummary::default();
+    let mut summary = JobSummaryCounts::default();
     for job in direct_jobs.values() {
-        s.total += 1;
-        match job.state {
-            JobState::Pending => s.creating += 1,
-            JobState::InProgress => s.running += 1,
-            JobState::Completed | JobState::Submitted | JobState::Accepted => s.completed += 1,
-            JobState::Failed => s.failed += 1,
-            JobState::Cancelled => s.cancelled += 1,
-            JobState::Stuck => s.stuck += 1,
-            JobState::Abandoned => s.failed += 1,
-        }
+        summary.record_direct_state(job.state.to_string());
     }
     for lookup in sandbox_jobs.values() {
-        s.total += 1;
-        match lookup.status().as_str() {
-            "creating" => s.creating += 1,
-            "running" => s.running += 1,
-            "completed" => s.completed += 1,
-            "failed" => s.failed += 1,
-            "cancelled" => s.cancelled += 1,
-            "interrupted" => s.interrupted += 1,
-            "stuck" => s.stuck += 1,
-            _ => {}
-        }
+        summary.record_sandbox_status(lookup.projection().status());
     }
 
-    Ok(Json(JobSummaryResponse {
-        total: s.total,
-        pending: s.creating,
-        in_progress: s.running,
-        completed: s.completed,
-        failed: s.failed,
-        cancelled: s.cancelled,
-        interrupted: s.interrupted,
-        stuck: s.stuck,
-    }))
+    Ok(Json(job_summary_response(&summary)))
 }
 
 pub(crate) async fn jobs_detail_handler(
@@ -421,117 +282,78 @@ pub(crate) async fn jobs_detail_handler(
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
-    let job_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+    let job_id = parse_job_id(&id)?;
 
     if let Some(job) = load_owned_direct_job(state.as_ref(), &request_identity, job_id).await? {
-        let runtime = local_job_runtime_descriptor();
-        return Ok(Json(JobDetailResponse {
-            id: job_id,
-            title: job.title.clone(),
-            description: job.description.clone(),
-            state: job.state.to_string(),
-            user_id: job.user_id.clone(),
-            created_at: job.created_at.to_rfc3339(),
-            started_at: job.started_at.map(|dt| dt.to_rfc3339()),
-            completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
-            elapsed_secs: local_job_elapsed_secs(&job),
-            project_dir: None,
-            browse_url: None,
-            execution_backend: Some(ExecutionBackendKind::LocalHost.as_str().to_string()),
-            runtime_family: Some(runtime.runtime_family),
-            runtime_mode: Some(runtime.runtime_mode),
-            runtime_capabilities: runtime.runtime_capabilities,
-            network_isolation: runtime.network_isolation,
-            job_mode: None,
-            unknown_job_mode_raw: None,
-            interactive: false,
-            transitions: local_job_transition_infos(&job),
-        }));
+        let transitions = job
+            .transitions
+            .iter()
+            .map(|transition| JobTransitionProjection {
+                from: transition.from.to_string(),
+                to: transition.to.to_string(),
+                timestamp: transition.timestamp,
+                reason: transition.reason.clone(),
+            })
+            .collect();
+        return Ok(Json(local_job_detail_response(
+            GatewayLocalJobDetailInput {
+                id: job_id,
+                title: job.title,
+                description: job.description,
+                state: job.state.to_string(),
+                user_id: job.user_id,
+                created_at: job.created_at,
+                started_at: job.started_at,
+                completed_at: job.completed_at,
+                elapsed_secs: gateway_elapsed_secs(
+                    job.started_at,
+                    job.completed_at,
+                    chrono::Utc::now(),
+                ),
+                transitions,
+            },
+        )));
     }
 
     let Some(lookup) = load_owned_sandbox_job(state.as_ref(), &request_identity, job_id).await?
     else {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        return Err(job_not_found_error());
     };
-    let Some(spec) = lookup.spec() else {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Sandbox job metadata unavailable".to_string(),
-        ));
+    let projection = lookup.projection();
+    let Some(spec) = projection.spec.as_ref() else {
+        return Err(sandbox_job_metadata_unavailable_error());
     };
 
-    let started_at = lookup.started_at();
-    let completed_at = lookup.completed_at();
-    let project_dir = lookup.project_dir();
-    let browse_url = project_dir.as_deref().map(|dir| {
-        let browse_id = browse_id_for_project_dir(dir, job_id);
-        format!("/projects/{}/", browse_id)
-    });
-
-    let elapsed_secs = started_at.map(|start| {
-        let end = completed_at.unwrap_or_else(chrono::Utc::now);
-        (end - start).num_seconds().max(0) as u64
-    });
-
-    let mut transitions = Vec::new();
-    if let Some(started) = started_at {
-        transitions.push(TransitionInfo {
-            from: "creating".to_string(),
-            to: "running".to_string(),
-            timestamp: started.to_rfc3339(),
-            reason: None,
-        });
-    }
-    if let Some(completed) = completed_at {
-        transitions.push(TransitionInfo {
-            from: "running".to_string(),
-            to: lookup.status(),
-            timestamp: completed.to_rfc3339(),
-            reason: lookup.failure_reason(),
-        });
-    }
-
-    let parsed_mode = ParsedJobMode {
-        resolved: spec.mode,
-        unknown_raw: None,
-    };
-    let runtime = runtime_descriptor_for_mode(&parsed_mode);
-
-    Ok(Json(JobDetailResponse {
-        id: job_id,
-        title: spec.title.clone(),
-        description: spec.description.clone(),
-        state: normalize_sandbox_ui_state(&lookup.status()).to_string(),
-        user_id: spec.principal_id.clone(),
-        created_at: lookup
-            .created_at()
-            .unwrap_or_else(chrono::Utc::now)
-            .to_rfc3339(),
-        started_at: started_at.map(|dt| dt.to_rfc3339()),
-        completed_at: completed_at.map(|dt| dt.to_rfc3339()),
-        elapsed_secs,
-        project_dir,
-        browse_url,
-        execution_backend: Some(ExecutionBackendKind::DockerSandbox.as_str().to_string()),
-        runtime_family: Some(runtime.runtime_family),
-        runtime_mode: Some(runtime.runtime_mode.clone()),
-        runtime_capabilities: runtime.runtime_capabilities,
-        network_isolation: runtime.network_isolation,
-        job_mode: normalized_job_mode_for_response(&parsed_mode),
-        unknown_job_mode_raw: parsed_mode.unknown_raw,
-        interactive: lookup.accepts_prompts(),
-        transitions,
-    }))
+    let started_at = projection.started_at();
+    let completed_at = projection.completed_at();
+    let project_dir = projection.project_dir();
+    let elapsed_secs = gateway_elapsed_secs(started_at, completed_at, chrono::Utc::now());
+    Ok(Json(sandbox_job_detail_response(
+        GatewaySandboxJobDetailInput {
+            id: job_id,
+            title: spec.title.clone(),
+            description: spec.description.clone(),
+            state: projection.ui_state(),
+            user_id: spec.principal_id.clone(),
+            created_at: projection.created_at().unwrap_or_else(chrono::Utc::now),
+            started_at,
+            completed_at,
+            elapsed_secs,
+            project_dir,
+            mode: spec.mode,
+            interactive: projection.accepts_prompts(),
+            final_status: projection.status(),
+            failure_reason: projection.failure_reason(),
+        },
+    )))
 }
 
 pub(crate) async fn jobs_cancel_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let job_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+) -> Result<Json<JobStatusActionResponse>, (StatusCode, String)> {
+    let job_id = parse_job_id(&id)?;
 
     if let Some(job) = load_owned_direct_job(state.as_ref(), &request_identity, job_id).await? {
         if !job.state.is_active() {
@@ -579,27 +401,22 @@ pub(crate) async fn jobs_cancel_handler(
         }
 
         if !cancelled {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Direct job scheduler not available".to_string(),
-            ));
+            return Err(direct_job_scheduler_unavailable_error());
         }
 
-        return Ok(Json(serde_json::json!({
-            "status": "cancelled",
-            "job_id": job_id,
-        })));
+        return Ok(Json(JobStatusActionResponse::new("cancelled", job_id)));
     }
 
     let Some(lookup) = load_owned_sandbox_job(state.as_ref(), &request_identity, job_id).await?
     else {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        return Err(job_not_found_error());
     };
 
-    if !lookup.is_cancellable() {
+    let projection = lookup.projection();
+    if !projection.is_cancellable() {
         return Err((
             StatusCode::CONFLICT,
-            format!("Cannot cancel job in state '{}'", lookup.status()),
+            format!("Cannot cancel job in state '{}'", projection.status()),
         ));
     }
 
@@ -613,39 +430,35 @@ pub(crate) async fn jobs_cancel_handler(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(serde_json::json!({
-        "status": "cancelled",
-        "job_id": job_id,
-    })))
+    Ok(Json(JobStatusActionResponse::new("cancelled", job_id)))
 }
 
 pub(crate) async fn jobs_restart_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-    let jm = state.job_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Sandbox not enabled".to_string(),
-    ))?;
+) -> Result<Json<JobRestartResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(job_database_unavailable_error)?;
+    let jm = state
+        .job_manager
+        .as_ref()
+        .ok_or_else(sandbox_unavailable_error)?;
 
-    let old_job_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+    let old_job_id = parse_job_id(&id)?;
 
     let old_job = store
         .get_sandbox_job(old_job_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+        .ok_or_else(job_not_found_error)?;
 
     if old_job.spec.principal_id != request_identity.principal_id
         || old_job.spec.actor_id != request_identity.actor_id
     {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        return Err(job_not_found_error());
     }
 
     if old_job.status != "interrupted" && old_job.status != "failed" {
@@ -698,77 +511,62 @@ pub(crate) async fn jobs_restart_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "status": "restarted",
-        "old_job_id": old_job_id,
-        "new_job_id": new_job_id,
-    })))
+    Ok(Json(job_restart_response(old_job_id, new_job_id)))
 }
 
 pub(crate) async fn jobs_prompt_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let prompt_queue = state.prompt_queue.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Container coding agents not configured".to_string(),
-    ))?;
+    Json(body): Json<JobPromptRequest>,
+) -> Result<Json<JobPromptQueuedResponse>, (StatusCode, String)> {
+    let prompt_queue = state
+        .prompt_queue
+        .as_ref()
+        .ok_or_else(job_prompt_queue_unavailable_error)?;
 
-    let job_id: uuid::Uuid = id
-        .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+    let job_id = parse_job_id(&id)?;
 
     let Some(lookup) = load_owned_sandbox_job(state.as_ref(), &request_identity, job_id).await?
     else {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        return Err(job_not_found_error());
     };
-    if !lookup.is_interactive() {
+    let projection = lookup.projection();
+    if !projection.is_interactive() {
         return Err((
             StatusCode::CONFLICT,
             "This job does not accept follow-up prompts".to_string(),
         ));
     }
-    if !lookup.accepts_prompts() {
+    if !projection.accepts_prompts() {
         return Err((
             StatusCode::CONFLICT,
             "This job is no longer accepting prompts".to_string(),
         ));
     }
 
-    let done = body.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
-    let content = body
-        .get("content")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    if !done && content.as_deref().unwrap_or("").trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Missing 'content' field".to_string(),
-        ));
+    if !body.done && body.content.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(missing_job_prompt_content_error());
     }
-    let prompt = PendingPrompt { content, done };
+    let prompt = PendingPrompt {
+        content: body.content,
+        done: body.done,
+    };
 
     {
         let mut queue = prompt_queue.lock().await;
         queue.entry(job_id).or_default().push_back(prompt);
     }
 
-    Ok(Json(serde_json::json!({
-        "status": "queued",
-        "job_id": job_id.to_string(),
-    })))
+    Ok(Json(job_prompt_queued_response(job_id)))
 }
 
 pub(crate) async fn jobs_events_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let job_id: uuid::Uuid = id
-        .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+) -> Result<Json<JobEventsResponse>, (StatusCode, String)> {
+    let job_id = parse_job_id(&id)?;
 
     let job_exists = load_owned_direct_job(state.as_ref(), &request_identity, job_id)
         .await?
@@ -777,7 +575,7 @@ pub(crate) async fn jobs_events_handler(
             .await?
             .is_some();
     if !job_exists {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        return Err(job_not_found_error());
     }
 
     let events = if let Some(store) = state.store.as_ref() {
@@ -789,22 +587,19 @@ pub(crate) async fn jobs_events_handler(
         Vec::new()
     };
 
-    let events_json: Vec<serde_json::Value> = events
+    let events = events
         .into_iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "event_type": e.event_type,
-                "data": e.data,
-                "created_at": e.created_at.to_rfc3339(),
+        .map(|event| {
+            job_event_info(JobEventInfoInput {
+                id: event.id,
+                event_type: event.event_type,
+                data: event.data,
+                created_at: event.created_at,
             })
         })
         .collect();
 
-    Ok(Json(serde_json::json!({
-        "job_id": job_id.to_string(),
-        "events": events_json,
-    })))
+    Ok(Json(job_events_response(job_id, events)))
 }
 
 pub(crate) async fn job_files_list_handler(
@@ -813,36 +608,36 @@ pub(crate) async fn job_files_list_handler(
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
-    let job_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+    let job_id = parse_job_id(&id)?;
 
     let Some(lookup) = load_owned_sandbox_job(state.as_ref(), &request_identity, job_id).await?
     else {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        return Err(job_not_found_error());
     };
 
     let base = std::path::PathBuf::from(
         lookup
+            .projection()
             .project_dir()
-            .ok_or((StatusCode::NOT_FOUND, "Project dir not found".to_string()))?,
+            .ok_or_else(project_dir_not_found_error)?,
     );
     let rel_path = query.path.as_deref().unwrap_or("");
     let target = base.join(rel_path);
 
     let canonical = target
         .canonicalize()
-        .map_err(|_| (StatusCode::NOT_FOUND, "Path not found".to_string()))?;
+        .map_err(|_| project_path_not_found_error())?;
     let base_canonical = base
         .canonicalize()
-        .map_err(|_| (StatusCode::NOT_FOUND, "Project dir not found".to_string()))?;
+        .map_err(|_| project_dir_not_found_error())?;
     if !canonical.starts_with(&base_canonical) {
-        return Err((StatusCode::FORBIDDEN, "Forbidden".to_string()));
+        return Err(project_forbidden_error());
     }
 
     let mut entries = Vec::new();
     let mut read_dir = tokio::fs::read_dir(&canonical)
         .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Cannot read directory".to_string()))?;
+        .map_err(|_| project_cannot_read_directory_error())?;
 
     while let Ok(Some(entry)) = read_dir.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -856,16 +651,14 @@ pub(crate) async fn job_files_list_handler(
         } else {
             format!("{}/{}", rel_path, name)
         };
-        entries.push(ProjectFileEntry {
+        entries.push(project_file_entry(ProjectFileEntryInput {
             name,
             path: rel,
             is_dir,
-        });
+        }));
     }
 
-    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-
-    Ok(Json(ProjectFilesResponse { entries }))
+    Ok(Json(project_files_response(entries)))
 }
 
 pub(crate) async fn job_files_read_handler(
@@ -874,44 +667,41 @@ pub(crate) async fn job_files_read_handler(
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
-    let job_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+    let job_id = parse_job_id(&id)?;
 
     let Some(lookup) = load_owned_sandbox_job(state.as_ref(), &request_identity, job_id).await?
     else {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        return Err(job_not_found_error());
     };
 
-    let path = query.path.as_deref().ok_or((
-        StatusCode::BAD_REQUEST,
-        "path parameter required".to_string(),
-    ))?;
+    let path = query
+        .path
+        .as_deref()
+        .ok_or_else(project_file_path_required_error)?;
 
     let base = std::path::PathBuf::from(
         lookup
+            .projection()
             .project_dir()
-            .ok_or((StatusCode::NOT_FOUND, "Project dir not found".to_string()))?,
+            .ok_or_else(project_dir_not_found_error)?,
     );
     let file_path = base.join(path);
 
     let canonical = file_path
         .canonicalize()
-        .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
+        .map_err(|_| project_file_not_found_error())?;
     let base_canonical = base
         .canonicalize()
-        .map_err(|_| (StatusCode::NOT_FOUND, "Project dir not found".to_string()))?;
+        .map_err(|_| project_dir_not_found_error())?;
     if !canonical.starts_with(&base_canonical) {
-        return Err((StatusCode::FORBIDDEN, "Forbidden".to_string()));
+        return Err(project_forbidden_error());
     }
 
     let content = tokio::fs::read_to_string(&canonical)
         .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Cannot read file".to_string()))?;
+        .map_err(|_| project_cannot_read_file_error())?;
 
-    Ok(Json(ProjectFileReadResponse {
-        path: path.to_string(),
-        content,
-    }))
+    Ok(Json(project_file_read_response(path, content)))
 }
 
 #[cfg(all(test, feature = "docker-sandbox"))]
@@ -930,8 +720,9 @@ mod tests {
     use crate::sandbox_jobs::SandboxJobSpec;
     use crate::sandbox_types::{
         ContainerHandle as SandboxContainerHandle, ContainerJobConfig, ContainerJobManager,
-        PendingPrompt,
+        JobMode, PendingPrompt,
     };
+    use crate::tools::execution_backend::ExecutionBackendKind;
 
     fn test_identity() -> GatewayRequestIdentity {
         GatewayRequestIdentity::new("user-1", "actor-1", GatewayAuthSource::TrustedProxy, false)
@@ -970,11 +761,13 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            response_cache: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
         })
     }
 
@@ -1124,15 +917,16 @@ mod tests {
             State(state),
             test_identity(),
             Path(job_id.to_string()),
-            Json(serde_json::json!({ "done": true })),
+            Json(JobPromptRequest {
+                content: None,
+                done: true,
+            }),
         )
         .await
         .expect("prompt handler should succeed");
 
-        assert_eq!(
-            response.get("status").and_then(|v| v.as_str()),
-            Some("queued")
-        );
+        assert_eq!(response.status, "queued");
+        assert_eq!(response.job_id, job_id.to_string());
 
         let queued = prompt_queue
             .lock()
@@ -1165,17 +959,8 @@ mod tests {
                 .await
                 .expect("events handler should succeed");
 
-        assert_eq!(
-            response.get("job_id").and_then(|value| value.as_str()),
-            Some(job_id.to_string().as_str())
-        );
-        assert_eq!(
-            response
-                .get("events")
-                .and_then(|value| value.as_array())
-                .map(Vec::len),
-            Some(0)
-        );
+        assert_eq!(response.job_id, job_id.to_string());
+        assert!(response.events.is_empty());
     }
 
     #[tokio::test]
@@ -1256,10 +1041,8 @@ mod tests {
                 .await
                 .expect("cancel should succeed");
 
-        assert_eq!(
-            response.get("status").and_then(|value| value.as_str()),
-            Some("cancelled")
-        );
+        assert_eq!(response.status, "cancelled");
+        assert_eq!(response.job_id, job_id);
 
         let handle: SandboxContainerHandle = job_manager
             .get_handle(job_id)

@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use thinclaw_channels::acp::wire::{JsonRpcError, JsonRpcErrorValue, JsonRpcMessage};
 use thinclaw_channels::acp::{
-    ACP_TERMINAL_OUTPUT_LIMIT, AcpConnectionCore, AcpSessionState, AcpTerminalExecution,
-    PendingPermission, PromptCompletion, acp_cwd_from_metadata, acp_session_id, prompt_to_text,
-    session_config_options, tool_kind,
+    ACP_TERMINAL_OUTPUT_LIMIT, AcpConnectionCore, AcpSessionState, AcpStatusUpdate,
+    AcpTerminalExecution, PendingPermission, PromptCompletion, acp_cwd_from_metadata,
+    acp_session_id, prompt_to_text, session_config_options,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{RwLock, mpsc, oneshot};
@@ -1667,53 +1667,32 @@ async fn status_to_acp_messages(
     session_id: &str,
     status: StatusUpdate,
 ) -> Vec<Value> {
-    match status {
-        StatusUpdate::Thinking(content) => vec![session_update(
-            session_id,
-            thinclaw_channels::acp::agent_thought_chunk(content),
-        )],
-        StatusUpdate::Status(content) => vec![session_update(
-            session_id,
-            thinclaw_channels::acp::tool_call_update(
-                &format!("status_{}", state.next_counter()),
-                "in_progress",
-                Some(&content),
-            ),
-        )],
-        StatusUpdate::Plan { entries } => vec![session_update(
-            session_id,
-            thinclaw_channels::acp::plan_update(entries),
-        )],
+    let projected = match status {
+        StatusUpdate::Thinking(content) => Some(AcpStatusUpdate::Thinking { content }),
+        StatusUpdate::Status(content) => Some(AcpStatusUpdate::Status {
+            tool_call_id: format!("status_{}", state.next_counter()),
+            content,
+        }),
+        StatusUpdate::Plan { entries } => Some(AcpStatusUpdate::Plan { entries }),
         StatusUpdate::Usage {
             input_tokens,
             output_tokens,
             cost_usd,
             model,
-        } => vec![session_update(
-            session_id,
-            thinclaw_channels::acp::usage_update(
-                input_tokens as u64,
-                output_tokens as u64,
-                cost_usd,
-                model,
-            ),
-        )],
-        StatusUpdate::StreamChunk(content) => {
-            vec![session_update(session_id, agent_message_chunk(&content))]
-        }
+        } => Some(AcpStatusUpdate::Usage {
+            input_tokens: input_tokens as u64,
+            output_tokens: output_tokens as u64,
+            cost_usd,
+            model,
+        }),
+        StatusUpdate::StreamChunk(content) => Some(AcpStatusUpdate::StreamChunk { content }),
         StatusUpdate::ToolStarted { name, parameters } => {
             let tool_call_id = state.tool_call_started(session_id, &name).await;
-            vec![session_update(
-                session_id,
-                thinclaw_channels::acp::tool_call(
-                    &tool_call_id,
-                    name.clone(),
-                    tool_kind(&name),
-                    "pending",
-                    parameters.clone().unwrap_or(Value::Null),
-                    Some(json!({ "parameters": parameters })),
-                ),
-            )]
+            Some(AcpStatusUpdate::ToolStarted {
+                tool_call_id,
+                name,
+                parameters,
+            })
         }
         StatusUpdate::ToolCompleted {
             name,
@@ -1721,25 +1700,18 @@ async fn status_to_acp_messages(
             result_preview,
         } => {
             let tool_call_id = state.tool_call_update_id(session_id, &name, true).await;
-            vec![session_update(
-                session_id,
-                thinclaw_channels::acp::tool_call_update(
-                    &tool_call_id,
-                    if success { "completed" } else { "failed" },
-                    result_preview.as_deref(),
-                ),
-            )]
+            Some(AcpStatusUpdate::ToolCompleted {
+                tool_call_id,
+                success,
+                result_preview,
+            })
         }
         StatusUpdate::ToolResult { name, preview, .. } => {
             let tool_call_id = state.tool_call_update_id(session_id, &name, false).await;
-            vec![session_update(
-                session_id,
-                thinclaw_channels::acp::tool_call_update(
-                    &tool_call_id,
-                    "in_progress",
-                    Some(&preview),
-                ),
-            )]
+            Some(AcpStatusUpdate::ToolResult {
+                tool_call_id,
+                preview,
+            })
         }
         StatusUpdate::ApprovalNeeded {
             request_id,
@@ -1748,75 +1720,49 @@ async fn status_to_acp_messages(
             parameters,
         } => {
             let tool_call_id = state.tool_call_started(session_id, &tool_name).await;
-            let client_request_id = state.next_counter().to_string();
+            let client_request_id = state.next_counter();
             state
                 .insert_pending_permission(PendingPermission {
-                    client_request_id: client_request_id.clone(),
+                    client_request_id: client_request_id.to_string(),
                     session_id: session_id.to_string(),
                     approval_request_id: request_id,
                     tool_call_id: tool_call_id.clone(),
                 })
                 .await;
-
-            vec![
-                session_update(
-                    session_id,
-                    thinclaw_channels::acp::tool_call(
-                        &tool_call_id,
-                        format!("Approval needed: {tool_name}"),
-                        tool_kind(&tool_name),
-                        "pending",
-                        parameters.clone(),
-                        Some(json!({
-                            "approvalNeeded": true,
-                            "description": description,
-                            "parameters": parameters
-                        })),
-                    ),
-                ),
-                client_request(
-                    Value::Number(client_request_id.parse::<u64>().unwrap_or_default().into()),
-                    "session/request_permission",
-                    thinclaw_channels::acp::request_permission_params(
-                        session_id,
-                        thinclaw_channels::acp::permission_tool_call_update(
-                            &tool_call_id,
-                            format!("Approval needed: {tool_name}"),
-                            tool_kind(&tool_name),
-                            parameters,
-                            description,
-                        ),
-                    ),
-                ),
-            ]
+            Some(AcpStatusUpdate::ApprovalNeeded {
+                client_request_id: Value::Number(client_request_id.into()),
+                tool_call_id,
+                tool_name,
+                description,
+                parameters,
+            })
         }
         StatusUpdate::AgentMessage { content, .. } => {
             state
                 .append_transcript(session_id, "assistant", content.clone())
                 .await;
-            vec![session_update(session_id, agent_message_chunk(&content))]
+            Some(AcpStatusUpdate::AgentMessage { content })
         }
-        StatusUpdate::Error { message, code } => vec![session_update(
-            session_id,
-            thinclaw_channels::acp::agent_error_message_chunk(&message, code),
-        )],
+        StatusUpdate::Error { message, code } => Some(AcpStatusUpdate::Error { message, code }),
         StatusUpdate::SubagentSpawned {
             agent_id,
             name,
             task,
             ..
-        } => vec![session_update(
-            session_id,
-            thinclaw_channels::acp::subagent_tool_call(agent_id, &name, &task),
-        )],
+        } => Some(AcpStatusUpdate::SubagentSpawned {
+            agent_id,
+            name,
+            task,
+        }),
         StatusUpdate::SubagentProgress {
             agent_id,
             message,
             category,
-        } => vec![session_update(
-            session_id,
-            thinclaw_channels::acp::subagent_progress_update(agent_id, &message, json!(category)),
-        )],
+        } => Some(AcpStatusUpdate::SubagentProgress {
+            agent_id,
+            message,
+            category,
+        }),
         StatusUpdate::SubagentCompleted {
             agent_id,
             success,
@@ -1824,23 +1770,24 @@ async fn status_to_acp_messages(
             duration_ms,
             iterations,
             ..
-        } => vec![session_update(
-            session_id,
-            thinclaw_channels::acp::subagent_completed_update(
-                agent_id,
-                success,
-                &response,
-                duration_ms,
-                iterations as u64,
-            ),
-        )],
+        } => Some(AcpStatusUpdate::SubagentCompleted {
+            agent_id,
+            success,
+            response,
+            duration_ms,
+            iterations: iterations as u64,
+        }),
         StatusUpdate::LifecycleStart { .. }
         | StatusUpdate::LifecycleEnd { .. }
         | StatusUpdate::JobStarted { .. }
         | StatusUpdate::AuthRequired { .. }
         | StatusUpdate::AuthCompleted { .. }
-        | StatusUpdate::CanvasAction(_) => Vec::new(),
-    }
+        | StatusUpdate::CanvasAction(_) => None,
+    };
+
+    projected
+        .map(|status| thinclaw_channels::acp::status_to_acp_messages(session_id, status))
+        .unwrap_or_default()
 }
 
 fn agent_message_chunk(content: &str) -> Value {

@@ -1,10 +1,14 @@
 //! Core tool traits, schemas, and execution metadata.
 
+pub mod builder;
 pub mod canvas;
 pub mod rate_limiter;
 pub mod tool;
 pub mod url_guard;
 
+pub use builder::{
+    BuildLog, BuildPhase, BuildRequirement, BuildResult, BuilderConfig, Language, SoftwareType,
+};
 pub use canvas::{
     ButtonStyle, CanvasAction, FormField, KvItem, NotifyLevel, PanelPosition, UiComponent,
 };

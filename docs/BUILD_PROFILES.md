@@ -39,7 +39,7 @@ as `thinclaw-acp` explicitly when you need them.
 | **edge** | `cargo build --release --no-default-features --features edge --bin thinclaw` | Small machines, VPS, SD cards, libSQL-only installs |
 | **light** (default) | `cargo build --release --bin thinclaw` | CLI agent, local gateway, API-only, cron agents |
 | **full** | `cargo build --release --features full --bin thinclaw` | Production runtime with tunnel, Docker sandbox, browser, Nostr |
-| **desktop** | `cargo build --release --features desktop --bin thinclaw` | Tauri/Scrappy desktop embedding |
+| **desktop** | `cargo build --release --features desktop --bin thinclaw` | ThinClaw Desktop embedding |
 | **custom** | `cargo build --release --features light,browser --bin thinclaw` | Mix and match |
 
 ## Profile Details
@@ -102,7 +102,7 @@ cargo run --features full
 
 ### `desktop`
 
-Minimal footprint for Tauri/Scrappy desktop app embedding. Includes libSQL (no
+Minimal footprint for ThinClaw Desktop embedding. Includes libSQL (no
 PostgreSQL), HTML-to-Markdown, document extraction, and REPL mode.
 
 ```bash

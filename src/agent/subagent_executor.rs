@@ -31,12 +31,19 @@ pub use thinclaw_agent::subagent::{
     SubagentInfo, SubagentResult, SubagentResultMessage, SubagentSpawnRequest, SubagentStatus,
 };
 use thinclaw_agent::subagent::{
-    SubagentSystemPromptSections, extract_subagent_message, filter_tools_for_memory_mode,
-    llm_metadata_from_json, normalize_subagent_progress_category, render_subagent_system_prompt,
-    should_reinject_subagent_result, subagent_learning_completion, subagent_memory_mode_label,
-    subagent_routine_actor, subagent_routine_completion, subagent_skill_mode_label,
-    subagent_status_from_result, subagent_tool_activity_message, subagent_tool_mode_label,
-    subagent_tool_warning_message, with_subagent_thread_metadata,
+    SubagentCompletionOutcome, SubagentConcurrency, SubagentJobMetadataInput,
+    SubagentLearningRiskTier, SubagentSpawnAdmission, SubagentSystemPromptSections,
+    extract_subagent_message, llm_metadata_from_json, normalize_subagent_progress_category,
+    render_subagent_system_prompt, resolve_parent_thread_id, should_cancel_subagent,
+    should_emit_subagent_heartbeat, should_force_subagent_text, should_reinject_subagent_result,
+    subagent_activity_category, subagent_allows_skill, subagent_cancelled_status,
+    subagent_completion_status_response, subagent_default_system_prompt, subagent_execution_grants,
+    subagent_heartbeat_message, subagent_identity_defaults, subagent_iteration_limit_reason,
+    subagent_job_metadata, subagent_learning_completion, subagent_learning_risk_tier,
+    subagent_parent_message, subagent_result_from_completion, subagent_routine_actor,
+    subagent_routine_completion, subagent_spawned_response, subagent_status_after_mark_completed,
+    subagent_status_from_result, subagent_tool_activity_message, subagent_tool_warning_message,
+    subagent_warning_category, with_subagent_thread_metadata,
 };
 pub use thinclaw_types::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
@@ -100,7 +107,10 @@ impl SubagentHeartbeat {
                         last_activity = *activity_rx.borrow();
                     }
                     _ = tokio::time::sleep(sleep_for) => {
-                        if last_activity.elapsed() < SUBAGENT_HEARTBEAT_INTERVAL {
+                        if !should_emit_subagent_heartbeat(
+                            last_activity.elapsed(),
+                            SUBAGENT_HEARTBEAT_INTERVAL,
+                        ) {
                             continue;
                         }
 
@@ -109,8 +119,8 @@ impl SubagentHeartbeat {
                                 &channel_name,
                                 StatusUpdate::SubagentProgress {
                                     agent_id: agent_id.clone(),
-                                    message: format!("sub-agent '{agent_name}' still working"),
-                                    category: "activity".to_string(),
+                                    message: subagent_heartbeat_message(&agent_name),
+                                    category: subagent_activity_category().to_string(),
                                 },
                                 &channel_metadata,
                             )
@@ -307,13 +317,11 @@ impl SubagentExecutor {
                 .values()
                 .filter(|h| h.status == SubagentStatus::Running)
                 .count();
-            if running >= self.config.max_concurrent {
+            let concurrency = SubagentConcurrency::new(running, self.config.max_concurrent);
+            if let SubagentSpawnAdmission::Rejected { reason } = concurrency.admission() {
                 return Err(Error::Tool(crate::error::ToolError::ExecutionFailed {
                     name: "spawn_subagent".to_string(),
-                    reason: format!(
-                        "Maximum concurrent sub-agents reached ({}/{})",
-                        running, self.config.max_concurrent
-                    ),
+                    reason,
                 }));
             }
 
@@ -343,18 +351,10 @@ impl SubagentExecutor {
         let wait_for_completion = request.wait;
 
         // Build system prompt
-        let system_prompt = request.system_prompt.clone().unwrap_or_else(|| {
-            format!(
-                "You are a focused sub-agent named '{}'. \
-                 You have been delegated a specific task by the main agent.\n\n\
-                 Complete the task thoroughly and concisely. \
-                 Return a clear, actionable summary when done.\n\n\
-                 Use `emit_user_message` only for meaningful checkpoints, interim findings, \
-                 blockers, or clarifying questions that help the user stay oriented. \
-                 Do not narrate every routine tool call unless detailed progress is explicitly requested.",
-                request.name
-            )
-        });
+        let system_prompt = request
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| subagent_default_system_prompt(&request.name));
 
         let name = request.name.clone();
         let task = request.task.clone();
@@ -379,11 +379,15 @@ impl SubagentExecutor {
         let tools = self.tools.clone();
         let channels = self.channels.clone();
         let ch_name = channel_name.to_string();
-        let allowed = Some(filter_tools_for_memory_mode(
-            request.allowed_tools.clone().unwrap_or_default(),
+        let grants = subagent_execution_grants(
+            request.allowed_tools.as_deref(),
+            request.allowed_skills.as_deref(),
             &memory_mode,
-        ));
-        let allowed_skills = request.allowed_skills.clone();
+            &tool_mode,
+            &skill_mode,
+        );
+        let allowed = grants.allowed_tools.clone();
+        let allowed_skills = grants.allowed_skills.clone();
         let result_tx = self.result_tx.clone();
         let principal_id = request.principal_id.clone();
         let actor_id = request.actor_id.clone();
@@ -395,26 +399,18 @@ impl SubagentExecutor {
         let skills_config = self.skills_config.clone();
 
         // For the result injection message
-        let parent_thread_id = parent_thread_id
-            .map(str::to_string)
-            .or_else(|| {
-                channel_metadata
-                    .get("thread_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| "agent:main".to_string());
+        let parent_thread_id = resolve_parent_thread_id(parent_thread_id, channel_metadata);
         let ch_meta =
             with_subagent_thread_metadata(channel_metadata, &parent_thread_id, channel_name);
 
         let agent_name = name.clone();
         let agent_task = task.clone();
         let event_task_packet = task_packet.clone();
-        let event_allowed_tools = allowed.clone().unwrap_or_default();
-        let event_allowed_skills = allowed_skills.clone().unwrap_or_default();
-        let event_memory_mode = subagent_memory_mode_label(&memory_mode).to_string();
-        let event_tool_mode = subagent_tool_mode_label(&tool_mode).to_string();
-        let event_skill_mode = subagent_skill_mode_label(&skill_mode).to_string();
+        let event_allowed_tools = grants.event_allowed_tools.clone();
+        let event_allowed_skills = grants.event_allowed_skills.clone();
+        let event_memory_mode = grants.memory_mode_label.to_string();
+        let event_tool_mode = grants.tool_mode_label.to_string();
+        let event_skill_mode = grants.skill_mode_label.to_string();
 
         // Clone store + sse_tx + cost_tracker for routine finalization inside spawned task
         let store_for_task = self.store.clone();
@@ -495,107 +491,52 @@ impl SubagentExecutor {
 
             drop(heartbeat);
 
-            let elapsed = start.elapsed();
+            let duration_ms = start.elapsed().as_millis() as u64;
 
             let subagent_result = match result {
-                Ok(Ok((response, iterations))) => {
-                    let _ = channels
-                        .send_status(
-                            &ch_name,
-                            StatusUpdate::SubagentCompleted {
-                                agent_id: id.to_string(),
-                                name: agent_name.clone(),
-                                success: true,
-                                response: response.clone(),
-                                duration_ms: elapsed.as_millis() as u64,
-                                iterations,
-                                task_packet: event_task_packet.clone(),
-                                allowed_tools: event_allowed_tools.clone(),
-                                allowed_skills: event_allowed_skills.clone(),
-                                memory_mode: event_memory_mode.clone(),
-                                tool_mode: event_tool_mode.clone(),
-                                skill_mode: event_skill_mode.clone(),
-                            },
-                            &ch_meta,
-                        )
-                        .await;
-
-                    SubagentResult {
-                        agent_id: id,
-                        name: agent_name,
+                Ok(Ok((response, iterations))) => subagent_result_from_completion(
+                    id,
+                    agent_name.clone(),
+                    duration_ms,
+                    SubagentCompletionOutcome::Success {
                         response,
                         iterations,
-                        duration_ms: elapsed.as_millis() as u64,
-                        success: true,
-                        error: None,
-                    }
-                }
-                Ok(Err(e)) => {
-                    let err_msg = e.to_string();
-                    let _ = channels
-                        .send_status(
-                            &ch_name,
-                            StatusUpdate::SubagentCompleted {
-                                agent_id: id.to_string(),
-                                name: agent_name.clone(),
-                                success: false,
-                                response: err_msg.clone(),
-                                duration_ms: elapsed.as_millis() as u64,
-                                iterations: 0,
-                                task_packet: event_task_packet.clone(),
-                                allowed_tools: event_allowed_tools.clone(),
-                                allowed_skills: event_allowed_skills.clone(),
-                                memory_mode: event_memory_mode.clone(),
-                                tool_mode: event_tool_mode.clone(),
-                                skill_mode: event_skill_mode.clone(),
-                            },
-                            &ch_meta,
-                        )
-                        .await;
-
-                    SubagentResult {
-                        agent_id: id,
-                        name: agent_name,
-                        response: String::new(),
-                        iterations: 0,
-                        duration_ms: elapsed.as_millis() as u64,
-                        success: false,
-                        error: Some(err_msg),
-                    }
-                }
-                Err(_timeout) => {
-                    let _ = channels
-                        .send_status(
-                            &ch_name,
-                            StatusUpdate::SubagentCompleted {
-                                agent_id: id.to_string(),
-                                name: agent_name.clone(),
-                                success: false,
-                                response: "Timed out".to_string(),
-                                duration_ms: elapsed.as_millis() as u64,
-                                iterations: 0,
-                                task_packet: event_task_packet.clone(),
-                                allowed_tools: event_allowed_tools.clone(),
-                                allowed_skills: event_allowed_skills.clone(),
-                                memory_mode: event_memory_mode.clone(),
-                                tool_mode: event_tool_mode.clone(),
-                                skill_mode: event_skill_mode.clone(),
-                            },
-                            &ch_meta,
-                        )
-                        .await;
-
-                    SubagentResult {
-                        agent_id: id,
-                        name: agent_name,
-                        response: String::new(),
-                        iterations: 0,
-                        duration_ms: elapsed.as_millis() as u64,
-                        success: false,
-                        error: Some("Timed out".to_string()),
-                    }
-                }
+                    },
+                ),
+                Ok(Err(e)) => subagent_result_from_completion(
+                    id,
+                    agent_name.clone(),
+                    duration_ms,
+                    SubagentCompletionOutcome::Error(e.to_string()),
+                ),
+                Err(_timeout) => subagent_result_from_completion(
+                    id,
+                    agent_name.clone(),
+                    duration_ms,
+                    SubagentCompletionOutcome::TimedOut,
+                ),
             };
+
+            let _ = channels
+                .send_status(
+                    &ch_name,
+                    StatusUpdate::SubagentCompleted {
+                        agent_id: id.to_string(),
+                        name: subagent_result.name.clone(),
+                        success: subagent_result.success,
+                        response: subagent_completion_status_response(&subagent_result),
+                        duration_ms,
+                        iterations: subagent_result.iterations,
+                        task_packet: event_task_packet.clone(),
+                        allowed_tools: event_allowed_tools.clone(),
+                        allowed_skills: event_allowed_skills.clone(),
+                        memory_mode: event_memory_mode.clone(),
+                        tool_mode: event_tool_mode.clone(),
+                        skill_mode: event_skill_mode.clone(),
+                    },
+                    &ch_meta,
+                )
+                .await;
 
             // Persist a learning event for sub-agent completions so the
             // orchestrator can learn from delegated task outcomes.
@@ -607,14 +548,14 @@ impl SubagentExecutor {
                     .or_else(|| actor_id.clone());
 
                 let completion = subagent_learning_completion(&subagent_result);
+                let risk_tier = match subagent_learning_risk_tier(&subagent_result) {
+                    SubagentLearningRiskTier::Low => RiskTier::Low,
+                    SubagentLearningRiskTier::Medium => RiskTier::Medium,
+                };
                 let event = RuntimeLearningEvent::new(
                     "subagent_executor::completion",
                     ImprovementClass::Skill,
-                    if subagent_result.success {
-                        RiskTier::Low
-                    } else {
-                        RiskTier::Medium
-                    },
+                    risk_tier,
                     completion.summary,
                 )
                 .with_target("subagent")
@@ -823,10 +764,7 @@ impl SubagentExecutor {
             Ok(SubagentResult {
                 agent_id: id,
                 name,
-                response: format!(
-                    "Sub-agent spawned (id: {}). Results will arrive when complete.",
-                    id
-                ),
+                response: subagent_spawned_response(id),
                 iterations: 0,
                 duration_ms: 0,
                 success: true,
@@ -850,10 +788,10 @@ impl SubagentExecutor {
     pub async fn cancel(&self, agent_id: Uuid) -> bool {
         let mut active = self.active.write().await;
         if let Some(handle) = active.get_mut(&agent_id)
-            && handle.status == SubagentStatus::Running
+            && should_cancel_subagent(&handle.status)
         {
             let _ = handle.cancel_tx.send(true);
-            handle.status = SubagentStatus::Cancelled;
+            handle.status = subagent_cancelled_status();
             // Abort the task if we have a handle
             if let Some(jh) = handle.join_handle.take() {
                 jh.abort();
@@ -899,13 +837,7 @@ impl SubagentExecutor {
     pub async fn mark_completed(&self, agent_id: Uuid, success: bool, error: Option<String>) {
         let mut active = self.active.write().await;
         if let Some(h) = active.get_mut(&agent_id) {
-            h.status = if success {
-                SubagentStatus::Completed
-            } else if error.as_deref() == Some("Timed out") {
-                SubagentStatus::TimedOut
-            } else {
-                SubagentStatus::Failed(error.unwrap_or_default())
-            };
+            h.status = subagent_status_after_mark_completed(success, error.as_deref());
         }
     }
 }
@@ -948,47 +880,20 @@ async fn run_subagent_loop(
 ) -> Result<(String, usize), Error> {
     let mut context_messages = vec![ChatMessage::user(task.to_string())];
 
-    let principal_id = principal_id.unwrap_or("subagent");
-    let actor_id = actor_id.unwrap_or(principal_id);
+    let identity_defaults = subagent_identity_defaults(principal_id, actor_id);
+    let principal_id = identity_defaults.principal_id;
+    let actor_id = identity_defaults.actor_id;
     let mut job_ctx =
         JobContext::with_identity(principal_id, actor_id, "subagent", "Sub-agent task");
-    job_ctx.metadata = channel_metadata.clone();
-    if !job_ctx.metadata.is_object() {
-        job_ctx.metadata = serde_json::json!({});
-    }
-    if let Some(metadata) = job_ctx.metadata.as_object_mut() {
-        metadata
-            .entry("conversation_kind".to_string())
-            .or_insert_with(|| serde_json::json!("direct"));
-        metadata
-            .entry("principal_id".to_string())
-            .or_insert_with(|| serde_json::json!(principal_id));
-        metadata
-            .entry("actor_id".to_string())
-            .or_insert_with(|| serde_json::json!(actor_id));
-        if let Some(agent_workspace_id) = agent_workspace_id {
-            metadata.insert(
-                "agent_workspace_id".to_string(),
-                serde_json::json!(agent_workspace_id.to_string()),
-            );
-        }
-        if let Some(allowed_tools) = allowed_tools {
-            metadata.insert(
-                "allowed_tools".to_string(),
-                serde_json::json!(allowed_tools),
-            );
-        }
-        if let Some(allowed_skills) = allowed_skills {
-            metadata.insert(
-                "allowed_skills".to_string(),
-                serde_json::json!(allowed_skills),
-            );
-        }
-        metadata.insert(
-            "tool_profile".to_string(),
-            serde_json::json!(tool_profile.as_str()),
-        );
-    }
+    job_ctx.metadata = subagent_job_metadata(SubagentJobMetadataInput {
+        channel_metadata,
+        principal_id,
+        actor_id,
+        agent_workspace_id,
+        allowed_tools,
+        allowed_skills,
+        tool_profile,
+    });
 
     let provider_tool_extensions = if let Some(store) = store {
         let orchestrator =
@@ -1049,17 +954,14 @@ async fn run_subagent_loop(
 
         // Check for messages from the parent (non-blocking)
         while let Ok(parent_msg) = parent_rx.try_recv() {
-            context_messages.push(ChatMessage::user(format!(
-                "[Message from main agent]: {}",
-                parent_msg
-            )));
+            context_messages.push(ChatMessage::user(subagent_parent_message(&parent_msg)));
         }
 
         // Force text on last usable iteration so the model produces a text
         // response before the fallback error at the end of the loop (Bug 39 fix).
         // Use max_iterations - 2 because the loop is 0-indexed and the fallback
         // fires AFTER the loop completes.
-        let force_text = iteration >= max_iterations.saturating_sub(2);
+        let force_text = should_force_subagent_text(iteration, max_iterations);
 
         let ctx = ReasoningContext {
             messages: context_messages.clone(),
@@ -1175,7 +1077,7 @@ async fn run_subagent_loop(
                             StatusUpdate::SubagentProgress {
                                 agent_id: agent_id.to_string(),
                                 message: subagent_tool_activity_message(&tc.name, &tc.arguments),
-                                category: "activity".to_string(),
+                                category: subagent_activity_category().to_string(),
                             },
                             channel_metadata,
                         )
@@ -1210,7 +1112,7 @@ async fn run_subagent_loop(
                                     StatusUpdate::SubagentProgress {
                                         agent_id: agent_id.to_string(),
                                         message: subagent_tool_warning_message(&tc.name, &warning),
-                                        category: "warning".to_string(),
+                                        category: subagent_warning_category().to_string(),
                                     },
                                     channel_metadata,
                                 )
@@ -1231,7 +1133,7 @@ async fn run_subagent_loop(
                                     StatusUpdate::SubagentProgress {
                                         agent_id: agent_id.to_string(),
                                         message: subagent_tool_warning_message(&tc.name, &warning),
-                                        category: "warning".to_string(),
+                                        category: subagent_warning_category().to_string(),
                                     },
                                     channel_metadata,
                                 )
@@ -1259,7 +1161,7 @@ async fn run_subagent_loop(
                                             message: subagent_tool_warning_message(
                                                 &tc.name, &warning,
                                             ),
-                                            category: "warning".to_string(),
+                                            category: subagent_warning_category().to_string(),
                                         },
                                         channel_metadata,
                                     )
@@ -1277,7 +1179,7 @@ async fn run_subagent_loop(
 
     Err(Error::Tool(crate::error::ToolError::ExecutionFailed {
         name: "subagent".to_string(),
-        reason: format!("Exceeded maximum iterations ({})", max_iterations),
+        reason: subagent_iteration_limit_reason(max_iterations),
     }))
 }
 
@@ -1391,20 +1293,10 @@ async fn build_subagent_skill_context(
 ) -> Option<String> {
     let skill_registry = skill_registry?;
     let guard = skill_registry.read().await;
-    let allowed_names = allowed_skills.map(|skills| {
-        skills
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::HashSet<_>>()
-    });
     let available_skills: Vec<LoadedSkill> = guard
         .skills()
         .iter()
-        .filter(|skill| {
-            allowed_names
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(skill.manifest.name.as_str()))
-        })
+        .filter(|skill| subagent_allows_skill(allowed_skills, skill.manifest.name.as_str()))
         .cloned()
         .collect();
     if available_skills.is_empty() {

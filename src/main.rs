@@ -18,8 +18,8 @@ use thinclaw::{
     app::{
         AppBuilder, AppBuilderFlags, LocalRuntimeChannel, NativeChannelActivationInput,
         NativeChannelActivationPlan, PeriodicPersistencePlan, QuietStartupSpinner,
-        RuntimeCommandIntent, RuntimeEntryMode, RuntimeEntrypointPlan, RuntimeShutdownAction,
-        RuntimeShutdownPlan, init_cli_tracing, relaunch_current_process,
+        RuntimeCommandIntent, RuntimeEntryMode, RuntimeEntrypointPlan, RuntimeEnvBootstrapPlan,
+        RuntimeShutdownAction, RuntimeShutdownPlan, init_cli_tracing, relaunch_current_process,
         restart_is_managed_by_service, run_async_entrypoint, should_show_quiet_startup_spinner,
     },
     channels::{
@@ -73,6 +73,15 @@ fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {
     }
 }
 
+fn execute_env_bootstrap_plan(plan: RuntimeEnvBootstrapPlan) {
+    if plan.load_dotenv {
+        let _ = dotenvy::dotenv();
+    }
+    if plan.load_thinclaw_env {
+        thinclaw::bootstrap::load_thinclaw_env();
+    }
+}
+
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 fn runtime_entry_mode_from_ui_mode(ui_mode: UiMode) -> RuntimeEntryMode {
     match ui_mode {
@@ -116,6 +125,7 @@ fn setup_config_for_startup_onboarding(runtime_entry_mode: RuntimeEntryMode) -> 
 async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let command_intent = runtime_command_intent(cli.command.as_ref());
+    let env_bootstrap_plan = RuntimeEnvBootstrapPlan::for_command(command_intent);
     let mut runtime_entry_mode = command_intent.initial_entry_mode();
 
     // Handle non-agent commands first (they don't need full setup)
@@ -157,56 +167,47 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Doctor { profile }) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return thinclaw::cli::run_doctor_command((*profile).into()).await;
         }
         Some(Command::Status { profile }) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return run_status_command((*profile).into()).await;
         }
         Some(Command::Reset(reset_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return run_reset_command(reset_cmd.clone()).await;
         }
         Some(Command::Secrets(secrets_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return run_secrets_command(secrets_cmd.clone()).await;
         }
         Some(Command::Cron(cron_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return thinclaw::cli::run_cron_command(cron_cmd.clone()).await;
         }
         Some(Command::Experiments(experiments_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return thinclaw::cli::run_experiments_command(experiments_cmd.clone()).await;
         }
         Some(Command::Gateway(gw_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return run_gateway_command(gw_cmd.clone()).await;
         }
         Some(Command::Identity(identity_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return run_identity_command(identity_cmd.clone()).await;
         }
         Some(Command::Channels(ch_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return run_channels_command(ch_cmd.clone()).await;
         }
         Some(Command::Comfy(comfy_cmd)) => {
@@ -215,14 +216,12 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Message(msg_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return thinclaw::cli::run_message_command(msg_cmd.clone()).await;
         }
         Some(Command::Models(model_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return thinclaw::cli::run_model_command(model_cmd.clone()).await;
         }
         Some(Command::Completion(completion)) => {
@@ -264,8 +263,7 @@ async fn async_main() -> anyhow::Result<()> {
             ui,
             profile,
         }) => {
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -293,8 +291,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Agents(agent_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             // In standalone CLI mode, create a fresh router.
             // Runtime agent routing state is in-memory only.
             let router = thinclaw::agent::AgentRouter::new();
@@ -303,8 +300,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Sessions(session_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             // In standalone CLI mode, create a fresh session manager.
             // Runtime session state is in-memory only.
             let mgr = std::sync::Arc::new(thinclaw::agent::SessionManager::new());
@@ -313,8 +309,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Logs(log_cmd)) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             return thinclaw::cli::run_log_command(log_cmd.clone()).await;
         }
         Some(Command::Browser(browser_cmd)) => {
@@ -342,8 +337,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::AutonomyShadowCanary { manifest }) => {
             init_cli_tracing(cli.debug);
-            let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_thinclaw_env();
+            execute_env_bootstrap_plan(env_bootstrap_plan);
             let report = thinclaw::desktop_autonomy::run_shadow_canary_entrypoint(manifest)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -367,8 +361,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Load .env files early so DATABASE_URL (and any other vars) are
     // available to all subsequent env-based config resolution.
-    let _ = dotenvy::dotenv();
-    thinclaw::bootstrap::load_thinclaw_env();
+    execute_env_bootstrap_plan(env_bootstrap_plan);
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -1223,6 +1216,8 @@ async fn async_main() -> anyhow::Result<()> {
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         gw = gw.with_cost_tracker(Arc::clone(&components.cost_tracker));
+        gw = gw.with_response_cache(Arc::clone(&components.response_cache));
+        gw = gw.with_hooks(Arc::clone(&components.hooks));
         if let Some(ref ss) = components.secrets_store {
             gw = gw.with_secrets_store(Arc::clone(ss));
         }

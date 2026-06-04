@@ -20,19 +20,14 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 #[cfg(feature = "browser")]
 use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
 use crate::tools::builtin::{
-    CancelJobTool, ComfyCheckDepsTool, ComfyHealthTool, ComfyManageTool, ComfyRunWorkflowTool,
-    CreateJobTool, DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort,
-    ExternalMemoryExportTool, ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool,
-    ExternalMemorySetupTool, ExternalMemoryStatusTool, FileToolHost, ImageGenerateTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, LearningFeedbackTool, LearningHistoryTool,
-    LearningOutcomesTool, LearningProposalReviewTool, LearningStatusTool, ListJobsTool,
-    MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    PromptManageTool, PromptQueue, RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool,
-    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, SkillAuditTool,
-    SkillCheckTool, SkillInspectTool, SkillInstallTool, SkillListTool, SkillManageTool,
-    SkillPromoteTrustTool, SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
-    SkillSearchTool, SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool,
-    SkillTapRemoveTool, SkillUpdateTool,
+    DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort, ExternalMemoryExportTool,
+    ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool, ExternalMemorySetupTool,
+    ExternalMemoryStatusTool, FileToolHost, PromptQueue, RootFileToolHost,
+    RootProcessBackendAdapter, SessionSearchTool, SharedModelOverride, SharedProcessRegistry,
+    SharedTodoStore, ShellTool, root_comfyui_tool_host, root_job_tool_host,
+    root_learning_tool_host, root_memory_tool_host, root_skill_install_tool_host,
+    root_skill_publish_tool_host, root_skill_search_tool_host, root_skill_tap_tool_host,
+    root_skill_tool_host,
 };
 use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::rate_limiter::RateLimiter;
@@ -44,6 +39,19 @@ use crate::tools::wasm::{
 };
 use crate::tools::wasm::{SharedCredentialRegistry, WasmToolRuntime};
 use crate::workspace::Workspace;
+use thinclaw_tools::builtin::{
+    CancelJobHostTool, ComfyCheckDepsHostTool, ComfyHealthHostTool, ComfyManageHostTool,
+    ComfyRunWorkflowHostTool, CreateJobHostTool, ImageGenerateHostTool, JobEventsHostTool,
+    JobPromptHostTool, JobStatusHostTool, LearningFeedbackHostTool, LearningHistoryHostTool,
+    LearningOutcomesHostTool, LearningProposalReviewHostTool, LearningStatusHostTool,
+    ListJobsHostTool, MemoryDeleteHostTool, MemoryReadHostTool, MemorySearchHostTool,
+    MemoryTreeHostTool, MemoryWriteHostTool, PromptManageHostTool, SkillAuditHostTool,
+    SkillCheckHostTool, SkillInspectHostTool, SkillInstallHostTool, SkillListHostTool,
+    SkillManageHostTool, SkillPromoteTrustHostTool, SkillPublishHostTool, SkillReadHostTool,
+    SkillReloadHostTool, SkillRemoveHostTool, SkillSearchHostTool, SkillSnapshotHostTool,
+    SkillTapAddHostTool, SkillTapListHostTool, SkillTapRefreshHostTool, SkillTapRemoveHostTool,
+    SkillUpdateHostTool,
+};
 
 #[cfg(test)]
 const HIDDEN_BY_DEFAULT_TOOL_NAMES: &[&str] = &[
@@ -445,7 +453,10 @@ impl ToolRegistry {
                 None,
             ))
         });
-        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
+        let memory_host = root_memory_tool_host(Arc::clone(&workspace), orchestrator, sse_sender);
+        self.register_sync(Arc::new(MemorySearchHostTool::new(Arc::clone(
+            &memory_host,
+        ))));
         if let Some(db) = db {
             let mut session_search = SessionSearchTool::new(db);
             if let Some(cheap) = cheap_llm {
@@ -454,17 +465,10 @@ impl ToolRegistry {
             self.register_sync(Arc::new(session_search));
             memory_tool_count += 1;
         }
-        self.register_sync(Arc::new(MemoryWriteTool::new(
-            Arc::clone(&workspace),
-            orchestrator,
-        )));
-        self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryTreeTool::new(Arc::clone(&workspace))));
-        let mut delete_tool = MemoryDeleteTool::new(workspace);
-        if let Some(tx) = sse_sender {
-            delete_tool = delete_tool.with_sse_sender(tx);
-        }
-        self.register_sync(Arc::new(delete_tool));
+        self.register_sync(Arc::new(MemoryWriteHostTool::new(Arc::clone(&memory_host))));
+        self.register_sync(Arc::new(MemoryReadHostTool::new(Arc::clone(&memory_host))));
+        self.register_sync(Arc::new(MemoryTreeHostTool::new(Arc::clone(&memory_host))));
+        self.register_sync(Arc::new(MemoryDeleteHostTool::new(memory_host)));
 
         tracing::info!("Registered {} memory tools", memory_tool_count);
     }
@@ -489,57 +493,51 @@ impl ToolRegistry {
         sandbox_children: Option<Arc<SandboxChildRegistry>>,
         secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     ) {
-        let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
-        if let Some(scheduler) = scheduler.clone() {
-            create_tool = create_tool.with_scheduler(scheduler);
-        }
-        if let Some(jm) = job_manager.clone() {
-            create_tool = create_tool.with_sandbox(jm, store.clone());
-        }
-        if let (Some(etx), Some(itx)) = (job_event_tx, inject_tx) {
-            create_tool = create_tool.with_monitor_deps(etx, itx, prompt_queue.clone());
-        }
-        if let Some(children) = sandbox_children {
-            create_tool = create_tool.with_sandbox_children(children);
-        }
-        if let Some(secrets) = secrets_store {
-            create_tool = create_tool.with_secrets(secrets);
-        }
-        self.register_sync(Arc::new(create_tool));
-        self.register_sync(Arc::new(
-            ListJobsTool::new(Arc::clone(&context_manager))
-                .with_sandbox(job_manager.clone(), store.clone()),
-        ));
-        self.register_sync(Arc::new(
-            JobStatusTool::new(Arc::clone(&context_manager))
-                .with_sandbox(job_manager.clone(), store.clone()),
-        ));
-        let mut cancel_tool = CancelJobTool::new(Arc::clone(&context_manager));
-        if let Some(scheduler) = scheduler {
-            cancel_tool = cancel_tool.with_scheduler(scheduler);
-        }
-        cancel_tool = cancel_tool.with_sandbox(job_manager.clone(), store.clone());
-        self.register_sync(Arc::new(cancel_tool));
+        let sandbox_enabled = job_manager.is_some();
+        let claude_code_enabled = job_manager
+            .as_ref()
+            .map(|manager| manager.claude_code_enabled())
+            .unwrap_or(false);
+        let codex_code_enabled = job_manager
+            .as_ref()
+            .map(|manager| manager.codex_code_enabled())
+            .unwrap_or(false);
+        let has_store = store.is_some();
+        let has_prompt_queue = prompt_queue.is_some();
+        let job_host = root_job_tool_host(
+            Arc::clone(&context_manager),
+            job_manager,
+            store,
+            scheduler,
+            job_event_tx,
+            inject_tx,
+            prompt_queue,
+            sandbox_children,
+            secrets_store,
+        );
+
+        self.register_sync(Arc::new(CreateJobHostTool::new(
+            Arc::clone(&job_host),
+            sandbox_enabled,
+            claude_code_enabled,
+            codex_code_enabled,
+        )));
+        self.register_sync(Arc::new(ListJobsHostTool::new(Arc::clone(&job_host))));
+        self.register_sync(Arc::new(JobStatusHostTool::new(Arc::clone(&job_host))));
+        self.register_sync(Arc::new(CancelJobHostTool::new(Arc::clone(&job_host))));
 
         // Base tools: create, list, status, cancel
         let mut job_tool_count = 4;
 
         // Register event reader if store is available
-        if let Some(store) = store.clone() {
-            self.register_sync(Arc::new(JobEventsTool::new(
-                store.clone(),
-                Arc::clone(&context_manager),
-                job_manager.clone(),
-            )));
+        if has_store {
+            self.register_sync(Arc::new(JobEventsHostTool::new(Arc::clone(&job_host))));
             job_tool_count += 1;
         }
 
         // Register prompt tool if queue is available
-        if let Some(pq) = prompt_queue {
-            self.register_sync(Arc::new(
-                JobPromptTool::new(pq, Arc::clone(&context_manager))
-                    .with_sandbox(job_manager.clone(), store.clone()),
-            ));
+        if has_prompt_queue {
+            self.register_sync(Arc::new(JobPromptHostTool::new(job_host)));
             job_tool_count += 1;
         }
 
@@ -566,60 +564,77 @@ impl ToolRegistry {
         quarantine: Arc<crate::skills::quarantine::QuarantineManager>,
         store: Option<Arc<dyn Database>>,
     ) {
-        self.register_sync(Arc::new(SkillInspectTool::new(
+        self.register_sync(Arc::new(SkillInspectHostTool::new(root_skill_tool_host(
             Arc::clone(&registry),
             Arc::clone(&quarantine),
+        ))));
+        self.register_sync(Arc::new(SkillReadHostTool::new(root_skill_tool_host(
+            Arc::clone(&registry),
+            Arc::clone(&quarantine),
+        ))));
+        self.register_sync(Arc::new(SkillListHostTool::new(root_skill_tool_host(
+            Arc::clone(&registry),
+            Arc::clone(&quarantine),
+        ))));
+        self.register_sync(Arc::new(SkillSearchHostTool::new(
+            root_skill_search_tool_host(
+                Arc::clone(&registry),
+                Arc::clone(&catalog),
+                remote_hub.clone(),
+            ),
         )));
-        self.register_sync(Arc::new(SkillReadTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(SkillSearchTool::new(
+        self.register_sync(Arc::new(SkillCheckHostTool::new(root_skill_tool_host(
+            Arc::clone(&registry),
+            Arc::clone(&quarantine),
+        ))));
+        let skill_install_host = root_skill_install_tool_host(
             Arc::clone(&registry),
             Arc::clone(&catalog),
             remote_hub.clone(),
-        )));
-        self.register_sync(Arc::new(SkillCheckTool::new(Arc::clone(&quarantine))));
-        self.register_sync(Arc::new(SkillInstallTool::new(
-            Arc::clone(&registry),
-            Arc::clone(&catalog),
-            remote_hub.clone(),
             Arc::clone(&quarantine),
-        )));
-        self.register_sync(Arc::new(SkillUpdateTool::new(
-            Arc::clone(&registry),
-            Arc::clone(&catalog),
-            remote_hub.clone(),
-            Arc::clone(&quarantine),
-        )));
-        self.register_sync(Arc::new(SkillAuditTool::new(
+        );
+        self.register_sync(Arc::new(SkillInstallHostTool::new(Arc::clone(
+            &skill_install_host,
+        ))));
+        self.register_sync(Arc::new(SkillUpdateHostTool::new(skill_install_host)));
+        self.register_sync(Arc::new(SkillAuditHostTool::new(root_skill_tool_host(
             Arc::clone(&registry),
             Arc::clone(&quarantine),
-        )));
-        self.register_sync(Arc::new(SkillSnapshotTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(SkillPublishTool::new(
+        ))));
+        self.register_sync(Arc::new(SkillSnapshotHostTool::new(root_skill_tool_host(
             Arc::clone(&registry),
-            remote_hub.clone(),
             Arc::clone(&quarantine),
-            store.clone(),
+        ))));
+        self.register_sync(Arc::new(SkillPublishHostTool::new(
+            root_skill_publish_tool_host(
+                Arc::clone(&registry),
+                remote_hub.clone(),
+                Arc::clone(&quarantine),
+                store.clone(),
+            ),
         )));
-        self.register_sync(Arc::new(SkillTapListTool::new(
-            store.clone(),
-            remote_hub.clone(),
+        let skill_tap_host = root_skill_tap_tool_host(store, remote_hub.clone());
+        self.register_sync(Arc::new(SkillTapListHostTool::new(Arc::clone(
+            &skill_tap_host,
+        ))));
+        self.register_sync(Arc::new(SkillTapAddHostTool::new(Arc::clone(
+            &skill_tap_host,
+        ))));
+        self.register_sync(Arc::new(SkillTapRemoveHostTool::new(Arc::clone(
+            &skill_tap_host,
+        ))));
+        self.register_sync(Arc::new(SkillTapRefreshHostTool::new(skill_tap_host)));
+        self.register_sync(Arc::new(SkillRemoveHostTool::new(root_skill_tool_host(
+            Arc::clone(&registry),
+            Arc::clone(&quarantine),
+        ))));
+        self.register_sync(Arc::new(SkillReloadHostTool::new(root_skill_tool_host(
+            Arc::clone(&registry),
+            Arc::clone(&quarantine),
+        ))));
+        self.register_sync(Arc::new(SkillPromoteTrustHostTool::new(
+            root_skill_tool_host(registry, quarantine),
         )));
-        self.register_sync(Arc::new(SkillTapAddTool::new(
-            store.clone(),
-            remote_hub.clone(),
-        )));
-        self.register_sync(Arc::new(SkillTapRemoveTool::new(
-            store.clone(),
-            remote_hub.clone(),
-        )));
-        self.register_sync(Arc::new(SkillTapRefreshTool::new(
-            store,
-            remote_hub.clone(),
-        )));
-        self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(SkillReloadTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(SkillPromoteTrustTool::new(registry)));
         tracing::info!("Registered 17 skill management tools");
     }
 
@@ -635,33 +650,39 @@ impl ToolRegistry {
             workspace.clone(),
             skill_registry.clone(),
         ));
-        let mut count = 0;
-
-        if let Some(workspace) = workspace {
-            self.register_sync(Arc::new(PromptManageTool::new(
-                Arc::clone(&orchestrator),
-                Arc::clone(&store),
-                workspace,
-            )));
-            count += 1;
-        }
-
-        if let Some(skill_registry) = skill_registry {
-            self.register_sync(Arc::new(SkillManageTool::new(
-                Arc::clone(&store),
-                skill_registry,
-            )));
-            count += 1;
-        }
-
-        self.register_sync(Arc::new(LearningStatusTool::new(
+        let learning_host = root_learning_tool_host(
             Arc::clone(&orchestrator),
             Arc::clone(&store),
-        )));
-        self.register_sync(Arc::new(LearningOutcomesTool::new(Arc::clone(&store))));
-        self.register_sync(Arc::new(LearningHistoryTool::new(Arc::clone(&store))));
-        self.register_sync(Arc::new(LearningFeedbackTool::new(Arc::clone(
-            &orchestrator,
+            workspace.clone(),
+            skill_registry.clone(),
+        );
+        let mut count = 0;
+
+        if workspace.is_some() {
+            self.register_sync(Arc::new(PromptManageHostTool::new(Arc::clone(
+                &learning_host,
+            ))));
+            count += 1;
+        }
+
+        if skill_registry.is_some() {
+            self.register_sync(Arc::new(SkillManageHostTool::new(Arc::clone(
+                &learning_host,
+            ))));
+            count += 1;
+        }
+
+        self.register_sync(Arc::new(LearningStatusHostTool::new(Arc::clone(
+            &learning_host,
+        ))));
+        self.register_sync(Arc::new(LearningOutcomesHostTool::new(Arc::clone(
+            &learning_host,
+        ))));
+        self.register_sync(Arc::new(LearningHistoryHostTool::new(Arc::clone(
+            &learning_host,
+        ))));
+        self.register_sync(Arc::new(LearningFeedbackHostTool::new(Arc::clone(
+            &learning_host,
         ))));
         let external_memory_port: Arc<dyn ExternalMemoryPort> = orchestrator.clone();
         self.register_sync(Arc::new(ExternalMemoryRecallTool::new(Arc::clone(
@@ -679,7 +700,7 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ExternalMemoryStatusTool::new(
             external_memory_port,
         )));
-        self.register_sync(Arc::new(LearningProposalReviewTool::new(orchestrator)));
+        self.register_sync(Arc::new(LearningProposalReviewHostTool::new(learning_host)));
         count += 10;
 
         tracing::info!("Registered {} learning tools", count);
@@ -749,24 +770,23 @@ impl ToolRegistry {
         config: crate::config::ComfyUiConfig,
         secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
     ) {
-        self.register_sync(Arc::new(ImageGenerateTool::new(
-            config.clone(),
-            secrets.clone(),
+        let comfy_host = root_comfyui_tool_host(config.clone(), secrets);
+        self.register_sync(Arc::new(ImageGenerateHostTool::new(
+            Arc::clone(&comfy_host),
+            config.default_aspect_ratio.clone(),
+            config.request_timeout,
         )));
-        self.register_sync(Arc::new(ComfyHealthTool::new(
-            config.clone(),
-            secrets.clone(),
-        )));
-        self.register_sync(Arc::new(ComfyCheckDepsTool::new(
-            config.clone(),
-            secrets.clone(),
-        )));
-        self.register_sync(Arc::new(ComfyRunWorkflowTool::new(
-            config.clone(),
-            secrets.clone(),
+        self.register_sync(Arc::new(ComfyHealthHostTool::new(Arc::clone(&comfy_host))));
+        self.register_sync(Arc::new(ComfyCheckDepsHostTool::new(Arc::clone(
+            &comfy_host,
+        ))));
+        self.register_sync(Arc::new(ComfyRunWorkflowHostTool::new(
+            Arc::clone(&comfy_host),
+            config.default_aspect_ratio.clone(),
+            config.request_timeout,
         )));
         if config.allow_lifecycle_management {
-            self.register_sync(Arc::new(ComfyManageTool::new(config, secrets)));
+            self.register_sync(Arc::new(ComfyManageHostTool::new(comfy_host)));
             tracing::info!("Registered ComfyUI media tools with lifecycle management");
         } else {
             tracing::info!("Registered ComfyUI media tools");

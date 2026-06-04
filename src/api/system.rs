@@ -2,49 +2,14 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
-
 use crate::app::AppComponents;
 use crate::llm::LlmProvider;
 
 use super::error::{ApiError, ApiResult};
 
-/// Snapshot of the engine's current state.
-#[derive(Debug, Clone, Serialize)]
-pub struct EngineStatus {
-    pub engine_running: bool,
-    pub setup_completed: bool,
-    pub tool_count: usize,
-    pub active_extensions: usize,
-    pub model_name: String,
-    pub cheap_model_name: Option<String>,
-    pub llm_runtime_revision: u64,
-    pub llm_runtime_healthy: bool,
-    pub llm_last_error: Option<String>,
-    pub db_connected: bool,
-    pub workspace_available: bool,
-}
+use thinclaw_app::{EngineStatusParts, build_engine_status};
 
-struct EngineStatusParts {
-    runtime_revision: u64,
-    runtime_last_error: Option<String>,
-    runtime_primary_model: String,
-    runtime_cheap_model: Option<String>,
-    fallback_model_name: String,
-    fallback_cheap_model_name: Option<String>,
-    setup_completed: bool,
-    tool_count: usize,
-    active_extensions: usize,
-    db_connected: bool,
-    workspace_available: bool,
-}
-
-/// Information about an available LLM model.
-#[derive(Debug, Clone, Serialize)]
-pub struct ModelInfo {
-    pub name: String,
-    pub is_primary: bool,
-}
+pub use thinclaw_app::{EngineStatus, ModelInfo, SnapshotResult};
 
 /// Get current engine status.
 pub async fn get_status(
@@ -82,31 +47,6 @@ pub async fn get_status(
     })
 }
 
-fn build_engine_status(parts: EngineStatusParts) -> EngineStatus {
-    let model_name = if parts.runtime_primary_model.trim().is_empty() {
-        parts.fallback_model_name
-    } else {
-        parts.runtime_primary_model
-    };
-    let cheap_model_name = parts
-        .runtime_cheap_model
-        .or(parts.fallback_cheap_model_name);
-
-    EngineStatus {
-        engine_running: parts.runtime_revision > 0,
-        setup_completed: parts.setup_completed,
-        tool_count: parts.tool_count,
-        active_extensions: parts.active_extensions,
-        model_name,
-        cheap_model_name,
-        llm_runtime_revision: parts.runtime_revision,
-        llm_runtime_healthy: parts.runtime_last_error.is_none(),
-        llm_last_error: parts.runtime_last_error,
-        db_connected: parts.db_connected,
-        workspace_available: parts.workspace_available,
-    }
-}
-
 /// List available models.
 pub fn list_models(
     llm: &Arc<dyn LlmProvider>,
@@ -125,15 +65,6 @@ pub fn list_models(
     }
 
     Ok(models)
-}
-
-/// Result of a database snapshot operation.
-#[derive(Debug, Clone, Serialize)]
-pub struct SnapshotResult {
-    /// Number of bytes written to the snapshot file.
-    pub bytes_written: u64,
-    /// Path where the snapshot was saved.
-    pub path: String,
 }
 
 /// Create a portable snapshot of ThinClaw's database.

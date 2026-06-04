@@ -1,6 +1,7 @@
 [workspace]
 members = [".", "crates/*"]
 exclude = [
+    "apps/desktop/backend",
     "channels-src/discord",
     "channels-src/telegram",
     "channels-src/slack",
@@ -43,6 +44,7 @@ dist = true
 thinclaw-types = { version = "0.1.0", path = "crates/thinclaw-types", default-features = false }
 thinclaw-agent = { version = "0.1.0", path = "crates/thinclaw-agent" }
 thinclaw-app = { version = "0.1.0", path = "crates/thinclaw-app" }
+thinclaw-branding = { version = "0.1.0", path = "crates/thinclaw-branding" }
 thinclaw-db = { version = "0.1.0", path = "crates/thinclaw-db" }
 thinclaw-channels = { version = "0.1.0", path = "crates/thinclaw-channels" }
 thinclaw-channels-core = { version = "0.1.0", path = "crates/thinclaw-channels-core" }
@@ -56,6 +58,7 @@ thinclaw-llm = { version = "0.1.0", path = "crates/thinclaw-llm" }
 thinclaw-llm-core = { version = "0.1.0", path = "crates/thinclaw-llm-core" }
 thinclaw-media = { version = "0.1.0", path = "crates/thinclaw-media" }
 thinclaw-platform = { version = "0.1.0", path = "crates/thinclaw-platform" }
+thinclaw-runtime-contracts = { version = "0.1.0", path = "crates/thinclaw-runtime-contracts" }
 thinclaw-safety = { version = "0.1.0", path = "crates/thinclaw-safety" }
 thinclaw-secrets = { version = "0.1.0", path = "crates/thinclaw-secrets", default-features = false }
 thinclaw-settings = { version = "0.1.0", path = "crates/thinclaw-settings" }
@@ -262,7 +265,7 @@ light = [
     "document-extraction",
     "timezones",
 ]
-# Desktop embedding (Tauri/Scrappy) — minimal footprint
+# Desktop embedding (ThinClaw Desktop/Tauri) — minimal footprint
 desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]
 # Individual runtime modules (can be combined with light)
 web-gateway = []
@@ -277,8 +280,13 @@ wasm-runtime = [
     "thinclaw-channels/wasm-runtime",
     "thinclaw-tools/wasm-runtime",
 ]
-browser = ["dep:chromiumoxide", "thinclaw-tools/browser"]
-nostr = ["thinclaw-channels/nostr", "thinclaw-tools/nostr", "dep:nostr-sdk"]
+browser = ["dep:chromiumoxide", "thinclaw-config/browser", "thinclaw-tools/browser"]
+nostr = [
+    "thinclaw-channels/nostr",
+    "thinclaw-config/nostr",
+    "thinclaw-tools/nostr",
+    "dep:nostr-sdk",
+]
 # Core scheduling/workspace APIs always use chrono-tz; keep this as a
 # compatibility feature for existing build profiles and docs.
 timezones = []
@@ -325,8 +333,8 @@ document-extraction = ["thinclaw-media/document-extraction", "thinclaw-tools/doc
 # Increases binary size by ~6-13 MB but requires no network access.
 bundled-wasm = ["wasm-runtime"]
 # Voice wake word detection — adds cpal for audio capture.
-# Only enable for headless/remote mode; in desktop mode Scrappy owns the mic.
-voice = ["dep:cpal"]
+# Only enable for headless/remote mode; in desktop mode ThinClaw Desktop owns the mic.
+voice = ["dep:cpal", "thinclaw-config/voice"]
 # AWS Bedrock embeddings — adds aws-config + aws-sdk-bedrockruntime.
 bedrock = [
     "thinclaw-workspace/bedrock",
@@ -436,7 +444,7 @@ doc_lazy_continuation      = "allow"
 unused_imports = "warn"
 
 # Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
-# sqlx-sqlite (used by Scrappy) calls sqlite3_config() first; the stock libsql
+# sqlx-sqlite (used by ThinClaw Desktop) calls sqlite3_config() first; the stock libsql
 # asserts on the duplicate call. Our patch checks sqlite3_threadsafe() instead.
 [patch.crates-io]
 libsql = { path = "patches/libsql-0.6.0" }

@@ -14,52 +14,182 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use uuid::Uuid;
-
 use crate::agent::session_search::{SessionSearchRender, SessionSearchService};
 use crate::context::JobContext;
 use crate::db::Database;
 use crate::llm::LlmProvider;
 use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolRouteIntent, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
+use async_trait::async_trait;
 use thinclaw_tools::builtin::memory as memory_policy;
-
-/// Files the LLM may only APPEND to — never fully overwrite.
-///
-/// Currently empty: IDENTITY.md was moved to freely-rewritable to prevent
-/// identity accretion during repeated bootstrap runs. If a file should be
-/// strictly append-only in the future, add it here.
-const APPEND_ONLY_IDENTITY_FILES: &[&str] = memory_policy::APPEND_ONLY_IDENTITY_FILES;
-
-/// Files the agent may FULLY REWRITE (replace entire content, append: false).
-///
-/// IDENTITY.md remains writable through memory_write because prompt_manage
-/// intentionally excludes it.
-const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = memory_policy::FREELY_REWRITABLE_IDENTITY_FILES;
-
-fn job_conversation_kind(metadata: &serde_json::Value) -> memory_policy::MemoryConversationKind {
-    memory_policy::memory_conversation_kind(metadata)
-}
-
-fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
-    let actor_id = ctx
-        .metadata
-        .get("actor_id")
-        .or_else(|| ctx.metadata.get("actor"))
-        .and_then(|v| v.as_str())
-        .or(ctx.actor_id.as_deref());
-    memory_policy::resolve_memory_write_path(&ctx.metadata, actor_id, target)
-}
+use thinclaw_tools::ports::{
+    MemoryToolHostPort, ToolHostError, ToolMemoryActionRequest, ToolMemoryActionResult,
+    ToolMemoryEntry, ToolMemoryReadRequest, ToolMemoryScope, ToolMemorySearchRequest,
+    ToolMemoryWriteRequest, ToolOperationScope, job_context_from_tool_scope,
+};
 
 fn workspace_for_ctx(base: &Arc<Workspace>, ctx: &JobContext) -> Workspace {
-    let agent_workspace_id = ctx
-        .metadata
-        .get("agent_workspace_id")
-        .and_then(|v| v.as_str())
-        .and_then(|v| Uuid::parse_str(v).ok())
-        .or_else(|| base.agent_id());
+    let agent_workspace_id =
+        memory_policy::workspace_agent_id_from_metadata(&ctx.metadata, base.agent_id());
     base.scoped_clone(ctx.user_id.clone(), agent_workspace_id)
+}
+
+pub struct RootMemoryToolHost {
+    workspace: Arc<Workspace>,
+    orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+    sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+}
+
+impl RootMemoryToolHost {
+    pub fn new(
+        workspace: Arc<Workspace>,
+        orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+        sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    ) -> Self {
+        Self {
+            workspace,
+            orchestrator,
+            sse_sender,
+        }
+    }
+}
+
+pub fn root_memory_tool_host(
+    workspace: Arc<Workspace>,
+    orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+    sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+) -> Arc<dyn MemoryToolHostPort> {
+    Arc::new(RootMemoryToolHost::new(workspace, orchestrator, sse_sender))
+}
+
+fn tool_host_error_from_tool(error: ToolError) -> ToolHostError {
+    match error {
+        ToolError::InvalidParameters(reason) => ToolHostError::InvalidRequest { reason },
+        ToolError::NotAuthorized(reason) => ToolHostError::PermissionDenied { reason },
+        ToolError::ExternalService(service) => ToolHostError::Unavailable { service },
+        other => ToolHostError::OperationFailed {
+            reason: other.to_string(),
+        },
+    }
+}
+
+#[async_trait]
+impl MemoryToolHostPort for RootMemoryToolHost {
+    async fn read_memory(
+        &self,
+        _request: ToolMemoryReadRequest,
+    ) -> Result<ToolMemoryEntry, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "memory_read_structured".to_string(),
+        })
+    }
+
+    async fn write_memory(
+        &self,
+        _request: ToolMemoryWriteRequest,
+    ) -> Result<ToolMemoryEntry, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "memory_write_structured".to_string(),
+        })
+    }
+
+    async fn search_memory(
+        &self,
+        _request: ToolMemorySearchRequest,
+    ) -> Result<Vec<ToolMemoryEntry>, ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "memory_search_structured".to_string(),
+        })
+    }
+
+    async fn delete_memory(
+        &self,
+        _scope: ToolOperationScope,
+        _path: String,
+        _memory_scope: ToolMemoryScope,
+    ) -> Result<(), ToolHostError> {
+        Err(ToolHostError::Unavailable {
+            service: "memory_delete_structured".to_string(),
+        })
+    }
+
+    async fn search_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_search");
+        let tool = MemorySearchTool::new(Arc::clone(&self.workspace));
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
+
+    async fn write_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_write");
+        let tool = MemoryWriteTool::new(Arc::clone(&self.workspace), self.orchestrator.clone());
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
+
+    async fn read_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_read");
+        let tool = MemoryReadTool::new(Arc::clone(&self.workspace));
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
+
+    async fn tree_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_tree");
+        let tool = MemoryTreeTool::new(Arc::clone(&self.workspace));
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
+
+    async fn delete_memory_action(
+        &self,
+        request: ToolMemoryActionRequest,
+    ) -> Result<ToolMemoryActionResult, ToolHostError> {
+        let ctx = job_context_from_tool_scope(request.scope, "memory_delete");
+        let mut tool = MemoryDeleteTool::new(Arc::clone(&self.workspace));
+        if let Some(sender) = self.sse_sender.clone() {
+            tool = tool.with_sse_sender(sender);
+        }
+        let output = tool
+            .execute(request.params, &ctx)
+            .await
+            .map_err(tool_host_error_from_tool)?;
+        Ok(ToolMemoryActionResult {
+            output: output.result,
+        })
+    }
 }
 
 /// Tool for searching workspace memory.
@@ -179,15 +309,6 @@ impl SessionSearchTool {
         self
     }
 
-    fn current_scope_filters(&self, ctx: &JobContext) -> memory_policy::SessionSearchScope {
-        memory_policy::resolve_session_search_scope(
-            &ctx.metadata,
-            &ctx.principal_id,
-            ctx.actor_id.as_deref(),
-            ctx.conversation_id,
-        )
-    }
-
     async fn recent_conversation_metadata(
         &self,
         principal_id: &str,
@@ -283,40 +404,23 @@ impl Tool for SessionSearchTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let direct_scope =
-            job_conversation_kind(&ctx.metadata) == memory_policy::MemoryConversationKind::Direct;
-        let parsed = memory_policy::parse_session_search_params(
+        let direct_scope = memory_policy::session_search_direct_scope_for_context(ctx);
+        let parsed = memory_policy::parse_session_search_params_for_context(
             &params,
-            direct_scope,
+            ctx,
             self.service.summarizer_configured(),
         )?;
         let query = parsed.query.as_str();
 
-        let scope = self.current_scope_filters(ctx);
-
-        let channel_filter = if parsed.all_channels {
-            None
-        } else {
-            ctx.metadata
-                .get("channel")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        };
-        let thread_filter = if parsed.include_current_thread {
-            ctx.metadata
-                .get("thread_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        } else {
-            None
-        };
+        let scope = memory_policy::resolve_session_search_scope_for_context(ctx);
+        let filters = memory_policy::session_search_filters_for_context(ctx, &parsed);
 
         if query.trim().is_empty() {
             let recent = self
                 .recent_conversation_metadata(
                     &scope.principal_id,
                     &scope.actor_id,
-                    channel_filter.as_deref(),
+                    filters.channel.as_deref(),
                     direct_scope,
                     parsed.limit,
                 )
@@ -331,8 +435,8 @@ impl Tool for SessionSearchTool {
                 &scope.principal_id,
                 query,
                 Some(&scope.actor_id),
-                channel_filter.as_deref(),
-                thread_filter.as_deref(),
+                filters.channel.as_deref(),
+                filters.thread_id.as_deref(),
                 parsed.limit as i64,
             )
             .await
@@ -413,81 +517,70 @@ impl Tool for MemoryWriteTool {
         let target = parsed.target.as_str();
         let append = parsed.append;
 
-        let (path, _is_actor_scoped) = resolve_memory_write_path(ctx, target);
-        let normalized_path = path.trim_start_matches('/');
-        let file_name = normalized_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(normalized_path);
+        let write_plan = memory_policy::resolve_memory_write_plan_for_context(ctx, target);
+        let path = write_plan.path.as_str();
 
-        // IDENTITY.md is append-only to protect the agent's established name/creature.
-        if APPEND_ONLY_IDENTITY_FILES.contains(&file_name) {
-            if !append {
+        // IDENTITY.md policy is crate-owned; root only performs the selected write.
+        match write_plan.file_policy {
+            memory_policy::MemoryWriteFilePolicy::AppendOnlyIdentity => {
+                if !append {
+                    return Err(ToolError::NotAuthorized(format!(
+                        "'{}' is append-only. Add an '## Update' section with your changes \
+                         instead of overwriting. To fully restructure SOUL.md / SOUL.local.md / \
+                         AGENTS.md / USER.md, use prompt_manage instead.",
+                        target,
+                    )));
+                }
+                workspace
+                    .append(path, content)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                let output = memory_policy::memory_write_output(
+                    "appended",
+                    path,
+                    true,
+                    content.len(),
+                    Some("Identity file updated (append-only)"),
+                );
+                return Ok(ToolOutput::success(output, start.elapsed()));
+            }
+            memory_policy::MemoryWriteFilePolicy::PromptManagedIdentity => {
                 return Err(ToolError::NotAuthorized(format!(
-                    "'{}' is append-only. Add an '## Update' section with your changes \
-                     instead of overwriting. To fully restructure SOUL.md / SOUL.local.md / \
-                     AGENTS.md / USER.md, use prompt_manage instead.",
-                    target,
+                    "'{}' must be managed through prompt_manage (bounded prompt mutation).",
+                    target
                 )));
             }
-            workspace
-                .append(&path, content)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-            let output = memory_policy::memory_write_output(
-                "appended",
-                &path,
-                true,
-                content.len(),
-                Some("Identity file updated (append-only)"),
-            );
-            return Ok(ToolOutput::success(output, start.elapsed()));
-        }
-
-        // SOUL.md / SOUL.local.md / AGENTS.md / USER.md must be mutated through prompt_manage.
-        if [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER]
-            .iter()
-            .any(|p| file_name.eq_ignore_ascii_case(p))
-        {
-            return Err(ToolError::NotAuthorized(format!(
-                "'{}' must be managed through prompt_manage (bounded prompt mutation).",
-                target
-            )));
-        }
-
-        // IDENTITY.md remains freely rewritable through memory_write.
-        if FREELY_REWRITABLE_IDENTITY_FILES
-            .iter()
-            .any(|p| file_name.eq_ignore_ascii_case(p))
-        {
-            if append {
-                workspace
-                    .append(&path, content)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-            } else {
-                workspace
-                    .write(&path, content)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-            }
-            let output = memory_policy::memory_write_output(
-                if append { "appended" } else { "rewritten" },
-                &path,
-                append,
-                content.len(),
-                Some(if append {
-                    "Personality file updated (new section appended)"
+            memory_policy::MemoryWriteFilePolicy::FreelyRewritableIdentity => {
+                if append {
+                    workspace
+                        .append(path, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 } else {
-                    "Personality file fully restructured — well-formed markdown expected"
-                }),
-            );
-            return Ok(ToolOutput::success(output, start.elapsed()));
+                    workspace
+                        .write(path, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                }
+                let output = memory_policy::memory_write_output(
+                    if append { "appended" } else { "rewritten" },
+                    path,
+                    append,
+                    content.len(),
+                    Some(if append {
+                        "Personality file updated (new section appended)"
+                    } else {
+                        "Personality file fully restructured — well-formed markdown expected"
+                    }),
+                );
+                return Ok(ToolOutput::success(output, start.elapsed()));
+            }
+            memory_policy::MemoryWriteFilePolicy::Regular => {}
         }
 
         let path =
-            match target.trim() {
-                t if t.eq_ignore_ascii_case("memory") => {
+            match write_plan.target_kind {
+                memory_policy::MemoryWriteTargetKind::Memory => {
                     if path.eq_ignore_ascii_case(paths::MEMORY) {
                         if append {
                             workspace.append_memory(content).await.map_err(|e| {
@@ -499,60 +592,60 @@ impl Tool for MemoryWriteTool {
                             })?;
                         }
                     } else if append {
-                        let doc = workspace.read(&path).await.ok();
+                        let doc = workspace.read(path).await.ok();
                         let new_content = match doc {
                             Some(doc) if !doc.content.is_empty() => {
                                 format!("{}\n\n{}", doc.content, content)
                             }
                             _ => content.to_string(),
                         };
-                        workspace.write(&path, &new_content).await.map_err(|e| {
+                        workspace.write(path, &new_content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     } else {
-                        workspace.write(&path, content).await.map_err(|e| {
+                        workspace.write(path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     }
-                    path
+                    path.to_string()
                 }
-                t if t.eq_ignore_ascii_case("daily_log") => {
+                memory_policy::MemoryWriteTargetKind::DailyLog => {
                     workspace
                         .append_daily_log(content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                     format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
                 }
-                t if t.eq_ignore_ascii_case("heartbeat") => {
+                memory_policy::MemoryWriteTargetKind::Heartbeat => {
                     if append {
-                        workspace.append(&path, content).await.map_err(|e| {
+                        workspace.append(path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     } else {
-                        workspace.write(&path, content).await.map_err(|e| {
+                        workspace.write(path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     }
-                    path
+                    path.to_string()
                 }
-                _ => {
+                memory_policy::MemoryWriteTargetKind::Other => {
                     if append {
-                        let doc = workspace.read(&path).await.ok();
+                        let doc = workspace.read(path).await.ok();
                         let new_content = match doc {
                             Some(doc) if !doc.content.is_empty() => {
                                 format!("{}\n\n{}", doc.content, content)
                             }
                             _ => content.to_string(),
                         };
-                        workspace.write(&path, &new_content).await.map_err(|e| {
+                        workspace.write(path, &new_content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     } else {
-                        workspace.write(&path, content).await.map_err(|e| {
+                        workspace.write(path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     }
-                    path
+                    path.to_string()
                 }
             };
 
@@ -999,7 +1092,8 @@ mod tests {
             "actor_id": "actor-123",
         });
 
-        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "memory");
+        let (path, is_actor_scoped) =
+            memory_policy::resolve_memory_write_path_for_context(&ctx, "memory");
         assert!(is_actor_scoped);
         assert_eq!(path, "actors/actor-123/MEMORY.md");
     }
@@ -1012,7 +1106,8 @@ mod tests {
             "actor_id": "actor-123",
         });
 
-        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "shared:memory");
+        let (path, is_actor_scoped) =
+            memory_policy::resolve_memory_write_path_for_context(&ctx, "shared:memory");
         assert!(!is_actor_scoped);
         assert_eq!(path, "MEMORY.md");
     }
@@ -1024,7 +1119,8 @@ mod tests {
             "conversation_kind": "direct"
         });
 
-        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "profile");
+        let (path, is_actor_scoped) =
+            memory_policy::resolve_memory_write_path_for_context(&ctx, "profile");
         assert!(is_actor_scoped);
         assert_eq!(path, "actors/actor-456/context/profile.json");
     }

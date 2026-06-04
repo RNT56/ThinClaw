@@ -7,10 +7,14 @@ use crate::llm::cost_tracker::CostTracker;
 use chrono::Utc;
 
 use thinclaw_agent::worker_runtime::{
-    RoutineFinalizationOutcome, WorkerActivityKeepalive, build_worker_system_prompt,
-    capped_worker_iterations, compact_post_plan, heartbeat_iteration_exhausted_critique,
+    DEFAULT_WORKER_ITERATIONS, RoutineFinalizationOutcome, WORKER_DIRECT_LOOP_DELAY_MS,
+    WORKER_TASK_FAILED_DURING_EXECUTION_REASON, WORKER_TOOL_KEEPALIVE_SECS,
+    WorkerActivityKeepalive, WorkerLoopMetadata, build_worker_system_prompt, compact_post_plan,
+    heartbeat_completion_critique, heartbeat_iteration_exhausted_critique,
     heartbeat_iteration_exhausted_summary, heartbeat_iteration_exhausted_user_message,
-    is_worker_terminal_state, touch_worker_activity,
+    is_worker_terminal_state, order_parallel_worker_results, should_finish_heartbeat_after_output,
+    should_nudge_worker, should_persist_heartbeat_completion_critique, touch_worker_activity,
+    worker_iteration_exceeded,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -324,24 +328,6 @@ impl Worker {
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
         touch_worker_activity(activity_tx);
-        let requested_iterations = self
-            .context_manager()
-            .get_context(self.job_id)
-            .await
-            .ok()
-            .and_then(|ctx| ctx.metadata.get("max_iterations").and_then(|v| v.as_u64()));
-        let max_iterations = capped_worker_iterations(requested_iterations, 50);
-
-        // Heartbeat jobs set { "heartbeat": true } in metadata. When the LLM
-        // produces a text response (HEARTBEAT_OK or findings), the job is done
-        // — don't loop looking for a generic completion phrase.
-        let is_heartbeat = self
-            .context_manager()
-            .get_context(self.job_id)
-            .await
-            .ok()
-            .and_then(|ctx| ctx.metadata.get("heartbeat").and_then(|v| v.as_bool()))
-            .unwrap_or(false);
         let capability_metadata = self
             .context_manager()
             .get_context(self.job_id)
@@ -349,12 +335,12 @@ impl Worker {
             .ok()
             .map(|ctx| ctx.metadata)
             .unwrap_or(serde_json::Value::Null);
-        let allowed_tools =
-            crate::tools::ToolRegistry::metadata_string_list(&capability_metadata, "allowed_tools");
-        let allowed_skills = crate::tools::ToolRegistry::metadata_string_list(
-            &capability_metadata,
-            "allowed_skills",
-        );
+        let loop_metadata =
+            WorkerLoopMetadata::from_metadata(&capability_metadata, DEFAULT_WORKER_ITERATIONS);
+        let max_iterations = loop_metadata.max_iterations;
+        let is_heartbeat = loop_metadata.is_heartbeat;
+        let allowed_tools = loop_metadata.allowed_tools;
+        let allowed_skills = loop_metadata.allowed_skills;
         let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
 
         let mut iteration = 0;
@@ -449,7 +435,10 @@ impl Worker {
             // Heartbeat jobs: if the plan already called emit_user_message,
             // the findings have been delivered — skip the expensive fallback
             // to direct tool selection.
-            if is_heartbeat && self.last_output.lock().ok().is_some_and(|g| g.is_some()) {
+            if should_finish_heartbeat_after_output(
+                is_heartbeat,
+                self.last_output.lock().ok().is_some_and(|g| g.is_some()),
+            ) {
                 self.mark_completed().await?;
                 return Ok(());
             }
@@ -496,7 +485,7 @@ impl Worker {
 
             iteration += 1;
             touch_worker_activity(activity_tx);
-            if iteration > max_iterations {
+            if worker_iteration_exceeded(iteration, max_iterations) {
                 if is_heartbeat {
                     let stuck_reason = heartbeat_iteration_exhausted_summary(max_iterations);
 
@@ -594,7 +583,7 @@ impl Worker {
 
                         // Give it one more chance to select a tool.
                         // Only nudge occasionally to avoid polluting context (Bug 26).
-                        if iteration > 8 && iteration % 10 == 0 {
+                        if should_nudge_worker(iteration) {
                             reason_ctx.messages.push(ChatMessage::user(
                                 "Are you stuck? Do you need help completing this job?",
                             ));
@@ -685,13 +674,16 @@ impl Worker {
             // the job is done. The LLM often stays in tool-call mode (never
             // producing a bare Text response), so we catch completion here
             // after each tool execution round.
-            if is_heartbeat && self.last_output.lock().ok().is_some_and(|g| g.is_some()) {
+            if should_finish_heartbeat_after_output(
+                is_heartbeat,
+                self.last_output.lock().ok().is_some_and(|g| g.is_some()),
+            ) {
                 self.mark_completed().await?;
                 return Ok(());
             }
 
             // Small delay between iterations
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(WORKER_DIRECT_LOOP_DELAY_MS)).await;
         }
     }
 
@@ -749,8 +741,10 @@ impl Worker {
             return results;
         }
 
-        let keepalive =
-            WorkerActivityKeepalive::spawn(activity_tx.clone(), Duration::from_secs(15));
+        let keepalive = WorkerActivityKeepalive::spawn(
+            activity_tx.clone(),
+            Duration::from_secs(WORKER_TOOL_KEEPALIVE_SECS),
+        );
         let mut join_set = JoinSet::new();
 
         for (idx, selection) in selections.iter().enumerate() {
@@ -764,13 +758,13 @@ impl Worker {
             });
         }
 
-        // Collect and reorder by original index
-        let mut results: Vec<Option<ToolExecResult>> = (0..count).map(|_| None).collect();
-        let mut panicked_reasons: Vec<Option<String>> = (0..count).map(|_| None).collect();
+        // Collect completed tasks; portable ordering policy lives in thinclaw-agent.
+        let mut completed_results = Vec::with_capacity(count);
+        let mut failed_reasons = Vec::new();
         while let Some(join_result) = join_set.join_next().await {
             touch_worker_activity(activity_tx);
             match join_result {
-                Ok((idx, exec_result)) => results[idx] = Some(exec_result),
+                Ok((idx, exec_result)) => completed_results.push((idx, exec_result)),
                 Err(e) => {
                     let reason = if e.is_panic() {
                         let panic_info = e.into_panic();
@@ -784,34 +778,31 @@ impl Worker {
                         format!("Task cancelled: {}", e)
                     };
                     tracing::error!(reason = %reason, "Tool execution task failed");
-                    // We don't know which index panicked, so store for first empty slot
-                    if let Some(slot) = panicked_reasons.iter_mut().find(|s| s.is_none()) {
-                        *slot = Some(reason);
-                    }
+                    failed_reasons.push(reason);
                 }
             }
         }
 
         // Fill any panicked/missing slots with error results
-        let mut panic_iter = panicked_reasons.into_iter().flatten();
-        let ordered = results
-            .into_iter()
-            .enumerate()
-            .map(|(i, opt)| {
-                opt.unwrap_or_else(|| {
-                    let reason = panic_iter
-                        .next()
-                        .unwrap_or_else(|| "Task failed during execution".to_string());
-                    ToolExecResult {
-                        result: Err(crate::error::ToolError::ExecutionFailed {
-                            name: selections[i].tool_name.clone(),
-                            reason,
-                        }
-                        .into()),
-                    }
-                })
-            })
-            .collect();
+        let ordered = order_parallel_worker_results(
+            count,
+            completed_results,
+            failed_reasons,
+            WORKER_TASK_FAILED_DURING_EXECUTION_REASON,
+        )
+        .into_iter()
+        .enumerate()
+        .map(|(i, result)| match result {
+            Ok(exec_result) => exec_result,
+            Err(reason) => ToolExecResult {
+                result: Err(crate::error::ToolError::ExecutionFailed {
+                    name: selections[i].tool_name.clone(),
+                    reason,
+                }
+                .into()),
+            },
+        })
+        .collect();
         drop(keepalive);
         touch_worker_activity(activity_tx);
         ordered
@@ -1154,7 +1145,7 @@ impl Worker {
             }
 
             // Small delay between actions
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(WORKER_DIRECT_LOOP_DELAY_MS)).await;
         }
 
         // Plan completed, check with LLM if job is done
@@ -1189,8 +1180,10 @@ impl Worker {
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<String, Error> {
         touch_worker_activity(activity_tx);
-        let keepalive =
-            WorkerActivityKeepalive::spawn(activity_tx.clone(), Duration::from_secs(15));
+        let keepalive = WorkerActivityKeepalive::spawn(
+            activity_tx.clone(),
+            Duration::from_secs(WORKER_TOOL_KEEPALIVE_SECS),
+        );
         let result = Self::execute_tool_inner(&self.deps, self.job_id, tool_name, params).await;
         drop(keepalive);
         touch_worker_activity(activity_tx);
@@ -1429,13 +1422,15 @@ impl Worker {
                     // critique so the next heartbeat run can read it and
                     // avoid repeating the same mistake.
                     if is_heartbeat && let Some(ref store) = store {
-                        if !result.success || result.quality_score < 100 {
-                            let critique = serde_json::json!({
-                                "timestamp": chrono::Utc::now().to_rfc3339(),
-                                "job_id": job_id.to_string(),
-                                "quality": result.quality_score,
-                                "reasoning": result.reasoning,
-                            });
+                        if should_persist_heartbeat_completion_critique(
+                            result.success,
+                            result.quality_score,
+                        ) {
+                            let critique = heartbeat_completion_critique(
+                                job_id,
+                                result.quality_score,
+                                result.reasoning,
+                            );
                             if let Err(e) = store
                                 .set_setting("system", "heartbeat.last_critique", &critique)
                                 .await

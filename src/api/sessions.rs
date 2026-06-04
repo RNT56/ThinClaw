@@ -12,6 +12,12 @@ use crate::channels::web::types::*;
 use crate::db::Database;
 use crate::history::ConversationKind;
 use crate::identity::scope_id_from_key;
+use thinclaw_gateway::web::chat::{
+    GatewaySessionToolCallInfo, GatewaySessionTurnInfo, GatewayThreadSummaryInput, ThreadInfoInput,
+    history_response, invalid_before_timestamp_message, no_active_thread_message,
+    parse_chat_thread_uuid, thread_info, thread_list_response, thread_list_response_from_summaries,
+    thread_not_found_message, turn_info_from_session_turn, turns_from_history_messages,
+};
 
 use super::error::{ApiError, ApiResult};
 
@@ -38,45 +44,27 @@ pub async fn list_threads(
             .list_conversations_with_preview(user_id, channel, 50)
             .await
         {
-            let mut assistant_thread = None;
-            let mut threads = Vec::new();
-
-            for s in &summaries {
-                let info = ThreadInfo {
+            let summaries = summaries
+                .into_iter()
+                .map(|s| GatewayThreadSummaryInput {
                     id: s.id,
-                    state: "Idle".to_string(),
-                    turn_count: (s.message_count / 2).max(0) as usize,
-                    created_at: s.started_at.to_rfc3339(),
-                    updated_at: s.last_activity.to_rfc3339(),
-                    title: s.title.clone(),
-                    thread_type: s.thread_type.clone(),
-                };
+                    message_count: s.message_count,
+                    started_at: s.started_at,
+                    last_activity: s.last_activity,
+                    title: s.title,
+                    thread_type: s.thread_type,
+                })
+                .collect::<Vec<_>>();
+            let synthesized_assistant_created_at = chrono::Utc::now();
+            let synthesized_assistant_updated_at = chrono::Utc::now();
 
-                if s.id == assistant_id {
-                    assistant_thread = Some(info);
-                } else {
-                    threads.push(info);
-                }
-            }
-
-            // If assistant wasn't in the list (0 messages), synthesize it
-            if assistant_thread.is_none() {
-                assistant_thread = Some(ThreadInfo {
-                    id: assistant_id,
-                    state: "Idle".to_string(),
-                    turn_count: 0,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                    title: None,
-                    thread_type: Some("assistant".to_string()),
-                });
-            }
-
-            return Ok(ThreadListResponse {
-                assistant_thread,
-                threads,
-                active_thread: sess.active_thread,
-            });
+            return Ok(thread_list_response_from_summaries(
+                assistant_id,
+                summaries,
+                sess.active_thread,
+                synthesized_assistant_created_at,
+                synthesized_assistant_updated_at,
+            ));
         }
     }
 
@@ -84,22 +72,20 @@ pub async fn list_threads(
     let threads: Vec<ThreadInfo> = sess
         .threads
         .values()
-        .map(|t| ThreadInfo {
-            id: t.id,
-            state: format!("{:?}", t.state),
-            turn_count: t.turns.len(),
-            created_at: t.created_at.to_rfc3339(),
-            updated_at: t.updated_at.to_rfc3339(),
-            title: None,
-            thread_type: None,
+        .map(|t| {
+            thread_info(ThreadInfoInput {
+                id: t.id,
+                state: format!("{:?}", t.state),
+                turn_count: t.turns.len(),
+                created_at: t.created_at,
+                updated_at: t.updated_at,
+                title: None,
+                thread_type: None,
+            })
         })
         .collect();
 
-    Ok(ThreadListResponse {
-        assistant_thread: None,
-        threads,
-        active_thread: sess.active_thread,
-    })
+    Ok(thread_list_response(None, threads, sess.active_thread))
 }
 
 /// Get chat history for a specific thread.
@@ -121,16 +107,16 @@ pub async fn get_history(
         .map(|s| {
             chrono::DateTime::parse_from_rfc3339(s)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| ApiError::InvalidInput("Invalid 'before' timestamp".into()))
+                .map_err(|_| ApiError::InvalidInput(invalid_before_timestamp_message()))
         })
         .transpose()?;
 
     // Resolve thread ID
     let tid = if let Some(tid_str) = thread_id {
-        Uuid::parse_str(tid_str)?
+        parse_chat_thread_uuid(tid_str)?
     } else {
         sess.active_thread
-            .ok_or_else(|| ApiError::SessionNotFound("No active thread".into()))?
+            .ok_or_else(|| ApiError::SessionNotFound(no_active_thread_message()))?
     };
 
     // Verify ownership
@@ -142,7 +128,7 @@ pub async fn get_history(
             .await
             .unwrap_or(false);
         if !owned && !sess.threads.contains_key(&tid) {
-            return Err(ApiError::SessionNotFound("Thread not found".into()));
+            return Err(ApiError::SessionNotFound(thread_not_found_message()));
         }
     }
 
@@ -155,14 +141,9 @@ pub async fn get_history(
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-        let turns = crate::channels::web::server::build_turns_from_db_messages(&messages);
-        return Ok(HistoryResponse {
-            thread_id: tid,
-            turns,
-            has_more,
-            oldest_timestamp,
-        });
+        let oldest_timestamp = messages.first().map(|m| m.created_at);
+        let turns = turns_from_history_messages(&messages);
+        return Ok(history_response(tid, turns, has_more, oldest_timestamp));
     }
 
     // Try in-memory first
@@ -172,36 +153,29 @@ pub async fn get_history(
         let turns: Vec<TurnInfo> = thread
             .turns
             .iter()
-            .map(|t| TurnInfo {
-                turn_number: t.turn_number,
-                user_input: if t.hide_user_input_from_ui {
-                    String::new()
-                } else {
-                    t.user_input.clone()
-                },
-                hide_user_input: t.hide_user_input_from_ui,
-                response: t.response.clone(),
-                state: format!("{:?}", t.state),
-                started_at: t.started_at.to_rfc3339(),
-                completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-                tool_calls: t
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ToolCallInfo {
-                        name: tc.name.clone(),
-                        has_result: tc.result.is_some(),
-                        has_error: tc.error.is_some(),
-                    })
-                    .collect(),
+            .map(|t| {
+                turn_info_from_session_turn(GatewaySessionTurnInfo {
+                    turn_number: t.turn_number,
+                    user_input: t.user_input.clone(),
+                    hide_user_input: t.hide_user_input_from_ui,
+                    response: t.response.clone(),
+                    state: format!("{:?}", t.state),
+                    started_at: t.started_at,
+                    completed_at: t.completed_at,
+                    tool_calls: t
+                        .tool_calls
+                        .iter()
+                        .map(|tc| GatewaySessionToolCallInfo {
+                            name: tc.name.clone(),
+                            has_result: tc.result.is_some(),
+                            has_error: tc.error.is_some(),
+                        })
+                        .collect(),
+                })
             })
             .collect();
 
-        return Ok(HistoryResponse {
-            thread_id: tid,
-            turns,
-            has_more: false,
-            oldest_timestamp: None,
-        });
+        return Ok(history_response(tid, turns, false, None));
     }
 
     // Fall back to DB
@@ -212,24 +186,14 @@ pub async fn get_history(
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         if !messages.is_empty() {
-            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-            let turns = crate::channels::web::server::build_turns_from_db_messages(&messages);
-            return Ok(HistoryResponse {
-                thread_id: tid,
-                turns,
-                has_more,
-                oldest_timestamp,
-            });
+            let oldest_timestamp = messages.first().map(|m| m.created_at);
+            let turns = turns_from_history_messages(&messages);
+            return Ok(history_response(tid, turns, has_more, oldest_timestamp));
         }
     }
 
     // Empty thread
-    Ok(HistoryResponse {
-        thread_id: tid,
-        turns: Vec::new(),
-        has_more: false,
-        oldest_timestamp: None,
-    })
+    Ok(history_response(tid, Vec::new(), false, None))
 }
 
 /// Create a new thread/session.
@@ -242,15 +206,15 @@ pub async fn create_thread(
     let session_id = session.lock().await.id;
     let thread = crate::agent::session::Thread::new(session_id);
     let thread_id = thread.id;
-    let info = ThreadInfo {
+    let info = thread_info(ThreadInfoInput {
         id: thread.id,
         state: format!("{:?}", thread.state),
         turn_count: thread.turns.len(),
-        created_at: thread.created_at.to_rfc3339(),
-        updated_at: thread.updated_at.to_rfc3339(),
+        created_at: thread.created_at,
+        updated_at: thread.updated_at,
         title: None,
         thread_type: Some("thread".to_string()),
-    };
+    });
 
     // Persist to DB
     if let Some(store) = store {
@@ -311,7 +275,7 @@ pub async fn delete_thread(
     user_id: &str,
     thread_id: &str,
 ) -> ApiResult<()> {
-    let tid = Uuid::parse_str(thread_id)?;
+    let tid = parse_chat_thread_uuid(thread_id)?;
 
     // Remove from in-memory session
     let session = session_manager.get_or_create_session(user_id).await;
@@ -349,7 +313,7 @@ pub async fn clear_thread(
     user_id: &str,
     thread_id: &str,
 ) -> ApiResult<()> {
-    let tid = Uuid::parse_str(thread_id)?;
+    let tid = parse_chat_thread_uuid(thread_id)?;
 
     // Clear in-memory turns
     let session = session_manager.get_or_create_session(user_id).await;

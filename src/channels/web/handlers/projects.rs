@@ -1,7 +1,6 @@
-use axum::{
-    extract::Path,
-    http::{StatusCode, header},
-    response::IntoResponse,
+use axum::{extract::Path, http::header, response::IntoResponse};
+use thinclaw_gateway::web::projects::{
+    project_forbidden_error, project_not_found_error, validate_project_id,
 };
 
 pub(crate) async fn project_redirect_handler(Path(project_id): Path<String>) -> impl IntoResponse {
@@ -19,12 +18,8 @@ pub(crate) async fn project_file_handler(
 }
 
 pub(crate) async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Response {
-    if project_id.contains('/')
-        || project_id.contains('\\')
-        || project_id.contains("..")
-        || project_id.is_empty()
-    {
-        return (StatusCode::BAD_REQUEST, "Invalid project ID").into_response();
+    if let Err(error) = validate_project_id(project_id) {
+        return error.into_response();
     }
 
     let base = crate::platform::resolve_data_dir("projects").join(project_id);
@@ -33,14 +28,14 @@ pub(crate) async fn serve_project_file(project_id: &str, path: &str) -> axum::re
 
     let canonical = match file_path.canonicalize() {
         Ok(p) => p,
-        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+        Err(_) => return project_not_found_error().into_response(),
     };
     let base_canonical = match base.canonicalize() {
         Ok(p) => p,
-        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+        Err(_) => return project_not_found_error().into_response(),
     };
     if !canonical.starts_with(&base_canonical) {
-        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+        return project_forbidden_error().into_response();
     }
 
     match tokio::fs::read(&canonical).await {
@@ -50,6 +45,6 @@ pub(crate) async fn serve_project_file(project_id: &str, path: &str) -> axum::re
                 .to_string();
             ([(header::CONTENT_TYPE, mime)], contents).into_response()
         }
-        Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+        Err(_) => project_not_found_error().into_response(),
     }
 }
