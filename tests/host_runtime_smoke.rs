@@ -1,7 +1,8 @@
 #![cfg(feature = "web-gateway")]
 
-use std::io::Read;
+use std::fs::OpenOptions;
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -15,6 +16,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 static RUNTIME_SMOKE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct SmokeRuntime {
+    child: Child,
+    binary: String,
+    cwd: PathBuf,
+    home: PathBuf,
+    gateway_port_env: String,
+    bound_addr_file: Option<PathBuf>,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+}
 
 async fn runtime_smoke_guard() -> MutexGuard<'static, ()> {
     RUNTIME_SMOKE_LOCK.lock().await
@@ -55,19 +67,32 @@ fn thinclaw_binary() -> String {
     }
 }
 
-fn spawn_runtime(temp: &TempDir, port: u16) -> Child {
+fn spawn_runtime(temp: &TempDir, port: u16) -> SmokeRuntime {
     spawn_runtime_with_port_env(temp, &port.to_string(), None)
 }
 
 fn spawn_runtime_with_port_env(
     temp: &TempDir,
     port: &str,
-    bound_addr_file: Option<&std::path::Path>,
-) -> Child {
+    bound_addr_file: Option<&Path>,
+) -> SmokeRuntime {
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("create smoke THINCLAW_HOME");
 
-    let mut command = Command::new(thinclaw_binary());
+    let stdout_path = temp.path().join("runtime.stdout.log");
+    let stderr_path = temp.path().join("runtime.stderr.log");
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_path)
+        .expect("open smoke runtime stdout log");
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)
+        .expect("open smoke runtime stderr log");
+    let binary = thinclaw_binary();
+    let mut command = Command::new(&binary);
     command
         .current_dir(temp.path())
         .arg("run")
@@ -95,32 +120,87 @@ fn spawn_runtime_with_port_env(
         .env("BUILDER_ENABLED", "false")
         .env("SKILLS_ENABLED", "false")
         .env("NO_COLOR", "1")
+        .env("RUST_BACKTRACE", "full")
+        .env(
+            "RUST_LOG",
+            std::env::var("THINCLAW_SMOKE_RUST_LOG").unwrap_or_else(|_| {
+                "thinclaw=debug,tower_http=warn,hyper=warn,reqwest=warn,sqlx=warn".to_string()
+            }),
+        )
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
 
     if let Some(path) = bound_addr_file {
         command.env("THINCLAW_GATEWAY_BOUND_ADDR_FILE", path);
     }
 
-    command.spawn().expect("spawn thinclaw smoke runtime")
+    let child = command.spawn().expect("spawn thinclaw smoke runtime");
+
+    SmokeRuntime {
+        child,
+        binary,
+        cwd: temp.path().to_path_buf(),
+        home,
+        gateway_port_env: port.to_string(),
+        bound_addr_file: bound_addr_file.map(Path::to_path_buf),
+        stdout_path,
+        stderr_path,
+    }
 }
 
-fn read_child_output(child: &mut Child) -> String {
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut stdout);
+fn process_exit_detail(status: std::process::ExitStatus) -> String {
+    #[cfg(windows)]
+    {
+        let mut detail = status.to_string();
+        if let Some(code) = status.code() {
+            let unsigned = code as u32;
+            detail.push_str(&format!(" (code: {code}, hex: 0x{unsigned:08x})"));
+            if unsigned == 0xc0000005 {
+                detail.push_str(" (Windows access violation)");
+            }
+        }
+        detail
     }
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_string(&mut stderr);
-    }
 
-    format!("stdout:\n{stdout}\n\nstderr:\n{stderr}")
+    #[cfg(not(windows))]
+    {
+        status.to_string()
+    }
 }
 
-async fn wait_for_gateway_ready(child: &mut Child, port: u16) -> Result<(), String> {
+fn read_log(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| format!("<failed to read {}: {e}>", path.display()))
+}
+
+fn runtime_diagnostics(runtime: &SmokeRuntime) -> String {
+    let bound_addr = runtime
+        .bound_addr_file
+        .as_ref()
+        .map(|path| {
+            let contents =
+                std::fs::read_to_string(path).unwrap_or_else(|e| format!("<not readable: {e}>"));
+            format!("{} => {}", path.display(), contents.trim())
+        })
+        .unwrap_or_else(|| "<none>".to_string());
+
+    format!(
+        "launch:\n  pid: {}\n  binary: {}\n  cwd: {}\n  THINCLAW_HOME: {}\n  GATEWAY_PORT env: {}\n  bound addr file: {}\n  stdout log: {}\n  stderr log: {}\n\nstdout:\n{}\n\nstderr:\n{}",
+        runtime.child.id(),
+        runtime.binary,
+        runtime.cwd.display(),
+        runtime.home.display(),
+        runtime.gateway_port_env,
+        bound_addr,
+        runtime.stdout_path.display(),
+        runtime.stderr_path.display(),
+        read_log(&runtime.stdout_path),
+        read_log(&runtime.stderr_path)
+    )
+}
+
+async fn wait_for_gateway_ready(runtime: &mut SmokeRuntime, port: u16) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
@@ -132,13 +212,15 @@ async fn wait_for_gateway_ready(child: &mut Child, port: u16) -> Result<(), Stri
     let mut last_error: String;
 
     loop {
-        if let Some(status) = child
+        if let Some(status) = runtime
+            .child
             .try_wait()
             .map_err(|e| format!("failed to poll runtime process: {e}"))?
         {
-            let output = read_child_output(child);
+            let diagnostics = runtime_diagnostics(runtime);
             return Err(format!(
-                "runtime exited before gateway became ready (status: {status}).\n{output}"
+                "runtime exited before gateway became ready (status: {}).\n{diagnostics}",
+                process_exit_detail(status)
             ));
         }
 
@@ -193,11 +275,11 @@ async fn wait_for_gateway_ready(child: &mut Child, port: u16) -> Result<(), Stri
         }
 
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let output = read_child_output(child);
+            let _ = runtime.child.kill();
+            let _ = runtime.child.wait();
+            let diagnostics = runtime_diagnostics(runtime);
             return Err(format!(
-                "gateway did not become ready within {:?}. Last observed error: {}.\n{output}",
+                "gateway did not become ready within {:?}. Last observed error: {}.\n{diagnostics}",
                 STARTUP_TIMEOUT, last_error
             ));
         }
@@ -211,14 +293,14 @@ async fn run_no_onboard_binds_gateway() {
     let _guard = runtime_smoke_guard().await;
     let temp = TempDir::new().expect("create temp dir");
     let port = reserve_local_port();
-    let mut child = spawn_runtime(&temp, port);
+    let mut runtime = spawn_runtime(&temp, port);
 
-    if let Err(error) = wait_for_gateway_ready(&mut child, port).await {
+    if let Err(error) = wait_for_gateway_ready(&mut runtime, port).await {
         panic!("{error}");
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = runtime.child.kill();
+    let _ = runtime.child.wait();
 }
 
 #[tokio::test]
@@ -231,14 +313,14 @@ async fn run_no_onboard_binds_explicit_gateway_port_3000_when_available() {
     drop(listener);
 
     let temp = TempDir::new().expect("create temp dir");
-    let mut child = spawn_runtime(&temp, 3000);
+    let mut runtime = spawn_runtime(&temp, 3000);
 
-    if let Err(error) = wait_for_gateway_ready(&mut child, 3000).await {
+    if let Err(error) = wait_for_gateway_ready(&mut runtime, 3000).await {
         panic!("{error}");
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = runtime.child.kill();
+    let _ = runtime.child.wait();
 }
 
 #[tokio::test]
@@ -246,34 +328,37 @@ async fn run_no_onboard_binds_gateway_port_zero() {
     let _guard = runtime_smoke_guard().await;
     let temp = TempDir::new().expect("create temp dir");
     let bound_addr_file = temp.path().join("gateway-bound-addr");
-    let mut child = spawn_runtime_with_port_env(&temp, "0", Some(&bound_addr_file));
+    let mut runtime = spawn_runtime_with_port_env(&temp, "0", Some(&bound_addr_file));
 
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let port = loop {
-        if let Some(status) = child.try_wait().expect("poll runtime") {
-            let output = read_child_output(&mut child);
-            panic!("runtime exited before writing bound addr ({status}).\n{output}");
+        if let Some(status) = runtime.child.try_wait().expect("poll runtime") {
+            let diagnostics = runtime_diagnostics(&runtime);
+            panic!(
+                "runtime exited before writing bound addr ({}).\n{diagnostics}",
+                process_exit_detail(status)
+            );
         }
         if let Ok(raw) = std::fs::read_to_string(&bound_addr_file) {
             let addr: std::net::SocketAddr = raw.trim().parse().expect("parse bound addr");
             break addr.port();
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let output = read_child_output(&mut child);
+            let _ = runtime.child.kill();
+            let _ = runtime.child.wait();
+            let diagnostics = runtime_diagnostics(&runtime);
             panic!(
-                "runtime did not write bound addr within {:?}.\n{output}",
+                "runtime did not write bound addr within {:?}.\n{diagnostics}",
                 STARTUP_TIMEOUT
             );
         }
         sleep(POLL_INTERVAL).await;
     };
 
-    if let Err(error) = wait_for_gateway_ready(&mut child, port).await {
+    if let Err(error) = wait_for_gateway_ready(&mut runtime, port).await {
         panic!("{error}");
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = runtime.child.kill();
+    let _ = runtime.child.wait();
 }
