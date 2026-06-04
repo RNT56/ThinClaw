@@ -127,6 +127,26 @@ impl SkillCheckInput {
     }
 }
 
+impl From<ToolSkillCheckSource> for SkillCheckInput {
+    fn from(source: ToolSkillCheckSource) -> Self {
+        match source {
+            ToolSkillCheckSource::InlineContent { content } => Self::InlineContent(content),
+            ToolSkillCheckSource::Path { path } => Self::Path(path),
+            ToolSkillCheckSource::Url { url } => Self::Url(url),
+        }
+    }
+}
+
+impl From<SkillCheckInput> for ToolSkillCheckSource {
+    fn from(input: SkillCheckInput) -> Self {
+        match input {
+            SkillCheckInput::InlineContent(content) => Self::InlineContent { content },
+            SkillCheckInput::Path(path) => Self::Path { path },
+            SkillCheckInput::Url(url) => Self::Url { url },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillListParams {
     pub verbose: bool,
@@ -1736,14 +1756,6 @@ impl Tool for SkillSnapshotHostTool {
     }
 }
 
-fn tool_skill_check_source(input: SkillCheckInput) -> ToolSkillCheckSource {
-    match input {
-        SkillCheckInput::InlineContent(content) => ToolSkillCheckSource::InlineContent { content },
-        SkillCheckInput::Path(path) => ToolSkillCheckSource::Path { path },
-        SkillCheckInput::Url(url) => ToolSkillCheckSource::Url { url },
-    }
-}
-
 pub struct SkillCheckHostTool {
     host: Arc<dyn SkillToolHostPort>,
 }
@@ -1780,7 +1792,7 @@ impl Tool for SkillCheckHostTool {
             .host
             .check_skill(ToolSkillCheckRequest {
                 scope: tool_scope_from_job_context(ctx),
-                source: tool_skill_check_source(input),
+                source: input.into(),
             })
             .await
             .map_err(tool_host_error)?;
@@ -3513,6 +3525,35 @@ mod tests {
         );
         assert!(ensure_skill_admin_available(&metadata, "skill_install").is_err());
         assert!(ensure_skill_admin_available(&serde_json::json!({}), "skill_install").is_ok());
+    }
+
+    #[test]
+    fn skill_check_input_converts_to_and_from_port_source() {
+        let input = SkillCheckInput::InlineContent("name: test".to_string());
+        let source: ToolSkillCheckSource = input.clone().into();
+        assert_eq!(
+            source,
+            ToolSkillCheckSource::InlineContent {
+                content: "name: test".to_string(),
+            }
+        );
+        assert_eq!(SkillCheckInput::from(source), input);
+
+        let path_source = ToolSkillCheckSource::Path {
+            path: "/tmp/example".to_string(),
+        };
+        assert_eq!(
+            SkillCheckInput::from(path_source),
+            SkillCheckInput::Path("/tmp/example".to_string())
+        );
+
+        let url_input = SkillCheckInput::Url("https://example.test/SKILL.md".to_string());
+        assert_eq!(
+            ToolSkillCheckSource::from(url_input),
+            ToolSkillCheckSource::Url {
+                url: "https://example.test/SKILL.md".to_string(),
+            }
+        );
     }
 
     #[test]

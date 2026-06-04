@@ -62,8 +62,7 @@ use crate::experiments::{
     ready_project_status as ready_project_status_policy, recent_trial_context,
     research_subagent_executor_unavailable_message, runner_cost_breakdown, short_id,
     sort_experiment_opportunities, summarize_llm_usage, truncate_for_prompt,
-    validate_lease_completion_status,
-    validate_project_workdir_fragment as validate_project_workdir_fragment_policy,
+    validate_lease_completion_status, validate_project_workdir_fragment,
 };
 use crate::history::OutcomeContractQuery;
 use crate::llm::usage_tracking::{
@@ -265,15 +264,6 @@ async fn ensure_experiments_enabled(
     Ok(settings)
 }
 
-fn ready_project_status(project: &ExperimentProject) -> ExperimentProjectStatus {
-    let workspace_exists = Path::new(&project.workspace_path).exists();
-    ready_project_status_policy(project, workspace_exists)
-}
-
-fn validate_project_workdir_fragment(workdir: &str) -> ApiResult<PathBuf> {
-    validate_project_workdir_fragment_policy(workdir).map_err(ApiError::InvalidInput)
-}
-
 async fn resolve_project_workdir(project: &ExperimentProject) -> ApiResult<PathBuf> {
     let workspace_root = tokio::fs::canonicalize(&project.workspace_path)
         .await
@@ -283,7 +273,8 @@ async fn resolve_project_workdir(project: &ExperimentProject) -> ApiResult<PathB
                 e,
             ))
         })?;
-    let workdir_fragment = validate_project_workdir_fragment(&project.workdir)?;
+    let workdir_fragment =
+        validate_project_workdir_fragment(&project.workdir).map_err(ApiError::InvalidInput)?;
     let workdir = workspace_root.join(workdir_fragment);
     let resolved = tokio::fs::canonicalize(&workdir).await.map_err(|e| {
         ApiError::InvalidInput(experiment_project_workdir_missing_message(
@@ -464,7 +455,8 @@ pub async fn create_project(
         created_at: now,
         updated_at: now,
     };
-    project.status = ready_project_status(&project);
+    project.status =
+        ready_project_status_policy(&project, Path::new(&project.workspace_path).exists());
     store
         .create_experiment_project(&project)
         .await
@@ -534,7 +526,9 @@ pub async fn update_project(
     if let Some(value) = req.autonomy_mode {
         project.autonomy_mode = value;
     }
-    project.status = req.status.unwrap_or_else(|| ready_project_status(&project));
+    project.status = req.status.unwrap_or_else(|| {
+        ready_project_status_policy(&project, Path::new(&project.workspace_path).exists())
+    });
     project.updated_at = Utc::now();
     store
         .update_experiment_project(&project)
@@ -3874,7 +3868,8 @@ async fn execute_local_trial(
     let worktree_root = tokio::fs::canonicalize(worktree_root)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to resolve campaign worktree: {e}")))?;
-    let workdir_fragment = validate_project_workdir_fragment(&project.workdir)?;
+    let workdir_fragment =
+        validate_project_workdir_fragment(&project.workdir).map_err(ApiError::InvalidInput)?;
     let run_root = worktree_root.join(workdir_fragment);
     let run_root = tokio::fs::canonicalize(&run_root)
         .await
@@ -4289,9 +4284,7 @@ fn ensure_unique_target_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        git_changed_files, record_campaign_candidate_generation, validate_project_workdir_fragment,
-    };
+    use super::{git_changed_files, record_campaign_candidate_generation};
     use crate::agent::subagent_executor::{SubagentConfig, SubagentExecutor};
     use crate::agent::{AgentRunArtifact, AgentRunStatus};
     use crate::channels::ChannelManager;
@@ -4543,17 +4536,6 @@ mod tests {
         assert_eq!(
             campaign.metadata["candidate_generation"]["artifact_run_ids"][0].as_str(),
             Some(artifact.run_id.as_str())
-        );
-    }
-
-    #[test]
-    fn validate_project_workdir_fragment_rejects_parent_traversal() {
-        let error = validate_project_workdir_fragment("../escape")
-            .expect_err("parent traversal should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("Project workdir must stay inside the workspace root")
         );
     }
 

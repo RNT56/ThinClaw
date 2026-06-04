@@ -29,16 +29,15 @@ use thinclaw_tools::builtin::skill::{
 use thinclaw_tools::ports::{
     SkillInstallToolHostPort, SkillPublishToolHostPort, SkillSearchToolHostPort,
     SkillTapToolHostPort, SkillToolHostPort, ToolHostError, ToolOperationScope,
-    ToolSkillCheckRequest, ToolSkillCheckResult, ToolSkillCheckSource,
-    ToolSkillInstallActionRequest, ToolSkillInstallRequest, ToolSkillMutationActionResult,
-    ToolSkillPublishRequest, ToolSkillPublishResult, ToolSkillQuery, ToolSkillRead,
-    ToolSkillRemoveResult, ToolSkillSearchCatalogEntry, ToolSkillSearchLocalEntry,
-    ToolSkillSearchRemoteEntry, ToolSkillSearchRequest, ToolSkillSearchResult,
-    ToolSkillSnapshotResult, ToolSkillSummary, ToolSkillTap, ToolSkillTapAddRequest,
-    ToolSkillTapList, ToolSkillTapMutationResult, ToolSkillTapQuery, ToolSkillTapRefreshRequest,
-    ToolSkillTapRefreshResult, ToolSkillTapRemoveRequest, ToolSkillTapTrust, ToolSkillTrust,
-    ToolSkillTrustMutationRequest, ToolSkillTrustMutationResult, ToolSkillUpdateActionRequest,
-    job_context_from_tool_scope,
+    ToolSkillCheckRequest, ToolSkillCheckResult, ToolSkillInstallActionRequest,
+    ToolSkillInstallRequest, ToolSkillMutationActionResult, ToolSkillPublishRequest,
+    ToolSkillPublishResult, ToolSkillQuery, ToolSkillRead, ToolSkillRemoveResult,
+    ToolSkillSearchCatalogEntry, ToolSkillSearchLocalEntry, ToolSkillSearchRemoteEntry,
+    ToolSkillSearchRequest, ToolSkillSearchResult, ToolSkillSnapshotResult, ToolSkillSummary,
+    ToolSkillTap, ToolSkillTapAddRequest, ToolSkillTapList, ToolSkillTapMutationResult,
+    ToolSkillTapQuery, ToolSkillTapRefreshRequest, ToolSkillTapRefreshResult,
+    ToolSkillTapRemoveRequest, ToolSkillTapTrust, ToolSkillTrust, ToolSkillTrustMutationRequest,
+    ToolSkillTrustMutationResult, ToolSkillUpdateActionRequest, job_context_from_tool_scope,
 };
 
 fn restricted_skill_names(ctx: &JobContext) -> Option<std::collections::HashSet<String>> {
@@ -1087,7 +1086,7 @@ impl SkillToolHostPort for RootSkillToolHost {
     ) -> Result<ToolSkillCheckResult, ToolHostError> {
         skill_policy::ensure_skill_admin_available(&request.scope.metadata, "skill_check")
             .map_err(tool_host_error_from_tool)?;
-        let input = skill_check_input_from_port(request.source);
+        let input = skill_policy::SkillCheckInput::from(request.source);
         let output = skill_check_output_for_input(&self.quarantine, input)
             .await
             .map_err(tool_host_error_from_tool)?;
@@ -1580,16 +1579,6 @@ impl Tool for SkillSearchTool {
 
 pub struct SkillCheckTool {
     quarantine: Arc<QuarantineManager>,
-}
-
-fn skill_check_input_from_port(source: ToolSkillCheckSource) -> skill_policy::SkillCheckInput {
-    match source {
-        ToolSkillCheckSource::InlineContent { content } => {
-            skill_policy::SkillCheckInput::InlineContent(content)
-        }
-        ToolSkillCheckSource::Path { path } => skill_policy::SkillCheckInput::Path(path),
-        ToolSkillCheckSource::Url { url } => skill_policy::SkillCheckInput::Url(url),
-    }
 }
 
 async fn resolve_skill_check_input(

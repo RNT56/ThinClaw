@@ -28,6 +28,17 @@ pub enum RoutingRule {
     },
 }
 
+/// Portable inputs for building a routing policy from persisted settings.
+///
+/// Root crates remain responsible for deriving `prefer_cheap_default` from
+/// concrete settings such as routing mode and configured provider slots.
+#[derive(Debug, Clone, Copy)]
+pub struct RoutingPolicyConfig<'a> {
+    pub smart_routing_enabled: bool,
+    pub prefer_cheap_default: bool,
+    pub rules: &'a [RoutingRule],
+}
+
 /// Context for a routing decision.
 #[derive(Debug, Clone)]
 pub struct RoutingContext {
@@ -250,6 +261,52 @@ fn latency_key_to_legacy_target(key: &str) -> String {
     key.strip_prefix("unknown|unknown|")
         .unwrap_or(key)
         .to_string()
+}
+
+pub fn build_routing_policy(config: RoutingPolicyConfig<'_>) -> RoutingPolicy {
+    let default_target = if config.prefer_cheap_default {
+        "cheap"
+    } else {
+        "primary"
+    };
+    let mut policy = RoutingPolicy::new(default_target);
+    policy.set_enabled(config.smart_routing_enabled);
+    for rule in config.rules {
+        policy.add_rule(rule.clone());
+    }
+    policy
+}
+
+pub fn policy_rule_targets(rules: &[RoutingRule]) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut push_unique = |target: &str| {
+        if !targets.iter().any(|existing| existing == target) {
+            targets.push(target.to_string());
+        }
+    };
+
+    for rule in rules {
+        match rule {
+            RoutingRule::LargeContext { provider, .. }
+            | RoutingRule::VisionContent { provider } => {
+                push_unique(provider);
+            }
+            RoutingRule::RoundRobin { providers } => {
+                for provider in providers {
+                    push_unique(provider);
+                }
+            }
+            RoutingRule::Fallback { primary, fallbacks } => {
+                push_unique(primary);
+                for fallback in fallbacks {
+                    push_unique(fallback);
+                }
+            }
+            RoutingRule::CostOptimized { .. } | RoutingRule::LowestLatency => {}
+        }
+    }
+
+    targets
 }
 
 impl RoutingPolicy {
@@ -704,6 +761,62 @@ mod tests {
         // Re-enabled: rule fires again
         policy.set_enabled(true);
         assert_eq!(policy.select_provider(&ctx), "gemini");
+    }
+
+    #[test]
+    fn test_build_routing_policy_preserves_default_enabled_and_rules() {
+        let rules = vec![RoutingRule::VisionContent {
+            provider: "primary".into(),
+        }];
+
+        let policy = build_routing_policy(RoutingPolicyConfig {
+            smart_routing_enabled: false,
+            prefer_cheap_default: true,
+            rules: &rules,
+        });
+
+        assert_eq!(policy.default_provider(), "cheap");
+        assert!(!policy.is_enabled());
+        assert_eq!(policy.rule_count(), 1);
+
+        let mut ctx = base_ctx();
+        ctx.has_vision = true;
+        assert_eq!(policy.select_provider(&ctx), "cheap");
+    }
+
+    #[test]
+    fn test_policy_rule_targets_collect_direct_and_fallback_targets_once() {
+        let rules = vec![
+            RoutingRule::LargeContext {
+                threshold: 8_000,
+                provider: "openai/gpt-4o".to_string(),
+            },
+            RoutingRule::VisionContent {
+                provider: "openai/gpt-4o".to_string(),
+            },
+            RoutingRule::RoundRobin {
+                providers: vec!["openai@cheap".to_string(), "anthropic@primary".to_string()],
+            },
+            RoutingRule::Fallback {
+                primary: "primary".to_string(),
+                fallbacks: vec!["openai/gpt-4o-mini".to_string()],
+            },
+            RoutingRule::CostOptimized {
+                max_cost_per_m_usd: 1.0,
+            },
+            RoutingRule::LowestLatency,
+        ];
+
+        assert_eq!(
+            policy_rule_targets(&rules),
+            vec![
+                "openai/gpt-4o".to_string(),
+                "openai@cheap".to_string(),
+                "anthropic@primary".to_string(),
+                "primary".to_string(),
+                "openai/gpt-4o-mini".to_string(),
+            ]
+        );
     }
 
     #[test]
