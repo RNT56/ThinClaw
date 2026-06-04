@@ -3,6 +3,18 @@
 ThinClaw is split into focused workspace crates with the root package kept as
 the compatibility facade and binary entrypoint.
 
+## Root Adapters End State
+
+The crate split targets a root-adapter architecture, not a root-minimal rewrite.
+Workspace crates own reusable DTOs, policy, algorithms, port traits, and
+root-independent runtimes. Root `src/*` owns public compatibility facades,
+`AppBuilder`, binaries, concrete DB/secrets/LLM/tool/channel/gateway wiring,
+Docker orchestration, and host side effects.
+
+When moving behavior, keep product behavior stable and cross root/crate
+boundaries through narrow ports. Do not move concrete root services into crates
+only to reduce root file count.
+
 ## Rule Of Thumb
 
 - Internal crates import each other directly as `thinclaw_*`.
