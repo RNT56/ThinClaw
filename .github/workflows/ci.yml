@@ -150,6 +150,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-companion
+          # The Tauri smoke build consumes most of the hosted runner disk; do
+          # not fail an otherwise green job while saving the post-job cache.
+          save-if: false
       - name: Install Node
         uses: actions/setup-node@v5
         with:
