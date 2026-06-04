@@ -7,8 +7,8 @@ use thinclaw_agent::ports::{
     SkillContext, WorkspacePromptAssembly, WorkspacePromptAssemblyPort, WorkspacePromptMaterials,
     WorkspacePromptRequest,
 };
+use thinclaw_agent::prompt_assembly::assemble_workspace_prompt_materials;
 
-use crate::agent::prompt_assembly::PromptAssemblyV2;
 use crate::error::WorkspaceError;
 
 pub struct RootWorkspacePromptAssemblyPort;
@@ -40,59 +40,7 @@ impl WorkspacePromptAssemblyPort for RootWorkspacePromptAssemblyPort {
         materials: WorkspacePromptMaterials,
         skills: SkillContext,
     ) -> Result<WorkspacePromptAssembly, WorkspaceError> {
-        let skill_index = skills
-            .available_index_block
-            .as_ref()
-            .map(|block| format!("## Skills\n{block}"))
-            .unwrap_or_default();
-        let active_skills = skills
-            .active_skill_block
-            .as_ref()
-            .map(|block| format!("## Skill Expansion\n{block}"))
-            .unwrap_or_default();
-
-        let assembly = PromptAssemblyV2::new()
-            .push_stable(
-                "workspace_prompt",
-                materials.workspace_prompt.clone().unwrap_or_default(),
-            )
-            .push_stable(
-                "provider_system_prompt",
-                materials.provider_system_prompt.clone().unwrap_or_default(),
-            )
-            .push_stable("skills_index", skill_index)
-            .push_ephemeral(
-                "provider_recall",
-                materials.provider_recall_block.clone().unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "linked_recall",
-                materials.linked_recall_block.clone().unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "channel_formatting_hints",
-                materials
-                    .channel_formatting_hints
-                    .clone()
-                    .unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "runtime_capabilities",
-                materials
-                    .runtime_capability_hint
-                    .clone()
-                    .unwrap_or_default(),
-            )
-            .push_ephemeral("active_skills", active_skills)
-            .push_ephemeral(
-                "post_compaction_fragment",
-                materials
-                    .post_compaction_context
-                    .clone()
-                    .unwrap_or_default(),
-            )
-            .with_provider_context_refs(materials.provider_context_refs.clone())
-            .build();
+        let assembly = assemble_workspace_prompt_materials(&materials, &skills);
 
         Ok(WorkspacePromptAssembly {
             materials,

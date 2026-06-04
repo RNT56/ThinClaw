@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::ports::SkillSummary;
+use crate::ports::{SkillContext, SkillSummary, WorkspacePromptMaterials};
 
 pub const DEFAULT_AVAILABLE_SKILL_INSTRUCTION: &str =
     "Use `skill_read` with a skill name to inspect full instructions before relying on a skill.";
@@ -165,6 +165,73 @@ pub fn render_skill_sections(
     }
 }
 
+pub fn render_skill_index_context(block: &str) -> String {
+    format!("## Skills\n{block}")
+}
+
+pub fn render_active_skill_context(block: &str) -> String {
+    format!("## Skill Expansion\n{block}")
+}
+
+pub fn assemble_workspace_prompt_materials(
+    materials: &WorkspacePromptMaterials,
+    skills: &SkillContext,
+) -> PromptAssemblyResult {
+    let skill_index = skills
+        .available_index_block
+        .as_deref()
+        .map(render_skill_index_context)
+        .unwrap_or_default();
+    let active_skills = skills
+        .active_skill_block
+        .as_deref()
+        .map(render_active_skill_context)
+        .unwrap_or_default();
+
+    PromptAssemblyV2::new()
+        .push_stable(
+            "workspace_prompt",
+            materials.workspace_prompt.clone().unwrap_or_default(),
+        )
+        .push_stable(
+            "provider_system_prompt",
+            materials.provider_system_prompt.clone().unwrap_or_default(),
+        )
+        .push_stable("skills_index", skill_index)
+        .push_ephemeral(
+            "provider_recall",
+            materials.provider_recall_block.clone().unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "linked_recall",
+            materials.linked_recall_block.clone().unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "channel_formatting_hints",
+            materials
+                .channel_formatting_hints
+                .clone()
+                .unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "runtime_capabilities",
+            materials
+                .runtime_capability_hint
+                .clone()
+                .unwrap_or_default(),
+        )
+        .push_ephemeral("active_skills", active_skills)
+        .push_ephemeral(
+            "post_compaction_fragment",
+            materials
+                .post_compaction_context
+                .clone()
+                .unwrap_or_default(),
+        )
+        .with_provider_context_refs(materials.provider_context_refs.clone())
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +335,58 @@ mod tests {
         assert!(rendered.contains("### Active Skills"));
         assert!(rendered.contains("### Available Skills"));
         assert!(rendered.contains(SUBAGENT_AVAILABLE_SKILL_INSTRUCTION));
+    }
+
+    #[test]
+    fn workspace_prompt_material_assembly_preserves_segment_policy() {
+        let materials = WorkspacePromptMaterials {
+            workspace_prompt: Some("You are ThinClaw.".to_string()),
+            provider_system_prompt: Some("Provider guidance.".to_string()),
+            provider_recall_block: Some("Memory".to_string()),
+            provider_context_refs: vec!["ctx-1".to_string()],
+            linked_recall_block: Some("Linked".to_string()),
+            channel_formatting_hints: Some("Use markdown".to_string()),
+            runtime_capability_hint: Some("Runtime hints".to_string()),
+            post_compaction_context: Some("Compacted".to_string()),
+        };
+        let skills = SkillContext {
+            available_index_block: Some("### Available Skills\n- **rust-fix**: Repair".to_string()),
+            active_skill_block: Some(
+                "### Active Skills\n- **rust-fix** (v1, trusted): Repair".to_string(),
+            ),
+            ..SkillContext::default()
+        };
+
+        let result = assemble_workspace_prompt_materials(&materials, &skills);
+
+        assert!(result.stable_snapshot.contains("You are ThinClaw."));
+        assert!(result.stable_snapshot.contains("## Skills"));
+        assert!(
+            result
+                .ephemeral_documents
+                .iter()
+                .any(|doc| doc.contains("Memory"))
+        );
+        assert!(
+            result
+                .ephemeral_documents
+                .iter()
+                .any(|doc| doc.contains("## Skill Expansion"))
+        );
+        assert_eq!(result.provider_context_refs, vec!["ctx-1"]);
+        assert_eq!(
+            result.segment_order,
+            vec![
+                "stable:workspace_prompt".to_string(),
+                "stable:provider_system_prompt".to_string(),
+                "stable:skills_index".to_string(),
+                "ephemeral:provider_recall".to_string(),
+                "ephemeral:linked_recall".to_string(),
+                "ephemeral:channel_formatting_hints".to_string(),
+                "ephemeral:runtime_capabilities".to_string(),
+                "ephemeral:active_skills".to_string(),
+                "ephemeral:post_compaction_fragment".to_string(),
+            ]
+        );
     }
 }

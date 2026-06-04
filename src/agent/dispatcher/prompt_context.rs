@@ -293,10 +293,9 @@ impl Agent {
         let provider_system_prompt = provider_system_prompt
             .map(|prompt| sanitize_prompt_segment("provider_system_prompt", prompt));
         let skill_index_context = skill_index_context
-            .map(|ctx| sanitize_prompt_segment("skills_index", format!("## Skills\n{ctx}")));
-        let active_skill_context = active_skill_context.map(|ctx| {
-            sanitize_prompt_segment("active_skills", format!("## Skill Expansion\n{ctx}"))
-        });
+            .map(|ctx| sanitize_prompt_segment("skills_index", render_skill_index_context(&ctx)));
+        let active_skill_context = active_skill_context
+            .map(|ctx| sanitize_prompt_segment("active_skills", render_active_skill_context(&ctx)));
         let provider_recall_context = provider_context.as_ref().map(|ctx| {
             sanitize_prompt_segment(
                 "provider_recall",
