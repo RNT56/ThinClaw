@@ -1,6 +1,6 @@
 use super::*;
 pub(in crate::agent::learning) use thinclaw_agent::learning_policy::{
-    LearningRouteAction, LearningRoutePolicy, auto_apply_allowed_for_class,
+    LearningRouteAction, LearningRoutePolicy, SafeModeTripInput, auto_apply_allowed_for_class,
     build_code_proposal_fields, code_proposal_review_metadata, ensure_auto_apply_class,
     evaluate_learning_event, generated_skill_feedback_polarity,
     generated_skill_lifecycle_for_reuse, generated_skill_transition_entry,

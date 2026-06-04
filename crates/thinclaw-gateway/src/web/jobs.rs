@@ -245,7 +245,7 @@ impl SandboxJobLookupProjection {
     }
 
     pub fn started_at(&self) -> Option<DateTime<Utc>> {
-        self.stored_started_at.or_else(|| match self.live_state {
+        self.stored_started_at.or(match self.live_state {
             Some(
                 SandboxContainerState::Running
                 | SandboxContainerState::Stopped

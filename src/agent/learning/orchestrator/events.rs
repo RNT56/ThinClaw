@@ -199,8 +199,8 @@ impl LearningOrchestrator {
         candidate: &DbLearningCandidate,
     ) -> Result<LearningOutcome, String> {
         let settings = self.load_settings_for_user(&candidate.user_id).await;
-        let class = ImprovementClass::from_str(&candidate.candidate_type);
-        let risk = RiskTier::from_str(&candidate.risk_tier);
+        let class = ImprovementClass::parse(&candidate.candidate_type);
+        let risk = RiskTier::parse(&candidate.risk_tier);
         let event_id = candidate.learning_event_id.unwrap_or(candidate.id);
         let mut outcome = LearningOutcome {
             trigger: trigger.to_string(),
@@ -391,16 +391,19 @@ impl LearningOrchestrator {
             .await
             .unwrap_or_default();
 
-        safe_mode_should_trip(
-            settings.safe_mode.enabled,
-            settings.safe_mode.thresholds.min_samples,
-            settings.safe_mode.thresholds.negative_feedback_ratio,
-            settings.safe_mode.thresholds.rollback_ratio,
-            feedback.len(),
-            negative_feedback,
-            rollbacks.len(),
-            outcome_stats.evaluated_last_7d,
-            outcome_stats.negative_ratio_last_7d,
-        )
+        safe_mode_should_trip(SafeModeTripInput {
+            enabled: settings.safe_mode.enabled,
+            min_samples: settings.safe_mode.thresholds.min_samples,
+            negative_feedback_ratio_threshold: settings
+                .safe_mode
+                .thresholds
+                .negative_feedback_ratio,
+            rollback_ratio_threshold: settings.safe_mode.thresholds.rollback_ratio,
+            feedback_count: feedback.len(),
+            negative_feedback_count: negative_feedback,
+            rollback_count: rollbacks.len(),
+            outcome_evaluated_last_7d: outcome_stats.evaluated_last_7d,
+            outcome_negative_ratio_last_7d: outcome_stats.negative_ratio_last_7d,
+        })
     }
 }

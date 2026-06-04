@@ -16,15 +16,16 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Timelike, Utc};
 use regex::Regex;
 use thinclaw_agent::routine_engine::{
-    EVENT_CONTENT_PREVIEW_LIMIT, FullJobRuntimeMetadata, RoutineEventEvaluationPlan,
-    RoutineEventFilterOutcome, ScheduledTriggerAction, active_hour_allows, build_heartbeat_prompt,
-    build_lightweight_routine_prompt, build_routine_event_from_message, build_routine_notification,
-    build_scheduled_routine_triggers, classify_lightweight_routine_response,
-    compare_event_cache_routines, decide_claimed_scheduled_trigger,
-    decide_missing_scheduled_trigger_routine, decide_routine_event_dispatch,
-    effective_lightweight_max_tokens, evaluate_routine_event_filters, full_job_metadata,
-    heartbeat_job_metadata, increment_decision_count, lightweight_routine_messages,
-    routine_cooldown_allows, routine_event_evaluation_details, routine_event_owner_matches,
+    ClaimedScheduledTriggerDecisionInput, EVENT_CONTENT_PREVIEW_LIMIT, FullJobRuntimeMetadata,
+    RoutineEventEvaluationPlan, RoutineEventFilterOutcome, ScheduledTriggerAction,
+    active_hour_allows, build_heartbeat_prompt, build_lightweight_routine_prompt,
+    build_routine_event_from_message, build_routine_notification, build_scheduled_routine_triggers,
+    classify_lightweight_routine_response, compare_event_cache_routines,
+    decide_claimed_scheduled_trigger, decide_missing_scheduled_trigger_routine,
+    decide_routine_event_dispatch, effective_lightweight_max_tokens,
+    evaluate_routine_event_filters, full_job_metadata, heartbeat_job_metadata,
+    increment_decision_count, lightweight_routine_messages, routine_cooldown_allows,
+    routine_event_evaluation_details, routine_event_owner_matches,
     routine_requests_desktop_capabilities, routine_runtime_update_for_run, sanitize_routine_name,
     scheduled_run_trigger_key, should_continue_queue_drain, should_refresh_event_cache,
     summarize_runtime_capabilities, truncate,
@@ -485,16 +486,16 @@ impl RoutineEngine {
             global_running < self.config.max_concurrent_routines as i64
         };
 
-        let plan = decide_claimed_scheduled_trigger(
-            &routine,
-            &trigger,
+        let plan = decide_claimed_scheduled_trigger(ClaimedScheduledTriggerDecisionInput {
+            routine: &routine,
+            trigger: &trigger,
             duplicate_exists,
             cooldown_allowed,
             routine_capacity_available,
             global_capacity_available,
-            self.user_timezone.as_deref(),
-            Utc::now(),
-        )?;
+            user_timezone: self.user_timezone.as_deref(),
+            now: Utc::now(),
+        })?;
 
         match plan.action {
             ScheduledTriggerAction::Complete if plan.decision != RoutineTriggerDecision::Fired => {

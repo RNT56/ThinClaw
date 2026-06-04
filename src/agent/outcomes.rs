@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use thinclaw_agent::outcomes::BuildOutcomeCandidateInput;
 use thinclaw_agent::outcomes::{
     self as outcome_policy, CONTRACT_ROUTINE, CONTRACT_TOOL, CONTRACT_TURN,
     DEFAULT_EVALUATION_INTERVAL_SECS, EVALUATOR_MANUAL_REVIEW, EVALUATOR_OUTCOME,
@@ -338,16 +339,16 @@ impl OutcomeService {
         } else {
             None
         };
-        let Some(candidate) = outcome_policy::build_outcome_candidate(
-            Uuid::new_v4(),
+        let Some(candidate) = outcome_policy::build_outcome_candidate(BuildOutcomeCandidateInput {
+            id: Uuid::new_v4(),
             learning_event_id,
             contract,
             score,
             observations,
-            &seed,
+            seed: &seed,
             prompt_payload,
-            Utc::now(),
-        ) else {
+            created_at: Utc::now(),
+        }) else {
             return Ok(None);
         };
         self.store

@@ -232,16 +232,23 @@ pub fn decide_missing_scheduled_trigger_routine() -> ScheduledTriggerDecisionPla
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ClaimedScheduledTriggerDecisionInput<'a> {
+    pub routine: &'a Routine,
+    pub trigger: &'a RoutineTrigger,
+    pub duplicate_exists: bool,
+    pub cooldown_allowed: bool,
+    pub routine_capacity_available: bool,
+    pub global_capacity_available: bool,
+    pub user_timezone: Option<&'a str>,
+    pub now: DateTime<Utc>,
+}
+
 pub fn decide_claimed_scheduled_trigger(
-    routine: &Routine,
-    trigger: &RoutineTrigger,
-    duplicate_exists: bool,
-    cooldown_allowed: bool,
-    routine_capacity_available: bool,
-    global_capacity_available: bool,
-    user_timezone: Option<&str>,
-    now: DateTime<Utc>,
+    input: ClaimedScheduledTriggerDecisionInput<'_>,
 ) -> Result<ScheduledTriggerDecisionPlan, RoutineError> {
+    let routine = input.routine;
+    let trigger = input.trigger;
     if !routine.enabled {
         return Ok(ScheduledTriggerDecisionPlan::complete(
             RoutineTriggerDecision::SkippedDisabled,
@@ -249,7 +256,7 @@ pub fn decide_claimed_scheduled_trigger(
         ));
     }
 
-    if duplicate_exists {
+    if input.duplicate_exists {
         return Ok(ScheduledTriggerDecisionPlan::complete(
             RoutineTriggerDecision::SkippedDuplicate,
             "a run already exists for this logical scheduled trigger",
@@ -257,7 +264,7 @@ pub fn decide_claimed_scheduled_trigger(
     }
 
     if matches!(routine.policy.catch_up_mode, RoutineCatchUpMode::Skip) {
-        let next_fire_at = next_fire_for_routine(routine, user_timezone, now)?;
+        let next_fire_at = next_fire_for_routine(routine, input.user_timezone, input.now)?;
         return Ok(ScheduledTriggerDecisionPlan {
             decision: RoutineTriggerDecision::SkippedCatchUp,
             reason: "catch-up mode is skip; backlog was collapsed without execution".to_string(),
@@ -266,7 +273,7 @@ pub fn decide_claimed_scheduled_trigger(
         });
     }
 
-    if !cooldown_allowed {
+    if !input.cooldown_allowed {
         return Ok(ScheduledTriggerDecisionPlan::release(
             RoutineTriggerDecision::DeferredCooldown,
             "routine cooldown is still active",
@@ -274,7 +281,7 @@ pub fn decide_claimed_scheduled_trigger(
     }
 
     if !matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent)
-        && !routine_capacity_available
+        && !input.routine_capacity_available
     {
         return Ok(ScheduledTriggerDecisionPlan::release(
             RoutineTriggerDecision::DeferredConcurrency,
@@ -283,7 +290,7 @@ pub fn decide_claimed_scheduled_trigger(
     }
 
     if !matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent)
-        && !global_capacity_available
+        && !input.global_capacity_available
     {
         return Ok(ScheduledTriggerDecisionPlan::release(
             RoutineTriggerDecision::DeferredGlobalCapacity,
@@ -1203,33 +1210,61 @@ mod tests {
         );
         let trigger = test_scheduled_trigger(routine.id, RoutineTriggerKind::Cron);
 
-        let duplicate = decide_claimed_scheduled_trigger(
-            &routine, &trigger, true, false, false, false, None, now,
-        )
+        let duplicate = decide_claimed_scheduled_trigger(ClaimedScheduledTriggerDecisionInput {
+            routine: &routine,
+            trigger: &trigger,
+            duplicate_exists: true,
+            cooldown_allowed: false,
+            routine_capacity_available: false,
+            global_capacity_available: false,
+            user_timezone: None,
+            now,
+        })
         .unwrap();
         assert_eq!(duplicate.decision, RoutineTriggerDecision::SkippedDuplicate);
         assert_eq!(duplicate.action, ScheduledTriggerAction::Complete);
 
         routine.policy.catch_up_mode = RoutineCatchUpMode::Skip;
-        let skip = decide_claimed_scheduled_trigger(
-            &routine, &trigger, false, true, true, true, None, now,
-        )
+        let skip = decide_claimed_scheduled_trigger(ClaimedScheduledTriggerDecisionInput {
+            routine: &routine,
+            trigger: &trigger,
+            duplicate_exists: false,
+            cooldown_allowed: true,
+            routine_capacity_available: true,
+            global_capacity_available: true,
+            user_timezone: None,
+            now,
+        })
         .unwrap();
         assert_eq!(skip.decision, RoutineTriggerDecision::SkippedCatchUp);
         assert_eq!(skip.action, ScheduledTriggerAction::Complete);
         assert!(skip.next_fire_at.is_some_and(|next| next > now));
 
         routine.policy.catch_up_mode = RoutineCatchUpMode::RunOnceNow;
-        let cooldown = decide_claimed_scheduled_trigger(
-            &routine, &trigger, false, false, true, true, None, now,
-        )
+        let cooldown = decide_claimed_scheduled_trigger(ClaimedScheduledTriggerDecisionInput {
+            routine: &routine,
+            trigger: &trigger,
+            duplicate_exists: false,
+            cooldown_allowed: false,
+            routine_capacity_available: true,
+            global_capacity_available: true,
+            user_timezone: None,
+            now,
+        })
         .unwrap();
         assert_eq!(cooldown.decision, RoutineTriggerDecision::DeferredCooldown);
         assert_eq!(cooldown.action, ScheduledTriggerAction::Release);
 
-        let global_full = decide_claimed_scheduled_trigger(
-            &routine, &trigger, false, true, true, false, None, now,
-        )
+        let global_full = decide_claimed_scheduled_trigger(ClaimedScheduledTriggerDecisionInput {
+            routine: &routine,
+            trigger: &trigger,
+            duplicate_exists: false,
+            cooldown_allowed: true,
+            routine_capacity_available: true,
+            global_capacity_available: false,
+            user_timezone: None,
+            now,
+        })
         .unwrap();
         assert_eq!(
             global_full.decision,
@@ -1249,16 +1284,16 @@ mod tests {
         );
         let trigger = test_scheduled_trigger(routine.id, RoutineTriggerKind::SystemEvent);
 
-        let plan = decide_claimed_scheduled_trigger(
-            &routine,
-            &trigger,
-            false,
-            true,
-            false,
-            false,
-            None,
-            Utc::now(),
-        )
+        let plan = decide_claimed_scheduled_trigger(ClaimedScheduledTriggerDecisionInput {
+            routine: &routine,
+            trigger: &trigger,
+            duplicate_exists: false,
+            cooldown_allowed: true,
+            routine_capacity_available: false,
+            global_capacity_available: false,
+            user_timezone: None,
+            now: Utc::now(),
+        })
         .unwrap();
 
         assert_eq!(plan.decision, RoutineTriggerDecision::Fired);

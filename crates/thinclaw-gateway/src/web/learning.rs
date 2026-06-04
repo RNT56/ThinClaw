@@ -549,26 +549,31 @@ pub fn learning_rollback_item_from_record(record: &LearningRollbackRecord) -> Le
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LearningFeedbackActionResponseInput {
+    pub id: Uuid,
+    pub user_id: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub verdict: String,
+    pub note: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
 pub fn learning_feedback_action_response(
-    id: Uuid,
-    user_id: impl Into<String>,
-    target_type: impl Into<String>,
-    target_id: impl Into<String>,
-    verdict: impl Into<String>,
-    note: Option<String>,
-    metadata: Option<serde_json::Value>,
-    created_at: DateTime<Utc>,
+    input: LearningFeedbackActionResponseInput,
 ) -> LearningFeedbackActionResponse {
     LearningFeedbackActionResponse {
         feedback: LearningFeedbackItem {
-            id,
-            user_id: user_id.into(),
-            target_type: target_type.into(),
-            target_id: target_id.into(),
-            verdict: verdict.into(),
-            note,
-            metadata: metadata.unwrap_or_else(|| serde_json::json!({})),
-            created_at: created_at.to_rfc3339(),
+            id: input.id,
+            user_id: input.user_id,
+            target_type: input.target_type,
+            target_id: input.target_id,
+            verdict: input.verdict,
+            note: input.note,
+            metadata: input.metadata.unwrap_or_else(|| serde_json::json!({})),
+            created_at: input.created_at.to_rfc3339(),
         },
         status: "recorded",
     }
@@ -1040,16 +1045,16 @@ mod tests {
     #[test]
     fn learning_action_response_builders_preserve_recorded_status() {
         let now = chrono::Utc::now();
-        let feedback = learning_feedback_action_response(
-            Uuid::new_v4(),
-            "user-1",
-            "candidate",
-            "candidate-1",
-            "positive",
-            Some("useful".to_string()),
-            None,
-            now,
-        );
+        let feedback = learning_feedback_action_response(LearningFeedbackActionResponseInput {
+            id: Uuid::new_v4(),
+            user_id: "user-1".to_string(),
+            target_type: "candidate".to_string(),
+            target_id: "candidate-1".to_string(),
+            verdict: "positive".to_string(),
+            note: Some("useful".to_string()),
+            metadata: None,
+            created_at: now,
+        });
         assert_eq!(feedback.status, "recorded");
         assert_eq!(feedback.feedback.created_at, now.to_rfc3339());
         assert_eq!(feedback.feedback.metadata, serde_json::json!({}));

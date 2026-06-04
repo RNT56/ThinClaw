@@ -821,9 +821,7 @@ pub fn outcome_candidate_seed(
     let supplement_kind = match class {
         OutcomeCandidateClass::Prompt => OutcomeCandidateSupplementKind::Prompt,
         OutcomeCandidateClass::Code => {
-            if code_candidate_payload(contract).is_none() {
-                return None;
-            }
+            code_candidate_payload(contract)?;
             OutcomeCandidateSupplementKind::Code
         }
         _ => OutcomeCandidateSupplementKind::None,
@@ -862,68 +860,77 @@ pub fn candidate_dedupe_exists(candidates: &[LearningCandidate], dedupe_key: &st
     })
 }
 
-pub fn build_outcome_candidate(
-    id: Uuid,
-    learning_event_id: Uuid,
-    contract: &OutcomeContract,
-    score: &OutcomeScore,
-    observations: &[OutcomeObservation],
-    seed: &OutcomeCandidateSeed,
-    prompt_payload: Option<serde_json::Value>,
-    created_at: DateTime<Utc>,
-) -> Option<LearningCandidate> {
-    let target_name = seed.target_name.clone();
+#[derive(Debug, Clone)]
+pub struct BuildOutcomeCandidateInput<'a> {
+    pub id: Uuid,
+    pub learning_event_id: Uuid,
+    pub contract: &'a OutcomeContract,
+    pub score: &'a OutcomeScore,
+    pub observations: &'a [OutcomeObservation],
+    pub seed: &'a OutcomeCandidateSeed,
+    pub prompt_payload: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+pub fn build_outcome_candidate(input: BuildOutcomeCandidateInput<'_>) -> Option<LearningCandidate> {
+    let target_name = input.seed.target_name.clone();
     let evidence = json!({
         "source": "outcome_backed_learning",
-        "contract_id": contract.id,
-        "contract_type": contract.contract_type.clone(),
-        "pattern_key": seed.pattern_key.clone(),
-        "pattern_count": seed.pattern_count,
-        "final_verdict": score.verdict.clone(),
-        "observations": observations,
+        "contract_id": input.contract.id,
+        "contract_type": input.contract.contract_type.clone(),
+        "pattern_key": input.seed.pattern_key.clone(),
+        "pattern_count": input.seed.pattern_count,
+        "final_verdict": input.score.verdict.clone(),
+        "observations": input.observations,
         "target": target_name.clone(),
-        "target_type": seed.target_type.clone(),
-        "routine_patch": routine_candidate_patch(contract, observations),
+        "target_type": input.seed.target_type.clone(),
+        "routine_patch": routine_candidate_patch(input.contract, input.observations),
     });
 
     let mut proposal = serde_json::Map::new();
-    proposal.insert("dedupe_key".to_string(), json!(seed.dedupe_key.clone()));
+    proposal.insert(
+        "dedupe_key".to_string(),
+        json!(input.seed.dedupe_key.clone()),
+    );
     proposal.insert("source".to_string(), json!("outcome_backed_learning"));
-    proposal.insert("pattern_key".to_string(), json!(seed.pattern_key.clone()));
-    proposal.insert("pattern_count".to_string(), json!(seed.pattern_count));
+    proposal.insert(
+        "pattern_key".to_string(),
+        json!(input.seed.pattern_key.clone()),
+    );
+    proposal.insert("pattern_count".to_string(), json!(input.seed.pattern_count));
     proposal.insert(
         "contract_type".to_string(),
-        json!(contract.contract_type.clone()),
+        json!(input.contract.contract_type.clone()),
     );
-    proposal.insert("verdict".to_string(), json!(score.verdict.clone()));
+    proposal.insert("verdict".to_string(), json!(input.score.verdict.clone()));
     proposal.insert("evidence".to_string(), evidence);
     proposal.insert(
         "routine_patch".to_string(),
-        routine_candidate_patch(contract, observations),
+        routine_candidate_patch(input.contract, input.observations),
     );
 
-    match seed.supplement_kind {
+    match input.seed.supplement_kind {
         OutcomeCandidateSupplementKind::Prompt => {
-            merge_json_object(&mut proposal, prompt_payload?);
+            merge_json_object(&mut proposal, input.prompt_payload?);
         }
         OutcomeCandidateSupplementKind::Code => {
-            merge_json_object(&mut proposal, code_candidate_payload(contract)?);
+            merge_json_object(&mut proposal, code_candidate_payload(input.contract)?);
         }
         OutcomeCandidateSupplementKind::None => {}
     }
 
     Some(LearningCandidate {
-        id,
-        learning_event_id: Some(learning_event_id),
-        user_id: contract.user_id.clone(),
-        candidate_type: seed.candidate_type.clone(),
-        risk_tier: seed.risk_tier.clone(),
-        confidence: Some(seed.confidence),
-        target_type: Some(seed.target_type.clone()),
+        id: input.id,
+        learning_event_id: Some(input.learning_event_id),
+        user_id: input.contract.user_id.clone(),
+        candidate_type: input.seed.candidate_type.clone(),
+        risk_tier: input.seed.risk_tier.clone(),
+        confidence: Some(input.seed.confidence),
+        target_type: Some(input.seed.target_type.clone()),
         target_name,
-        summary: Some(seed.summary.clone()),
+        summary: Some(input.seed.summary.clone()),
         proposal: serde_json::Value::Object(proposal),
-        created_at,
+        created_at: input.created_at,
     })
 }
 
@@ -1712,16 +1719,17 @@ mod tests {
         assert_eq!(seed.risk_tier, "low");
         assert_eq!(seed.supplement_kind, OutcomeCandidateSupplementKind::None);
 
-        let candidate = build_outcome_candidate(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            &contract,
-            &score,
-            &[observation("explicit_correction", VERDICT_NEGATIVE, 1.0)],
-            &seed,
-            None,
-            Utc::now(),
-        )
+        let observations = [observation("explicit_correction", VERDICT_NEGATIVE, 1.0)];
+        let candidate = build_outcome_candidate(BuildOutcomeCandidateInput {
+            id: Uuid::new_v4(),
+            learning_event_id: Uuid::new_v4(),
+            contract: &contract,
+            score: &score,
+            observations: &observations,
+            seed: &seed,
+            prompt_payload: None,
+            created_at: Utc::now(),
+        })
         .expect("candidate");
         assert_eq!(candidate.candidate_type, "memory");
         assert_eq!(

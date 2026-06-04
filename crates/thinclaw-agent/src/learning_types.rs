@@ -39,10 +39,6 @@ impl ImprovementClass {
             _ => Self::Unknown,
         }
     }
-
-    pub fn from_str(value: &str) -> Self {
-        Self::parse(value)
-    }
 }
 
 impl std::str::FromStr for ImprovementClass {
@@ -82,10 +78,6 @@ impl RiskTier {
             "critical" => Self::Critical,
             _ => Self::Medium,
         }
-    }
-
-    pub fn from_str(value: &str) -> Self {
-        Self::parse(value)
     }
 
     pub fn rank(self) -> u8 {

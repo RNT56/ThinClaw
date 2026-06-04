@@ -473,33 +473,36 @@ pub fn is_negative_learning_feedback_verdict(verdict: &str) -> bool {
     )
 }
 
-pub fn safe_mode_should_trip(
-    enabled: bool,
-    min_samples: u32,
-    negative_feedback_ratio_threshold: f64,
-    rollback_ratio_threshold: f64,
-    feedback_count: usize,
-    negative_feedback_count: usize,
-    rollback_count: usize,
-    outcome_evaluated_last_7d: u64,
-    outcome_negative_ratio_last_7d: f64,
-) -> bool {
-    if !enabled {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SafeModeTripInput {
+    pub enabled: bool,
+    pub min_samples: u32,
+    pub negative_feedback_ratio_threshold: f64,
+    pub rollback_ratio_threshold: f64,
+    pub feedback_count: usize,
+    pub negative_feedback_count: usize,
+    pub rollback_count: usize,
+    pub outcome_evaluated_last_7d: u64,
+    pub outcome_negative_ratio_last_7d: f64,
+}
+
+pub fn safe_mode_should_trip(input: SafeModeTripInput) -> bool {
+    if !input.enabled {
         return false;
     }
 
-    let sample = feedback_count.max(rollback_count) as u32;
-    if sample < min_samples {
+    let sample = input.feedback_count.max(input.rollback_count) as u32;
+    if sample < input.min_samples {
         return false;
     }
 
-    let feedback_ratio = negative_feedback_count as f64 / sample as f64;
-    let rollback_ratio = rollback_count as f64 / sample as f64;
+    let feedback_ratio = input.negative_feedback_count as f64 / sample as f64;
+    let rollback_ratio = input.rollback_count as f64 / sample as f64;
 
-    feedback_ratio >= negative_feedback_ratio_threshold
-        || rollback_ratio >= rollback_ratio_threshold
-        || (outcome_evaluated_last_7d >= min_samples as u64
-            && outcome_negative_ratio_last_7d >= negative_feedback_ratio_threshold)
+    feedback_ratio >= input.negative_feedback_ratio_threshold
+        || rollback_ratio >= input.rollback_ratio_threshold
+        || (input.outcome_evaluated_last_7d >= input.min_samples as u64
+            && input.outcome_negative_ratio_last_7d >= input.negative_feedback_ratio_threshold)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1242,12 +1245,50 @@ mod tests {
         assert!(is_negative_learning_feedback_verdict("dont_learn"));
         assert!(!is_negative_learning_feedback_verdict("helpful"));
 
-        assert!(!safe_mode_should_trip(
-            true, 8, 0.2, 0.25, 7, 7, 0, 100, 1.0
-        ));
-        assert!(safe_mode_should_trip(true, 8, 0.2, 0.25, 10, 2, 0, 0, 0.0));
-        assert!(safe_mode_should_trip(true, 8, 0.2, 0.25, 2, 0, 8, 0, 0.0));
-        assert!(safe_mode_should_trip(true, 8, 0.2, 0.25, 8, 0, 0, 8, 0.2));
+        assert!(!safe_mode_should_trip(SafeModeTripInput {
+            enabled: true,
+            min_samples: 8,
+            negative_feedback_ratio_threshold: 0.2,
+            rollback_ratio_threshold: 0.25,
+            feedback_count: 7,
+            negative_feedback_count: 7,
+            rollback_count: 0,
+            outcome_evaluated_last_7d: 100,
+            outcome_negative_ratio_last_7d: 1.0,
+        }));
+        assert!(safe_mode_should_trip(SafeModeTripInput {
+            enabled: true,
+            min_samples: 8,
+            negative_feedback_ratio_threshold: 0.2,
+            rollback_ratio_threshold: 0.25,
+            feedback_count: 10,
+            negative_feedback_count: 2,
+            rollback_count: 0,
+            outcome_evaluated_last_7d: 0,
+            outcome_negative_ratio_last_7d: 0.0,
+        }));
+        assert!(safe_mode_should_trip(SafeModeTripInput {
+            enabled: true,
+            min_samples: 8,
+            negative_feedback_ratio_threshold: 0.2,
+            rollback_ratio_threshold: 0.25,
+            feedback_count: 2,
+            negative_feedback_count: 0,
+            rollback_count: 8,
+            outcome_evaluated_last_7d: 0,
+            outcome_negative_ratio_last_7d: 0.0,
+        }));
+        assert!(safe_mode_should_trip(SafeModeTripInput {
+            enabled: true,
+            min_samples: 8,
+            negative_feedback_ratio_threshold: 0.2,
+            rollback_ratio_threshold: 0.25,
+            feedback_count: 8,
+            negative_feedback_count: 0,
+            rollback_count: 0,
+            outcome_evaluated_last_7d: 8,
+            outcome_negative_ratio_last_7d: 0.2,
+        }));
     }
 
     #[test]

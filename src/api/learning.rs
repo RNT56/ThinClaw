@@ -466,14 +466,16 @@ pub async fn submit_feedback(
         .await
         .map_err(ApiError::Internal)?;
     Ok(learning_feedback_action_response(
-        id,
-        user_id,
-        target_type,
-        target_id,
-        verdict,
-        note.map(str::to_string),
-        metadata.cloned(),
-        Utc::now(),
+        LearningFeedbackActionResponseInput {
+            id,
+            user_id: user_id.to_string(),
+            target_type: target_type.to_string(),
+            target_id: target_id.to_string(),
+            verdict: verdict.to_string(),
+            note: note.map(str::to_string),
+            metadata: metadata.cloned(),
+            created_at: Utc::now(),
+        },
     ))
 }
 
