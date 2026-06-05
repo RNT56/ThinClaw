@@ -8,6 +8,22 @@ pub const DEFAULT_AVAILABLE_SKILL_INSTRUCTION: &str =
 pub const SUBAGENT_AVAILABLE_SKILL_INSTRUCTION: &str = "If a task would benefit from one of these skills, use `skill_read` to load its full instructions first.";
 pub const ACTIVE_SKILL_INSTRUCTION: &str =
     "Use `skill_read` with the skill name to load full instructions before using a skill.";
+pub const CHANNEL_TRANSCRIPT_GUIDANCE: &str = "Channel transcript guidance: when the user asks about prior Telegram, WebUI, or other channel conversations, use session_search to inspect transcript history. Do not use communication/action tools like telegram_actions to read transcript history or infer account login state; those tools perform live platform actions only.";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatcherPromptMaterials {
+    pub workspace_prompt: Option<String>,
+    pub provider_system_prompt: Option<String>,
+    pub skill_index_context: Option<String>,
+    pub provider_recall_context: Option<String>,
+    pub linked_recall_context: Option<String>,
+    pub channel_formatting_context: Option<String>,
+    pub personality_overlay_context: Option<String>,
+    pub runtime_capability_hint: Option<String>,
+    pub active_skill_context: Option<String>,
+    pub post_compaction_fragment: Option<String>,
+    pub provider_context_refs: Vec<String>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct PromptAssemblyV2 {
@@ -232,6 +248,70 @@ pub fn assemble_workspace_prompt_materials(
         .build()
 }
 
+pub fn assemble_dispatcher_prompt_materials(
+    materials: &DispatcherPromptMaterials,
+) -> PromptAssemblyResult {
+    PromptAssemblyV2::new()
+        .push_stable(
+            "workspace_prompt",
+            materials.workspace_prompt.clone().unwrap_or_default(),
+        )
+        .push_stable(
+            "provider_system_prompt",
+            materials.provider_system_prompt.clone().unwrap_or_default(),
+        )
+        .push_stable(
+            "skills_index",
+            materials.skill_index_context.clone().unwrap_or_default(),
+        )
+        .push_ephemeral("transcript_guidance", CHANNEL_TRANSCRIPT_GUIDANCE)
+        .push_ephemeral(
+            "provider_recall",
+            materials
+                .provider_recall_context
+                .clone()
+                .unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "linked_recall",
+            materials.linked_recall_context.clone().unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "channel_formatting_hints",
+            materials
+                .channel_formatting_context
+                .clone()
+                .unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "personality_overlay",
+            materials
+                .personality_overlay_context
+                .clone()
+                .unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "runtime_capabilities",
+            materials
+                .runtime_capability_hint
+                .clone()
+                .unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "active_skills",
+            materials.active_skill_context.clone().unwrap_or_default(),
+        )
+        .push_ephemeral(
+            "post_compaction_fragment",
+            materials
+                .post_compaction_fragment
+                .clone()
+                .unwrap_or_default(),
+        )
+        .with_provider_context_refs(materials.provider_context_refs.clone())
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +463,56 @@ mod tests {
                 "ephemeral:provider_recall".to_string(),
                 "ephemeral:linked_recall".to_string(),
                 "ephemeral:channel_formatting_hints".to_string(),
+                "ephemeral:runtime_capabilities".to_string(),
+                "ephemeral:active_skills".to_string(),
+                "ephemeral:post_compaction_fragment".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatcher_prompt_material_assembly_preserves_runtime_segment_policy() {
+        let materials = DispatcherPromptMaterials {
+            workspace_prompt: Some("Workspace".to_string()),
+            provider_system_prompt: Some("Provider".to_string()),
+            skill_index_context: Some("## Skills\nskills".to_string()),
+            provider_recall_context: Some("## External Memory Recall\nmemory".to_string()),
+            linked_recall_context: Some("## Linked Recall\nlinked".to_string()),
+            channel_formatting_context: Some("## Platform Formatting (web)\nhints".to_string()),
+            personality_overlay_context: Some("## Temporary Personality\n\nplayful".to_string()),
+            runtime_capability_hint: Some("Runtime capability hints".to_string()),
+            active_skill_context: Some("## Skill Expansion\nactive".to_string()),
+            post_compaction_fragment: Some("Compacted".to_string()),
+            provider_context_refs: vec!["ctx-1".to_string()],
+        };
+
+        let result = assemble_dispatcher_prompt_materials(&materials);
+
+        assert!(result.stable_snapshot.contains("Workspace"));
+        assert!(
+            result
+                .ephemeral_documents
+                .iter()
+                .any(|doc| doc == CHANNEL_TRANSCRIPT_GUIDANCE)
+        );
+        assert!(
+            result
+                .ephemeral_documents
+                .iter()
+                .any(|doc| doc.contains("Temporary Personality"))
+        );
+        assert_eq!(result.provider_context_refs, vec!["ctx-1"]);
+        assert_eq!(
+            result.segment_order,
+            vec![
+                "stable:workspace_prompt".to_string(),
+                "stable:provider_system_prompt".to_string(),
+                "stable:skills_index".to_string(),
+                "ephemeral:transcript_guidance".to_string(),
+                "ephemeral:provider_recall".to_string(),
+                "ephemeral:linked_recall".to_string(),
+                "ephemeral:channel_formatting_hints".to_string(),
+                "ephemeral:personality_overlay".to_string(),
                 "ephemeral:runtime_capabilities".to_string(),
                 "ephemeral:active_skills".to_string(),
                 "ephemeral:post_compaction_fragment".to_string(),

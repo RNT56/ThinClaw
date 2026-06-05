@@ -352,55 +352,22 @@ impl Agent {
                 ))
             }
         };
-        let prompt_assembly = PromptAssemblyV2::new()
-            .push_stable(
-                "workspace_prompt",
-                workspace_prompt.clone().unwrap_or_default(),
-            )
-            .push_stable(
-                "provider_system_prompt",
-                provider_system_prompt.clone().unwrap_or_default(),
-            )
-            .push_stable(
-                "skills_index",
-                skill_index_context.unwrap_or_default(),
-            )
-            .push_ephemeral("transcript_guidance", "Channel transcript guidance: when the user asks about prior Telegram, WebUI, or other channel conversations, use session_search to inspect transcript history. Do not use communication/action tools like telegram_actions to read transcript history or infer account login state; those tools perform live platform actions only.")
-            .push_ephemeral(
-                "provider_recall",
-                provider_recall_context.unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "linked_recall",
-                linked_recall_context.unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "channel_formatting_hints",
-                channel_formatting_context.unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "personality_overlay",
-                personality_overlay_context.unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "runtime_capabilities",
-                runtime_capability_hint.unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "active_skills",
-                active_skill_context.unwrap_or_default(),
-            )
-            .push_ephemeral(
-                "post_compaction_fragment",
-                post_compaction_fragment.unwrap_or_default(),
-            )
-            .with_provider_context_refs(
-                provider_context
-                    .as_ref()
-                    .map(|ctx| ctx.context_refs.clone())
-                    .unwrap_or_default(),
-            )
-            .build();
+        let prompt_assembly = assemble_dispatcher_prompt_materials(&DispatcherPromptMaterials {
+            workspace_prompt: workspace_prompt.clone(),
+            provider_system_prompt: provider_system_prompt.clone(),
+            skill_index_context,
+            provider_recall_context,
+            linked_recall_context,
+            channel_formatting_context,
+            personality_overlay_context,
+            runtime_capability_hint,
+            active_skill_context,
+            post_compaction_fragment,
+            provider_context_refs: provider_context
+                .as_ref()
+                .map(|ctx| ctx.context_refs.clone())
+                .unwrap_or_default(),
+        });
         if let Some(store) = self.store().map(Arc::clone) {
             let stable_hash = prompt_assembly.stable_hash.clone();
             let ephemeral_hash = prompt_assembly.ephemeral_hash.clone();
