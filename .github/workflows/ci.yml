@@ -620,7 +620,7 @@ jobs:
           exit $LASTEXITCODE
       - name: Shell launcher smoke
         timeout-minutes: 20
-        run: cargo test --features full launcher_has_expected_prefix_args -- --nocapture
+        run: cargo test -p thinclaw-platform launcher_has_expected_prefix_args -- --nocapture
       - name: State-path smoke
         timeout-minutes: 10
         run: cargo test --features full state_paths_share_same_root -- --nocapture
