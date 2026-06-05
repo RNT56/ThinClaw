@@ -623,19 +623,19 @@ jobs:
         run: cargo test -p thinclaw-platform launcher_has_expected_prefix_args -- --nocapture
       - name: State-path smoke
         timeout-minutes: 10
-        run: cargo test --features full state_paths_share_same_root -- --nocapture
+        run: cargo test -p thinclaw-platform state_paths_share_same_root -- --nocapture
       - name: Windows path-escape smoke
         timeout-minutes: 10
-        run: cargo test --features full detect_path_escape_understands_windows_absolute_paths -- --nocapture
+        run: cargo test -p thinclaw-tools detect_path_escape_understands_windows_absolute_paths -- --nocapture
       - name: Service adapter smoke
-        timeout-minutes: 10
-        run: cargo test --features full run_checked_succeeds_on_zero_exit -- --nocapture
+        timeout-minutes: 20
+        run: cargo test --lib --features full run_checked_succeeds_on_zero_exit -- --nocapture
       - name: Interpreter selection smoke
         timeout-minutes: 10
-        run: cargo test --features full test_interpreter_for -- --nocapture
+        run: cargo test -p thinclaw-tools test_interpreter_for -- --nocapture
       - name: Signal attachment override smoke
         timeout-minutes: 10
-        run: cargo test --features full signal_attachment_dir_prefers_override_env -- --nocapture
+        run: cargo test -p thinclaw-channels signal_attachment_dir_prefers_override_env -- --nocapture
 
   db-contract-libsql:
     name: DB Contract (libSQL)
