@@ -24,8 +24,11 @@ tauri-build = { version = "2", features = [] }
 # Inference Engine Features — each build targets ONE engine per platform
 # ---------------------------------------------------------------------------
 [features]
-default = ["llamacpp", "runtime-libsql"]
+default = ["llamacpp", "runtime-libsql", "docker-sandbox"]
 llamacpp = []     # Bundled llama-server sidecar — all platforms
+# Local Docker sandbox: lets the desktop app spawn coding/worker containers
+# (used by the repo project supervisor) when sandbox + repo_projects are enabled.
+docker-sandbox = ["thinclaw_core/docker-sandbox"]
 mlx = []          # External Python process via uv — macOS Apple Silicon only
 vllm = []         # External Python process via uv — Linux CUDA only
 ollama = []       # Detect existing Ollama daemon — all platforms

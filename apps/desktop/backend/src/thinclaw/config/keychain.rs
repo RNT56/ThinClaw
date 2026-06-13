@@ -228,7 +228,10 @@ pub fn load_all() {
     *loaded = true;
 }
 
-fn get_keychain_blob(service: &str, account: &str) -> Result<HashMap<String, String>, KeychainError> {
+fn get_keychain_blob(
+    service: &str,
+    account: &str,
+) -> Result<HashMap<String, String>, KeychainError> {
     match get_generic_password(service, account) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(json_str) => match serde_json::from_str::<HashMap<String, String>>(&json_str) {

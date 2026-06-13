@@ -23,7 +23,9 @@ fn parse_project_id(project_id: &str) -> Result<Uuid, String> {
     Uuid::parse_str(project_id).map_err(|_| "Invalid repository project ID".to_string())
 }
 
-fn value<T: serde::Serialize>(result: Result<T, thinclaw_core::api::ApiError>) -> Result<serde_json::Value, String> {
+fn value<T: serde::Serialize>(
+    result: Result<T, thinclaw_core::api::ApiError>,
+) -> Result<serde_json::Value, String> {
     let output = result.map_err(|error| error.to_string())?;
     serde_json::to_value(output).map_err(|error| error.to_string())
 }
