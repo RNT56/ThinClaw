@@ -23,6 +23,7 @@ Implemented:
 - Optional one-shot **sandbox code review** of the pushed branch (env `REPO_PROJECTS_REVIEWER_BACKEND=claude_code|codex_code|worker`): the executor checks out the *pushed* branch content into a detached review worktree, dispatches a read-only review job that posts findings to the PR, and the worker run is skipped by task-state reconciliation. Advisory — it does not by itself block the gate.
 - Local Git workspace provisioning helpers that clone/fetch a repo and create per-task worktrees (impl + review) under a supervisor workspace directory.
 - Supervisor startup honors `repo_projects.enabled`, uses the resolved watchdog interval, and passes the resolved workspace root into the executor.
+- A cross-surface **GitHub connector**: discover the repositories a credential can act on (`GET /installation/repositories` for a GitHub App, `GET /user/repos` for a `github_token`), mark which are already supervised, and bring selected repos — or all of them — under supervision in one step. Exposed everywhere it matters: agent tools, CLI, gateway HTTP, a desktop connector card, and a WebUI connector panel (see *Surfaces and the GitHub Connector* below).
 
 Validation:
 
@@ -33,6 +34,44 @@ Integration-pending:
 - Webhook **replay** tooling. Deliveries are now stored durably for idempotency/audit, but there is no operator command to replay a stored delivery.
 - Mapping individual GitHub webhook payloads directly into task state transitions; today a webhook wakes the supervisor, which then re-derives state from the GitHub API on the next reconcile.
 - A running fake-Docker coding-bridge end-to-end in CI. The GitHub side has a pipeline E2E and a supervisor-reconcile E2E; the sandbox dispatch path has a real-Docker E2E (`tests/repo_project_docker_e2e.rs`, dispatches an actual container via `RepoProjectExecutor`) that is `#[ignore]`d by default because it needs a local `thinclaw-worker:latest` image (`docker build -f Dockerfile.worker -t thinclaw-worker .`).
+
+## Surfaces and the GitHub Connector
+
+The supervisor is reachable from every operator surface. The framework-free
+`crate::api::repo_projects` layer is the single source of truth; each surface is
+a thin adapter over it.
+
+**Connector flow (connect → select → engage):**
+
+1. **Connect** — store a credential and/or configure a GitHub App. Credential
+   *values* go straight to the encrypted secrets store and are referenced by
+   *name* only; they are never written to settings, events, logs, or sent
+   through the LLM. A configured `app_slug` yields an install URL
+   (`https://github.com/apps/<slug>/installations/new`) so the user can install
+   the App and grant repo access.
+2. **Select** — `list_connectable_repos` lists the repositories the credential
+   can act on, each flagged with whether it is already supervised. The user
+   picks specific repos or selects all.
+3. **Engage** — `connect_repos` creates a draft project per selected repo
+   (skipping ones already enrolled); the project is then started/planned with
+   the normal controls.
+
+**Per-surface entry points:**
+
+| Surface | How to use the connector |
+|---|---|
+| Agent chat (all surfaces) | Tools `repo_project_setup`, `repo_project_set_credential`, `repo_project_list_repos`, `repo_project_connect`, `repo_project_enroll` (+ `create/plan/status/pause/resume/approve`). The credential tool/value is stored encrypted and never echoed. |
+| CLI | `thinclaw repo-projects setup`, `set-credential`, `repos`, `connect [repos…] [--all]`, `enroll`, plus `list/show/status/create/start/pause/resume/cancel/events`. |
+| Gateway HTTP | `GET /api/repo-projects/readiness`, `POST /api/repo-projects/setup`, `POST /api/repo-projects/credentials`, `GET /api/repo-projects/connectable-repos`, `POST /api/repo-projects/connect`, `POST /api/repo-projects/{id}/enroll` (+ the existing project CRUD/command routes). |
+| WebUI (gateway dashboard) | *Operations → Repo Projects* tab: a GitHub Connector card (enable, readiness checklist, masked credential entry, App config + install link, repo picker with select-all/specific) plus a projects list/detail with start/pause/resume/cancel. |
+| Desktop app | The Repo Projects view embeds a `ThinClawRepoConnector` card (same connector flow) and can spawn coding/worker containers locally when the Docker sandbox is enabled. |
+
+**Credential security:** every surface routes credential *values* through
+`store_repo_credential` → the encrypted secrets store. The masked inputs in the
+desktop card and WebUI panel submit directly to the secrets store
+(`thinclaw_repo_projects_set_credential` / `POST /api/repo-projects/credentials`)
+so the value bypasses the model entirely; settings only ever hold the secret's
+*name*.
 
 ## Enablement
 
@@ -53,7 +92,13 @@ app_id = 123456
 installation_id = 987654
 private_key_secret = "repo_projects_github_private_key"
 webhook_secret_secret = "repo_projects_github_webhook_secret"
+# Public App slug; used to build the connector install URL.
+app_slug = "thinclaw-supervisor"
 ```
+
+The connector surfaces (CLI `setup --app-slug`, the desktop card, and the WebUI
+panel) write these same settings, so the App can also be configured entirely
+from the UI without hand-editing config.
 
 Env overrides:
 
