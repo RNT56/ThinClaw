@@ -944,6 +944,12 @@ function connectSSE() {
     enableChatInput();
   });
 
+  eventSource.addEventListener('credential_prompt', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    renderCredentialPrompt(data);
+  });
+
   eventSource.addEventListener('extension_status', (e) => {
     if (currentTab === 'extensions') loadExtensions();
   });
@@ -6252,6 +6258,61 @@ function repoProjectAction(action) {
     showToast('Project ' + action + ' requested', 'success');
     loadRepoProjectsDashboard();
   }).catch(function (err) { showToast('Action failed: ' + err.message, 'error'); });
+}
+
+// Inline secure credential prompt card (agent-driven). The masked value POSTs
+// straight to the secrets endpoint, never through chat/the LLM.
+function renderCredentialPrompt(data) {
+  if (!data || !data.secret_name) return;
+  const container = turnCardStack(ensureLiveTurnCard());
+  const card = document.createElement('div');
+  card.className = 'approval-card credential-card';
+  card.setAttribute('data-credential-name', data.secret_name);
+
+  const header = document.createElement('div');
+  header.className = 'approval-header';
+  header.textContent = 'Credential requested';
+  card.appendChild(header);
+
+  const desc = document.createElement('div');
+  desc.className = 'approval-description';
+  desc.textContent = (data.reason || ('Enter a value for ' + data.secret_name + '.'))
+    + ' Stored encrypted — it is never sent to the model.';
+  card.appendChild(desc);
+
+  const input = document.createElement('input');
+  input.type = 'password';
+  input.autocomplete = 'off';
+  input.className = 'credential-input';
+  input.placeholder = data.secret_name + ' value';
+  card.appendChild(input);
+
+  const actions = document.createElement('div');
+  actions.className = 'approval-actions';
+  const submitBtn = document.createElement('button');
+  submitBtn.className = 'approve';
+  submitBtn.textContent = 'Store securely';
+  submitBtn.addEventListener('click', function () { submitInChatCredential(data.secret_name, input.value, card); });
+  actions.appendChild(submitBtn);
+  card.appendChild(actions);
+
+  container.appendChild(card);
+  finishChatMutation(shouldPinChatToLatest());
+}
+
+function submitInChatCredential(name, value, card) {
+  if (!value || !value.trim()) { showToast('Enter the credential value', 'error'); return; }
+  apiFetch('/api/repo-projects/credentials', { method: 'POST', body: { name: name, value: value } })
+    .then(function () {
+      showToast('Stored ' + name + ' securely', 'success');
+      if (card) {
+        const input = card.querySelector('.credential-input');
+        if (input) input.value = '';
+        const actions = card.querySelector('.approval-actions');
+        if (actions) actions.innerHTML = '<span class="approval-resolved">Stored securely</span>';
+      }
+    })
+    .catch(function (err) { showToast('Failed to store credential: ' + err.message, 'error'); });
 }
 
 function renderAutonomySummaryCard(label, value, statusClass, detail) {
