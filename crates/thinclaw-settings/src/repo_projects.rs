@@ -57,6 +57,11 @@ pub struct RepoProjectsGithubAppSettings {
     pub private_key_secret: Option<String>,
     #[serde(default)]
     pub webhook_secret_secret: Option<String>,
+    /// Public slug of the GitHub App (the `…/apps/<slug>` segment). Used to
+    /// build the install URL that starts the connector flow so the user can
+    /// grant the agent access to all or specific repositories.
+    #[serde(default)]
+    pub app_slug: Option<String>,
 }
 
 impl Default for RepoProjectsSettings {

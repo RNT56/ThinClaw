@@ -643,6 +643,7 @@ pub struct RepoProjectsConfigureInput {
     pub installation_id: Option<u64>,
     pub private_key_secret: Option<String>,
     pub webhook_secret_secret: Option<String>,
+    pub app_slug: Option<String>,
     pub default_coding_backend: Option<String>,
     pub auto_merge_default: Option<bool>,
     pub max_concurrent_projects: Option<usize>,
@@ -660,6 +661,12 @@ pub struct RepoProjectsReadiness {
     pub installation_id: Option<u64>,
     pub private_key_secret: Option<String>,
     pub webhook_secret_secret: Option<String>,
+    pub app_slug: Option<String>,
+    /// GitHub App install URL for the connector "Connect" action, when an
+    /// `app_slug` is configured. Sending the user here lets them install the
+    /// App and pick all or specific repos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_url: Option<String>,
     pub auto_merge_default: bool,
     pub default_coding_backend: String,
     pub max_concurrent_projects: usize,
@@ -737,6 +744,15 @@ pub async fn configure_supervisor(
             store,
             user_id,
             "repo_projects.github_app.webhook_secret_secret",
+            serde_json::json!(value.trim()),
+        )
+        .await?;
+    }
+    if let Some(value) = input.app_slug {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.github_app.app_slug",
             serde_json::json!(value.trim()),
         )
         .await?;
@@ -900,6 +916,8 @@ pub async fn repo_projects_readiness(
         installation_id: app.installation_id,
         private_key_secret: app.private_key_secret,
         webhook_secret_secret: app.webhook_secret_secret,
+        install_url: github_app_install_url(app.app_slug.as_deref()),
+        app_slug: app.app_slug,
         auto_merge_default: rp.auto_merge_default,
         default_coding_backend: rp.default_coding_backend,
         max_concurrent_projects: rp.max_concurrent_projects,
@@ -937,6 +955,14 @@ pub async fn store_repo_credential(
 pub struct RepoCredentialStored {
     pub ok: bool,
     pub name: String,
+}
+
+/// Request body for storing a GitHub credential. The `value` is encrypted into
+/// the secrets store and never echoed back or written to settings/events.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepoCredentialInput {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1006,6 +1032,291 @@ pub async fn enroll_repo(
         message: Some(format!("Enrolled {}/{}", repo.owner, repo.repo)),
         project: Some(project_view(&project, &parts)),
         run: None,
+    })
+}
+
+// ── GitHub connector: repo discovery + selection ─────────────────────────
+
+/// Build the GitHub App install URL from a configured app slug. This is the
+/// entry point of the connector "Connect" flow: the user installs the App and
+/// grants access to all or specific repositories.
+fn github_app_install_url(app_slug: Option<&str>) -> Option<String> {
+    let slug = app_slug.map(str::trim).filter(|slug| !slug.is_empty())?;
+    Some(format!("https://github.com/apps/{slug}/installations/new"))
+}
+
+/// A repository the connected GitHub credential can act on, annotated with
+/// whether it is already enrolled in a ThinClaw project.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectableRepo {
+    pub owner: String,
+    pub repo: String,
+    pub full_name: String,
+    pub private: bool,
+    pub archived: bool,
+    pub default_branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html_url: Option<String>,
+    /// True when this repo is already under supervision.
+    pub enrolled: bool,
+    /// The project id this repo is enrolled in, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectableReposResponse {
+    /// How the listing was authenticated: "github_app" or "github_token".
+    pub source: String,
+    pub total: usize,
+    pub repos: Vec<ConnectableRepo>,
+}
+
+/// List the repositories the configured GitHub credential can act on, so the
+/// connector UI (or the agent) can present a repo picker. Builds an
+/// authenticated client from settings + the secrets store; GitHub App auth
+/// lists the installation's repos, a `github_token` lists the owner's repos.
+pub async fn list_connectable_repos(
+    store: &Arc<dyn Database>,
+    secrets: &SharedSecrets,
+    user_id: &str,
+) -> ApiResult<ConnectableReposResponse> {
+    let map = store
+        .get_all_settings(user_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let app = Settings::from_db_map(&map).repo_projects.github_app;
+    let provider = crate::repo_projects::github_provider::SecretsRepoGitHubClientProvider::build(
+        Arc::clone(secrets),
+        user_id,
+        "https://api.github.com",
+        app.app_id,
+        app.installation_id,
+        app.private_key_secret.clone(),
+        "github_token",
+    )
+    .await;
+    list_connectable_repos_with_provider(store, &provider).await
+}
+
+const CONNECTOR_REPO_PAGE_SIZE: u32 = 100;
+const CONNECTOR_REPO_MAX_PAGES: u32 = 20;
+
+async fn list_connectable_repos_with_provider(
+    store: &Arc<dyn Database>,
+    provider: &dyn crate::repo_projects::github_provider::RepoGitHubClientProvider,
+) -> ApiResult<ConnectableReposResponse> {
+    use crate::repo_projects::github::{GitHubListQuery, GitHubUserReposQuery};
+
+    let (client, mode) = provider.discovery_client().await.map_err(ApiError::Internal)?;
+
+    let mut raw = Vec::new();
+    let mut page = 1u32;
+    loop {
+        let batch = match mode {
+            GitHubAuthMode::GitHubApp => {
+                client
+                    .list_installation_repositories(&GitHubListQuery {
+                        page: Some(page),
+                        per_page: Some(CONNECTOR_REPO_PAGE_SIZE),
+                    })
+                    .await
+                    .map_err(|error| ApiError::Internal(error.to_string()))?
+                    .repositories
+            }
+            _ => {
+                client
+                    .list_user_repositories(&GitHubUserReposQuery {
+                        affiliation: Some(
+                            "owner,collaborator,organization_member".to_string(),
+                        ),
+                        sort: Some("updated".to_string()),
+                        direction: Some("desc".to_string()),
+                        page: Some(page),
+                        per_page: Some(CONNECTOR_REPO_PAGE_SIZE),
+                    })
+                    .await
+                    .map_err(|error| ApiError::Internal(error.to_string()))?
+            }
+        };
+        let received = batch.len() as u32;
+        raw.extend(batch);
+        if received < CONNECTOR_REPO_PAGE_SIZE || page >= CONNECTOR_REPO_MAX_PAGES {
+            break;
+        }
+        page += 1;
+    }
+
+    let enrolled = enrolled_repo_index(store).await?;
+    let mut repos = Vec::with_capacity(raw.len());
+    for repo in raw {
+        let owner = repo
+            .owner
+            .as_ref()
+            .map(|owner| owner.login.clone())
+            .or_else(|| repo.full_name.split('/').next().map(ToString::to_string))
+            .unwrap_or_default();
+        let name = if repo.name.is_empty() {
+            repo.full_name
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            repo.name.clone()
+        };
+        let project_id = enrolled
+            .get(&(owner.to_ascii_lowercase(), name.to_ascii_lowercase()))
+            .cloned();
+        repos.push(ConnectableRepo {
+            owner,
+            repo: name,
+            full_name: repo.full_name,
+            private: repo.private,
+            archived: repo.archived,
+            default_branch: repo.default_branch.unwrap_or_else(|| "main".to_string()),
+            html_url: repo.html_url,
+            enrolled: project_id.is_some(),
+            project_id,
+        });
+    }
+
+    Ok(ConnectableReposResponse {
+        source: connector_source_label(mode),
+        total: repos.len(),
+        repos,
+    })
+}
+
+fn connector_source_label(mode: GitHubAuthMode) -> String {
+    match mode {
+        GitHubAuthMode::GitHubApp => "github_app",
+        GitHubAuthMode::UserToken => "github_token",
+        GitHubAuthMode::GhCli => "gh_cli",
+    }
+    .to_string()
+}
+
+/// Map of `(owner_lc, repo_lc) -> project_id` for every repo already enrolled
+/// in some project, so the connector can mark which repos are already taken.
+async fn enrolled_repo_index(
+    store: &Arc<dyn Database>,
+) -> ApiResult<std::collections::HashMap<(String, String), String>> {
+    let mut index = std::collections::HashMap::new();
+    let projects = store
+        .list_repo_projects()
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    for project in projects {
+        let repos = store
+            .list_repo_project_repos(project.id)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        for repo in repos.into_iter().filter(|repo| repo.enrolled) {
+            index.insert(
+                (
+                    repo.owner.to_ascii_lowercase(),
+                    repo.repo.to_ascii_lowercase(),
+                ),
+                project.id.to_string(),
+            );
+        }
+    }
+    Ok(index)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RepoConnectInput {
+    /// `owner/repo` identifiers to bring under supervision.
+    #[serde(default)]
+    pub repos: Vec<String>,
+    /// When true, connect every repository the credential can access.
+    #[serde(default)]
+    pub all: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoConnectResponse {
+    pub ok: bool,
+    pub connected: Vec<String>,
+    pub skipped: Vec<String>,
+    pub message: String,
+}
+
+/// Bring the selected repositories under supervision by creating a draft
+/// project for each repo that is not already enrolled. With `all = true`,
+/// every (non-archived) connectable repo is selected. This is the "select all
+/// or specific repos" step of the connector flow; callers then `start_project`
+/// to engage.
+pub async fn connect_repos(
+    store: &Arc<dyn Database>,
+    secrets: &SharedSecrets,
+    user_id: &str,
+    input: RepoConnectInput,
+) -> ApiResult<RepoConnectResponse> {
+    ensure_repo_projects_enabled(store, user_id).await?;
+
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    if input.all {
+        let listing = list_connectable_repos(store, secrets, user_id).await?;
+        for repo in listing.repos.into_iter().filter(|repo| !repo.archived) {
+            wanted.push((repo.owner, repo.repo));
+        }
+    }
+    for raw in &input.repos {
+        let (owner, repo) = parse_github_repo_url(raw)?;
+        wanted.push((owner, repo));
+    }
+    if wanted.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "Provide one or more repos, or set all=true to connect every accessible repository."
+                .to_string(),
+        ));
+    }
+
+    let enrolled = enrolled_repo_index(store).await?;
+    let mut connected = Vec::new();
+    let mut skipped = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (owner, repo) in wanted {
+        let key = (owner.to_ascii_lowercase(), repo.to_ascii_lowercase());
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let full = format!("{owner}/{repo}");
+        if enrolled.contains_key(&key) {
+            skipped.push(full);
+            continue;
+        }
+        create_project(
+            store,
+            user_id,
+            RepoProjectCreateInput {
+                name: repo.clone(),
+                repo_url: full.clone(),
+                default_branch: None,
+                local_path: None,
+                description: None,
+            },
+        )
+        .await?;
+        connected.push(full);
+    }
+
+    let message = format!(
+        "Connected {} repo(s){}",
+        connected.len(),
+        if skipped.is_empty() {
+            String::new()
+        } else {
+            format!(", skipped {} already enrolled", skipped.len())
+        }
+    );
+    Ok(RepoConnectResponse {
+        ok: true,
+        connected,
+        skipped,
+        message,
     })
 }
 
@@ -1663,5 +1974,119 @@ mod tests {
         let repos = db.list_repo_project_repos(project.id).await.unwrap();
         assert_eq!(repos.len(), 2);
         assert!(repos.iter().any(|repo| repo.repo == "gadgets"));
+    }
+
+    #[test]
+    fn install_url_is_built_from_app_slug() {
+        assert_eq!(
+            github_app_install_url(Some("thinclaw-supervisor")),
+            Some("https://github.com/apps/thinclaw-supervisor/installations/new".to_string())
+        );
+        assert_eq!(github_app_install_url(Some("   ")), None);
+        assert_eq!(github_app_install_url(None), None);
+    }
+
+    #[tokio::test]
+    async fn connector_lists_installation_repos_and_connects_selected() {
+        use crate::repo_projects::github_provider::FixedTokenGitHubClientProvider;
+        use axum::http::{Method, StatusCode, Uri};
+        use axum::response::{IntoResponse, Response};
+        use axum::{Json, Router};
+
+        async fn fake(method: Method, uri: Uri) -> Response {
+            if method == Method::GET && uri.path() == "/installation/repositories" {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "total_count": 3,
+                        "repositories": [
+                            { "id": 1, "name": "widgets", "full_name": "acme/widgets",
+                              "private": true, "default_branch": "main",
+                              "owner": { "login": "acme", "id": 10 } },
+                            { "id": 2, "name": "gadgets", "full_name": "acme/gadgets",
+                              "private": false, "default_branch": "develop",
+                              "owner": { "login": "acme", "id": 10 } },
+                            { "id": 3, "name": "legacy", "full_name": "octo/legacy",
+                              "private": false, "archived": true, "default_branch": "main",
+                              "owner": { "login": "octo", "id": 20 } }
+                        ]
+                    })),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "message": "not found" })),
+            )
+                .into_response()
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = Router::new().fallback(fake);
+            let _ = axum::serve(listener, app).await;
+        });
+        let base_url = format!("http://{addr}");
+
+        let (db, _guard) = crate::testing::test_db().await;
+        let secrets = test_secrets();
+
+        // Enable the feature + enroll acme/widgets via a project.
+        configure_supervisor(
+            &db,
+            Some(&secrets),
+            "default",
+            RepoProjectsConfigureInput {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        create_project(
+            &db,
+            "default",
+            RepoProjectCreateInput {
+                name: "Widgets".to_string(),
+                repo_url: "acme/widgets".to_string(),
+                default_branch: None,
+                local_path: None,
+                description: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Discovery: the installation lists all three; widgets is marked enrolled.
+        let provider = FixedTokenGitHubClientProvider::new(base_url, "tok");
+        let listing = list_connectable_repos_with_provider(&db, &provider)
+            .await
+            .unwrap();
+        assert_eq!(listing.source, "github_app");
+        assert_eq!(listing.total, 3);
+        let widgets = listing.repos.iter().find(|r| r.repo == "widgets").unwrap();
+        assert!(widgets.enrolled);
+        assert!(widgets.project_id.is_some());
+        let gadgets = listing.repos.iter().find(|r| r.repo == "gadgets").unwrap();
+        assert!(!gadgets.enrolled);
+        assert_eq!(gadgets.default_branch, "develop");
+
+        // Select specific repos: gadgets is new, widgets already enrolled → skipped.
+        let result = connect_repos(
+            &db,
+            &secrets,
+            "default",
+            RepoConnectInput {
+                repos: vec!["acme/gadgets".to_string(), "acme/widgets".to_string()],
+                all: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.connected, vec!["acme/gadgets".to_string()]);
+        assert_eq!(result.skipped, vec!["acme/widgets".to_string()]);
+        let projects = db.list_repo_projects().await.unwrap();
+        assert!(projects.iter().any(|project| project.name == "gadgets"));
     }
 }

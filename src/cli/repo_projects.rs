@@ -40,6 +40,9 @@ pub enum RepoProjectCommand {
         /// Name of the secret holding the GitHub webhook secret.
         #[arg(long)]
         webhook_secret_secret: Option<String>,
+        /// Public GitHub App slug (used to build the install URL).
+        #[arg(long)]
+        app_slug: Option<String>,
         #[arg(long)]
         default_coding_backend: Option<String>,
         #[arg(long)]
@@ -72,6 +75,18 @@ pub enum RepoProjectCommand {
         repo_url: String,
         #[arg(long)]
         default_branch: Option<String>,
+    },
+    /// List the GitHub repositories the connected credential can act on
+    /// (the connector repo picker), marking which are already enrolled.
+    Repos,
+    /// Bring repositories under supervision: a project is created for each.
+    /// Pass one or more `owner/repo`, or `--all` for every accessible repo.
+    Connect {
+        /// owner/repo identifiers to connect.
+        repos: Vec<String>,
+        /// Connect every repository the credential can access.
+        #[arg(long)]
+        all: bool,
     },
     /// Start a project.
     Start { project_id: String },
@@ -107,6 +122,7 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
             installation_id,
             private_key_secret,
             webhook_secret_secret,
+            app_slug,
             default_coding_backend,
             auto_merge,
             watchdog_interval_secs,
@@ -125,6 +141,7 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
                 installation_id,
                 private_key_secret,
                 webhook_secret_secret,
+                app_slug,
                 default_coding_backend,
                 auto_merge_default: auto_merge,
                 watchdog_interval_secs,
@@ -179,6 +196,16 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
             )
             .await,
         ),
+        RepoProjectCommand::Repos => {
+            let secrets = crate::cli::secrets::get_secrets_store().await?;
+            print(api::list_connectable_repos(&db, &secrets, USER).await)
+        }
+        RepoProjectCommand::Connect { repos, all } => {
+            let secrets = crate::cli::secrets::get_secrets_store().await?;
+            print(
+                api::connect_repos(&db, &secrets, USER, api::RepoConnectInput { repos, all }).await,
+            )
+        }
         RepoProjectCommand::Start { project_id } => {
             print(api::start_project(&db, USER, parse(&project_id)?).await)
         }

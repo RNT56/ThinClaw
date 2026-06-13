@@ -381,6 +381,27 @@ impl GitHubApiClient {
         })
     }
 
+    /// List the repositories accessible to the authenticated App installation.
+    /// This is the "which repos can the agent act on" source that powers the
+    /// connector repo picker. Requires installation (GitHub App) auth.
+    pub async fn list_installation_repositories(
+        &self,
+        query: &GitHubListQuery,
+    ) -> Result<GitHubInstallationRepositoriesResponse, GitHubApiError> {
+        self.get_query("installation/repositories".to_string(), query)
+            .await
+    }
+
+    /// List repositories visible to the authenticated user. Used as the
+    /// personal-access-token fallback when no GitHub App installation is
+    /// configured.
+    pub async fn list_user_repositories(
+        &self,
+        query: &GitHubUserReposQuery,
+    ) -> Result<Vec<GitHubRepository>, GitHubApiError> {
+        self.get_query("user/repos".to_string(), query).await
+    }
+
     pub async fn get_branch(
         &self,
         owner: &str,
@@ -984,6 +1005,15 @@ impl GitHubRepository {
     }
 }
 
+/// Response shape for `GET /installation/repositories`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitHubInstallationRepositoriesResponse {
+    #[serde(default)]
+    pub total_count: u64,
+    #[serde(default)]
+    pub repositories: Vec<GitHubRepository>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitHubBranch {
     pub name: String,
@@ -1051,6 +1081,23 @@ struct GitHubUpdateRefRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct GitHubListQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_page: Option<u32>,
+}
+
+/// Query for `GET /user/repos` (PAT fallback repo discovery). Defaults to the
+/// repos the token owner can administer/push to, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct GitHubUserReposQuery {
+    /// One of `all`, `owner`, `public`, `private`, `member`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affiliation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

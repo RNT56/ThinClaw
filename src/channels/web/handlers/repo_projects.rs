@@ -287,3 +287,120 @@ pub(crate) async fn repo_project_merge_gates_handler(
         .map(Json)
         .map_err(repo_project_api_error)
 }
+
+// ── Setup / credentials / GitHub connector ──────────────────────────────
+
+type SharedSecrets = Arc<dyn crate::secrets::SecretsStore + Send + Sync>;
+
+fn repo_project_secrets(state: &GatewayState) -> Result<&SharedSecrets, (StatusCode, String)> {
+    state.secrets_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Secrets store is not available; cannot manage GitHub credentials".to_string(),
+        )
+    })
+}
+
+pub(crate) async fn repo_project_readiness_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+) -> Result<Json<repo_projects_api::RepoProjectsReadiness>, (StatusCode, String)> {
+    let store = repo_project_store(&state)?;
+    repo_projects_api::repo_projects_readiness(
+        store,
+        state.secrets_store.as_ref(),
+        &request_identity.principal_id,
+    )
+    .await
+    .map(Json)
+    .map_err(repo_project_api_error)
+}
+
+pub(crate) async fn repo_project_setup_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    Json(input): Json<repo_projects_api::RepoProjectsConfigureInput>,
+) -> Result<Json<repo_projects_api::RepoProjectsReadiness>, (StatusCode, String)> {
+    let store = repo_project_store(&state)?;
+    let readiness = repo_projects_api::configure_supervisor(
+        store,
+        state.secrets_store.as_ref(),
+        &request_identity.principal_id,
+        input,
+    )
+    .await
+    .map_err(repo_project_api_error)?;
+    state.sse.broadcast(SseEvent::RepoProjectEvent {
+        project_id: String::new(),
+        event_type: "repo_project_setup".to_string(),
+        message: "Repository project supervisor configuration updated".to_string(),
+    });
+    Ok(Json(readiness))
+}
+
+pub(crate) async fn repo_project_credential_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    Json(input): Json<repo_projects_api::RepoCredentialInput>,
+) -> Result<Json<repo_projects_api::RepoCredentialStored>, (StatusCode, String)> {
+    let secrets = repo_project_secrets(&state)?;
+    repo_projects_api::store_repo_credential(
+        secrets,
+        &request_identity.principal_id,
+        input.name,
+        input.value,
+    )
+    .await
+    .map(Json)
+    .map_err(repo_project_api_error)
+}
+
+pub(crate) async fn repo_project_connectable_repos_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+) -> Result<Json<repo_projects_api::ConnectableReposResponse>, (StatusCode, String)> {
+    let store = repo_project_store(&state)?;
+    let secrets = repo_project_secrets(&state)?;
+    repo_projects_api::list_connectable_repos(store, secrets, &request_identity.principal_id)
+        .await
+        .map(Json)
+        .map_err(repo_project_api_error)
+}
+
+pub(crate) async fn repo_project_connect_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    Json(input): Json<repo_projects_api::RepoConnectInput>,
+) -> Result<Json<repo_projects_api::RepoConnectResponse>, (StatusCode, String)> {
+    let store = repo_project_store(&state)?;
+    let secrets = repo_project_secrets(&state)?;
+    let response =
+        repo_projects_api::connect_repos(store, secrets, &request_identity.principal_id, input)
+            .await
+            .map_err(repo_project_api_error)?;
+    for full_name in &response.connected {
+        state.sse.broadcast(SseEvent::RepoProjectEvent {
+            project_id: String::new(),
+            event_type: "repo_project_connected".to_string(),
+            message: format!("Connected {full_name}"),
+        });
+    }
+    Ok(Json(response))
+}
+
+pub(crate) async fn repo_project_enroll_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    Path(id): Path<String>,
+    Json(input): Json<repo_projects_api::RepoEnrollInput>,
+) -> Result<Json<repo_projects_api::RepoProjectCommandResponse>, (StatusCode, String)> {
+    let store = repo_project_store(&state)?;
+    let id = parse_repo_project_id(&id)?;
+    let response =
+        repo_projects_api::enroll_repo(store, &request_identity.principal_id, id, input)
+            .await
+            .map_err(repo_project_api_error)?;
+    broadcast_project_response(&state, &response);
+    wake_project_supervisor(&state, id, RepoSupervisorWakeReason::Manual).await;
+    Ok(Json(response))
+}

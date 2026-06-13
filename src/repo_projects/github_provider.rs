@@ -18,6 +18,15 @@ use super::github::{GitHubApiClient, GitHubAppConfig, GitHubAppTokenCache};
 #[async_trait]
 pub trait RepoGitHubClientProvider: Send + Sync {
     async fn client_for(&self, repo: &RepoProjectRepo) -> Result<GitHubApiClient, String>;
+
+    /// Mint a client for installation/account-level *discovery* calls that are
+    /// not scoped to a single enrolled repo — e.g. listing the repos an App
+    /// installation can access so the connector UI can offer a repo picker.
+    ///
+    /// Returns the resolved [`GitHubAuthMode`] alongside the client so the caller
+    /// knows which endpoint to hit: GitHub App auth lists
+    /// `/installation/repositories`; a personal-access token lists `/user/repos`.
+    async fn discovery_client(&self) -> Result<(GitHubApiClient, GitHubAuthMode), String>;
 }
 
 /// Production provider: resolves a GitHub App installation token (preferred) or
@@ -161,6 +170,41 @@ impl RepoGitHubClientProvider for SecretsRepoGitHubClientProvider {
             token,
         ))
     }
+
+    async fn discovery_client(&self) -> Result<(GitHubApiClient, GitHubAuthMode), String> {
+        // Prefer App installation auth: this is what unlocks
+        // `/installation/repositories`, the native "select all or specific
+        // repos" source. Requires both an App key and a default installation id.
+        if let Some(cache) = self.app_token_cache.as_ref()
+            && let Some(installation_id) = self.default_installation_id
+        {
+            return Ok((
+                GitHubApiClient::with_app_installation(Arc::clone(cache), installation_id),
+                GitHubAuthMode::GitHubApp,
+            ));
+        }
+
+        // Fallback: a personal-access token enumerates the owner's repos via
+        // `/user/repos`.
+        let token = resolve_secret(
+            self.secrets.as_ref(),
+            &self.user_id,
+            &self.fallback_token_secret,
+            "discover_repos",
+        )
+        .await
+        .map_err(|error| format!("no GitHub credentials for repo discovery: {error}"))?;
+        if token.trim().is_empty() {
+            return Err(format!(
+                "GitHub token secret '{}' is empty",
+                self.fallback_token_secret
+            ));
+        }
+        Ok((
+            GitHubApiClient::with_base_url_and_token(self.api_base_url.clone(), token),
+            GitHubAuthMode::UserToken,
+        ))
+    }
 }
 
 async fn resolve_secret(
@@ -204,6 +248,18 @@ impl RepoGitHubClientProvider for FixedTokenGitHubClientProvider {
         Ok(GitHubApiClient::with_base_url_and_token(
             self.api_base_url.clone(),
             self.token.clone(),
+        ))
+    }
+
+    async fn discovery_client(&self) -> Result<(GitHubApiClient, GitHubAuthMode), String> {
+        // Tests drive the App-installation discovery path against the fake
+        // server, so report GitHubApp mode here.
+        Ok((
+            GitHubApiClient::with_base_url_and_token(
+                self.api_base_url.clone(),
+                self.token.clone(),
+            ),
+            GitHubAuthMode::GitHubApp,
         ))
     }
 }

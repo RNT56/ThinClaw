@@ -23,9 +23,10 @@ use crate::tools::builtin::{
     DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort, ExternalMemoryExportTool,
     ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool, ExternalMemorySetupTool,
     ExternalMemoryStatusTool, FileToolHost, PromptQueue, RepoProjectApproveTool,
-    RepoProjectCreateTool, RepoProjectEnrollTool, RepoProjectPauseTool, RepoProjectPlanTool,
-    RepoProjectResumeTool, RepoProjectSetCredentialTool, RepoProjectSetupTool,
-    RepoProjectStatusTool, RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool,
+    RepoProjectConnectTool, RepoProjectCreateTool, RepoProjectEnrollTool, RepoProjectListReposTool,
+    RepoProjectPauseTool, RepoProjectPlanTool, RepoProjectResumeTool, RepoProjectSetCredentialTool,
+    RepoProjectSetupTool, RepoProjectStatusTool, RootFileToolHost, RootProcessBackendAdapter,
+    SessionSearchTool,
     SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, root_comfyui_tool_host,
     root_job_tool_host, root_learning_tool_host, root_memory_tool_host,
     root_skill_install_tool_host, root_skill_publish_tool_host, root_skill_search_tool_host,
@@ -765,15 +766,22 @@ impl ToolRegistry {
             Arc::clone(&store),
             self.secrets_store.clone(),
         )));
-        self.register_sync(Arc::new(RepoProjectApproveTool::new(store)));
-        // Credential storage requires a secrets store.
+        self.register_sync(Arc::new(RepoProjectApproveTool::new(Arc::clone(&store))));
+        // Credential storage + GitHub connector (repo discovery/selection) all
+        // require a secrets store to mint authenticated GitHub clients.
         if let Some(secrets) = self.secrets_store.clone() {
-            self.register_sync(Arc::new(RepoProjectSetCredentialTool::new(secrets)));
-            tracing::info!("Registered 9 repository project supervisor tools");
+            self.register_sync(Arc::new(RepoProjectSetCredentialTool::new(secrets.clone())));
+            self.register_sync(Arc::new(RepoProjectListReposTool::new(
+                Arc::clone(&store),
+                secrets.clone(),
+            )));
+            self.register_sync(Arc::new(RepoProjectConnectTool::new(store, secrets)));
+            tracing::info!("Registered 11 repository project supervisor tools");
         } else {
             tracing::info!(
                 "Registered 8 repository project supervisor tools (no secrets store; \
-                 repo_project_set_credential unavailable)"
+                 repo_project_set_credential, repo_project_list_repos, and repo_project_connect \
+                 unavailable)"
             );
         }
     }

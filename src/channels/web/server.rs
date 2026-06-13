@@ -938,7 +938,30 @@ pub async fn start_server(
             "/api/repo-projects",
             get(repo_projects_list_handler).post(repo_project_create_handler),
         )
+        // Connector: setup, credentials, repo discovery + selection. These
+        // literal segments are registered before `{id}` so they take priority.
+        .route(
+            "/api/repo-projects/readiness",
+            get(repo_project_readiness_handler),
+        )
+        .route("/api/repo-projects/setup", post(repo_project_setup_handler))
+        .route(
+            "/api/repo-projects/credentials",
+            post(repo_project_credential_handler),
+        )
+        .route(
+            "/api/repo-projects/connectable-repos",
+            get(repo_project_connectable_repos_handler),
+        )
+        .route(
+            "/api/repo-projects/connect",
+            post(repo_project_connect_handler),
+        )
         .route("/api/repo-projects/{id}", get(repo_project_detail_handler))
+        .route(
+            "/api/repo-projects/{id}/enroll",
+            post(repo_project_enroll_handler),
+        )
         .route(
             "/api/repo-projects/{id}/plan",
             post(repo_project_plan_handler),

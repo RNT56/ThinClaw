@@ -615,6 +615,156 @@ impl Tool for RepoProjectEnrollTool {
     }
 }
 
+// ── Connector: discover + select repos ──────────────────────────────────
+
+pub struct RepoProjectListReposTool {
+    store: Arc<dyn Database>,
+    secrets: SharedSecrets,
+}
+
+impl RepoProjectListReposTool {
+    pub fn new(store: Arc<dyn Database>, secrets: SharedSecrets) -> Self {
+        Self { store, secrets }
+    }
+}
+
+#[async_trait]
+impl Tool for RepoProjectListReposTool {
+    fn name(&self) -> &str {
+        "repo_project_list_repos"
+    }
+
+    fn description(&self) -> &str {
+        "List the GitHub repositories the connected credential can act on — the connector repo \
+         picker. Each repo is marked with whether it is already under supervision. Use this to \
+         show the user their repositories so they can choose which ones the agent should manage. \
+         Requires GitHub credentials to be configured (GitHub App installation or github_token)."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {}, "required": [] })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::read_only()
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        ctx: &thinclaw_types::JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let started = Instant::now();
+        output(
+            started,
+            repo_projects_api::list_connectable_repos(&self.store, &self.secrets, user_id(ctx))
+                .await,
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectParams {
+    #[serde(default)]
+    repos: Vec<String>,
+    #[serde(default)]
+    all: bool,
+}
+
+pub struct RepoProjectConnectTool {
+    store: Arc<dyn Database>,
+    secrets: SharedSecrets,
+}
+
+impl RepoProjectConnectTool {
+    pub fn new(store: Arc<dyn Database>, secrets: SharedSecrets) -> Self {
+        Self { store, secrets }
+    }
+}
+
+#[async_trait]
+impl Tool for RepoProjectConnectTool {
+    fn name(&self) -> &str {
+        "repo_project_connect"
+    }
+
+    fn description(&self) -> &str {
+        "Bring selected GitHub repositories under supervision by creating a draft project for \
+         each. Provide repos:[\"owner/repo\", …] to connect specific repositories, or set \
+         all:true to connect every repository the credential can access. Repos already enrolled \
+         are skipped. Requires the supervisor to be enabled. After connecting, use \
+         repo_project_status and the project controls to engage."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "repos": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "owner/repo identifiers to connect."
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "Connect every accessible repository instead of a specific list."
+                }
+            },
+            "required": []
+        })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            side_effect_level: ToolSideEffectLevel::Write,
+            approval_class: crate::tools::tool::ToolApprovalClass::Conditional,
+            parallel_safe: false,
+            ..ToolMetadata::default()
+        }
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &thinclaw_types::JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let started = Instant::now();
+        let params: ConnectParams = serde_json::from_value(params)
+            .map_err(|error| ToolError::InvalidParameters(error.to_string()))?;
+        let input = repo_projects_api::RepoConnectInput {
+            repos: params.repos,
+            all: params.all,
+        };
+        output(
+            started,
+            repo_projects_api::connect_repos(&self.store, &self.secrets, user_id(ctx), input)
+                .await,
+        )
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Orchestrator
+    }
+}
+
+impl std::fmt::Debug for RepoProjectListReposTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepoProjectListReposTool")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RepoProjectConnectTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepoProjectConnectTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for RepoProjectSetupTool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RepoProjectSetupTool")
