@@ -1421,6 +1421,40 @@ pub enum SseEvent {
         status: String,
         message: String,
     },
+    #[serde(rename = "repo_project_updated")]
+    RepoProjectUpdated {
+        project_id: String,
+        state: String,
+        message: String,
+    },
+    #[serde(rename = "repo_task_updated")]
+    RepoTaskUpdated {
+        project_id: String,
+        task_id: String,
+        state: String,
+        message: String,
+    },
+    #[serde(rename = "repo_worker_run_updated")]
+    RepoWorkerRunUpdated {
+        project_id: String,
+        worker_run_id: String,
+        state: String,
+        message: String,
+    },
+    #[serde(rename = "repo_project_event")]
+    RepoProjectEvent {
+        project_id: String,
+        event_type: String,
+        message: String,
+    },
+    #[serde(rename = "repo_merge_gate_updated")]
+    RepoMergeGateUpdated {
+        project_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        state: String,
+        message: String,
+    },
 
     /// Agent completed its bootstrap ritual (BOOTSTRAP.md deleted).
     /// Frontend should update bootstrapNeeded → false.
@@ -1486,6 +1520,11 @@ impl SseEvent {
             SseEvent::ExperimentCampaignUpdated { .. } => "experiment_campaign_updated",
             SseEvent::ExperimentTrialUpdated { .. } => "experiment_trial_updated",
             SseEvent::ExperimentRunnerUpdated { .. } => "experiment_runner_updated",
+            SseEvent::RepoProjectUpdated { .. } => "repo_project_updated",
+            SseEvent::RepoTaskUpdated { .. } => "repo_task_updated",
+            SseEvent::RepoWorkerRunUpdated { .. } => "repo_worker_run_updated",
+            SseEvent::RepoProjectEvent { .. } => "repo_project_event",
+            SseEvent::RepoMergeGateUpdated { .. } => "repo_merge_gate_updated",
             SseEvent::BootstrapCompleted => "bootstrap_completed",
         }
     }

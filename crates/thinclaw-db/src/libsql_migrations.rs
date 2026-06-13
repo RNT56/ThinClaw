@@ -940,6 +940,102 @@ CREATE TABLE IF NOT EXISTS job_events (
 
 CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, id);
 
+-- ==================== Repo Projects ====================
+
+CREATE TABLE IF NOT EXISTS repo_projects (
+    id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_projects_state_updated
+    ON repo_projects(state, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS repo_project_repos (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES repo_projects(id) ON DELETE CASCADE,
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    enrolled INTEGER NOT NULL DEFAULT 1,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(project_id, owner, repo)
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_project_repos_project
+    ON repo_project_repos(project_id, owner, repo);
+
+CREATE TABLE IF NOT EXISTS repo_project_tasks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES repo_projects(id) ON DELETE CASCADE,
+    repo_id TEXT NOT NULL REFERENCES repo_project_repos(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_project_tasks_project_state
+    ON repo_project_tasks(project_id, state, priority DESC, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS repo_worker_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES repo_projects(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES repo_project_tasks(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_worker_runs_project_state
+    ON repo_worker_runs(project_id, state, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS repo_project_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES repo_projects(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES repo_project_tasks(id) ON DELETE SET NULL,
+    event_kind TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_project_events_project_created
+    ON repo_project_events(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS repo_merge_gate_decisions (
+    project_id TEXT NOT NULL REFERENCES repo_projects(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES repo_project_tasks(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(project_id, task_id)
+);
+
+CREATE TABLE IF NOT EXISTS repo_project_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES repo_projects(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_project_runs_project
+    ON repo_project_runs(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS repo_webhook_deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    event TEXT NOT NULL,
+    data TEXT NOT NULL,
+    received_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_webhook_deliveries_received
+    ON repo_webhook_deliveries(received_at DESC);
+
 -- ==================== Routines ====================
 
 CREATE TABLE IF NOT EXISTS routines (

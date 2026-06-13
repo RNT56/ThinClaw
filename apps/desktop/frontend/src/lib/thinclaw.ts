@@ -2082,3 +2082,290 @@ export async function validateExperimentGpuCloud(provider: string): Promise<Thin
 export async function launchExperimentGpuCloudTest(provider: string): Promise<ThinClawJson> {
     return safeInvoke('thinclaw_experiments_gpu_launch_test', { provider });
 }
+
+// ============================================================================
+// Repo Projects
+// ============================================================================
+
+export interface ThinClawFutureCommandUnavailable {
+    available: false;
+    command: string;
+    reason: string;
+}
+
+export type ThinClawRepoProjectState =
+    | 'setup_required'
+    | 'ready'
+    | 'queued'
+    | 'running'
+    | 'paused'
+    | 'blocked'
+    | 'merging'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'archived'
+    | 'error'
+    | string;
+
+export type ThinClawRepoProjectSetupKey =
+    | 'feature_flag'
+    | 'github_app'
+    | 'docker_agents'
+    | 'coding_backend'
+    | 'credentials'
+    | 'concurrency'
+    | 'auto_merge_policy'
+    | 'notifications'
+    | string;
+
+export interface ThinClawRepoProjectSetupItem {
+    key: ThinClawRepoProjectSetupKey;
+    label: string;
+    state: 'complete' | 'pending' | 'blocked' | string;
+    detail?: string | null;
+}
+
+export interface ThinClawRepoBacklogItem {
+    id: string;
+    title: string;
+    priority: 'low' | 'medium' | 'high' | 'urgent' | string;
+    state: 'queued' | 'running' | 'blocked' | 'done' | string;
+    owner?: string | null;
+    labels?: string[];
+    created_at?: string | null;
+    updated_at?: string | null;
+}
+
+export interface ThinClawRepoWorkerRun {
+    id: string;
+    backlog_id?: string | null;
+    agent: string;
+    state: 'queued' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled' | string;
+    branch?: string | null;
+    started_at?: string | null;
+    updated_at?: string | null;
+    duration_secs?: number | null;
+    last_event?: string | null;
+}
+
+export interface ThinClawRepoPullRequest {
+    id: string;
+    title: string;
+    number?: number | null;
+    url?: string | null;
+    branch?: string | null;
+    state: 'draft' | 'open' | 'merged' | 'closed' | string;
+    author?: string | null;
+    updated_at?: string | null;
+}
+
+export interface ThinClawRepoCiCheck {
+    id: string;
+    name: string;
+    state: 'queued' | 'running' | 'passed' | 'failed' | 'skipped' | string;
+    url?: string | null;
+    updated_at?: string | null;
+}
+
+export interface ThinClawRepoMergeGate {
+    id: string;
+    label: string;
+    state: 'passed' | 'pending' | 'blocked' | 'failed' | string;
+    required: boolean;
+    detail?: string | null;
+    updated_at?: string | null;
+}
+
+export interface ThinClawRepoProject {
+    id: string;
+    name: string;
+    repo_url: string;
+    default_branch: string;
+    local_path?: string | null;
+    description?: string | null;
+    state: ThinClawRepoProjectState;
+    active_runs: number;
+    queued_items: number;
+    open_prs: number;
+    merge_gate_state: 'passed' | 'pending' | 'blocked' | 'failed' | string;
+    feature_flag?: 'enabled' | 'disabled' | 'pending' | string;
+    github_app: 'connected' | 'missing' | 'pending' | string;
+    docker_agents: 'ready' | 'missing' | 'degraded' | string;
+    credentials: 'ready' | 'missing' | 'partial' | string;
+    coding_backend?: 'worker' | 'codex_code' | 'claude_code' | string | null;
+    concurrency_limit: number;
+    auto_merge_policy: 'manual' | 'green_checks' | 'approved_only' | 'disabled' | string;
+    notifications: 'enabled' | 'disabled' | 'partial' | string;
+    updated_at?: string | null;
+    setup_checklist?: ThinClawRepoProjectSetupItem[];
+    backlog?: ThinClawRepoBacklogItem[];
+    worker_runs?: ThinClawRepoWorkerRun[];
+    pull_requests?: ThinClawRepoPullRequest[];
+    ci_checks?: ThinClawRepoCiCheck[];
+    merge_gates?: ThinClawRepoMergeGate[];
+}
+
+export interface ThinClawRepoProjectsListResponse {
+    projects: ThinClawRepoProject[];
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+export interface ThinClawRepoProjectResponse {
+    project: ThinClawRepoProject | null;
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+export interface ThinClawRepoProjectCreateInput {
+    name: string;
+    repo_url: string;
+    default_branch?: string | null;
+    local_path?: string | null;
+    description?: string | null;
+}
+
+export interface ThinClawRepoBacklogEnqueueInput {
+    title: string;
+    description?: string | null;
+    priority?: 'low' | 'medium' | 'high' | 'urgent' | string;
+    labels?: string[];
+}
+
+export interface ThinClawRepoApprovalInput {
+    approval_id: string;
+    decision: 'approve' | 'reject';
+    note?: string | null;
+}
+
+export interface ThinClawRepoProjectCommandResponse {
+    ok: boolean;
+    message: string | null;
+    project?: ThinClawRepoProject | null;
+    run?: ThinClawRepoWorkerRun | null;
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+export interface ThinClawRepoProjectEventsResponse {
+    events: ThinClawJobEvent[];
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+export interface ThinClawRepoProjectMergeGatesResponse {
+    gates: ThinClawRepoMergeGate[];
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+function futureCommandUnavailable(command: string, err: unknown): ThinClawFutureCommandUnavailable {
+    const reason = err instanceof Error ? err.message : String(err || `Command ${command} is not available yet.`);
+    return { available: false, command, reason };
+}
+
+async function safeFutureCommand<T>(
+    command: string,
+    args: Record<string, unknown> | undefined,
+    fallback: (unavailable: ThinClawFutureCommandUnavailable) => T,
+): Promise<T> {
+    try {
+        return await safeInvoke<T>(command, args);
+    } catch (err) {
+        return fallback(futureCommandUnavailable(command, err));
+    }
+}
+
+export async function listRepoProjects(): Promise<ThinClawRepoProjectsListResponse> {
+    return safeFutureCommand('thinclaw_repo_projects_list', undefined, (unavailable) => ({
+        projects: [],
+        unavailable,
+    }));
+}
+
+export async function getRepoProject(projectId: string): Promise<ThinClawRepoProjectResponse> {
+    return safeFutureCommand('thinclaw_repo_project_get', { projectId }, (unavailable) => ({
+        project: null,
+        unavailable,
+    }));
+}
+
+export async function createRepoProject(input: ThinClawRepoProjectCreateInput): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_create', { input }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function startRepoProject(projectId: string): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_start', { projectId }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function planRepoProject(projectId: string): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_plan', { projectId }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function pauseRepoProject(projectId: string): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_pause', { projectId }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function resumeRepoProject(projectId: string): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_resume', { projectId }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function cancelRepoProject(projectId: string, runId?: string): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_cancel', { projectId, runId: runId ?? null }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function approveRepoProject(
+    projectId: string,
+    input: ThinClawRepoApprovalInput,
+): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_approve', { projectId, input }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function enqueueRepoProject(
+    projectId: string,
+    item: ThinClawRepoBacklogEnqueueInput,
+): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_enqueue', { projectId, item }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function getRepoProjectEvents(projectId: string, limit = 100): Promise<ThinClawRepoProjectEventsResponse> {
+    return safeFutureCommand('thinclaw_repo_project_events', { projectId, limit }, (unavailable) => ({
+        events: [],
+        unavailable,
+    }));
+}
+
+export async function getRepoProjectMergeGates(projectId: string): Promise<ThinClawRepoProjectMergeGatesResponse> {
+    return safeFutureCommand('thinclaw_repo_project_merge_gates', { projectId }, (unavailable) => ({
+        gates: [],
+        unavailable,
+    }));
+}

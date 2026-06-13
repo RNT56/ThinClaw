@@ -11,6 +11,7 @@ mod conversations;
 mod experiments;
 mod identity;
 mod jobs;
+mod repo_projects;
 mod routines;
 mod sandbox;
 mod settings;

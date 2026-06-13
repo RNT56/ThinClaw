@@ -599,3 +599,156 @@ fn test_learning_prompt_mutation_enabled_by_default() {
     let settings = Settings::default();
     assert!(settings.learning.prompt_mutation.enabled);
 }
+
+#[test]
+fn test_repo_projects_defaults_and_set_round_trip() {
+    let mut settings = Settings::default();
+    assert!(!settings.repo_projects.enabled);
+    assert_eq!(settings.repo_projects.max_concurrent_projects, 1);
+    assert_eq!(settings.repo_projects.max_concurrent_tasks_per_project, 1);
+    assert_eq!(settings.repo_projects.default_coding_backend, "worker");
+    assert!(!settings.repo_projects.auto_merge_default);
+    assert_eq!(settings.repo_projects.watchdog_interval_secs, 60);
+    assert!(settings.repo_projects.workspace_base_dir.is_none());
+    assert!(settings.repo_projects.github_app.app_id.is_none());
+    assert!(settings.repo_projects.github_app.installation_id.is_none());
+    assert!(
+        settings
+            .repo_projects
+            .github_app
+            .private_key_secret
+            .is_none()
+    );
+    assert!(
+        settings
+            .repo_projects
+            .github_app
+            .webhook_secret_secret
+            .is_none()
+    );
+
+    settings.set("repo_projects.enabled", "true").unwrap();
+    settings
+        .set("repo_projects.max_concurrent_projects", "3")
+        .unwrap();
+    settings
+        .set("repo_projects.max_concurrent_tasks_per_project", "2")
+        .unwrap();
+    settings
+        .set("repo_projects.default_coding_backend", "codex_code")
+        .unwrap();
+    settings
+        .set("repo_projects.auto_merge_default", "true")
+        .unwrap();
+    settings
+        .set("repo_projects.watchdog_interval_secs", "45")
+        .unwrap();
+    settings
+        .set("repo_projects.workspace_base_dir", "/tmp/thinclaw-repos")
+        .unwrap();
+    settings
+        .set("repo_projects.github_app.app_id", "123")
+        .unwrap();
+    settings
+        .set("repo_projects.github_app.installation_id", "456")
+        .unwrap();
+    settings
+        .set(
+            "repo_projects.github_app.private_key_secret",
+            "repo_projects_github_private_key",
+        )
+        .unwrap();
+    settings
+        .set(
+            "repo_projects.github_app.webhook_secret_secret",
+            "repo_projects_github_webhook",
+        )
+        .unwrap();
+
+    let restored = Settings::from_db_map(&settings.to_db_map());
+    assert!(restored.repo_projects.enabled);
+    assert_eq!(restored.repo_projects.max_concurrent_projects, 3);
+    assert_eq!(restored.repo_projects.max_concurrent_tasks_per_project, 2);
+    assert_eq!(restored.repo_projects.default_coding_backend, "codex_code");
+    assert!(restored.repo_projects.auto_merge_default);
+    assert_eq!(restored.repo_projects.watchdog_interval_secs, 45);
+    assert_eq!(
+        restored.repo_projects.workspace_base_dir.as_deref(),
+        Some("/tmp/thinclaw-repos")
+    );
+    assert_eq!(restored.repo_projects.github_app.app_id, Some(123));
+    assert_eq!(restored.repo_projects.github_app.installation_id, Some(456));
+    assert_eq!(
+        restored
+            .repo_projects
+            .github_app
+            .private_key_secret
+            .as_deref(),
+        Some("repo_projects_github_private_key")
+    );
+    assert_eq!(
+        restored
+            .repo_projects
+            .github_app
+            .webhook_secret_secret
+            .as_deref(),
+        Some("repo_projects_github_webhook")
+    );
+}
+
+#[test]
+fn test_repo_projects_toml_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("repo-projects.toml");
+
+    std::fs::write(
+        &path,
+        r#"
+[repo_projects]
+enabled = true
+max_concurrent_projects = 4
+max_concurrent_tasks_per_project = 2
+default_coding_backend = "claude_code"
+auto_merge_default = true
+watchdog_interval_secs = 30
+workspace_base_dir = "/tmp/repo-project-workspaces"
+
+[repo_projects.github_app]
+app_id = 123
+installation_id = 456
+private_key_secret = "repo_projects_github_private_key"
+webhook_secret_secret = "repo_projects_github_webhook"
+"#,
+    )
+    .unwrap();
+
+    let loaded = Settings::load_toml(&path).unwrap().unwrap();
+    assert!(loaded.repo_projects.enabled);
+    assert_eq!(loaded.repo_projects.max_concurrent_projects, 4);
+    assert_eq!(loaded.repo_projects.max_concurrent_tasks_per_project, 2);
+    assert_eq!(loaded.repo_projects.default_coding_backend, "claude_code");
+    assert!(loaded.repo_projects.auto_merge_default);
+    assert_eq!(loaded.repo_projects.watchdog_interval_secs, 30);
+    assert_eq!(
+        loaded.repo_projects.workspace_base_dir.as_deref(),
+        Some("/tmp/repo-project-workspaces")
+    );
+    assert_eq!(loaded.repo_projects.github_app.app_id, Some(123));
+    assert_eq!(loaded.repo_projects.github_app.installation_id, Some(456));
+    assert_eq!(
+        loaded
+            .repo_projects
+            .github_app
+            .private_key_secret
+            .as_deref(),
+        Some("repo_projects_github_private_key")
+    );
+    assert_eq!(
+        loaded
+            .repo_projects
+            .github_app
+            .webhook_secret_secret
+            .as_deref(),
+        Some("repo_projects_github_webhook")
+    );
+}

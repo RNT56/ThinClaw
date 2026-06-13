@@ -37,6 +37,7 @@ mod moa;
 #[cfg(feature = "nostr")]
 mod nostr_actions;
 pub(crate) mod process;
+mod repo_projects;
 pub mod routine;
 mod screen_capture;
 mod search_files;
@@ -113,6 +114,10 @@ pub use moa::MoaTool;
 #[cfg(feature = "nostr")]
 pub use nostr_actions::NostrActionsTool;
 pub use process::{ProcessTool, RootProcessBackendAdapter, SharedProcessRegistry, start_reaper};
+pub use repo_projects::{
+    RepoProjectApproveTool, RepoProjectCreateTool, RepoProjectPauseTool, RepoProjectPlanTool,
+    RepoProjectResumeTool, RepoProjectStatusTool,
+};
 pub use routine::{
     RootRoutineOutcomeObserver, RootRoutineStorePort, RoutineCreateTool, RoutineDeleteTool,
     RoutineEngineControlPort, RoutineHistoryTool, RoutineListTool, RoutineOutcomeObserver,

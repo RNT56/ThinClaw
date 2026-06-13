@@ -26,6 +26,7 @@ import { ThinClawCacheStats } from '../../thinclaw/ThinClawCacheStats';
 import { ThinClawRouting } from '../../thinclaw/ThinClawRouting';
 import { ThinClawExperiments } from '../../thinclaw/ThinClawExperiments';
 import { ThinClawLearning } from '../../thinclaw/ThinClawLearning';
+import { ThinClawRepoProjects } from '../../thinclaw/ThinClawRepoProjects';
 import * as thinclaw from '../../../lib/thinclaw';
 
 export function ThinClawView() {
@@ -75,6 +76,7 @@ export function ThinClawView() {
             case 'presence': return <ThinClawPresence />;
             case 'automations': return <ThinClawAutomations />;
             case 'jobs': return <ThinClawJobs />;
+            case 'repo-projects': return <ThinClawRepoProjects />;
             case 'autonomy': return <ThinClawAutonomy />;
             case 'routine-audit': return <ThinClawRoutineAudit />;
             case 'skills': return <ThinClawSkills />;

@@ -22,6 +22,7 @@ thinclaw-config = { version = "0.1.0", path = "../thinclaw-config" }
 thinclaw-experiments = { version = "0.1.0", path = "../thinclaw-experiments" }
 thinclaw-history = { version = "0.1.0", path = "../thinclaw-history" }
 thinclaw-identity = { version = "0.1.0", path = "../thinclaw-identity" }
+thinclaw-repo-projects = { version = "0.1.0", path = "../thinclaw-repo-projects" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }
 tokio = { version = "1", features = ["time", "fs"], optional = true }

@@ -113,6 +113,7 @@ impl GatewayChannel {
             cost_tracker: None,
             response_cache: None,
             routine_engine: None,
+            repo_project_supervisor: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
@@ -160,6 +161,7 @@ impl GatewayChannel {
             cost_tracker: self.state.cost_tracker.clone(),
             response_cache: self.state.response_cache.clone(),
             routine_engine: self.state.routine_engine.clone(),
+            repo_project_supervisor: self.state.repo_project_supervisor.clone(),
             startup_time: self.state.startup_time,
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: self.state.secrets_store.clone(),
@@ -321,6 +323,16 @@ impl GatewayChannel {
     ) -> Self {
         self.rebuild_state(|s| s.routine_engine = Some(engine));
         self
+    }
+
+    /// Shared cell holding the repository project supervisor wake handle. The
+    /// supervisor is built during agent background-task startup (after the
+    /// gateway), so the agent loop writes it into this cell via `AgentDeps`.
+    /// GitHub webhook handlers read from the same cell.
+    pub fn repo_project_supervisor_cell(
+        &self,
+    ) -> Arc<tokio::sync::RwLock<Option<crate::repo_projects::supervisor::ProjectSupervisor>>> {
+        Arc::clone(&self.state.repo_project_supervisor)
     }
 
     /// Inject the secrets store for API key management (Provider Vault).

@@ -27,15 +27,27 @@ use crate::agent::submission::{
 };
 use crate::agent::{RootAgentRuntimePorts, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
-use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
+use crate::config::{
+    AgentConfig, HeartbeatConfig, RepoProjectsConfig, RoutineConfig, SkillsConfig,
+};
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::{LlmProvider, ProviderTokenCapture, TokenCaptureSupport};
+use crate::repo_projects::executor::{RepoProjectExecutor, RepoProjectExecutorConfig};
+use crate::repo_projects::github_provider::{
+    RepoGitHubClientProvider, SecretsRepoGitHubClientProvider,
+};
+use crate::repo_projects::pipeline::{GitHubPipeline, PipelineConfig};
+use crate::repo_projects::supervisor::{
+    DatabaseRepoSupervisorStore, ProjectSupervisor, RepoSupervisorStore,
+    run_project_supervisor_loop,
+};
 use crate::safety::SafetyLayer;
 use crate::sandbox_jobs::SandboxChildRegistry;
+use crate::sandbox_types::ContainerJobManager;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -72,6 +84,15 @@ pub struct AgentDeps {
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     /// Optional SSE broadcast sender for routine lifecycle events.
     pub sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// Optional Docker sandbox manager used by repo project supervision.
+    pub job_manager: Option<Arc<ContainerJobManager>>,
+    /// Secrets store used by the repo project supervisor to resolve GitHub App /
+    /// `github_token` credentials for the live PR/CI/merge pipeline.
+    pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    /// Shared cell the agent loop writes the constructed repo project supervisor
+    /// into, so the gateway's GitHub webhook handlers can wake it. Populated by
+    /// `start_background_tasks` when repo projects are enabled.
+    pub repo_project_supervisor_slot: Option<Arc<tokio::sync::RwLock<Option<ProjectSupervisor>>>>,
     /// Optional multi-agent router for workspace isolation & priority-based routing.
     pub agent_router: Option<Arc<AgentRouter>>,
     /// Optional agent registry for persistent agent workspace management + A2A.
@@ -481,6 +502,9 @@ pub struct BackgroundTasksHandle {
     // Bug 5 fix: zombie reaper was previously untracked and leaked on shutdown
     zombie_reaper_handle: Option<tokio::task::JoinHandle<()>>,
     outcome_handle: Option<tokio::task::JoinHandle<()>>,
+    repo_project_supervisor: Option<ProjectSupervisor>,
+    repo_project_supervisor_handle: Option<tokio::task::JoinHandle<()>>,
+    repo_project_supervisor_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     health_monitor: Option<Arc<crate::channels::ChannelHealthMonitor>>,
     /// Receiver for system events (heartbeat messages injected by the routine engine).
     /// The message loop polls this to process heartbeat turns when the dispatcher is idle.
@@ -494,6 +518,11 @@ impl BackgroundTasksHandle {
         self.routine_handle.as_ref().map(|(_, engine)| engine)
     }
 
+    /// Get the repository project supervisor wake handle, if the subsystem is running.
+    pub fn repo_project_supervisor(&self) -> Option<ProjectSupervisor> {
+        self.repo_project_supervisor.clone()
+    }
+
     /// Take the system event receiver for external consumption.
     ///
     /// In standalone mode, `Agent::run()` consumes this via its select! loop.
@@ -505,6 +534,41 @@ impl BackgroundTasksHandle {
     ) -> tokio::sync::MutexGuard<'_, Option<tokio::sync::mpsc::Receiver<IncomingMessage>>> {
         self.system_event_mutex.lock().await
     }
+}
+
+async fn resolve_repo_projects_config(store: &Arc<dyn Database>) -> RepoProjectsConfig {
+    let mut default_config = RepoProjectsConfig::default();
+
+    for user_id in ["default", "local_user"] {
+        match store.get_all_settings(user_id).await {
+            Ok(map) => {
+                let settings = crate::settings::Settings::from_db_map(&map);
+                match RepoProjectsConfig::resolve(&settings) {
+                    Ok(config) if config.enabled => return config,
+                    Ok(config) if user_id == "default" => {
+                        default_config = config;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            user_id,
+                            error = %error,
+                            "failed to resolve repo projects config"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    user_id,
+                    error = %error,
+                    "failed to load settings while resolving repo projects config"
+                );
+            }
+        }
+    }
+
+    default_config
 }
 
 impl Agent {
@@ -894,6 +958,98 @@ impl Agent {
             spawn_outcome_service(service)
         });
 
+        let (
+            repo_project_supervisor,
+            repo_project_supervisor_handle,
+            repo_project_supervisor_shutdown_tx,
+        ) = if let Some(store) = self.store() {
+            let repo_projects_config = resolve_repo_projects_config(store).await;
+            if repo_projects_config.enabled {
+                let mut supervisor_db_store = DatabaseRepoSupervisorStore::new(Arc::clone(store))
+                    .with_sse(self.deps.sse_sender.clone());
+
+                // Sandbox executor for coding-job dispatch + CI repair.
+                if self.deps.job_manager.is_some() {
+                    let executor = RepoProjectExecutor::new(
+                        Arc::clone(store),
+                        self.deps.job_manager.clone(),
+                        RepoProjectExecutorConfig {
+                            workspace_base_dir: repo_projects_config.workspace_base_dir.clone(),
+                            ..RepoProjectExecutorConfig::default()
+                        },
+                    )
+                    .with_sse(self.deps.sse_sender.clone());
+                    supervisor_db_store = supervisor_db_store.with_executor(executor);
+                }
+
+                // GitHub PR/CI/merge pipeline, authenticated from the secrets
+                // store (GitHub App installation token or `github_token`).
+                if let Some(secrets) = self.deps.secrets_store.clone() {
+                    let owner_id = self
+                        .workspace()
+                        .map(|workspace| workspace.user_id().to_string())
+                        .unwrap_or_else(|| "default".to_string());
+                    let provider = SecretsRepoGitHubClientProvider::build(
+                        secrets,
+                        owner_id,
+                        "https://api.github.com",
+                        repo_projects_config.github_app.app_id,
+                        repo_projects_config.github_app.installation_id,
+                        repo_projects_config.github_app.private_key_secret.clone(),
+                        "github_token",
+                    )
+                    .await;
+                    let provider: Arc<dyn RepoGitHubClientProvider> = Arc::new(provider);
+                    let pipeline_config = PipelineConfig {
+                        post_review_summary: std::env::var("REPO_PROJECTS_REVIEW_SUMMARY")
+                            .map(|value| {
+                                matches!(
+                                    value.trim().to_ascii_lowercase().as_str(),
+                                    "1" | "true" | "yes" | "on"
+                                )
+                            })
+                            .unwrap_or(false),
+                        ..PipelineConfig::default()
+                    };
+                    let pipeline =
+                        GitHubPipeline::new(Arc::clone(store), provider, pipeline_config)
+                            .with_sse(self.deps.sse_sender.clone());
+                    supervisor_db_store = supervisor_db_store.with_pipeline(pipeline);
+                } else {
+                    tracing::warn!(
+                        "repo projects enabled but no secrets store is available; \
+                         GitHub PR/CI/merge pipeline is disabled"
+                    );
+                }
+
+                let supervisor_store: Arc<dyn RepoSupervisorStore> = Arc::new(supervisor_db_store);
+                let (supervisor, wake_rx) =
+                    ProjectSupervisor::new(Arc::clone(&supervisor_store), 128);
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+                // Publish the supervisor into the shared slot so the gateway's
+                // GitHub webhook handlers can wake it.
+                if let Some(slot) = self.deps.repo_project_supervisor_slot.as_ref() {
+                    *slot.write().await = Some(supervisor.clone());
+                }
+
+                (
+                    Some(supervisor),
+                    Some(tokio::spawn(run_project_supervisor_loop(
+                        supervisor_store,
+                        wake_rx,
+                        std::time::Duration::from_secs(repo_projects_config.watchdog_interval_secs),
+                        shutdown_rx,
+                    ))),
+                    Some(shutdown_tx),
+                )
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+
         BackgroundTasksHandle {
             repair_handle,
             session_pruning_handle,
@@ -903,6 +1059,9 @@ impl Agent {
             notification_forwarder_handle,
             zombie_reaper_handle,
             outcome_handle,
+            repo_project_supervisor,
+            repo_project_supervisor_handle,
+            repo_project_supervisor_shutdown_tx,
             health_monitor,
             system_event_mutex: tokio::sync::Mutex::new(Some(system_event_rx)),
         }
@@ -935,6 +1094,13 @@ impl Agent {
             h.abort();
         }
         if let Some(h) = handle.outcome_handle {
+            h.abort();
+        }
+        if let Some(tx) = handle.repo_project_supervisor_shutdown_tx {
+            let _ = tx.send(());
+        }
+        drop(handle.repo_project_supervisor);
+        if let Some(h) = handle.repo_project_supervisor_handle {
             h.abort();
         }
         if let Some(ref monitor) = handle.health_monitor {

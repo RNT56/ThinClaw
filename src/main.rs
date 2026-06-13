@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::Parser;
 
 #[cfg(feature = "docker-sandbox")]
-use thinclaw::orchestrator::{
-    ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore, api::OrchestratorState,
-};
+use thinclaw::orchestrator::{OrchestratorApi, api::OrchestratorState};
+#[cfg(feature = "docker-sandbox")]
+use thinclaw::sandbox_types::{ContainerJobConfig, TokenStore};
 use thinclaw::{
     agent::{Agent, AgentDeps},
     app::{
@@ -38,6 +38,7 @@ use thinclaw::{
     },
     config::Config,
     pairing::PairingStore,
+    sandbox_types::ContainerJobManager,
 };
 
 use thinclaw::channels::GmailChannel;
@@ -623,7 +624,7 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     #[cfg(not(feature = "docker-sandbox"))]
-    let _container_job_manager: Option<std::sync::Arc<std::convert::Infallible>> = None;
+    let container_job_manager: Option<Arc<ContainerJobManager>> = None;
 
     // ── Channel setup ──────────────────────────────────────────────────
 
@@ -1829,6 +1830,11 @@ async fn async_main() -> anyhow::Result<()> {
     let shutdown_tracker = Arc::clone(&components.cost_tracker);
 
     let restart_requested = Arc::new(AtomicBool::new(false));
+    // Shared cell the agent loop writes the repo project supervisor into, so the
+    // gateway's GitHub webhook handlers can wake it once it is built.
+    let repo_project_supervisor_slot = gateway_state
+        .as_ref()
+        .map(|state| Arc::clone(&state.repo_project_supervisor));
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -1843,6 +1849,9 @@ async fn async_main() -> anyhow::Result<()> {
         hooks: components.hooks,
         cost_guard: components.cost_guard,
         sse_sender: routine_sse_sender,
+        job_manager: container_job_manager.clone(),
+        secrets_store: shared_secrets_store.clone(),
+        repo_project_supervisor_slot,
         agent_router: Some(shared_agent_router),
         agent_registry: Some(agent_registry),
         canvas_store: Some(canvas_store),

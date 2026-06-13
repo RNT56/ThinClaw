@@ -33,6 +33,8 @@ mod job_events;
 mod jobs;
 mod learning;
 mod outcomes;
+#[cfg(feature = "postgres")]
+mod repo_projects;
 mod routine_crud;
 mod routine_events;
 mod routine_rows;

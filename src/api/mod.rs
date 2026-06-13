@@ -26,6 +26,7 @@ pub mod extensions;
 pub mod learning;
 pub mod mcp;
 pub mod memory;
+pub mod repo_projects;
 pub mod routines;
 pub mod sessions;
 pub mod skills;

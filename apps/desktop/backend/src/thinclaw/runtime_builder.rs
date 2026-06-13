@@ -815,6 +815,10 @@ pub(crate) async fn build_inner(
         llm_runtime: Some(components.llm_runtime.clone()),
         routing_policy: Some(components.routing_policy.clone()),
         sse_sender: Some(sse_tx.clone()), // ← wired into RoutineEngine + Dispatcher
+        job_manager: None,
+        secrets_store: components.secrets_store.clone(),
+        // Desktop has no gateway webhook surface, so no shared supervisor slot.
+        repo_project_supervisor_slot: None,
         agent_router: Some(shared_agent_router),
         agent_registry: Some(agent_registry),
         canvas_store: Some(thinclaw_core::channels::canvas_gateway::CanvasStore::new(

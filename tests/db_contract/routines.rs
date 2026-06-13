@@ -306,6 +306,7 @@ async fn start_routine_gateway_server(
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
         routine_engine: Some(engine),
+        repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         secrets_store: None,
         channel_manager: None,
         hooks: None,

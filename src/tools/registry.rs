@@ -22,12 +22,13 @@ use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
 use crate::tools::builtin::{
     DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort, ExternalMemoryExportTool,
     ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool, ExternalMemorySetupTool,
-    ExternalMemoryStatusTool, FileToolHost, PromptQueue, RootFileToolHost,
-    RootProcessBackendAdapter, SessionSearchTool, SharedModelOverride, SharedProcessRegistry,
-    SharedTodoStore, ShellTool, root_comfyui_tool_host, root_job_tool_host,
-    root_learning_tool_host, root_memory_tool_host, root_skill_install_tool_host,
-    root_skill_publish_tool_host, root_skill_search_tool_host, root_skill_tap_tool_host,
-    root_skill_tool_host,
+    ExternalMemoryStatusTool, FileToolHost, PromptQueue, RepoProjectApproveTool,
+    RepoProjectCreateTool, RepoProjectPauseTool, RepoProjectPlanTool, RepoProjectResumeTool,
+    RepoProjectStatusTool, RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool,
+    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, root_comfyui_tool_host,
+    root_job_tool_host, root_learning_tool_host, root_memory_tool_host,
+    root_skill_install_tool_host, root_skill_publish_tool_host, root_skill_search_tool_host,
+    root_skill_tap_tool_host, root_skill_tool_host,
 };
 use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::rate_limiter::RateLimiter;
@@ -749,6 +750,17 @@ impl ToolRegistry {
         ));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store_port)));
         tracing::info!("Registered 5 routine management tools");
+    }
+
+    /// Register repository project supervisor tools.
+    pub fn register_repo_project_tools(&self, store: Arc<dyn Database>) {
+        self.register_sync(Arc::new(RepoProjectCreateTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectPlanTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectStatusTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectPauseTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectResumeTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectApproveTool::new(store)));
+        tracing::info!("Registered 6 repository project supervisor tools");
     }
 
     /// Register the TTS tool.
