@@ -20,15 +20,19 @@ Implemented:
 - Durable, restart-surviving webhook delivery storage (`repo_webhook_deliveries`) used for idempotency and audit; the in-memory deduper remains a fast pre-check.
 - Durable project-run records (`repo_project_runs`): the supervisor opens a run on first dispatch and closes it with final task tallies on project completion (`ProjectRunStarted`/`ProjectRunCompleted` events).
 - Optional one-shot "review readiness" PR comment at the review stage (env `REPO_PROJECTS_REVIEW_SUMMARY=true`) summarizing CI + merge-gate status.
-- Local Git workspace provisioning helpers that clone/fetch a repo and create per-task worktrees under a supervisor workspace directory.
+- Optional one-shot **sandbox code review** of the pushed branch (env `REPO_PROJECTS_REVIEWER_BACKEND=claude_code|codex_code|worker`): the executor checks out the *pushed* branch content into a detached review worktree, dispatches a read-only review job that posts findings to the PR, and the worker run is skipped by task-state reconciliation. Advisory — it does not by itself block the gate.
+- Local Git workspace provisioning helpers that clone/fetch a repo and create per-task worktrees (impl + review) under a supervisor workspace directory.
 - Supervisor startup honors `repo_projects.enabled`, uses the resolved watchdog interval, and passes the resolved workspace root into the executor.
+
+Validation:
+
+- Two-backend DB parity is checked in CI/Docker: `schema_divergence` confirms the libSQL schema block and the Postgres `V*.sql` migrations (incl. `V26` runs + webhook deliveries) match, and a `db_contract` repo-projects test round-trips the full store (projects/repos/tasks/runs/worker-runs/events/merge-gates/webhook deliveries) against real Postgres.
 
 Integration-pending:
 
 - Webhook **replay** tooling. Deliveries are now stored durably for idempotency/audit, but there is no operator command to replay a stored delivery.
 - Mapping individual GitHub webhook payloads directly into task state transitions; today a webhook wakes the supervisor, which then re-derives state from the GitHub API on the next reconcile.
-- A full ThinClaw reviewer sandbox pass (Claude Code reviewing the diff). Only the lightweight review-readiness summary comment is wired; a real sandbox review needs PR-branch worktree handling that is deferred until it can be Docker-tested. The merge gate uses GitHub's authoritative review state plus CI/branch/findings evidence.
-- A full fake-Docker coding-bridge end-to-end suite. The GitHub side has both a pipeline E2E and a supervisor-reconcile E2E (seed waiting-CI task → reconcile → green CI → two-phase merge gate → single squash merge → project + run completion, plus auto-merge-disabled, review-summary, and restart-recovery paths); the sandbox coding bridge itself is still only exercised via unit-level executor logic.
+- A running fake-Docker coding-bridge end-to-end in CI. The GitHub side has a pipeline E2E and a supervisor-reconcile E2E; the sandbox dispatch path has a real-Docker E2E (`tests/repo_project_docker_e2e.rs`, dispatches an actual container via `RepoProjectExecutor`) that is `#[ignore]`d by default because it needs a local `thinclaw-worker:latest` image (`docker build -f Dockerfile.worker -t thinclaw-worker .`).
 
 ## Enablement
 
@@ -67,6 +71,7 @@ Env overrides:
 | `REPO_PROJECTS_GITHUB_PRIVATE_KEY_SECRET` | Secret-store key name for the PEM private key. | unset |
 | `REPO_PROJECTS_GITHUB_WEBHOOK_SECRET_SECRET` | Secret-store key name for the webhook secret. | unset |
 | `REPO_PROJECTS_REVIEW_SUMMARY` | Post a one-shot review-readiness summary comment on PRs at the review stage. | `false` |
+| `REPO_PROJECTS_REVIEWER_BACKEND` | Run a one-shot sandbox code review (`claude_code`/`codex_code`/`worker`) of the pushed branch before the merge gate. Unset = off. | unset |
 
 Operational note: the webhook route resolves the configured webhook secret, and the supervisor now constructs a live GitHub App installation-token client by resolving `private_key_secret` from the secrets store at startup. If the App id or private key is missing/unreadable, the supervisor logs a warning and falls back to a `github_token` secret for API calls, so a misconfigured App degrades gracefully rather than disabling the pipeline.
 

@@ -336,6 +336,19 @@ impl DatabaseRepoSupervisorStore {
                     });
                 }
             }
+            Ok(PipelineOutcome::ReviewRequested { backend }) => {
+                if let Some(executor) = self.executor.as_ref()
+                    && let Err(error) = executor
+                        .dispatch_review_task(project, repo, task, backend)
+                        .await
+                {
+                    tracing::warn!(error = %error, "failed to dispatch sandbox review task");
+                }
+                decisions.push(RepoSupervisorDecision::AwaitingReview {
+                    project_id: project.id,
+                    task_id: task.id,
+                });
+            }
             Ok(outcome) => decisions.push(pipeline_decision(project.id, task.id, &outcome)),
             Err(error) => decisions.push(RepoSupervisorDecision::Blocked {
                 project_id: project.id,
@@ -534,10 +547,12 @@ fn pipeline_decision(
                 task_id,
             }
         }
-        PipelineOutcome::CiRepairRequested(_) => RepoSupervisorDecision::DispatchTask {
-            project_id,
-            task_id,
-        },
+        PipelineOutcome::CiRepairRequested(_) | PipelineOutcome::ReviewRequested { .. } => {
+            RepoSupervisorDecision::DispatchTask {
+                project_id,
+                task_id,
+            }
+        }
         PipelineOutcome::Merged { .. } => RepoSupervisorDecision::Merged {
             project_id,
             task_id,

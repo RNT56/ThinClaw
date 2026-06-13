@@ -166,6 +166,63 @@ impl RepoWorkspaceProvisioner {
         })
     }
 
+    /// Create a detached worktree at the remote tip of the task branch, for a
+    /// read-only review pass. Unlike [`create_task_worktree`], this checks out
+    /// the *pushed* branch content (the implementation worker's commits) rather
+    /// than resetting the branch to base.
+    pub async fn create_review_worktree(
+        &self,
+        owner: &str,
+        repo: &str,
+        task_short_id: &str,
+        branch_name: &str,
+    ) -> Result<TaskWorktree, RepoWorkspaceError> {
+        let repo_dir = self.repo_dir(owner, repo)?;
+        let worktree_dir = self.review_worktree_dir(owner, repo, task_short_id)?;
+
+        // Fetch the latest tip of the branch under review.
+        run_git(&repo_dir, &["fetch", "origin", branch_name]).await?;
+
+        if worktree_dir.exists() {
+            run_git(
+                &repo_dir,
+                &["worktree", "remove", "--force", path_str(&worktree_dir)?],
+            )
+            .await?;
+        }
+
+        run_git(
+            &repo_dir,
+            &[
+                "worktree",
+                "add",
+                "--force",
+                "--detach",
+                path_str(&worktree_dir)?,
+                &format!("origin/{branch_name}"),
+            ],
+        )
+        .await?;
+
+        Ok(TaskWorktree {
+            repo_dir,
+            worktree_dir,
+            branch: branch_name.to_string(),
+        })
+    }
+
+    pub fn review_worktree_dir(
+        &self,
+        owner: &str,
+        repo: &str,
+        task_short_id: &str,
+    ) -> Result<PathBuf, RepoWorkspaceError> {
+        validate_branch_component(task_short_id).map_err(|_| RepoWorkspaceError::InvalidTaskId)?;
+        Ok(self
+            .repo_dir(owner, repo)?
+            .with_file_name(format!("{owner}__{repo}__review__{task_short_id}")))
+    }
+
     pub async fn remove_task_worktree(
         &self,
         owner: &str,
@@ -275,5 +332,63 @@ mod tests {
             RepoWorkspaceProvisioner::task_branch("project", "abc@{1}"),
             Err(RepoWorkspaceError::InvalidTaskId)
         ));
+    }
+
+    async fn git(cwd: &Path, args: &[&str]) {
+        run_git(cwd, args)
+            .await
+            .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
+    }
+
+    #[tokio::test]
+    async fn review_worktree_checks_out_pushed_branch_content() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
+        let bare = root.join("remote.git");
+        let seed = root.join("seed");
+        let base_dir = root.join("workspace");
+
+        // A bare "origin" with a main branch and a pushed feature branch.
+        git(
+            root,
+            &["init", "--bare", "-b", "main", bare.to_str().unwrap()],
+        )
+        .await;
+        git(
+            root,
+            &["clone", bare.to_str().unwrap(), seed.to_str().unwrap()],
+        )
+        .await;
+        git(&seed, &["config", "user.email", "t@example.com"]).await;
+        git(&seed, &["config", "user.name", "Test"]).await;
+        tokio::fs::write(seed.join("README.md"), b"base\n")
+            .await
+            .unwrap();
+        git(&seed, &["add", "."]).await;
+        git(&seed, &["commit", "-m", "base"]).await;
+        git(&seed, &["push", "-u", "origin", "main"]).await;
+        git(&seed, &["checkout", "-b", "thinclaw/p/abc123"]).await;
+        tokio::fs::write(seed.join("FEATURE.txt"), b"feature work\n")
+            .await
+            .unwrap();
+        git(&seed, &["add", "."]).await;
+        git(&seed, &["commit", "-m", "feature"]).await;
+        git(&seed, &["push", "-u", "origin", "thinclaw/p/abc123"]).await;
+
+        let provisioner = RepoWorkspaceProvisioner::new(&base_dir);
+        provisioner
+            .clone_or_fetch("owner", "repo", bare.to_str().unwrap(), "main")
+            .await
+            .expect("clone_or_fetch");
+        let worktree = provisioner
+            .create_review_worktree("owner", "repo", "abc123", "thinclaw/p/abc123")
+            .await
+            .expect("create_review_worktree");
+
+        // The review worktree must contain the pushed feature content, not base.
+        let feature = tokio::fs::read_to_string(worktree.worktree_dir.join("FEATURE.txt"))
+            .await
+            .expect("feature file present in review worktree");
+        assert_eq!(feature, "feature work\n");
     }
 }

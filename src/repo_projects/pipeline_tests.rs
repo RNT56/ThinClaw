@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use thinclaw_repo_projects::{
     CodingBackend, GitHubAuthMode, MergeMethod, ProjectPolicy, RepoProject, RepoProjectRepo,
     RepoProjectRun, RepoProjectRunState, RepoProjectState, RepoProjectTask, RepoProjectTaskState,
+    RepoWorkerRun, RepoWorkerRunState,
 };
 use uuid::Uuid;
 
@@ -511,5 +512,124 @@ async fn review_summary_comment_is_posted_once_per_head_sha_when_enabled() {
         fake.lock().unwrap().comments,
         after_first,
         "summary is one-shot per head SHA"
+    );
+}
+
+#[tokio::test]
+async fn review_requested_once_per_head_sha_when_reviewer_configured() {
+    let (db, _guard) = test_db().await;
+    let fake = SharedFake::default();
+    fake.lock().unwrap().ci_green = true;
+    let base_url = spawn_fake_github(Arc::clone(&fake)).await;
+    let (project, repo, task_id) = seed(&db, true, RepoProjectTaskState::WaitingReview).await;
+    let mut seeded = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    seeded.pull_request_number = Some(42);
+    seeded.head_sha = Some(HEAD_SHA.to_string());
+    db.upsert_repo_project_task(&seeded).await.unwrap();
+
+    let pipeline = pipeline_with(
+        Arc::clone(&db),
+        &base_url,
+        PipelineConfig {
+            reviewer_backend: Some(CodingBackend::Worker),
+            ..PipelineConfig::default()
+        },
+    );
+
+    let mut task = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    let outcome = pipeline
+        .advance_task(&project, &repo, &mut task)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, PipelineOutcome::ReviewRequested { .. }),
+        "first review pass requests a review, got {outcome:?}"
+    );
+    assert_eq!(fake.lock().unwrap().merges, 0, "no merge before review");
+
+    // Second pass: review already requested for this head SHA -> proceeds to gate.
+    let mut task = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    let outcome = pipeline
+        .advance_task(&project, &repo, &mut task)
+        .await
+        .unwrap();
+    assert!(
+        !matches!(outcome, PipelineOutcome::ReviewRequested { .. }),
+        "sandbox review is one-shot per head SHA, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn sync_worker_runs_skips_review_runs_and_keeps_task_in_review() {
+    let (db, _guard) = test_db().await;
+    let (project, repo, task_id) = seed(&db, true, RepoProjectTaskState::WaitingReview).await;
+    let now = Utc::now();
+
+    // A completed review sandbox job and its review-marked worker run.
+    let job_id = Uuid::new_v4();
+    db.save_sandbox_job(&crate::history::SandboxJobRecord {
+        id: job_id,
+        spec: crate::sandbox_jobs::SandboxJobSpec::new(
+            "review",
+            "review",
+            "principal",
+            "actor",
+            None,
+            crate::sandbox_types::JobMode::Worker,
+        ),
+        status: "completed".to_string(),
+        success: Some(true),
+        failure_reason: None,
+        created_at: now,
+        started_at: Some(now),
+        completed_at: Some(now),
+        credential_grants_json: "[]".to_string(),
+    })
+    .await
+    .unwrap();
+
+    let run_id = Uuid::new_v4();
+    db.upsert_repo_worker_run(&RepoWorkerRun {
+        id: run_id,
+        project_id: project.id,
+        project_run_id: run_id,
+        repo_id: repo.id,
+        task_id,
+        state: RepoWorkerRunState::Running,
+        coding_backend: CodingBackend::Worker,
+        worker_id: "repo-project-reviewer-x".to_string(),
+        branch_name: "thinclaw/proj/abc123".to_string(),
+        job_id: Some(job_id.to_string()),
+        commit_sha: None,
+        exit_code: None,
+        summary: None,
+        metadata: json!({ "review": true }),
+        created_at: now,
+        updated_at: now,
+        started_at: Some(now),
+        completed_at: None,
+    })
+    .await
+    .unwrap();
+
+    let executor = super::executor::RepoProjectExecutor::new(
+        Arc::clone(&db),
+        None,
+        super::executor::RepoProjectExecutorConfig::default(),
+    );
+    executor.sync_worker_runs(project.id).await.unwrap();
+
+    let runs = db.list_repo_worker_runs(project.id).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].state,
+        RepoWorkerRunState::Succeeded,
+        "review worker run is still synced to terminal"
+    );
+    let task = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    assert_eq!(
+        task.state,
+        RepoProjectTaskState::WaitingReview,
+        "a review run must not transition the task out of review"
     );
 }

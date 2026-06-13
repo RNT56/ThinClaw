@@ -1009,6 +1009,18 @@ impl Agent {
                                 )
                             })
                             .unwrap_or(false),
+                        reviewer_backend: std::env::var("REPO_PROJECTS_REVIEWER_BACKEND")
+                            .ok()
+                            .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+                                "claude_code" | "claude" => {
+                                    Some(thinclaw_repo_projects::CodingBackend::ClaudeCode)
+                                }
+                                "codex_code" | "codex" => {
+                                    Some(thinclaw_repo_projects::CodingBackend::CodexCode)
+                                }
+                                "worker" => Some(thinclaw_repo_projects::CodingBackend::Worker),
+                                _ => None,
+                            }),
                         ..PipelineConfig::default()
                     };
                     let pipeline =

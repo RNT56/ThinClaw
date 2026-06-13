@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use thinclaw_repo_projects::{
-    MergeMethod, RepoProject, RepoProjectEvent, RepoProjectEventKind, RepoProjectRepo,
-    RepoProjectTask, RepoProjectTaskState, validate_task_state_transition,
+    CodingBackend, MergeMethod, RepoProject, RepoProjectEvent, RepoProjectEventKind,
+    RepoProjectRepo, RepoProjectTask, RepoProjectTaskState, validate_task_state_transition,
 };
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -56,6 +56,11 @@ pub struct PipelineConfig {
     /// comment (CI + merge-gate status) to the PR at the review stage. This is an
     /// automated readiness signal, not a full code review.
     pub post_review_summary: bool,
+    /// When set, the supervisor dispatches a one-shot sandbox code review (using
+    /// this coding backend) of the pushed branch before evaluating the merge
+    /// gate. The review posts findings to the PR; it is advisory and does not by
+    /// itself block the gate.
+    pub reviewer_backend: Option<CodingBackend>,
 }
 
 impl Default for PipelineConfig {
@@ -63,6 +68,7 @@ impl Default for PipelineConfig {
         Self {
             max_ci_repair_attempts: 3,
             post_review_summary: false,
+            reviewer_backend: None,
         }
     }
 }
@@ -85,6 +91,9 @@ pub enum PipelineOutcome {
     CiRepairRequested(CiSuiteClassification),
     /// A merge-gate decision was recorded but the task was not merged.
     MergeGateRecorded { approved: bool },
+    /// A one-shot sandbox review of the pushed branch was requested; the caller
+    /// (which owns the sandbox executor) should dispatch it.
+    ReviewRequested { backend: CodingBackend },
     /// The pull request was merged and the task is done.
     Merged { sha: String },
     /// The task needs human attention; it was moved to `Blocked`.
@@ -367,6 +376,30 @@ impl GitHubPipeline {
             )
             .await?;
             return Ok(PipelineOutcome::WaitingForCi);
+        }
+
+        // Optional one-shot sandbox code review of the pushed branch, before the
+        // gate. Requested once per head SHA; the caller dispatches it.
+        if let Some(backend) = self.config.reviewer_backend
+            && metadata_string(&task.metadata, "review_requested_sha").as_deref()
+                != Some(head_sha.as_str())
+        {
+            task.metadata = merge_metadata(
+                &task.metadata,
+                serde_json::json!({ "review_requested_sha": head_sha }),
+            );
+            task.updated_at = Utc::now();
+            self.persist_task(task).await?;
+            self.record_event(
+                project.id,
+                Some(repo.id),
+                Some(task.id),
+                RepoProjectEventKind::TaskStateChanged,
+                "Requested ThinClaw sandbox review of the pull request",
+                serde_json::json!({ "head_sha": head_sha }),
+            )
+            .await?;
+            return Ok(PipelineOutcome::ReviewRequested { backend });
         }
 
         // Gather live review + branch-freshness + findings evidence. Findings are
