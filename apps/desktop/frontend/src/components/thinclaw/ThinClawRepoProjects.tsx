@@ -30,6 +30,7 @@ import { toast } from 'sonner';
 import { listen } from '@tauri-apps/api/event';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
+import { ThinClawRepoConnector } from './ThinClawRepoConnector';
 
 const SHELL_PROJECTS: thinclaw.ThinClawRepoProject[] = [
     {
@@ -608,6 +609,8 @@ export function ThinClawRepoProjects() {
                     </span>
                 </div>
             )}
+
+            <ThinClawRepoConnector onConnected={loadProjects} />
 
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
                 <MetricCard label="Projects" value={projects.length} />

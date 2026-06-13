@@ -2255,6 +2255,88 @@ export interface ThinClawRepoProjectMergeGatesResponse {
     unavailable?: ThinClawFutureCommandUnavailable;
 }
 
+// ── Setup / credentials / GitHub connector ──────────────────────────────
+
+export interface ThinClawRepoProjectsConfigureInput {
+    enabled?: boolean | null;
+    app_id?: number | null;
+    installation_id?: number | null;
+    private_key_secret?: string | null;
+    webhook_secret_secret?: string | null;
+    app_slug?: string | null;
+    default_coding_backend?: string | null;
+    auto_merge_default?: boolean | null;
+    max_concurrent_projects?: number | null;
+    max_concurrent_tasks_per_project?: number | null;
+    watchdog_interval_secs?: number | null;
+    workspace_base_dir?: string | null;
+}
+
+export interface ThinClawRepoProjectsReadiness {
+    enabled: boolean;
+    credential_mode: 'github_app' | 'github_token' | 'none' | string;
+    app_id?: number | null;
+    installation_id?: number | null;
+    private_key_secret?: string | null;
+    webhook_secret_secret?: string | null;
+    app_slug?: string | null;
+    install_url?: string | null;
+    auto_merge_default: boolean;
+    default_coding_backend: string;
+    max_concurrent_projects: number;
+    max_concurrent_tasks_per_project: number;
+    watchdog_interval_secs: number;
+    github_token_secret_present?: boolean | null;
+    private_key_secret_present?: boolean | null;
+    webhook_secret_present?: boolean | null;
+    ready_for_live_runs: boolean;
+    checklist: ThinClawRepoProjectSetupItem[];
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+export interface ThinClawRepoCredentialStored {
+    ok: boolean;
+    name: string;
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+export interface ThinClawConnectableRepo {
+    owner: string;
+    repo: string;
+    full_name: string;
+    private: boolean;
+    archived: boolean;
+    default_branch: string;
+    html_url?: string | null;
+    enrolled: boolean;
+    project_id?: string | null;
+}
+
+export interface ThinClawConnectableReposResponse {
+    source: 'github_app' | 'github_token' | 'gh_cli' | string;
+    total: number;
+    repos: ThinClawConnectableRepo[];
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+export interface ThinClawRepoConnectInput {
+    repos?: string[];
+    all?: boolean;
+}
+
+export interface ThinClawRepoConnectResponse {
+    ok: boolean;
+    connected: string[];
+    skipped: string[];
+    message: string;
+    unavailable?: ThinClawFutureCommandUnavailable;
+}
+
+export interface ThinClawRepoEnrollInput {
+    repo_url: string;
+    default_branch?: string | null;
+}
+
 function futureCommandUnavailable(command: string, err: unknown): ThinClawFutureCommandUnavailable {
     const reason = err instanceof Error ? err.message : String(err || `Command ${command} is not available yet.`);
     return { available: false, command, reason };
@@ -2366,6 +2448,87 @@ export async function getRepoProjectEvents(projectId: string, limit = 100): Prom
 export async function getRepoProjectMergeGates(projectId: string): Promise<ThinClawRepoProjectMergeGatesResponse> {
     return safeFutureCommand('thinclaw_repo_project_merge_gates', { projectId }, (unavailable) => ({
         gates: [],
+        unavailable,
+    }));
+}
+
+// ── Setup / credentials / GitHub connector ──────────────────────────────
+
+export async function getRepoProjectsReadiness(): Promise<ThinClawRepoProjectsReadiness> {
+    return safeFutureCommand('thinclaw_repo_projects_readiness', undefined, (unavailable) => ({
+        enabled: false,
+        credential_mode: 'none',
+        auto_merge_default: false,
+        default_coding_backend: 'worker',
+        max_concurrent_projects: 1,
+        max_concurrent_tasks_per_project: 1,
+        watchdog_interval_secs: 60,
+        ready_for_live_runs: false,
+        checklist: [],
+        unavailable,
+    }));
+}
+
+export async function setupRepoProjects(
+    input: ThinClawRepoProjectsConfigureInput,
+): Promise<ThinClawRepoProjectsReadiness> {
+    return safeFutureCommand('thinclaw_repo_projects_setup', { input }, (unavailable) => ({
+        enabled: false,
+        credential_mode: 'none',
+        auto_merge_default: false,
+        default_coding_backend: 'worker',
+        max_concurrent_projects: 1,
+        max_concurrent_tasks_per_project: 1,
+        watchdog_interval_secs: 60,
+        ready_for_live_runs: false,
+        checklist: [],
+        unavailable,
+    }));
+}
+
+/**
+ * Securely store a GitHub credential. The value is passed straight to the
+ * encrypted secrets store; it is never written to settings, events, or logs.
+ */
+export async function setRepoProjectCredential(
+    name: string,
+    valueSecret: string,
+): Promise<ThinClawRepoCredentialStored> {
+    return safeFutureCommand(
+        'thinclaw_repo_projects_set_credential',
+        { name, valueSecret },
+        (unavailable) => ({ ok: false, name, unavailable }),
+    );
+}
+
+export async function listConnectableRepos(): Promise<ThinClawConnectableReposResponse> {
+    return safeFutureCommand('thinclaw_repo_projects_connectable_repos', undefined, (unavailable) => ({
+        source: 'none',
+        total: 0,
+        repos: [],
+        unavailable,
+    }));
+}
+
+export async function connectRepoProjects(
+    input: ThinClawRepoConnectInput,
+): Promise<ThinClawRepoConnectResponse> {
+    return safeFutureCommand('thinclaw_repo_projects_connect', { input }, (unavailable) => ({
+        ok: false,
+        connected: [],
+        skipped: [],
+        message: unavailable.reason,
+        unavailable,
+    }));
+}
+
+export async function enrollRepoProject(
+    projectId: string,
+    input: ThinClawRepoEnrollInput,
+): Promise<ThinClawRepoProjectCommandResponse> {
+    return safeFutureCommand('thinclaw_repo_project_enroll', { projectId, input }, (unavailable) => ({
+        ok: false,
+        message: unavailable.reason,
         unavailable,
     }));
 }

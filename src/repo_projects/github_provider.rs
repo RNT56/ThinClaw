@@ -255,10 +255,7 @@ impl RepoGitHubClientProvider for FixedTokenGitHubClientProvider {
         // Tests drive the App-installation discovery path against the fake
         // server, so report GitHubApp mode here.
         Ok((
-            GitHubApiClient::with_base_url_and_token(
-                self.api_base_url.clone(),
-                self.token.clone(),
-            ),
+            GitHubApiClient::with_base_url_and_token(self.api_base_url.clone(), self.token.clone()),
             GitHubAuthMode::GitHubApp,
         ))
     }

@@ -26,9 +26,8 @@ use crate::tools::builtin::{
     RepoProjectConnectTool, RepoProjectCreateTool, RepoProjectEnrollTool, RepoProjectListReposTool,
     RepoProjectPauseTool, RepoProjectPlanTool, RepoProjectResumeTool, RepoProjectSetCredentialTool,
     RepoProjectSetupTool, RepoProjectStatusTool, RootFileToolHost, RootProcessBackendAdapter,
-    SessionSearchTool,
-    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, root_comfyui_tool_host,
-    root_job_tool_host, root_learning_tool_host, root_memory_tool_host,
+    SessionSearchTool, SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool,
+    root_comfyui_tool_host, root_job_tool_host, root_learning_tool_host, root_memory_tool_host,
     root_skill_install_tool_host, root_skill_publish_tool_host, root_skill_search_tool_host,
     root_skill_tap_tool_host, root_skill_tool_host,
 };

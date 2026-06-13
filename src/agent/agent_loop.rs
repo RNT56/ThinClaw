@@ -272,6 +272,12 @@ impl Agent {
         self.deps.store.as_ref()
     }
 
+    /// Get the secrets store (public for Tauri/API integration, e.g. the repo
+    /// project connector which mints authenticated GitHub clients).
+    pub fn secrets_store(&self) -> Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>> {
+        self.deps.secrets_store.as_ref()
+    }
+
     pub(super) fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.deps.llm
     }

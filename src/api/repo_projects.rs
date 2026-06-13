@@ -1108,7 +1108,10 @@ async fn list_connectable_repos_with_provider(
 ) -> ApiResult<ConnectableReposResponse> {
     use crate::repo_projects::github::{GitHubListQuery, GitHubUserReposQuery};
 
-    let (client, mode) = provider.discovery_client().await.map_err(ApiError::Internal)?;
+    let (client, mode) = provider
+        .discovery_client()
+        .await
+        .map_err(ApiError::Internal)?;
 
     let mut raw = Vec::new();
     let mut page = 1u32;
@@ -1124,20 +1127,16 @@ async fn list_connectable_repos_with_provider(
                     .map_err(|error| ApiError::Internal(error.to_string()))?
                     .repositories
             }
-            _ => {
-                client
-                    .list_user_repositories(&GitHubUserReposQuery {
-                        affiliation: Some(
-                            "owner,collaborator,organization_member".to_string(),
-                        ),
-                        sort: Some("updated".to_string()),
-                        direction: Some("desc".to_string()),
-                        page: Some(page),
-                        per_page: Some(CONNECTOR_REPO_PAGE_SIZE),
-                    })
-                    .await
-                    .map_err(|error| ApiError::Internal(error.to_string()))?
-            }
+            _ => client
+                .list_user_repositories(&GitHubUserReposQuery {
+                    affiliation: Some("owner,collaborator,organization_member".to_string()),
+                    sort: Some("updated".to_string()),
+                    direction: Some("desc".to_string()),
+                    page: Some(page),
+                    per_page: Some(CONNECTOR_REPO_PAGE_SIZE),
+                })
+                .await
+                .map_err(|error| ApiError::Internal(error.to_string()))?,
         };
         let received = batch.len() as u32;
         raw.extend(batch);

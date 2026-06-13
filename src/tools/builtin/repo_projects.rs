@@ -737,8 +737,7 @@ impl Tool for RepoProjectConnectTool {
         };
         output(
             started,
-            repo_projects_api::connect_repos(&self.store, &self.secrets, user_id(ctx), input)
-                .await,
+            repo_projects_api::connect_repos(&self.store, &self.secrets, user_id(ctx), input).await,
         )
     }
 

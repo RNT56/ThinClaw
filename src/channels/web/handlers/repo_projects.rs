@@ -396,10 +396,9 @@ pub(crate) async fn repo_project_enroll_handler(
 ) -> Result<Json<repo_projects_api::RepoProjectCommandResponse>, (StatusCode, String)> {
     let store = repo_project_store(&state)?;
     let id = parse_repo_project_id(&id)?;
-    let response =
-        repo_projects_api::enroll_repo(store, &request_identity.principal_id, id, input)
-            .await
-            .map_err(repo_project_api_error)?;
+    let response = repo_projects_api::enroll_repo(store, &request_identity.principal_id, id, input)
+        .await
+        .map_err(repo_project_api_error)?;
     broadcast_project_response(&state, &response);
     wake_project_supervisor(&state, id, RepoSupervisorWakeReason::Manual).await;
     Ok(Json(response))

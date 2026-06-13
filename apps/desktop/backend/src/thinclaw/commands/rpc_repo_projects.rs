@@ -19,6 +19,36 @@ async fn local_repo_project_store(
         .ok_or_else(|| "ThinClaw database is not available".to_string())
 }
 
+type SharedSecrets = std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>;
+
+/// Database + secrets together — the connector needs both to mint authenticated
+/// GitHub clients for repo discovery and credential storage.
+async fn local_repo_project_context(
+    ironclaw: &ThinClawRuntimeState,
+) -> Result<
+    (
+        std::sync::Arc<dyn thinclaw_core::db::Database>,
+        SharedSecrets,
+    ),
+    String,
+> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(
+            "Repository project commands are not available through remote gateway mode yet"
+                .to_string(),
+        );
+    }
+    let agent = ironclaw.agent().await?;
+    let store = agent
+        .store()
+        .cloned()
+        .ok_or_else(|| "ThinClaw database is not available".to_string())?;
+    let secrets = agent.secrets_store().cloned().ok_or_else(|| {
+        "Secrets store is not available; cannot manage GitHub credentials".to_string()
+    })?;
+    Ok((store, secrets))
+}
+
 fn parse_project_id(project_id: &str) -> Result<Uuid, String> {
     Uuid::parse_str(project_id).map_err(|_| "Invalid repository project ID".to_string())
 }
@@ -233,4 +263,114 @@ pub async fn thinclaw_repo_project_merge_gates(
     let store = local_repo_project_store(&ironclaw).await?;
     let project_id = parse_project_id(&project_id)?;
     value(thinclaw_core::api::repo_projects::list_merge_gates(&store, project_id).await)
+}
+
+// ── Setup / credentials / GitHub connector ──────────────────────────────
+
+fn user() -> &'static str {
+    thinclaw_core::api::repo_projects::default_user_id()
+}
+
+/// Report supervisor readiness: feature flag, credential mode, GitHub App
+/// config, derived install URL, and per-secret presence.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_repo_projects_readiness(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+) -> Result<serde_json::Value, String> {
+    let store = local_repo_project_store(&ironclaw).await?;
+    let secrets = ironclaw.agent().await?.secrets_store().cloned();
+    value(
+        thinclaw_core::api::repo_projects::repo_projects_readiness(
+            &store,
+            secrets.as_ref(),
+            user(),
+        )
+        .await,
+    )
+}
+
+/// Enable + configure the supervisor (feature flag, GitHub App config, policy).
+/// Secret VALUES are never written here — only the names of secrets.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_repo_projects_setup(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let store = local_repo_project_store(&ironclaw).await?;
+    let secrets = ironclaw.agent().await?.secrets_store().cloned();
+    let input: thinclaw_core::api::repo_projects::RepoProjectsConfigureInput =
+        serde_json::from_value(input).map_err(|error| error.to_string())?;
+    value(
+        thinclaw_core::api::repo_projects::configure_supervisor(
+            &store,
+            secrets.as_ref(),
+            user(),
+            input,
+        )
+        .await,
+    )
+}
+
+/// Securely store a GitHub credential (PAT or GitHub App PEM key) in the
+/// encrypted secrets store. The value never touches settings, events, or logs.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_repo_projects_set_credential(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    name: String,
+    value_secret: String,
+) -> Result<serde_json::Value, String> {
+    let (_store, secrets) = local_repo_project_context(&ironclaw).await?;
+    value(
+        thinclaw_core::api::repo_projects::store_repo_credential(
+            &secrets,
+            user(),
+            name,
+            value_secret,
+        )
+        .await,
+    )
+}
+
+/// List the repositories the connected GitHub credential can act on — the
+/// connector repo picker. Each repo is marked with whether it is already
+/// under supervision.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_repo_projects_connectable_repos(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+) -> Result<serde_json::Value, String> {
+    let (store, secrets) = local_repo_project_context(&ironclaw).await?;
+    value(thinclaw_core::api::repo_projects::list_connectable_repos(&store, &secrets, user()).await)
+}
+
+/// Bring selected repositories under supervision (a project per repo). Provide
+/// `repos: ["owner/repo", …]` or `all: true`.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_repo_projects_connect(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (store, secrets) = local_repo_project_context(&ironclaw).await?;
+    let input: thinclaw_core::api::repo_projects::RepoConnectInput =
+        serde_json::from_value(input).map_err(|error| error.to_string())?;
+    value(thinclaw_core::api::repo_projects::connect_repos(&store, &secrets, user(), input).await)
+}
+
+/// Enroll an additional repository into an existing project.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_repo_project_enroll(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    project_id: String,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let store = local_repo_project_store(&ironclaw).await?;
+    let project_id = parse_project_id(&project_id)?;
+    let input: thinclaw_core::api::repo_projects::RepoEnrollInput =
+        serde_json::from_value(input).map_err(|error| error.to_string())?;
+    value(thinclaw_core::api::repo_projects::enroll_repo(&store, user(), project_id, input).await)
 }
