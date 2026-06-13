@@ -115,8 +115,9 @@ pub use moa::MoaTool;
 pub use nostr_actions::NostrActionsTool;
 pub use process::{ProcessTool, RootProcessBackendAdapter, SharedProcessRegistry, start_reaper};
 pub use repo_projects::{
-    RepoProjectApproveTool, RepoProjectCreateTool, RepoProjectPauseTool, RepoProjectPlanTool,
-    RepoProjectResumeTool, RepoProjectStatusTool,
+    RepoProjectApproveTool, RepoProjectCreateTool, RepoProjectEnrollTool, RepoProjectPauseTool,
+    RepoProjectPlanTool, RepoProjectResumeTool, RepoProjectSetCredentialTool, RepoProjectSetupTool,
+    RepoProjectStatusTool,
 };
 pub use routine::{
     RootRoutineOutcomeObserver, RootRoutineStorePort, RoutineCreateTool, RoutineDeleteTool,

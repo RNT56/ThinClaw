@@ -23,7 +23,8 @@ use crate::tools::builtin::{
     DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort, ExternalMemoryExportTool,
     ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool, ExternalMemorySetupTool,
     ExternalMemoryStatusTool, FileToolHost, PromptQueue, RepoProjectApproveTool,
-    RepoProjectCreateTool, RepoProjectPauseTool, RepoProjectPlanTool, RepoProjectResumeTool,
+    RepoProjectCreateTool, RepoProjectEnrollTool, RepoProjectPauseTool, RepoProjectPlanTool,
+    RepoProjectResumeTool, RepoProjectSetCredentialTool, RepoProjectSetupTool,
     RepoProjectStatusTool, RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool,
     SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, root_comfyui_tool_host,
     root_job_tool_host, root_learning_tool_host, root_memory_tool_host,
@@ -759,8 +760,22 @@ impl ToolRegistry {
         self.register_sync(Arc::new(RepoProjectStatusTool::new(Arc::clone(&store))));
         self.register_sync(Arc::new(RepoProjectPauseTool::new(Arc::clone(&store))));
         self.register_sync(Arc::new(RepoProjectResumeTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectEnrollTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectSetupTool::new(
+            Arc::clone(&store),
+            self.secrets_store.clone(),
+        )));
         self.register_sync(Arc::new(RepoProjectApproveTool::new(store)));
-        tracing::info!("Registered 6 repository project supervisor tools");
+        // Credential storage requires a secrets store.
+        if let Some(secrets) = self.secrets_store.clone() {
+            self.register_sync(Arc::new(RepoProjectSetCredentialTool::new(secrets)));
+            tracing::info!("Registered 9 repository project supervisor tools");
+        } else {
+            tracing::info!(
+                "Registered 8 repository project supervisor tools (no secrets store; \
+                 repo_project_set_credential unavailable)"
+            );
+        }
     }
 
     /// Register the TTS tool.

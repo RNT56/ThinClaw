@@ -629,6 +629,386 @@ pub async fn list_merge_gates(
     })
 }
 
+// ── Supervisor setup / configuration ────────────────────────────────────
+
+type SharedSecrets = Arc<dyn crate::secrets::SecretsStore + Send + Sync>;
+
+/// Fields an operator/agent can set to configure the supervisor. All optional;
+/// only provided fields are written. Secret *values* are never stored here —
+/// only the *names* of secrets held in the encrypted secrets store.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RepoProjectsConfigureInput {
+    pub enabled: Option<bool>,
+    pub app_id: Option<u64>,
+    pub installation_id: Option<u64>,
+    pub private_key_secret: Option<String>,
+    pub webhook_secret_secret: Option<String>,
+    pub default_coding_backend: Option<String>,
+    pub auto_merge_default: Option<bool>,
+    pub max_concurrent_projects: Option<usize>,
+    pub max_concurrent_tasks_per_project: Option<usize>,
+    pub watchdog_interval_secs: Option<u64>,
+    pub workspace_base_dir: Option<String>,
+}
+
+/// A snapshot of how ready the supervisor is for live runs.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoProjectsReadiness {
+    pub enabled: bool,
+    pub credential_mode: String,
+    pub app_id: Option<u64>,
+    pub installation_id: Option<u64>,
+    pub private_key_secret: Option<String>,
+    pub webhook_secret_secret: Option<String>,
+    pub auto_merge_default: bool,
+    pub default_coding_backend: String,
+    pub max_concurrent_projects: usize,
+    pub max_concurrent_tasks_per_project: usize,
+    pub watchdog_interval_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_token_secret_present: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key_secret_present: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_secret_present: Option<bool>,
+    pub ready_for_live_runs: bool,
+    pub checklist: Vec<RepoProjectSetupItem>,
+}
+
+async fn set_repo_setting(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    key: &str,
+    value: serde_json::Value,
+) -> ApiResult<()> {
+    store
+        .set_setting(user_id, key, &value)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))
+}
+
+/// Write the provided supervisor settings (feature flag, GitHub App config,
+/// policy defaults) and return the resulting readiness. Does not touch secret
+/// values — store those with [`store_repo_credential`].
+pub async fn configure_supervisor(
+    store: &Arc<dyn Database>,
+    secrets: Option<&SharedSecrets>,
+    user_id: &str,
+    input: RepoProjectsConfigureInput,
+) -> ApiResult<RepoProjectsReadiness> {
+    if let Some(value) = input.enabled {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.enabled",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
+    if let Some(value) = input.app_id {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.github_app.app_id",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
+    if let Some(value) = input.installation_id {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.github_app.installation_id",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
+    if let Some(value) = input.private_key_secret {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.github_app.private_key_secret",
+            serde_json::json!(value.trim()),
+        )
+        .await?;
+    }
+    if let Some(value) = input.webhook_secret_secret {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.github_app.webhook_secret_secret",
+            serde_json::json!(value.trim()),
+        )
+        .await?;
+    }
+    if let Some(value) = input.default_coding_backend {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.default_coding_backend",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
+    if let Some(value) = input.auto_merge_default {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.auto_merge_default",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
+    if let Some(value) = input.max_concurrent_projects {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.max_concurrent_projects",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
+    if let Some(value) = input.max_concurrent_tasks_per_project {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.max_concurrent_tasks_per_project",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
+    if let Some(value) = input.watchdog_interval_secs {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.watchdog_interval_secs",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
+    if let Some(value) = input.workspace_base_dir {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.workspace_base_dir",
+            serde_json::json!(value.trim()),
+        )
+        .await?;
+    }
+    repo_projects_readiness(store, secrets, user_id).await
+}
+
+/// Report the supervisor's configuration + (when a secrets store is provided)
+/// whether the referenced credentials actually exist.
+pub async fn repo_projects_readiness(
+    store: &Arc<dyn Database>,
+    secrets: Option<&SharedSecrets>,
+    user_id: &str,
+) -> ApiResult<RepoProjectsReadiness> {
+    let map = store
+        .get_all_settings(user_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let rp = Settings::from_db_map(&map).repo_projects;
+    let app = rp.github_app.clone();
+
+    let secret_present = |name: Option<String>| async {
+        match (secrets, name) {
+            (Some(store), Some(name)) if !name.trim().is_empty() => {
+                Some(store.exists(user_id, name.trim()).await.unwrap_or(false))
+            }
+            _ => None,
+        }
+    };
+    let private_key_secret_present = secret_present(app.private_key_secret.clone()).await;
+    let webhook_secret_present = secret_present(app.webhook_secret_secret.clone()).await;
+    let github_token_secret_present = match secrets {
+        Some(store) => Some(store.exists(user_id, "github_token").await.unwrap_or(false)),
+        None => None,
+    };
+
+    let app_ready = app.app_id.is_some()
+        && app.private_key_secret.is_some()
+        && private_key_secret_present != Some(false);
+    let credential_mode = if app_ready {
+        "github_app"
+    } else if github_token_secret_present == Some(true) {
+        "github_token"
+    } else {
+        "none"
+    };
+    let ready_for_live_runs =
+        rp.enabled && (app_ready || github_token_secret_present == Some(true));
+
+    let item = |key: &str, label: &str, state: &str, detail: Option<String>| RepoProjectSetupItem {
+        key: key.to_string(),
+        label: label.to_string(),
+        state: state.to_string(),
+        detail,
+    };
+    let checklist = vec![
+        item(
+            "feature_flag",
+            "Supervisor enabled",
+            if rp.enabled { "complete" } else { "pending" },
+            (!rp.enabled).then(|| "Set repo_projects.enabled to true.".to_string()),
+        ),
+        item(
+            "credentials",
+            "GitHub credentials",
+            match credential_mode {
+                "none" => "pending",
+                _ => "complete",
+            },
+            match credential_mode {
+                "github_app" => Some("GitHub App installation token".to_string()),
+                "github_token" => Some("github_token secret".to_string()),
+                _ => Some(
+                    "Configure a GitHub App (app_id + private key secret) or store a github_token secret."
+                        .to_string(),
+                ),
+            },
+        ),
+        item(
+            "webhook",
+            "Webhook secret",
+            match (app.webhook_secret_secret.is_some(), webhook_secret_present) {
+                (true, Some(false)) => "pending",
+                (true, _) => "complete",
+                (false, _) => "optional",
+            },
+            app.webhook_secret_secret.clone(),
+        ),
+        item(
+            "coding_backend",
+            "Coding backend",
+            "complete",
+            Some(rp.default_coding_backend.clone()),
+        ),
+        item(
+            "auto_merge",
+            "Auto-merge default",
+            if rp.auto_merge_default { "enabled" } else { "disabled" },
+            None,
+        ),
+    ];
+
+    Ok(RepoProjectsReadiness {
+        enabled: rp.enabled,
+        credential_mode: credential_mode.to_string(),
+        app_id: app.app_id,
+        installation_id: app.installation_id,
+        private_key_secret: app.private_key_secret,
+        webhook_secret_secret: app.webhook_secret_secret,
+        auto_merge_default: rp.auto_merge_default,
+        default_coding_backend: rp.default_coding_backend,
+        max_concurrent_projects: rp.max_concurrent_projects,
+        max_concurrent_tasks_per_project: rp.max_concurrent_tasks_per_project,
+        watchdog_interval_secs: rp.watchdog_interval_secs,
+        github_token_secret_present,
+        private_key_secret_present,
+        webhook_secret_present,
+        ready_for_live_runs,
+        checklist,
+    })
+}
+
+/// Securely store a GitHub credential value into the encrypted secrets store
+/// under `name`. The plaintext is never persisted in settings or events.
+pub async fn store_repo_credential(
+    secrets: &SharedSecrets,
+    user_id: &str,
+    name: String,
+    value: String,
+) -> ApiResult<RepoCredentialStored> {
+    let name = non_empty(name, "name")?;
+    let value = non_empty(value, "value")?;
+    let params = crate::secrets::CreateSecretParams::new(name.clone(), value)
+        .with_provider("github")
+        .with_created_by("repo_project_setup");
+    secrets
+        .create(user_id, params)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(RepoCredentialStored { ok: true, name })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoCredentialStored {
+    pub ok: bool,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepoEnrollInput {
+    pub repo_url: String,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+}
+
+/// Enroll an additional GitHub repository into an existing project.
+pub async fn enroll_repo(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    project_id: Uuid,
+    input: RepoEnrollInput,
+) -> ApiResult<RepoProjectCommandResponse> {
+    ensure_repo_projects_enabled(store, user_id).await?;
+    let project = project_required(store, project_id).await?;
+    let repo_url = non_empty(input.repo_url, "repo_url")?;
+    let (owner, repo_name) = parse_github_repo_url(&repo_url)?;
+    let default_branch = input
+        .default_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("main")
+        .to_string();
+    let now = Utc::now();
+    let repo = RepoProjectRepo {
+        id: Uuid::new_v4(),
+        project_id,
+        owner: owner.clone(),
+        repo: repo_name.clone(),
+        github_repo_id: None,
+        installation_id: None,
+        default_branch: default_branch.clone(),
+        base_branch: Some(default_branch),
+        enrolled: true,
+        local_path: Some(
+            repo_local_path_fragment(&owner, &repo_name)
+                .map_err(ApiError::InvalidInput)?
+                .to_string_lossy()
+                .to_string(),
+        ),
+        auth_mode: project.policy.github_auth_mode,
+        metadata: serde_json::json!({ "input_repo_url": repo_url }),
+        created_at: now,
+        updated_at: now,
+    };
+    store
+        .upsert_repo_project_repo(&repo)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    append_project_event(
+        store,
+        project_id,
+        Some(repo.id),
+        None,
+        RepoProjectEventKind::RepoEnrolled,
+        "Repository enrolled",
+        serde_json::json!({ "owner": repo.owner, "repo": repo.repo }),
+    )
+    .await?;
+    let parts = load_project_parts(store, project_id).await?;
+    Ok(RepoProjectCommandResponse {
+        ok: true,
+        message: Some(format!("Enrolled {}/{}", repo.owner, repo.repo)),
+        project: Some(project_view(&project, &parts)),
+        run: None,
+    })
+}
+
 async fn transition_project<F>(
     store: &Arc<dyn Database>,
     project_id: Uuid,
@@ -1200,4 +1580,88 @@ fn priority_label(priority: i32) -> &'static str {
 
 pub fn default_user_id() -> &'static str {
     LOCAL_USER_ID
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod tests {
+    use super::*;
+    use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+    use secrecy::SecretString;
+
+    fn test_secrets() -> SharedSecrets {
+        let key = "0123456789abcdef0123456789abcdef";
+        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
+        Arc::new(InMemorySecretsStore::new(crypto))
+    }
+
+    #[tokio::test]
+    async fn setup_store_credential_and_enroll_roundtrip() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let secrets = test_secrets();
+
+        // Disabled before setup.
+        let readiness = repo_projects_readiness(&db, Some(&secrets), "default")
+            .await
+            .unwrap();
+        assert!(!readiness.enabled);
+        assert!(!readiness.ready_for_live_runs);
+        assert_eq!(readiness.credential_mode, "none");
+
+        // Store a github_token credential securely.
+        store_repo_credential(
+            &secrets,
+            "default",
+            "github_token".to_string(),
+            "ghp_test_value".to_string(),
+        )
+        .await
+        .unwrap();
+
+        // Enable the supervisor + policy.
+        let input = RepoProjectsConfigureInput {
+            enabled: Some(true),
+            auto_merge_default: Some(true),
+            default_coding_backend: Some("codex_code".to_string()),
+            ..Default::default()
+        };
+        let readiness = configure_supervisor(&db, Some(&secrets), "default", input)
+            .await
+            .unwrap();
+        assert!(readiness.enabled);
+        assert_eq!(readiness.github_token_secret_present, Some(true));
+        assert_eq!(readiness.credential_mode, "github_token");
+        assert!(readiness.ready_for_live_runs);
+        assert!(readiness.auto_merge_default);
+        assert_eq!(readiness.default_coding_backend, "codex_code");
+
+        // Create a project (now that the feature is enabled) + enroll a 2nd repo.
+        create_project(
+            &db,
+            "default",
+            RepoProjectCreateInput {
+                name: "Proj".to_string(),
+                repo_url: "acme/widgets".to_string(),
+                default_branch: None,
+                local_path: None,
+                description: None,
+            },
+        )
+        .await
+        .unwrap();
+        let project = db.list_repo_projects().await.unwrap().pop().unwrap();
+        enroll_repo(
+            &db,
+            "default",
+            project.id,
+            RepoEnrollInput {
+                repo_url: "acme/gadgets".to_string(),
+                default_branch: Some("develop".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let repos = db.list_repo_project_repos(project.id).await.unwrap();
+        assert_eq!(repos.len(), 2);
+        assert!(repos.iter().any(|repo| repo.repo == "gadgets"));
+    }
 }

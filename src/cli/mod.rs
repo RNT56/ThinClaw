@@ -33,6 +33,7 @@ pub mod nodes;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
+mod repo_projects;
 mod reset;
 mod secrets;
 #[cfg(feature = "repl")]
@@ -66,6 +67,7 @@ pub use message::{MessageCommand, run_message_command};
 pub use models::{ModelCommand, run_model_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
+pub use repo_projects::{RepoProjectCommand, run_repo_projects_command};
 pub use reset::{ResetCommand, run_reset_command};
 pub use secrets::{SecretsCommand, run_secrets_command};
 #[cfg(feature = "repl")]
@@ -210,6 +212,10 @@ pub enum Command {
     /// Browse and install extensions from the registry
     #[command(subcommand)]
     Registry(RegistryCommand),
+
+    /// Manage the GitHub repository project supervisor
+    #[command(subcommand)]
+    RepoProjects(RepoProjectCommand),
 
     /// Manage MCP servers (hosted tool providers)
     #[command(subcommand)]

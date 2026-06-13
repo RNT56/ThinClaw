@@ -143,6 +143,10 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing(cli.debug);
             return thinclaw::cli::run_registry_command(registry_cmd.clone()).await;
         }
+        Some(Command::RepoProjects(rp_cmd)) => {
+            init_cli_tracing(cli.debug);
+            return thinclaw::cli::run_repo_projects_command(rp_cmd.clone()).await;
+        }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing(cli.debug);
             return run_mcp_command(mcp_cmd.clone()).await;
