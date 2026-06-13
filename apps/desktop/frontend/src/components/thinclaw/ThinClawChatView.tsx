@@ -745,6 +745,26 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                     return { ...prev, approvals: prev.approvals.map(a => a.id === uiEvent.approval_id ? { ...a, status: uiEvent.approved ? 'approved' as const : 'denied' as const } : a) };
                 });
             }
+            // Inline secure credential prompt (masked-input card). The value is
+            // collected by the card straight into the secrets store — it never
+            // travels through this event or the model.
+            if (uiEvent.kind === 'CredentialPrompt') {
+                setActiveRun(prev => {
+                    if (!prev) return prev;
+                    const existing = prev.credentialPrompts || [];
+                    if (existing.some(p => p.id === uiEvent.prompt_id)) return prev;
+                    return {
+                        ...prev,
+                        credentialPrompts: [...existing, {
+                            id: uiEvent.prompt_id,
+                            secretName: uiEvent.secret_name,
+                            provider: uiEvent.provider,
+                            reason: uiEvent.reason,
+                            status: 'pending' as const,
+                        }],
+                    };
+                });
+            }
         });
         return () => {
             isMounted = false;

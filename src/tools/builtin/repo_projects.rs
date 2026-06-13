@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::repo_projects as repo_projects_api;
@@ -761,6 +761,159 @@ impl std::fmt::Debug for RepoProjectConnectTool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RepoProjectConnectTool")
             .finish_non_exhaustive()
+    }
+}
+
+// ── Secure in-chat credential prompt ────────────────────────────────────
+
+/// Payload the `repo_project_request_credential` tool returns. The dispatcher
+/// detects this on the tool result and emits a `StatusUpdate::CredentialPrompt`
+/// so the surfaces render an inline masked-input card. It carries NO secret
+/// value — only the name to store under, a provider, and a human reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialPromptSignal {
+    pub secret_name: String,
+    pub provider: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestCredentialParams {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Asks the operator to enter a credential via a secure inline card instead of
+/// pasting it into chat. The tool itself never sees or stores the value — it
+/// only emits the prompt; the typed value goes straight to the encrypted
+/// secrets store, bypassing the model entirely.
+#[derive(Debug, Default)]
+pub struct RepoProjectRequestCredentialTool;
+
+impl RepoProjectRequestCredentialTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for RepoProjectRequestCredentialTool {
+    fn name(&self) -> &str {
+        "repo_project_request_credential"
+    }
+
+    fn description(&self) -> &str {
+        "Prompt the operator to securely enter a GitHub credential (e.g. a personal access token \
+         or GitHub App private key). This shows an inline card with a masked input; the entered \
+         value is stored encrypted in the secrets store and NEVER passes through you or the \
+         conversation. Prefer this over asking the user to paste a token in chat. After calling \
+         it, tell the user to enter the value in the card, then re-check readiness with \
+         repo_project_setup. Does not take or return any secret value."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Secret name to store under (default github_token)." },
+                "provider": { "type": "string", "description": "Provider/category for provenance (default github)." },
+                "reason": { "type": "string", "description": "Short human-readable reason shown on the card." }
+            },
+            "required": []
+        })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            side_effect_level: ToolSideEffectLevel::Write,
+            parallel_safe: false,
+            ..ToolMetadata::default()
+        }
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &thinclaw_types::JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let started = Instant::now();
+        let params: RequestCredentialParams = serde_json::from_value(params)
+            .map_err(|error| ToolError::InvalidParameters(error.to_string()))?;
+        let trimmed = |value: Option<String>| {
+            value
+                .map(|inner| inner.trim().to_string())
+                .filter(|inner| !inner.is_empty())
+        };
+        let secret_name = trimmed(params.name).unwrap_or_else(|| "github_token".to_string());
+        let provider = trimmed(params.provider).unwrap_or_else(|| "github".to_string());
+        let reason = trimmed(params.reason).unwrap_or_else(|| {
+            "ThinClaw needs a GitHub credential to manage your repositories.".to_string()
+        });
+        // The result the model sees carries only the prompt metadata — no value.
+        let content = serde_json::json!({
+            "secret_name": secret_name,
+            "provider": provider,
+            "reason": reason,
+            "status": "credential_prompt_shown"
+        });
+        Ok(ToolOutput::success(content, started.elapsed()))
+    }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Orchestrator
+    }
+}
+
+#[cfg(test)]
+mod credential_prompt_tests {
+    use super::*;
+
+    fn job_context() -> thinclaw_types::JobContext {
+        thinclaw_types::JobContext::new("credential-prompt-test", "test")
+    }
+
+    #[tokio::test]
+    async fn request_credential_emits_prompt_signal_without_value() {
+        let tool = RepoProjectRequestCredentialTool::new();
+        let output = tool
+            .execute(
+                serde_json::json!({ "reason": "Need a token to open PRs." }),
+                &job_context(),
+            )
+            .await
+            .expect("tool executes");
+
+        // The dispatcher parses the tool result as CredentialPromptSignal; the
+        // tool ↔ dispatcher field-name contract must hold and carry no value.
+        let signal: CredentialPromptSignal =
+            serde_json::from_value(output.result.clone()).expect("result parses as signal");
+        assert_eq!(signal.secret_name, "github_token");
+        assert_eq!(signal.provider, "github");
+        assert_eq!(signal.reason, "Need a token to open PRs.");
+        assert!(
+            output.result.get("value").is_none(),
+            "credential prompt must never carry a value"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_credential_honors_overrides() {
+        let tool = RepoProjectRequestCredentialTool::new();
+        let output = tool
+            .execute(
+                serde_json::json!({ "name": "repo_projects_pem", "provider": "github_app" }),
+                &job_context(),
+            )
+            .await
+            .expect("tool executes");
+        let signal: CredentialPromptSignal =
+            serde_json::from_value(output.result.clone()).expect("result parses as signal");
+        assert_eq!(signal.secret_name, "repo_projects_pem");
+        assert_eq!(signal.provider, "github_app");
     }
 }
 

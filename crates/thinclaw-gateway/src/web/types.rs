@@ -1276,6 +1276,18 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    /// Agent requests a credential; the browser renders an inline masked-input
+    /// card that POSTs the value straight to `/api/repo-projects/credentials`.
+    /// Carries NO secret value — only the name to store under and a reason.
+    #[serde(rename = "credential_prompt")]
+    CredentialPrompt {
+        prompt_id: String,
+        secret_name: String,
+        provider: String,
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "auth_completed")]
     AuthCompleted {
         extension_name: String,
@@ -1503,6 +1515,7 @@ impl SseEvent {
             SseEvent::ApprovalNeeded { .. } => "approval_needed",
             SseEvent::AuthRequired { .. } => "auth_required",
             SseEvent::AuthCompleted { .. } => "auth_completed",
+            SseEvent::CredentialPrompt { .. } => "credential_prompt",
             SseEvent::Error { .. } => "error",
             SseEvent::Heartbeat => "heartbeat",
             SseEvent::JobMessage { .. } => "job_message",

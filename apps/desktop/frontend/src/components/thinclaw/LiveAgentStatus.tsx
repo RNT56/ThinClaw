@@ -6,6 +6,7 @@ import { listen } from '@tauri-apps/api/event';
 import { cn } from '../../lib/utils';
 import { StreamRun } from '../../hooks/use-thinclaw-stream';
 import { ApprovalCard } from './ApprovalCard';
+import { CredentialPromptCard } from './CredentialPromptCard';
 
 interface LiveAgentStatusProps {
     run: StreamRun;
@@ -218,6 +219,19 @@ export function LiveAgentStatus({ run, persistent = false }: LiveAgentStatusProp
                                             approvalId={approval.id}
                                             tool={approval.tool}
                                             input={approval.input}
+                                        />
+                                    ))}
+                                </AnimatePresence>
+
+                                {/* Inline secure credential prompts */}
+                                <AnimatePresence>
+                                    {(run.credentialPrompts || []).filter(p => p.status === 'pending').map(prompt => (
+                                        <CredentialPromptCard
+                                            key={prompt.id}
+                                            promptId={prompt.id}
+                                            secretName={prompt.secretName}
+                                            provider={prompt.provider}
+                                            reason={prompt.reason}
                                         />
                                     ))}
                                 </AnimatePresence>

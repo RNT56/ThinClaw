@@ -24,10 +24,11 @@ use crate::tools::builtin::{
     ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool, ExternalMemorySetupTool,
     ExternalMemoryStatusTool, FileToolHost, PromptQueue, RepoProjectApproveTool,
     RepoProjectConnectTool, RepoProjectCreateTool, RepoProjectEnrollTool, RepoProjectListReposTool,
-    RepoProjectPauseTool, RepoProjectPlanTool, RepoProjectResumeTool, RepoProjectSetCredentialTool,
-    RepoProjectSetupTool, RepoProjectStatusTool, RootFileToolHost, RootProcessBackendAdapter,
-    SessionSearchTool, SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool,
-    root_comfyui_tool_host, root_job_tool_host, root_learning_tool_host, root_memory_tool_host,
+    RepoProjectPauseTool, RepoProjectPlanTool, RepoProjectRequestCredentialTool,
+    RepoProjectResumeTool, RepoProjectSetCredentialTool, RepoProjectSetupTool,
+    RepoProjectStatusTool, RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool,
+    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, root_comfyui_tool_host,
+    root_job_tool_host, root_learning_tool_host, root_memory_tool_host,
     root_skill_install_tool_host, root_skill_publish_tool_host, root_skill_search_tool_host,
     root_skill_tap_tool_host, root_skill_tool_host,
 };
@@ -766,6 +767,10 @@ impl ToolRegistry {
             self.secrets_store.clone(),
         )));
         self.register_sync(Arc::new(RepoProjectApproveTool::new(Arc::clone(&store))));
+        // Secure in-chat credential prompt: emits a masked-input card; the value
+        // is collected out-of-band straight to the secrets store (no secrets
+        // dependency needed here — the tool never sees the value).
+        self.register_sync(Arc::new(RepoProjectRequestCredentialTool::new()));
         // Credential storage + GitHub connector (repo discovery/selection) all
         // require a secrets store to mint authenticated GitHub clients.
         if let Some(secrets) = self.secrets_store.clone() {
@@ -775,10 +780,10 @@ impl ToolRegistry {
                 secrets.clone(),
             )));
             self.register_sync(Arc::new(RepoProjectConnectTool::new(store, secrets)));
-            tracing::info!("Registered 11 repository project supervisor tools");
+            tracing::info!("Registered 12 repository project supervisor tools");
         } else {
             tracing::info!(
-                "Registered 8 repository project supervisor tools (no secrets store; \
+                "Registered 9 repository project supervisor tools (no secrets store; \
                  repo_project_set_credential, repo_project_list_repos, and repo_project_connect \
                  unavailable)"
             );

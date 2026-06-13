@@ -299,6 +299,20 @@ pub enum StatusUpdate {
         missing_scopes: Vec<String>,
         thread_id: Option<String>,
     },
+    /// Agent requests a credential from the operator, rendered as an inline
+    /// card with a masked input. The value is collected out-of-band (submitted
+    /// straight to the encrypted secrets store), so this event carries NO secret
+    /// value — only the name to store under and a human-readable reason.
+    CredentialPrompt {
+        prompt_id: String,
+        /// Secret name to store the value under (e.g. `github_token`).
+        secret_name: String,
+        /// Provider/category for provenance and grouping (e.g. `github`).
+        provider: String,
+        /// Human-readable reason shown on the card.
+        reason: String,
+        thread_id: Option<String>,
+    },
     /// Turn-level error surfaced to the UI (e.g., LLM unreachable, safety rejection).
     ///
     /// Emitted by the API layer when a spawned agent turn fails. Without this,

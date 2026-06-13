@@ -439,6 +439,7 @@ mod tests {
             "UsageUpdate",
             "LifecycleUpdate",
             "ApprovalRequested",
+            "CredentialPrompt",
             "WebLogin",
             "CanvasUpdate",
             "SubAgentUpdate",

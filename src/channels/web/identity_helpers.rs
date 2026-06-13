@@ -211,6 +211,7 @@ pub(crate) async fn sse_event_visible_to_identity(
         | SseEvent::RepoMergeGateUpdated { .. }
         | SseEvent::AuthRequired { .. }
         | SseEvent::AuthCompleted { .. }
+        | SseEvent::CredentialPrompt { .. }
         | SseEvent::ExtensionStatus { .. }
         | SseEvent::ChannelStatusChange { .. }
         | SseEvent::CostAlert { .. }
