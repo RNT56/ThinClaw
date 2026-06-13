@@ -91,7 +91,7 @@ const SHELL_SECTIONS = [
   { id: 'chat', label: 'Chat', tabs: ['chat'], blurb: 'Active conversations and agent transcripts.' },
   { id: 'workspace', label: 'Workspace', tabs: ['memory', 'jobs', 'routines', 'learning'], blurb: 'Memory, jobs, routines, and learning loops.' },
   { id: 'studio', label: 'Studio', tabs: ['extensions', 'skills', 'research'], blurb: 'Extensions, skills, and research tooling.' },
-  { id: 'operations', label: 'Operations', tabs: ['providers', 'costs', 'logs', 'autonomy'], blurb: 'Runtime controls, costs, logs, and autonomy.' },
+  { id: 'operations', label: 'Operations', tabs: ['providers', 'costs', 'logs', 'autonomy', 'repo-projects'], blurb: 'Runtime controls, costs, logs, autonomy, and repo projects.' },
   { id: 'settings', label: 'Settings', tabs: ['settings'], blurb: 'Presentation, agent, safety, and channel settings.' },
 ];
 
@@ -108,6 +108,7 @@ const SHELL_TAB_META = {
   costs: { label: 'Costs' },
   logs: { label: 'Logs' },
   autonomy: { label: 'Autonomy', feature: 'autonomy' },
+  'repo-projects': { label: 'Repo Projects' },
   settings: { label: 'Settings' },
 };
 
@@ -2982,6 +2983,7 @@ function switchTab(tab, options) {
   if (currentTab === 'jobs') loadJobs();
   if (currentTab === 'routines') loadRoutines();
   if (currentTab === 'autonomy') loadAutonomyDashboard();
+  if (currentTab === 'repo-projects') loadRepoProjectsDashboard();
   if (currentTab === 'research') {
     loadExperiments();
     switchResearchSubtab(currentResearchSubtab || 'overview', { render: false });
@@ -5986,6 +5988,270 @@ function autonomyStatusValue(value) {
   if (value === null || value === undefined || value === '') return '-';
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   return String(value);
+}
+
+// ── Repo Projects (GitHub connector + supervisor) ───────────────────────
+
+let repoProjectsState = {
+  readiness: null,
+  projects: [],
+  repos: [],
+  reposLoaded: false,
+  selectedRepos: {},
+  selectedProjectId: null,
+};
+
+function statusLabelRepo(value) {
+  return (value || 'unknown').replace(/_/g, ' ');
+}
+
+function repoBadge(state, label) {
+  let cls = 'pending';
+  if (['complete', 'enabled', 'passed', 'running', 'ready', 'connected', 'merged'].indexOf(state) !== -1) cls = 'completed';
+  else if (['blocked', 'failed'].indexOf(state) !== -1) cls = 'failed';
+  return '<span class="badge ' + cls + '">' + escapeHtml(label || state || 'unknown') + '</span>';
+}
+
+function loadRepoProjectsDashboard() {
+  renderRepoConnectorPanel();
+  renderRepoProjectsListPanel();
+  renderRepoProjectDetailPanel();
+  Promise.all([
+    apiFetch('/api/repo-projects/readiness').catch(function () { return null; }),
+    apiFetch('/api/repo-projects').catch(function () { return { projects: [] }; }),
+  ]).then(function (results) {
+    repoProjectsState.readiness = results[0];
+    repoProjectsState.projects = (results[1] && results[1].projects) || [];
+    if (!repoProjectsState.selectedProjectId && repoProjectsState.projects.length) {
+      repoProjectsState.selectedProjectId = repoProjectsState.projects[0].id;
+    }
+    renderRepoConnectorPanel();
+    renderRepoProjectsListPanel();
+    renderRepoProjectDetailPanel();
+  });
+}
+
+function renderRepoConnectorPanel() {
+  const panel = document.getElementById('repo-connector-panel');
+  if (!panel) return;
+  const r = repoProjectsState.readiness;
+  const enabled = !!(r && r.enabled);
+  const mode = (r && r.credential_mode) || 'none';
+  const modeLabel = mode === 'github_app' ? 'GitHub App' : (mode === 'github_token' ? 'Token' : 'No credentials');
+  const ready = !!(r && r.ready_for_live_runs);
+
+  let html = '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy">'
+    + '<h3 class="ui-panel-title">GitHub Connector</h3>'
+    + '<p class="ui-panel-desc">Connect GitHub and choose which repositories the agent may manage. Credential values are stored encrypted and never written to settings, events, or logs.</p>'
+    + '</div><div class="repo-connector-badges">' + repoBadge(mode === 'none' ? 'pending' : 'complete', modeLabel) + (ready ? ' ' + repoBadge('completed', 'Live-ready') : '') + '</div></div>';
+
+  html += '<div class="autonomy-action-bar">'
+    + '<button onclick="repoToggleEnabled()">' + (enabled ? 'Disable Supervisor' : 'Enable Supervisor') + '</button>'
+    + '<button onclick="repoDiscover()">Discover Repos</button>'
+    + '<button onclick="repoConnect(true)"' + (enabled ? '' : ' disabled') + '>Connect All</button>'
+    + '<button onclick="loadRepoProjectsDashboard()">Refresh</button>'
+    + '</div>';
+
+  if (r && r.checklist && r.checklist.length) {
+    html += '<div class="repo-checklist">' + r.checklist.map(function (item) {
+      const done = item.state === 'complete' || item.state === 'enabled';
+      return '<div class="repo-checklist-item">' + repoBadge(done ? 'complete' : 'pending', item.label)
+        + (item.detail ? '<span class="repo-checklist-detail">' + escapeHtml(item.detail) + '</span>' : '') + '</div>';
+    }).join('') + '</div>';
+  }
+
+  html += '<div class="repo-form-grid">';
+  html += '<div class="repo-form-block"><div class="autonomy-section-label">Store credential (encrypted)</div>'
+    + '<input id="repo-cred-name" type="text" placeholder="Secret name (e.g. github_token)" value="github_token" />'
+    + '<input id="repo-cred-value" type="password" autocomplete="off" placeholder="Paste token or PEM key — stored encrypted" />'
+    + '<div class="repo-form-actions"><button onclick="repoSaveCredential()">Store Securely</button></div></div>';
+
+  const appId = (r && r.app_id != null) ? r.app_id : '';
+  const instId = (r && r.installation_id != null) ? r.installation_id : '';
+  const slug = (r && r.app_slug) || '';
+  const pk = (r && r.private_key_secret) || '';
+  html += '<div class="repo-form-block"><div class="autonomy-section-label">GitHub App (optional)</div>'
+    + '<input id="repo-app-id" type="text" inputmode="numeric" placeholder="App ID" value="' + escapeHtml(String(appId)) + '" />'
+    + '<input id="repo-app-installation" type="text" inputmode="numeric" placeholder="Installation ID" value="' + escapeHtml(String(instId)) + '" />'
+    + '<input id="repo-app-slug" type="text" placeholder="App slug (for install link)" value="' + escapeHtml(slug) + '" />'
+    + '<input id="repo-app-key" type="text" placeholder="Private key secret name" value="' + escapeHtml(pk) + '" />'
+    + '<div class="repo-form-actions"><button onclick="repoSaveAppConfig()">Save App Config</button>'
+    + ((r && r.install_url) ? '<a class="repo-install-link" href="' + escapeHtml(r.install_url) + '" target="_blank" rel="noreferrer">Install</a>' : '') + '</div></div>';
+  html += '</div>';
+
+  html += '<div class="autonomy-section-label">Select repositories</div>';
+  if (!repoProjectsState.reposLoaded) {
+    html += '<div class="ui-panel-empty">Store a credential, then “Discover Repos” to list what the agent can manage.</div>';
+  } else if (!repoProjectsState.repos.length) {
+    html += '<div class="ui-panel-empty">No repositories found for the connected credential.</div>';
+  } else {
+    html += '<div class="repo-picker-list">' + repoProjectsState.repos.map(function (repo, idx) {
+      const checked = !!repoProjectsState.selectedRepos[repo.full_name];
+      const disabled = repo.enrolled;
+      return '<label class="repo-picker-item' + (disabled ? ' is-enrolled' : '') + '">'
+        + '<input type="checkbox" ' + (checked ? 'checked' : '') + (disabled ? ' disabled' : '')
+        + ' onchange="repoToggleSelect(' + idx + ', this.checked)" />'
+        + '<span class="repo-picker-name">' + escapeHtml(repo.full_name) + '</span>'
+        + '<span class="repo-picker-meta">' + (repo.private ? 'private' : 'public') + ' · ' + escapeHtml(repo.default_branch || 'main') + (repo.archived ? ' · archived' : '') + '</span>'
+        + (disabled ? repoBadge('completed', 'Supervised') : '') + '</label>';
+    }).join('') + '</div>';
+    html += '<div class="repo-form-actions"><button onclick="repoConnect(false)"' + (enabled ? '' : ' disabled') + '>Connect Selected</button></div>';
+  }
+
+  panel.innerHTML = html;
+}
+
+function renderRepoProjectsListPanel() {
+  const panel = document.getElementById('repo-projects-list-panel');
+  if (!panel) return;
+  const projects = repoProjectsState.projects || [];
+  let html = '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Projects</h3><p class="ui-panel-desc">Repositories under supervision.</p></div></div>';
+  if (!projects.length) {
+    html += '<div class="ui-panel-empty">No projects yet. Connect repositories above to begin.</div>';
+  } else {
+    html += '<div class="repo-project-list">' + projects.map(function (p) {
+      const active = p.id === repoProjectsState.selectedProjectId;
+      return '<button class="repo-project-item' + (active ? ' active' : '') + '" onclick="repoSelectProject(\'' + escapeHtml(p.id) + '\')">'
+        + '<div class="repo-project-item-head"><span class="repo-project-name">' + escapeHtml(p.name) + '</span>' + repoBadge(p.state, statusLabelRepo(p.state)) + '</div>'
+        + '<div class="repo-project-repo">' + escapeHtml(p.repo_url) + '</div>'
+        + '<div class="repo-project-stats">' + p.active_runs + ' runs · ' + p.queued_items + ' queued · ' + p.open_prs + ' PRs</div>'
+        + '</button>';
+    }).join('') + '</div>';
+  }
+  panel.innerHTML = html;
+}
+
+function renderRepoProjectDetailPanel() {
+  const panel = document.getElementById('repo-project-detail-panel');
+  if (!panel) return;
+  const id = repoProjectsState.selectedProjectId;
+  const project = (repoProjectsState.projects || []).find(function (p) { return p.id === id; });
+  if (!project) {
+    panel.innerHTML = '<div class="ui-panel-empty">Select a project to see details.</div>';
+    return;
+  }
+  let html = '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">' + escapeHtml(project.name) + '</h3><p class="ui-panel-desc">' + escapeHtml(project.repo_url) + '</p></div>' + repoBadge(project.state, statusLabelRepo(project.state)) + '</div>';
+  html += '<div class="autonomy-action-bar">'
+    + '<button onclick="repoProjectAction(\'start\')">Start</button>'
+    + '<button onclick="repoProjectAction(\'pause\')">Pause</button>'
+    + '<button onclick="repoProjectAction(\'resume\')">Resume</button>'
+    + '<button onclick="repoProjectAction(\'cancel\')">Cancel</button>'
+    + '</div>';
+  html += renderAutonomyKv([
+    { label: 'Default Branch', value: project.default_branch },
+    { label: 'Active Runs', value: project.active_runs },
+    { label: 'Queued', value: project.queued_items },
+    { label: 'Open PRs', value: project.open_prs },
+    { label: 'Merge Gate', value: project.merge_gate_state },
+    { label: 'Auto-merge', value: project.auto_merge_policy },
+    { label: 'Credentials', value: project.credentials },
+  ]);
+  if (project.backlog && project.backlog.length) {
+    html += '<div class="autonomy-section-label">Backlog</div><div class="repo-backlog-list">' + project.backlog.map(function (t) {
+      return '<div class="repo-backlog-item">' + repoBadge(t.state, statusLabelRepo(t.state)) + '<span>' + escapeHtml(t.title) + '</span></div>';
+    }).join('') + '</div>';
+  }
+  if (project.pull_requests && project.pull_requests.length) {
+    html += '<div class="autonomy-section-label">Pull Requests</div><div class="repo-backlog-list">' + project.pull_requests.map(function (pr) {
+      const label = pr.number ? ('#' + pr.number + ' ') : '';
+      const title = pr.url
+        ? '<a href="' + escapeHtml(pr.url) + '" target="_blank" rel="noreferrer">' + escapeHtml(label + pr.title) + '</a>'
+        : escapeHtml(label + pr.title);
+      return '<div class="repo-backlog-item">' + repoBadge(pr.state, pr.state) + '<span>' + title + '</span></div>';
+    }).join('') + '</div>';
+  }
+  panel.innerHTML = html;
+}
+
+function repoSelectProject(id) {
+  repoProjectsState.selectedProjectId = id;
+  renderRepoProjectsListPanel();
+  renderRepoProjectDetailPanel();
+}
+
+function repoSetup(body, successMsg) {
+  return apiFetch('/api/repo-projects/setup', { method: 'POST', body: body }).then(function (readiness) {
+    repoProjectsState.readiness = readiness;
+    renderRepoConnectorPanel();
+    if (successMsg) showToast(successMsg, 'success');
+    return readiness;
+  }).catch(function (err) { showToast('Setup failed: ' + err.message, 'error'); });
+}
+
+function repoToggleEnabled() {
+  const enabled = !!(repoProjectsState.readiness && repoProjectsState.readiness.enabled);
+  repoSetup({ enabled: !enabled }, !enabled ? 'Supervisor enabled' : 'Supervisor disabled');
+}
+
+function repoSaveAppConfig() {
+  const body = {};
+  const appId = (document.getElementById('repo-app-id').value || '').trim();
+  const instId = (document.getElementById('repo-app-installation').value || '').trim();
+  const slug = (document.getElementById('repo-app-slug').value || '').trim();
+  const pk = (document.getElementById('repo-app-key').value || '').trim();
+  if (appId) body.app_id = Number(appId);
+  if (instId) body.installation_id = Number(instId);
+  if (slug) body.app_slug = slug;
+  if (pk) body.private_key_secret = pk;
+  repoSetup(body, 'GitHub App configuration saved');
+}
+
+function repoSaveCredential() {
+  const name = (document.getElementById('repo-cred-name').value || '').trim() || 'github_token';
+  const value = document.getElementById('repo-cred-value').value || '';
+  if (!value.trim()) { showToast('Enter the credential value', 'error'); return; }
+  apiFetch('/api/repo-projects/credentials', { method: 'POST', body: { name: name, value: value } }).then(function () {
+    document.getElementById('repo-cred-value').value = '';
+    showToast('Stored ' + name + ' securely', 'success');
+    return apiFetch('/api/repo-projects/readiness');
+  }).then(function (readiness) {
+    if (readiness) { repoProjectsState.readiness = readiness; renderRepoConnectorPanel(); }
+  }).catch(function (err) { showToast('Failed to store credential: ' + err.message, 'error'); });
+}
+
+function repoDiscover() {
+  apiFetch('/api/repo-projects/connectable-repos').then(function (res) {
+    repoProjectsState.repos = (res && res.repos) || [];
+    repoProjectsState.reposLoaded = true;
+    repoProjectsState.selectedRepos = {};
+    if (!repoProjectsState.repos.length) showToast('No repositories found for the connected credential', 'info');
+    renderRepoConnectorPanel();
+  }).catch(function (err) { showToast('Discovery failed: ' + err.message, 'error'); });
+}
+
+function repoToggleSelect(idx, checked) {
+  const repo = repoProjectsState.repos[idx];
+  if (!repo) return;
+  repoProjectsState.selectedRepos[repo.full_name] = checked;
+}
+
+function repoConnect(all) {
+  let body;
+  if (all) {
+    body = { all: true };
+  } else {
+    const picks = Object.keys(repoProjectsState.selectedRepos).filter(function (k) { return repoProjectsState.selectedRepos[k]; });
+    if (!picks.length) { showToast('Select at least one repository', 'error'); return; }
+    body = { repos: picks };
+  }
+  apiFetch('/api/repo-projects/connect', { method: 'POST', body: body }).then(function (res) {
+    if (res && res.ok) {
+      showToast(res.message || 'Connected', 'success');
+      loadRepoProjectsDashboard();
+      repoDiscover();
+    } else {
+      showToast((res && res.message) || 'Connect failed', 'error');
+    }
+  }).catch(function (err) { showToast('Connect failed: ' + err.message, 'error'); });
+}
+
+function repoProjectAction(action) {
+  const id = repoProjectsState.selectedProjectId;
+  if (!id) return;
+  apiFetch('/api/repo-projects/' + encodeURIComponent(id) + '/' + action, { method: 'POST' }).then(function () {
+    showToast('Project ' + action + ' requested', 'success');
+    loadRepoProjectsDashboard();
+  }).catch(function (err) { showToast('Action failed: ' + err.message, 'error'); });
 }
 
 function renderAutonomySummaryCard(label, value, statusClass, detail) {
