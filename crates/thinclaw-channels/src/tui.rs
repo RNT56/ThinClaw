@@ -161,6 +161,15 @@ impl From<StatusUpdate> for TuiUpdate {
                 success,
                 message,
             },
+            // The TUI has no interactive masked-input card; surface the prompt
+            // as a clear instruction to store the secret from the CLI.
+            StatusUpdate::CredentialPrompt {
+                secret_name,
+                reason,
+                ..
+            } => TuiUpdate::Status(format!(
+                "Credential needed: {reason} — store it with `thinclaw secrets set {secret_name}`"
+            )),
             StatusUpdate::CanvasAction(ref action) => {
                 let summary = match action {
                     thinclaw_tools_core::CanvasAction::Show {

@@ -1276,6 +1276,18 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    /// Agent requests a credential; the browser renders an inline masked-input
+    /// card that POSTs the value straight to `/api/repo-projects/credentials`.
+    /// Carries NO secret value — only the name to store under and a reason.
+    #[serde(rename = "credential_prompt")]
+    CredentialPrompt {
+        prompt_id: String,
+        secret_name: String,
+        provider: String,
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "auth_completed")]
     AuthCompleted {
         extension_name: String,
@@ -1421,6 +1433,40 @@ pub enum SseEvent {
         status: String,
         message: String,
     },
+    #[serde(rename = "repo_project_updated")]
+    RepoProjectUpdated {
+        project_id: String,
+        state: String,
+        message: String,
+    },
+    #[serde(rename = "repo_task_updated")]
+    RepoTaskUpdated {
+        project_id: String,
+        task_id: String,
+        state: String,
+        message: String,
+    },
+    #[serde(rename = "repo_worker_run_updated")]
+    RepoWorkerRunUpdated {
+        project_id: String,
+        worker_run_id: String,
+        state: String,
+        message: String,
+    },
+    #[serde(rename = "repo_project_event")]
+    RepoProjectEvent {
+        project_id: String,
+        event_type: String,
+        message: String,
+    },
+    #[serde(rename = "repo_merge_gate_updated")]
+    RepoMergeGateUpdated {
+        project_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        state: String,
+        message: String,
+    },
 
     /// Agent completed its bootstrap ritual (BOOTSTRAP.md deleted).
     /// Frontend should update bootstrapNeeded → false.
@@ -1469,6 +1515,7 @@ impl SseEvent {
             SseEvent::ApprovalNeeded { .. } => "approval_needed",
             SseEvent::AuthRequired { .. } => "auth_required",
             SseEvent::AuthCompleted { .. } => "auth_completed",
+            SseEvent::CredentialPrompt { .. } => "credential_prompt",
             SseEvent::Error { .. } => "error",
             SseEvent::Heartbeat => "heartbeat",
             SseEvent::JobMessage { .. } => "job_message",
@@ -1486,6 +1533,11 @@ impl SseEvent {
             SseEvent::ExperimentCampaignUpdated { .. } => "experiment_campaign_updated",
             SseEvent::ExperimentTrialUpdated { .. } => "experiment_trial_updated",
             SseEvent::ExperimentRunnerUpdated { .. } => "experiment_runner_updated",
+            SseEvent::RepoProjectUpdated { .. } => "repo_project_updated",
+            SseEvent::RepoTaskUpdated { .. } => "repo_task_updated",
+            SseEvent::RepoWorkerRunUpdated { .. } => "repo_worker_run_updated",
+            SseEvent::RepoProjectEvent { .. } => "repo_project_event",
+            SseEvent::RepoMergeGateUpdated { .. } => "repo_merge_gate_updated",
             SseEvent::BootstrapCompleted => "bootstrap_completed",
         }
     }

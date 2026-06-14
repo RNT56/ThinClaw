@@ -22,12 +22,15 @@ use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
 use crate::tools::builtin::{
     DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort, ExternalMemoryExportTool,
     ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool, ExternalMemorySetupTool,
-    ExternalMemoryStatusTool, FileToolHost, PromptQueue, RootFileToolHost,
-    RootProcessBackendAdapter, SessionSearchTool, SharedModelOverride, SharedProcessRegistry,
-    SharedTodoStore, ShellTool, root_comfyui_tool_host, root_job_tool_host,
-    root_learning_tool_host, root_memory_tool_host, root_skill_install_tool_host,
-    root_skill_publish_tool_host, root_skill_search_tool_host, root_skill_tap_tool_host,
-    root_skill_tool_host,
+    ExternalMemoryStatusTool, FileToolHost, PromptQueue, RepoProjectApproveTool,
+    RepoProjectConnectTool, RepoProjectCreateTool, RepoProjectEnrollTool, RepoProjectListReposTool,
+    RepoProjectPauseTool, RepoProjectPlanTool, RepoProjectRequestCredentialTool,
+    RepoProjectResumeTool, RepoProjectSetCredentialTool, RepoProjectSetupTool,
+    RepoProjectStatusTool, RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool,
+    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, root_comfyui_tool_host,
+    root_job_tool_host, root_learning_tool_host, root_memory_tool_host,
+    root_skill_install_tool_host, root_skill_publish_tool_host, root_skill_search_tool_host,
+    root_skill_tap_tool_host, root_skill_tool_host,
 };
 use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::rate_limiter::RateLimiter;
@@ -749,6 +752,42 @@ impl ToolRegistry {
         ));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store_port)));
         tracing::info!("Registered 5 routine management tools");
+    }
+
+    /// Register repository project supervisor tools.
+    pub fn register_repo_project_tools(&self, store: Arc<dyn Database>) {
+        self.register_sync(Arc::new(RepoProjectCreateTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectPlanTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectStatusTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectPauseTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectResumeTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectEnrollTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RepoProjectSetupTool::new(
+            Arc::clone(&store),
+            self.secrets_store.clone(),
+        )));
+        self.register_sync(Arc::new(RepoProjectApproveTool::new(Arc::clone(&store))));
+        // Secure in-chat credential prompt: emits a masked-input card; the value
+        // is collected out-of-band straight to the secrets store (no secrets
+        // dependency needed here — the tool never sees the value).
+        self.register_sync(Arc::new(RepoProjectRequestCredentialTool::new()));
+        // Credential storage + GitHub connector (repo discovery/selection) all
+        // require a secrets store to mint authenticated GitHub clients.
+        if let Some(secrets) = self.secrets_store.clone() {
+            self.register_sync(Arc::new(RepoProjectSetCredentialTool::new(secrets.clone())));
+            self.register_sync(Arc::new(RepoProjectListReposTool::new(
+                Arc::clone(&store),
+                secrets.clone(),
+            )));
+            self.register_sync(Arc::new(RepoProjectConnectTool::new(store, secrets)));
+            tracing::info!("Registered 12 repository project supervisor tools");
+        } else {
+            tracing::info!(
+                "Registered 9 repository project supervisor tools (no secrets store; \
+                 repo_project_set_credential, repo_project_list_repos, and repo_project_connect \
+                 unavailable)"
+            );
+        }
     }
 
     /// Register the TTS tool.

@@ -146,6 +146,12 @@ pub struct GatewayState {
         Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
     /// Routine engine for webhook-triggered routine execution.
     pub routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
+    /// Repository project supervisor wake handle for GitHub webhooks. Held in a
+    /// shared cell so the agent loop can populate it after the gateway is built
+    /// (the supervisor is constructed during background-task startup, which
+    /// happens after the gateway).
+    pub repo_project_supervisor:
+        Arc<tokio::sync::RwLock<Option<crate::repo_projects::supervisor::ProjectSupervisor>>>,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
     /// Flag set when a restart has been requested via the API.
@@ -843,7 +849,12 @@ pub async fn start_server(
             get(experiment_lease_credentials_handler),
         )
         // Webhook trigger endpoint: no auth — uses per-routine HMAC secret validation.
-        .route("/hooks/routine/{id}", post(webhook_routine_trigger_handler));
+        .route("/hooks/routine/{id}", post(webhook_routine_trigger_handler))
+        // GitHub App webhook endpoint: no auth — verifies X-Hub-Signature-256.
+        .route(
+            "/hooks/github/repo-projects",
+            post(github_repo_projects_webhook_handler),
+        );
 
     // Protected routes (require auth)
     let auth_state = {
@@ -922,6 +933,71 @@ pub async fn start_server(
         .route("/api/jobs/{id}/events", get(jobs_events_handler))
         .route("/api/jobs/{id}/files/list", get(job_files_list_handler))
         .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
+        // Repository projects
+        .route(
+            "/api/repo-projects",
+            get(repo_projects_list_handler).post(repo_project_create_handler),
+        )
+        // Connector: setup, credentials, repo discovery + selection. These
+        // literal segments are registered before `{id}` so they take priority.
+        .route(
+            "/api/repo-projects/readiness",
+            get(repo_project_readiness_handler),
+        )
+        .route("/api/repo-projects/setup", post(repo_project_setup_handler))
+        .route(
+            "/api/repo-projects/credentials",
+            post(repo_project_credential_handler),
+        )
+        .route(
+            "/api/repo-projects/connectable-repos",
+            get(repo_project_connectable_repos_handler),
+        )
+        .route(
+            "/api/repo-projects/connect",
+            post(repo_project_connect_handler),
+        )
+        .route("/api/repo-projects/{id}", get(repo_project_detail_handler))
+        .route(
+            "/api/repo-projects/{id}/enroll",
+            post(repo_project_enroll_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/plan",
+            post(repo_project_plan_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/start",
+            post(repo_project_start_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/pause",
+            post(repo_project_pause_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/resume",
+            post(repo_project_resume_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/cancel",
+            post(repo_project_cancel_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/approve",
+            post(repo_project_approve_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/enqueue",
+            post(repo_project_enqueue_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/events",
+            get(repo_project_events_handler),
+        )
+        .route(
+            "/api/repo-projects/{id}/merge-gates",
+            get(repo_project_merge_gates_handler),
+        )
         // Logs
         .route("/api/logs/events", get(logs_events_handler))
         .route("/api/logs/recent", get(logs_recent_handler))
@@ -2185,6 +2261,7 @@ mod tests {
             cost_tracker: None,
             response_cache: None,
             routine_engine: None,
+            repo_project_supervisor: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
@@ -2287,6 +2364,7 @@ mod tests {
             cost_tracker: None,
             response_cache: None,
             routine_engine: None,
+            repo_project_supervisor: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,

@@ -231,6 +231,10 @@ pub struct Settings {
     #[serde(default)]
     pub experiments: ExperimentsSettings,
 
+    /// Optional repository projects subsystem settings.
+    #[serde(default)]
+    pub repo_projects: RepoProjectsSettings,
+
     /// Persisted per-channel / per-group tool access policy.
     #[serde(default)]
     pub tool_policies: ToolPolicyManager,

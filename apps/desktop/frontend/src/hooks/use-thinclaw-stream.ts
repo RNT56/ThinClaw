@@ -7,6 +7,14 @@ export interface StreamApproval {
     status: 'pending' | 'approved' | 'denied';
 }
 
+export interface StreamCredentialPrompt {
+    id: string;
+    secretName: string;
+    provider: string;
+    reason: string;
+    status: 'pending' | 'stored';
+}
+
 export interface StreamRun {
     id: string;
     text: string;
@@ -18,6 +26,8 @@ export interface StreamRun {
         timestamp: number;
     }[];
     approvals: StreamApproval[];
+    /** Inline credential prompts emitted by the agent (masked-input cards). */
+    credentialPrompts?: StreamCredentialPrompt[];
     status: 'running' | 'completed' | 'failed' | 'idle';
     error?: string;
     startedAt: number;

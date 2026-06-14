@@ -82,6 +82,7 @@ pub mod profile;
 pub mod profile_evolution;
 pub mod qr_pairing;
 pub mod registry;
+pub mod repo_projects;
 pub mod safety;
 pub mod sandbox;
 pub mod sandbox_jobs;

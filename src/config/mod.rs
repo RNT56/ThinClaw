@@ -22,6 +22,7 @@ pub mod mdns_discovery;
 pub mod model_compat;
 pub mod network_modes;
 pub mod provider_catalog;
+mod repo_projects;
 mod routines;
 mod safety;
 mod sandbox;
@@ -61,6 +62,7 @@ pub use self::llm::{
     LlmConfig, OllamaConfig, OpenAiCompatibleConfig, OpenAiDirectConfig, ReliabilityConfig,
     TinfoilConfig,
 };
+pub use self::repo_projects::RepoProjectsConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, CodexCodeConfig, SandboxModeConfig};
@@ -142,6 +144,7 @@ pub struct Config {
     pub codex_code: CodexCodeConfig,
     pub skills: SkillsConfig,
     pub experiments: ExperimentsConfig,
+    pub repo_projects: RepoProjectsConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -289,6 +292,7 @@ impl Config {
             codex_code: CodexCodeConfig::resolve(settings)?,
             skills: SkillsConfig::resolve(settings)?,
             experiments: ExperimentsConfig::resolve(settings)?,
+            repo_projects: RepoProjectsConfig::resolve(settings)?,
             observability: crate::observability::ObservabilityConfig {
                 backend: helpers::optional_env("OBSERVABILITY_BACKEND")
                     .ok()

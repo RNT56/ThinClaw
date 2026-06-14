@@ -204,8 +204,14 @@ pub(crate) async fn sse_event_visible_to_identity(
         SseEvent::RoutineLifecycle { .. }
         | SseEvent::ExperimentRunnerUpdated { .. }
         | SseEvent::ExperimentOpportunityUpdated { .. }
+        | SseEvent::RepoProjectUpdated { .. }
+        | SseEvent::RepoTaskUpdated { .. }
+        | SseEvent::RepoWorkerRunUpdated { .. }
+        | SseEvent::RepoProjectEvent { .. }
+        | SseEvent::RepoMergeGateUpdated { .. }
         | SseEvent::AuthRequired { .. }
         | SseEvent::AuthCompleted { .. }
+        | SseEvent::CredentialPrompt { .. }
         | SseEvent::ExtensionStatus { .. }
         | SseEvent::ChannelStatusChange { .. }
         | SseEvent::CostAlert { .. }
@@ -498,6 +504,7 @@ mod tests {
             cost_tracker: None,
             response_cache: None,
             routine_engine: None,
+            repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,

@@ -34,7 +34,8 @@ fn message_id_from_metadata(metadata: &Value) -> Option<&str> {
 fn thread_id_from_status(status: &StatusUpdate) -> Option<&str> {
     match status {
         StatusUpdate::AuthRequired { thread_id, .. }
-        | StatusUpdate::AuthCompleted { thread_id, .. } => thread_id.as_deref(),
+        | StatusUpdate::AuthCompleted { thread_id, .. }
+        | StatusUpdate::CredentialPrompt { thread_id, .. } => thread_id.as_deref(),
         _ => None,
     }
 }
@@ -133,6 +134,21 @@ pub fn status_to_ui_event(
             session_key,
             tool_name,
             input: parameters,
+        }),
+
+        StatusUpdate::CredentialPrompt {
+            prompt_id,
+            secret_name,
+            provider,
+            reason,
+            thread_id,
+        } => Some(UiEvent::CredentialPrompt {
+            prompt_id,
+            session_key: thread_id.unwrap_or(session_key),
+            run_id,
+            secret_name,
+            provider,
+            reason,
         }),
 
         StatusUpdate::AuthRequired {
@@ -561,6 +577,17 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                 input: parameters,
             }]
         }
+        "credential_prompt" => {
+            let session_key = session_key.unwrap_or_else(|| "agent:main".to_string());
+            vec![UiEvent::CredentialPrompt {
+                prompt_id: value_string(&value, "prompt_id").unwrap_or_default(),
+                session_key,
+                run_id,
+                secret_name: value_string(&value, "secret_name").unwrap_or_default(),
+                provider: value_string(&value, "provider").unwrap_or_default(),
+                reason: value_string(&value, "reason").unwrap_or_default(),
+            }]
+        }
         "auth_required" => vec![UiEvent::WebLogin {
             session_key,
             run_id,
@@ -771,6 +798,13 @@ mod tests {
                 auth_status: Some("authenticated".into()),
                 shared_auth_provider: None,
                 missing_scopes: Vec::new(),
+                thread_id: Some("auth-thread".into()),
+            },
+            StatusUpdate::CredentialPrompt {
+                prompt_id: "prompt-1".into(),
+                secret_name: "github_token".into(),
+                provider: "github".into(),
+                reason: "needs a token".into(),
                 thread_id: Some("auth-thread".into()),
             },
             StatusUpdate::Error {

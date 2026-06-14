@@ -715,6 +715,7 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: None,
+            repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,

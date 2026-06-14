@@ -13,6 +13,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 - Understanding identity, packs, and `/personality`: go to [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - Understanding memory, continuity, and `/compress`: go to [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
 - Understanding outcome-backed learning, Learning Ledger outcomes, and deferred review: go to [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
+- Operating the repository project supervisor: go to [REPO_PROJECT_SUPERVISOR.md](REPO_PROJECT_SUPERVISOR.md)
 - Understanding skill trust, provenance, quarantine, and lifecycle tools: go to [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md)
 - Generating images with ComfyUI: go to [COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md)
 - Running ThinClaw in editor-native ACP clients: go to [ACP_INTEGRATION.md](ACP_INTEGRATION.md)
@@ -42,6 +43,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 - [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
 - [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
+- [REPO_PROJECT_SUPERVISOR.md](REPO_PROJECT_SUPERVISOR.md)
 - [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md)
 - [COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md)
 - [ACP_INTEGRATION.md](ACP_INTEGRATION.md)
@@ -81,6 +83,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Identity packs and session personality | [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md) |
 | Memory, continuity, and growth surfaces | [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md) |
 | Outcome-backed learning and Learning Ledger outcomes | [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md) |
+| Repository project supervisor operations | [REPO_PROJECT_SUPERVISOR.md](REPO_PROJECT_SUPERVISOR.md) |
 | Skills ecosystem and lifecycle | [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md) |
 | ComfyUI media generation | [COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md) |
 | ACP editor integration | [ACP_INTEGRATION.md](ACP_INTEGRATION.md) |

@@ -126,6 +126,18 @@ pub enum UiEvent {
         approved: bool,
     },
 
+    /// Agent requests a credential; the UI shows an inline masked-input card.
+    /// Carries NO secret value — the typed value is submitted out-of-band via
+    /// `thinclaw_repo_projects_set_credential`, bypassing the engine and model.
+    CredentialPrompt {
+        prompt_id: String,
+        session_key: String,
+        run_id: Option<String>,
+        secret_name: String,
+        provider: String,
+        reason: String,
+    },
+
     /// Engine error
     Error {
         code: String,

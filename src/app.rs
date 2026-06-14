@@ -1564,6 +1564,7 @@ impl AppBuilder {
                 workspace.as_ref().cloned(),
                 skill_registry.clone(),
             );
+            tools.register_repo_project_tools(Arc::clone(db));
         }
 
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));

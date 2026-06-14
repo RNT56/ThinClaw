@@ -215,7 +215,7 @@ fn validate_cli_secret_value(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
+pub(crate) async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
     let config = Config::from_env().await?;
     let master_key = config
         .secrets

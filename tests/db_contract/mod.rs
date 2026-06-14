@@ -5,6 +5,7 @@ mod experiments;
 mod fixtures;
 mod identity;
 mod jobs;
+mod repo_projects;
 mod routines;
 mod sandbox;
 mod settings;

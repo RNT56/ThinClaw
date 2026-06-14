@@ -13,7 +13,7 @@ import { ThinClawSession } from '../../lib/thinclaw';
 
 import { motion } from 'framer-motion';
 
-export type ThinClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'jobs' | 'autonomy' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing' | 'experiments' | 'learning';
+export type ThinClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'jobs' | 'repo-projects' | 'autonomy' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing' | 'experiments' | 'learning';
 
 const containerVariants = {
     hidden: { opacity: 0 },
@@ -361,6 +361,7 @@ export function ThinClawSidebar({
                             items: [
                                 { id: 'automations', label: 'Automations', icon: Timer },
                                 { id: 'jobs', label: 'Jobs', icon: Play },
+                                { id: 'repo-projects', label: 'Repo Projects', icon: GitBranch },
                                 { id: 'autonomy', label: 'Autonomy', icon: ShieldCheck },
                                 { id: 'experiments', label: 'Experiments', icon: FlaskConical },
                                 { id: 'routine-audit', label: 'Routine Audit', icon: FileText },

@@ -3840,6 +3840,12 @@ export type UiEvent =
  */
 { kind: "ApprovalResolved"; approval_id: string; session_key: string; approved: boolean } |
 /**
+ * Agent requests a credential; the UI shows an inline masked-input card.
+ * Carries NO secret value — the typed value is submitted out-of-band via
+ * `thinclaw_repo_projects_set_credential`, bypassing the engine and model.
+ */
+{ kind: "CredentialPrompt"; prompt_id: string; session_key: string; run_id: string | null; secret_name: string; provider: string; reason: string } |
+/**
  * Engine error
  */
 { kind: "Error"; code: string; message: string; details: JsonValue } |

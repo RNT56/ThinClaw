@@ -535,6 +535,33 @@ impl Agent {
                         }
                     }
 
+                    // ── Credential prompt interception ───────────────
+                    // repo_project_request_credential emits only a PROMPT
+                    // (no value). Surface it as an inline credential card;
+                    // the operator's typed value is collected out-of-band
+                    // straight to the secrets store, bypassing the model.
+                    if tc.name == "repo_project_request_credential"
+                        && let Ok(ref output) = tool_result
+                        && let Ok(signal) = serde_json::from_str::<
+                            crate::tools::builtin::CredentialPromptSignal,
+                        >(&output.content)
+                    {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::CredentialPrompt {
+                                    prompt_id: uuid::Uuid::new_v4().to_string(),
+                                    secret_name: signal.secret_name,
+                                    provider: signal.provider,
+                                    reason: signal.reason,
+                                    thread_id: None,
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
+
                     // ── emit_user_message interception ───────────────
                     // When the agent calls emit_user_message, forward
                     // the message to the user's channel as a visible

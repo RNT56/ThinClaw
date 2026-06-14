@@ -433,6 +433,19 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             missing_scopes,
             thread_id: auth_thread_id.or(thread_id),
         },
+        StatusUpdate::CredentialPrompt {
+            prompt_id,
+            secret_name,
+            provider,
+            reason,
+            thread_id: prompt_thread_id,
+        } => SseEvent::CredentialPrompt {
+            prompt_id,
+            secret_name,
+            provider,
+            reason,
+            thread_id: prompt_thread_id.or(thread_id),
+        },
         StatusUpdate::Error { message, code } => SseEvent::Status {
             message: format!(
                 "[error{}] {}",

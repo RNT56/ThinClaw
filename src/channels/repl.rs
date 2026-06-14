@@ -822,6 +822,24 @@ impl Channel for ReplChannel {
                     eprintln!("  {}", branding.bad(format!("{extension_name}: {message}")));
                 }
             }
+            StatusUpdate::CredentialPrompt {
+                secret_name,
+                reason,
+                ..
+            } => {
+                eprintln!();
+                eprintln!(
+                    "  {}",
+                    branding.warn(format!("Credential needed: {reason}"))
+                );
+                eprintln!(
+                    "  {}",
+                    branding.body(format!(
+                        "Store it with `thinclaw secrets set {secret_name}`"
+                    ))
+                );
+                eprintln!();
+            }
             StatusUpdate::Error { message, code } => {
                 let code_str = code.as_deref().unwrap_or("error");
                 eprintln!(

@@ -7504,6 +7504,7 @@ dependencies = [
  "iana-time-zone",
  "insta",
  "jsonschema",
+ "jsonwebtoken",
  "libloading",
  "libsql",
  "lru",
@@ -7555,6 +7556,7 @@ dependencies = [
  "thinclaw-llm-core",
  "thinclaw-media",
  "thinclaw-platform",
+ "thinclaw-repo-projects",
  "thinclaw-runtime-contracts",
  "thinclaw-safety",
  "thinclaw-secrets",
@@ -7771,6 +7773,7 @@ dependencies = [
  "thinclaw-experiments",
  "thinclaw-history",
  "thinclaw-identity",
+ "thinclaw-repo-projects",
  "thinclaw-types",
  "thinclaw-workspace",
  "tokio",
@@ -7925,6 +7928,16 @@ dependencies = [
  "iana-time-zone",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "thinclaw-repo-projects"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

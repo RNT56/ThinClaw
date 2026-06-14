@@ -22,6 +22,7 @@ pub mod mdns_discovery;
 pub mod model_compat;
 pub mod network_modes;
 pub mod provider_catalog;
+pub mod repo_projects;
 pub mod routines;
 pub mod safety;
 pub mod sandbox;

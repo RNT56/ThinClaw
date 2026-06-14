@@ -26,6 +26,10 @@ use thinclaw_identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, NewActorEndpointRecord,
     NewActorRecord,
 };
+use thinclaw_repo_projects::{
+    MergeGateDecision, RepoProject, RepoProjectEvent, RepoProjectRepo, RepoProjectRun,
+    RepoProjectTask, RepoWebhookDelivery, RepoWorkerRun,
+};
 pub use thinclaw_types::AgentWorkspaceRecord;
 pub use thinclaw_types::error::{DatabaseError, WorkspaceError};
 use thinclaw_types::{
@@ -1000,6 +1004,78 @@ pub trait ExperimentStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait RepoProjectStore: Send + Sync {
+    async fn create_repo_project(&self, project: &RepoProject) -> Result<(), DatabaseError>;
+    async fn get_repo_project(&self, id: Uuid) -> Result<Option<RepoProject>, DatabaseError>;
+    async fn list_repo_projects(&self) -> Result<Vec<RepoProject>, DatabaseError>;
+    async fn update_repo_project(&self, project: &RepoProject) -> Result<(), DatabaseError>;
+    async fn delete_repo_project(&self, id: Uuid) -> Result<bool, DatabaseError>;
+
+    async fn upsert_repo_project_repo(&self, repo: &RepoProjectRepo) -> Result<(), DatabaseError>;
+    async fn list_repo_project_repos(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<RepoProjectRepo>, DatabaseError>;
+
+    async fn upsert_repo_project_task(&self, task: &RepoProjectTask) -> Result<(), DatabaseError>;
+    async fn get_repo_project_task(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<RepoProjectTask>, DatabaseError>;
+    async fn list_repo_project_tasks(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<RepoProjectTask>, DatabaseError>;
+
+    async fn upsert_repo_worker_run(&self, run: &RepoWorkerRun) -> Result<(), DatabaseError>;
+    async fn list_repo_worker_runs(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<RepoWorkerRun>, DatabaseError>;
+
+    async fn append_repo_project_event(
+        &self,
+        event: &RepoProjectEvent,
+    ) -> Result<(), DatabaseError>;
+    async fn list_repo_project_events(
+        &self,
+        project_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RepoProjectEvent>, DatabaseError>;
+
+    async fn upsert_repo_merge_gate_decision(
+        &self,
+        project_id: Uuid,
+        task_id: Uuid,
+        decision: &MergeGateDecision,
+    ) -> Result<(), DatabaseError>;
+    async fn list_repo_merge_gate_decisions(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<(Uuid, MergeGateDecision)>, DatabaseError>;
+
+    /// Persist a received GitHub webhook delivery. Returns `true` when the
+    /// delivery was newly recorded and `false` when it was already present
+    /// (a duplicate/redelivery), giving restart-surviving idempotency.
+    async fn record_repo_webhook_delivery(
+        &self,
+        delivery: &RepoWebhookDelivery,
+    ) -> Result<bool, DatabaseError>;
+    async fn list_repo_webhook_deliveries(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<RepoWebhookDelivery>, DatabaseError>;
+
+    async fn upsert_repo_project_run(&self, run: &RepoProjectRun) -> Result<(), DatabaseError>;
+    async fn get_repo_project_run(&self, id: Uuid)
+    -> Result<Option<RepoProjectRun>, DatabaseError>;
+    async fn list_repo_project_runs(
+        &self,
+        project_id: Uuid,
+    ) -> Result<Vec<RepoProjectRun>, DatabaseError>;
+}
+
+#[async_trait]
 pub trait SettingsStore: Send + Sync {
     async fn get_setting(
         &self,
@@ -1068,6 +1144,7 @@ pub trait Database:
     + IdentityRegistryStore
     + ToolFailureStore
     + ExperimentStore
+    + RepoProjectStore
     + SettingsStore
     + WorkspaceStore
     + AgentRegistryStore
