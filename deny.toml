@@ -5,6 +5,24 @@
 [advisories]
 unmaintained = "workspace"
 yanked = "deny"
+# Documented, web-verified risk-acceptances for advisories with NO fix available
+# to us. Revisit whenever dependencies are bumped.
+ignore = [
+    # rustls-webpki 0.101.7 (RUSTSEC-2026-0098 / 0099 / 0104). Pulled in ONLY as
+    # a transitive of the AWS SDK's legacy TLS stack: aws-smithy-runtime enables
+    # aws-smithy-http-client's default `hyper-014` / `legacy-rustls-ring`
+    # features, and only when the optional `bedrock` feature is enabled.
+    # aws-config defaults to the modern `default-https-client` (hyper 1.x +
+    # rustls 0.23 + aws-lc-rs), which is the ACTIVE TLS path — the legacy webpki
+    # is linked but is not the runtime certificate verifier. There is no fix
+    # available from our Cargo manifest (cargo feature unification keeps the
+    # legacy smithy default); upstream-tracked at
+    # awslabs/aws-s3-transfer-manager-rs#138. Drop these once the AWS SDK stops
+    # defaulting to its legacy hyper-014 HTTP client.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]
 
 [licenses]
 version = 2
