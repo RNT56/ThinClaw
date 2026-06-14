@@ -238,6 +238,7 @@ mod tests {
                     installation_id: Some(456),
                     private_key_secret: Some("repo_projects_github_private_key".to_string()),
                     webhook_secret_secret: Some("repo_projects_github_webhook".to_string()),
+                    app_slug: Some("thinclaw-supervisor".to_string()),
                 },
             },
             ..Default::default()
