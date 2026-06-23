@@ -31,4 +31,25 @@
 
 ---
 
+## Wave 1 — WS-06 (repo-project supervisor)
+
+### F-06 — LLM-backed RepoTaskPlanner adapter
+- **Done:** the `RepoTaskPlanner` port + `PlannedTask` DTO + `with_planner` wiring + the no-planner `AwaitingHuman` fallback are shipped; `NeedsPlanning` now always acts (no silent stall). Wiring point at `agent_loop.rs` passes `with_planner(None)`.
+- **Remains:** the concrete adapter that spawns a one-shot planning subagent (`SubagentExecutor::spawn` + planner prompts) and a `REPO_PROJECTS_AUTOPLAN` opt-in.
+- **Takes:** a focused pass pulling the LLM/subagent stack into the supervisor wiring + an integration test with a stub subagent.
+
+### F-07 — WebUI SSE consumer for repo-project events
+- **Done:** the backend emits `RepoTaskUpdated`/`ProjectStateChanged`/`TaskCreated` in lockstep with state changes.
+- **Remains:** the frontend consumer in `crates/thinclaw-gateway/src/web/static/app.js` to render live supervisor progress.
+- **Takes:** small frontend addition; independent of backend.
+
+## Wave 1 — WS-09 (routines/heartbeat)
+
+### F-08 — Full channel-broadcast routing for worker heartbeats
+- **Done:** heartbeat `target` (none/chat/channel) + `include_reasoning` are honored — `target=none` suppresses the SSE delivery (output still recorded), `target=<channel>` tags the SSE summary, `include_reasoning` is enforced via the prompt + metadata.
+- **Remains:** true channel broadcast for light-context worker heartbeats requires adding a `notify_tx` to `WorkerDeps` (the worker has no broadcast seam today; only the agent-loop forwarder reads `notify_channel`).
+- **Takes:** thread a notification sender into `WorkerDeps` (cross-cutting in the worker runtime).
+
+---
+
 *Add follow-ups under the owning wave as they arise. Resolve or explicitly accept each before declaring a workstream done.*

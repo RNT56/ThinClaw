@@ -18,6 +18,28 @@ impl Store {
         Ok(row.get::<_, i64>("cnt") > 0)
     }
 
+    pub async fn routine_event_recent_content_match(
+        &self,
+        routine_id: Uuid,
+        content_hash: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT COUNT(*) AS cnt \
+                 FROM routine_event_evaluations e \
+                 JOIN routine_event_inbox i ON i.id = e.event_id \
+                 WHERE e.routine_id = $1 \
+                   AND e.decision = 'fired' \
+                   AND i.content_hash = $2 \
+                   AND e.created_at >= $3",
+                &[&routine_id, &content_hash, &since],
+            )
+            .await?;
+        Ok(row.get::<_, i64>("cnt") > 0)
+    }
+
     pub async fn enqueue_routine_trigger(
         &self,
         trigger: &RoutineTrigger,

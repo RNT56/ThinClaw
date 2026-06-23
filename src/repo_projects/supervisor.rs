@@ -16,6 +16,7 @@ use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::repo_projects::executor::RepoProjectExecutor;
 use crate::repo_projects::pipeline::{GitHubPipeline, PipelineOutcome};
+use crate::repo_projects::planner::RepoTaskPlanner;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoSupervisorWakeReason {
@@ -61,12 +62,24 @@ pub trait RepoSupervisorStore: Send + Sync {
     }
 }
 
+/// Default per-process ceilings, matching `RepoProjectsConfig::default`. Used
+/// when the store is constructed without explicit limits (e.g. in tests).
+const DEFAULT_MAX_CONCURRENT_PROJECTS: usize = 1;
+const DEFAULT_MAX_CONCURRENT_TASKS_PER_PROJECT: usize = 1;
+
 #[derive(Clone)]
 pub struct DatabaseRepoSupervisorStore {
     db: Arc<dyn Database>,
     executor: Option<RepoProjectExecutor>,
     pipeline: Option<GitHubPipeline>,
     sse: Option<broadcast::Sender<SseEvent>>,
+    planner: Option<Arc<dyn RepoTaskPlanner>>,
+    /// Process-global ceiling on how many projects may advance dispatch per
+    /// reconcile. Caps total host load across projects.
+    max_concurrent_projects: usize,
+    /// Process-global ceiling on concurrently-running tasks per project. Clamps
+    /// the per-project `ProjectPolicy.max_parallel_tasks`.
+    max_concurrent_tasks_per_project: usize,
 }
 
 impl DatabaseRepoSupervisorStore {
@@ -76,6 +89,9 @@ impl DatabaseRepoSupervisorStore {
             executor: None,
             pipeline: None,
             sse: None,
+            planner: None,
+            max_concurrent_projects: DEFAULT_MAX_CONCURRENT_PROJECTS,
+            max_concurrent_tasks_per_project: DEFAULT_MAX_CONCURRENT_TASKS_PER_PROJECT,
         }
     }
 
@@ -93,6 +109,26 @@ impl DatabaseRepoSupervisorStore {
 
     pub fn with_sse(mut self, sse: Option<broadcast::Sender<SseEvent>>) -> Self {
         self.sse = sse;
+        self
+    }
+
+    /// Inject the autonomous task planner. When absent, `NeedsPlanning`
+    /// projects fall back to an explicit `AwaitingHuman` status instead of
+    /// stalling silently.
+    pub fn with_planner(mut self, planner: Option<Arc<dyn RepoTaskPlanner>>) -> Self {
+        self.planner = planner;
+        self
+    }
+
+    /// Set the process-global concurrency ceilings (typically from
+    /// `RepoProjectsConfig`). Values below 1 are clamped to 1.
+    pub fn with_limits(
+        mut self,
+        max_concurrent_projects: usize,
+        max_concurrent_tasks_per_project: usize,
+    ) -> Self {
+        self.max_concurrent_projects = max_concurrent_projects.max(1);
+        self.max_concurrent_tasks_per_project = max_concurrent_tasks_per_project.max(1);
         self
     }
 }
@@ -131,6 +167,10 @@ impl RepoSupervisorStore for DatabaseRepoSupervisorStore {
         };
 
         let mut decisions = Vec::new();
+        // Process-global ceiling: how many projects may advance dispatch this
+        // reconcile. A project that only logs Idle/Blocked does not consume a
+        // slot; a project that dispatches a task or plans does.
+        let mut projects_advanced = 0usize;
         for mut project in projects {
             let decisions_before = decisions.len();
             if let Some(executor) = self.executor.as_ref() {
@@ -146,11 +186,21 @@ impl RepoSupervisorStore for DatabaseRepoSupervisorStore {
                 .list_repo_project_repos(project.id)
                 .await
                 .map_err(|error| error.to_string())?;
+            // Once the per-reconcile project budget is spent, stop advancing
+            // dispatch/planning for additional projects; pipeline advancement of
+            // already-in-flight tasks below is unaffected for the projects that
+            // did get a slot.
+            let dispatch_budget_available = projects_advanced < self.max_concurrent_projects;
             match project.state {
                 RepoProjectState::Draft | RepoProjectState::Planning if tasks.is_empty() => {
                     decisions.push(RepoSupervisorDecision::NeedsPlanning {
                         project_id: project.id,
                     });
+                    if dispatch_budget_available {
+                        projects_advanced += 1;
+                        self.plan_or_await_human(&mut project, &repos, &mut decisions)
+                            .await?;
+                    }
                 }
                 RepoProjectState::Active | RepoProjectState::Planning => {
                     // 1. Advance GitHub-driven tasks (PR/CI/review/merge). These
@@ -166,17 +216,21 @@ impl RepoSupervisorStore for DatabaseRepoSupervisorStore {
                         }
                     }
 
-                    // 2. Dispatch one queued/ready task into a sandbox worker.
+                    // 2. Dispatch queued/ready tasks into sandbox workers, up to
+                    //    the effective per-project concurrency cap, respecting
+                    //    the per-reconcile project budget.
                     let has_dispatchable = tasks.iter().any(|task| {
                         matches!(
                             task.state,
                             RepoProjectTaskState::Queued | RepoProjectTaskState::Ready
                         )
                     });
-                    if has_dispatchable {
+                    if has_dispatchable && dispatch_budget_available {
+                        projects_advanced += 1;
                         self.dispatch_next_task(&mut project, &repos, &mut tasks, &mut decisions)
                             .await?;
-                    } else if !tasks.is_empty()
+                    } else if !has_dispatchable
+                        && !tasks.is_empty()
                         && tasks
                             .iter()
                             .all(|task| task.state == RepoProjectTaskState::Done)
@@ -202,9 +256,23 @@ impl RepoSupervisorStore for DatabaseRepoSupervisorStore {
                 | RepoProjectState::Completed
                 | RepoProjectState::Failed
                 | RepoProjectState::Cancelled => decisions.push(RepoSupervisorDecision::Idle),
-                RepoProjectState::Draft => decisions.push(RepoSupervisorDecision::NeedsPlanning {
-                    project_id: project.id,
-                }),
+                // Draft with a non-empty backlog (the empty case is handled by
+                // the guarded arm above): normalize to Planning so the next
+                // reconcile dispatches the existing tasks.
+                RepoProjectState::Draft => {
+                    decisions.push(RepoSupervisorDecision::NeedsPlanning {
+                        project_id: project.id,
+                    });
+                    if dispatch_budget_available {
+                        projects_advanced += 1;
+                        self.transition_project_state(
+                            &mut project,
+                            RepoProjectState::Active,
+                            "Repository project activated",
+                        )
+                        .await?;
+                    }
+                }
             }
 
             if decisions.len() == decisions_before {
@@ -358,7 +426,17 @@ impl DatabaseRepoSupervisorStore {
         Ok(())
     }
 
-    /// Dispatch the first `Queued`/`Ready` task into a sandbox worker.
+    /// Dispatch `Queued`/`Ready` tasks into sandbox workers, up to the effective
+    /// per-project concurrency cap.
+    ///
+    /// The cap is the persisted per-project `ProjectPolicy.max_parallel_tasks`
+    /// clamped by the process-global `max_concurrent_tasks_per_project` ceiling
+    /// (the per-project knob is authoritative, the env knob caps host load). We
+    /// count tasks already in `Running` (CI/review states are GitHub-bound, not
+    /// sandbox-bound, so they do not consume a worker slot) and dispatch until
+    /// the cap is reached or no dispatchable task remains. Counting actual
+    /// `Running` tasks — rather than relying on a one-dispatch-per-tick cadence —
+    /// keeps the limit correct across consecutive reconciles and faster wakes.
     async fn dispatch_next_task(
         &self,
         project: &mut RepoProject,
@@ -366,16 +444,30 @@ impl DatabaseRepoSupervisorStore {
         tasks: &mut [RepoProjectTask],
         decisions: &mut Vec<RepoSupervisorDecision>,
     ) -> Result<(), String> {
-        let Some(pos) = tasks.iter().position(|task| {
+        let cap = (project.policy.max_parallel_tasks as usize)
+            .min(self.max_concurrent_tasks_per_project)
+            .max(1);
+        let mut running = tasks
+            .iter()
+            .filter(|task| task.state == RepoProjectTaskState::Running)
+            .count();
+
+        // Already at (or over) the effective concurrency cap: nothing to do this
+        // tick. Returning here keeps the cap honored across consecutive
+        // reconciles (it does not rely on the one-dispatch-per-tick cadence).
+        if running >= cap {
+            return Ok(());
+        }
+        // No dispatchable task: nothing to do.
+        let has_dispatchable = tasks.iter().any(|task| {
             matches!(
                 task.state,
                 RepoProjectTaskState::Queued | RepoProjectTaskState::Ready
             )
-        }) else {
+        });
+        if !has_dispatchable {
             return Ok(());
-        };
-        let task_id = tasks[pos].id;
-        let repo_id = tasks[pos].repo_id;
+        }
 
         let Some(executor) = self.executor.as_ref() else {
             decisions.push(RepoSupervisorDecision::AwaitingHuman {
@@ -384,59 +476,281 @@ impl DatabaseRepoSupervisorStore {
             });
             return Ok(());
         };
-        let Some(repo) = repos.iter().find(|repo| repo.id == repo_id) else {
-            append_supervisor_event(
-                self.db.as_ref(),
-                project.id,
-                None,
-                Some(task_id),
-                RepoProjectEventKind::TaskStateChanged,
-                "Repository task has no matching enrolled repo",
-                serde_json::json!({ "task_id": task_id }),
-            )
-            .await?;
-            decisions.push(RepoSupervisorDecision::Blocked {
-                project_id: project.id,
-                reason: format!("task {task_id} has no matching repo"),
-            });
-            return Ok(());
-        };
 
-        let mut dispatch_task = tasks[pos].clone();
-        match executor
-            .dispatch_task(project, repo, &mut dispatch_task)
-            .await
-        {
-            Ok(Some(outcome)) => {
+        while running < cap {
+            let Some(pos) = tasks.iter().position(|task| {
+                matches!(
+                    task.state,
+                    RepoProjectTaskState::Queued | RepoProjectTaskState::Ready
+                )
+            }) else {
+                break;
+            };
+            let task_id = tasks[pos].id;
+            let repo_id = tasks[pos].repo_id;
+
+            let Some(repo) = repos.iter().find(|repo| repo.id == repo_id) else {
                 append_supervisor_event(
                     self.db.as_ref(),
                     project.id,
-                    Some(repo.id),
-                    Some(dispatch_task.id),
+                    None,
+                    Some(task_id),
                     RepoProjectEventKind::TaskStateChanged,
-                    "Repository task dispatched to sandbox worker",
-                    serde_json::json!({
-                        "job_id": outcome.job_id,
-                        "worker_run_id": outcome.worker_run_id,
-                        "mode": outcome.mode.as_str(),
-                    }),
+                    "Repository task has no matching enrolled repo",
+                    serde_json::json!({ "task_id": task_id }),
                 )
                 .await?;
-                tasks[pos] = dispatch_task;
-                decisions.push(RepoSupervisorDecision::DispatchTask {
+                decisions.push(RepoSupervisorDecision::Blocked {
                     project_id: project.id,
-                    task_id,
+                    reason: format!("task {task_id} has no matching repo"),
                 });
+                // Mark the orphaned task non-dispatchable for this pass so the
+                // loop does not spin on it; the next reconcile re-evaluates.
+                tasks[pos].state = RepoProjectTaskState::Blocked;
+                continue;
+            };
+
+            let mut dispatch_task = tasks[pos].clone();
+            let result = executor
+                .dispatch_task(project, repo, &mut dispatch_task)
+                .await;
+            // Write the (possibly mutated) task back so the next iteration's
+            // position scan does not re-select it. A successful dispatch moves
+            // the task to `Running`; an adopted pre-existing worker may leave it
+            // unchanged, so guard against re-selecting an unmoved task below.
+            let still_dispatchable = matches!(
+                dispatch_task.state,
+                RepoProjectTaskState::Queued | RepoProjectTaskState::Ready
+            );
+            match result {
+                Ok(Some(outcome)) => {
+                    append_supervisor_event(
+                        self.db.as_ref(),
+                        project.id,
+                        Some(repo.id),
+                        Some(dispatch_task.id),
+                        RepoProjectEventKind::TaskStateChanged,
+                        "Repository task dispatched to sandbox worker",
+                        serde_json::json!({
+                            "job_id": outcome.job_id,
+                            "worker_run_id": outcome.worker_run_id,
+                            "mode": outcome.mode.as_str(),
+                        }),
+                    )
+                    .await?;
+                    tasks[pos] = dispatch_task;
+                    decisions.push(RepoSupervisorDecision::DispatchTask {
+                        project_id: project.id,
+                        task_id,
+                    });
+                }
+                Ok(None) => {
+                    tasks[pos] = dispatch_task;
+                    decisions.push(RepoSupervisorDecision::DispatchTask {
+                        project_id: project.id,
+                        task_id,
+                    });
+                }
+                Err(error) => {
+                    decisions.push(RepoSupervisorDecision::Blocked {
+                        project_id: project.id,
+                        reason: error,
+                    });
+                    // Avoid re-selecting the same task in this loop.
+                    tasks[pos].state = RepoProjectTaskState::Blocked;
+                    continue;
+                }
             }
-            Ok(None) => decisions.push(RepoSupervisorDecision::DispatchTask {
-                project_id: project.id,
-                task_id,
-            }),
-            Err(error) => decisions.push(RepoSupervisorDecision::Blocked {
-                project_id: project.id,
-                reason: error,
-            }),
+            // If the task is still Queued/Ready (e.g. an already-active worker was
+            // adopted without a state change), it still occupies a sandbox slot;
+            // stop here rather than spin re-selecting it this pass.
+            if still_dispatchable {
+                break;
+            }
+            running += 1;
         }
+        Ok(())
+    }
+
+    /// Act on a `NeedsPlanning` project. With a planner wired, decompose the
+    /// project goal into `Queued` tasks and move the project to `Active`. Without
+    /// a planner (or when planning yields nothing / errors), transition the
+    /// project to `AwaitingHuman` so it never silently stalls in `Planning`.
+    ///
+    /// Idempotent: the caller only invokes this while the project has no tasks,
+    /// and we re-check, so a burst of wakes cannot duplicate tasks.
+    async fn plan_or_await_human(
+        &self,
+        project: &mut RepoProject,
+        repos: &[RepoProjectRepo],
+        decisions: &mut Vec<RepoSupervisorDecision>,
+    ) -> Result<(), String> {
+        // Defensive idempotency guard: never plan over an existing backlog.
+        let existing = self
+            .db
+            .list_repo_project_tasks(project.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !existing.is_empty() {
+            return Ok(());
+        }
+
+        // Normalize Draft -> Planning so the subsequent transitions are valid
+        // (Draft cannot move directly to AwaitingHuman).
+        if project.state == RepoProjectState::Draft {
+            self.transition_project_state(
+                project,
+                RepoProjectState::Planning,
+                "Repository project planning started",
+            )
+            .await?;
+        }
+
+        let planned = match self.planner.as_ref() {
+            Some(planner) => match planner.plan(project, repos).await {
+                Ok(planned) => planned,
+                Err(error) => {
+                    tracing::warn!(project_id = %project.id, error = %error, "repo task planner failed");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+
+        if planned.is_empty() {
+            // No planner, or nothing to plan: surface an actionable human-facing
+            // status rather than leaving the project parked in Planning forever.
+            self.transition_project_state(
+                project,
+                RepoProjectState::AwaitingHuman,
+                "Project needs a plan; add tasks to proceed.",
+            )
+            .await?;
+            decisions.push(RepoSupervisorDecision::AwaitingHuman {
+                project_id: project.id,
+                reason: "no planner configured; awaiting human-provided tasks".to_string(),
+            });
+            return Ok(());
+        }
+
+        // Persist each planned task as a Queued task, recording a TaskCreated
+        // event + SSE in lockstep so the WebUI consumer reflects the new backlog.
+        let mut created = 0usize;
+        for task_draft in planned {
+            let Some(repo) = repos.iter().find(|repo| repo.id == task_draft.repo_id) else {
+                tracing::warn!(
+                    project_id = %project.id,
+                    repo_id = %task_draft.repo_id,
+                    "planner returned a task for an unknown repo; dropping"
+                );
+                continue;
+            };
+            let task = crate::repo_projects::build_queued_task(
+                project,
+                repo,
+                task_draft.title,
+                task_draft.body,
+                0,
+                Vec::new(),
+            )?;
+            self.db
+                .upsert_repo_project_task(&task)
+                .await
+                .map_err(|error| error.to_string())?;
+            append_supervisor_event(
+                self.db.as_ref(),
+                project.id,
+                Some(repo.id),
+                Some(task.id),
+                RepoProjectEventKind::TaskCreated,
+                "Repository project task planned",
+                serde_json::json!({
+                    "title": task.title,
+                    "branch_name": task.branch_name,
+                    "source": "planner",
+                }),
+            )
+            .await?;
+            self.emit_task(&task, "Task planned");
+            decisions.push(RepoSupervisorDecision::DispatchTask {
+                project_id: project.id,
+                task_id: task.id,
+            });
+            created += 1;
+        }
+
+        if created == 0 {
+            // Every planned task referenced an unknown repo — fall back to human.
+            self.transition_project_state(
+                project,
+                RepoProjectState::AwaitingHuman,
+                "Planner produced no usable tasks; add tasks to proceed.",
+            )
+            .await?;
+            decisions.push(RepoSupervisorDecision::AwaitingHuman {
+                project_id: project.id,
+                reason: "planner produced no usable tasks".to_string(),
+            });
+            return Ok(());
+        }
+
+        // Move the project to Active so the next reconcile dispatches the new
+        // backlog.
+        self.transition_project_state(
+            project,
+            RepoProjectState::Active,
+            "Repository project plan ready",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Transition a project to `next`, persisting the change, appending a
+    /// `ProjectStateChanged` event, and broadcasting SSE in lockstep. A no-op
+    /// when the transition is invalid (logged) or already in the target state.
+    async fn transition_project_state(
+        &self,
+        project: &mut RepoProject,
+        next: RepoProjectState,
+        message: &str,
+    ) -> Result<(), String> {
+        if project.state == next {
+            return Ok(());
+        }
+        if validate_project_state_transition(project.state, next).is_err() {
+            tracing::warn!(
+                project_id = %project.id,
+                from = state_label(project.state),
+                to = state_label(next),
+                "skipping invalid project state transition"
+            );
+            return Ok(());
+        }
+        let now = Utc::now();
+        let from = project.state;
+        project.state = next;
+        project.updated_at = now;
+        if next == RepoProjectState::Active && project.started_at.is_none() {
+            project.started_at = Some(now);
+        }
+        self.db
+            .update_repo_project(project)
+            .await
+            .map_err(|error| error.to_string())?;
+        append_supervisor_event(
+            self.db.as_ref(),
+            project.id,
+            None,
+            None,
+            RepoProjectEventKind::ProjectStateChanged,
+            message,
+            serde_json::json!({
+                "from": state_label(from),
+                "to": state_label(next),
+            }),
+        )
+        .await?;
+        self.emit_project(project, message);
         Ok(())
     }
 
@@ -520,6 +834,17 @@ impl DatabaseRepoSupervisorStore {
             let _ = sender.send(SseEvent::RepoProjectUpdated {
                 project_id: project.id.to_string(),
                 state: state_label(project.state).to_string(),
+                message: message.to_string(),
+            });
+        }
+    }
+
+    fn emit_task(&self, task: &RepoProjectTask, message: &str) {
+        if let Some(sender) = self.sse.as_ref() {
+            let _ = sender.send(SseEvent::RepoTaskUpdated {
+                project_id: task.project_id.to_string(),
+                task_id: task.id.to_string(),
+                state: task_state_label(task.state).to_string(),
                 message: message.to_string(),
             });
         }
@@ -657,6 +982,21 @@ fn state_label(state: RepoProjectState) -> &'static str {
         RepoProjectState::Completed => "completed",
         RepoProjectState::Failed => "failed",
         RepoProjectState::Cancelled => "cancelled",
+    }
+}
+
+fn task_state_label(state: RepoProjectTaskState) -> &'static str {
+    match state {
+        RepoProjectTaskState::Queued => "queued",
+        RepoProjectTaskState::Planning => "planning",
+        RepoProjectTaskState::Ready => "ready",
+        RepoProjectTaskState::Running => "running",
+        RepoProjectTaskState::WaitingCi => "waiting_ci",
+        RepoProjectTaskState::WaitingReview => "waiting_review",
+        RepoProjectTaskState::Blocked => "blocked",
+        RepoProjectTaskState::Done => "done",
+        RepoProjectTaskState::Failed => "failed",
+        RepoProjectTaskState::Cancelled => "cancelled",
     }
 }
 

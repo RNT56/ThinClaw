@@ -972,7 +972,17 @@ impl Agent {
             let repo_projects_config = resolve_repo_projects_config(store).await;
             if repo_projects_config.enabled {
                 let mut supervisor_db_store = DatabaseRepoSupervisorStore::new(Arc::clone(store))
-                    .with_sse(self.deps.sse_sender.clone());
+                    .with_sse(self.deps.sse_sender.clone())
+                    .with_limits(
+                        repo_projects_config.max_concurrent_projects,
+                        repo_projects_config.max_concurrent_tasks_per_project,
+                    );
+
+                // The autonomous LLM-backed task planner (T6) is wired here once
+                // an injectable subagent stack is available; until then projects
+                // that need planning fall back to an explicit AwaitingHuman
+                // status (see DatabaseRepoSupervisorStore::with_planner).
+                supervisor_db_store = supervisor_db_store.with_planner(None);
 
                 // Sandbox executor for coding-job dispatch + CI repair.
                 if self.deps.job_manager.is_some() {
@@ -1007,6 +1017,11 @@ impl Agent {
                     .await;
                     let provider: Arc<dyn RepoGitHubClientProvider> = Arc::new(provider);
                     let pipeline_config = PipelineConfig {
+                        max_merge_attempts: std::env::var("REPO_PROJECTS_MAX_MERGE_ATTEMPTS")
+                            .ok()
+                            .and_then(|value| value.trim().parse::<u32>().ok())
+                            .filter(|value| *value > 0)
+                            .unwrap_or(PipelineConfig::default().max_merge_attempts),
                         post_review_summary: std::env::var("REPO_PROJECTS_REVIEW_SUMMARY")
                             .map(|value| {
                                 matches!(

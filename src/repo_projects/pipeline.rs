@@ -52,6 +52,12 @@ const SUPERVISOR_BOT_MARKER: &str = "_Managed by the ThinClaw repo project super
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineConfig {
     pub max_ci_repair_attempts: u32,
+    /// Cap on how many times an *approved* merge gate may attempt a merge that
+    /// GitHub accepts-without-merging or rejects before the task is escalated to
+    /// a human. Without this bound a structurally-unmergeable-but-gate-approved
+    /// PR (protected branch, required-status mismatch, repeated 405) would be
+    /// retried on every watchdog tick forever. Reset on a new head SHA.
+    pub max_merge_attempts: u32,
     /// When enabled, the supervisor posts a one-shot "review readiness" summary
     /// comment (CI + merge-gate status) to the PR at the review stage. This is an
     /// automated readiness signal, not a full code review.
@@ -67,6 +73,7 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             max_ci_repair_attempts: 3,
+            max_merge_attempts: 3,
             post_review_summary: false,
             reviewer_backend: None,
         }
@@ -478,7 +485,7 @@ impl GitHubPipeline {
         })
     }
 
-    async fn perform_merge(
+    pub(super) async fn perform_merge(
         &self,
         repo: &RepoProjectRepo,
         task: &mut RepoProjectTask,
@@ -486,6 +493,32 @@ impl GitHubPipeline {
         head_sha: &str,
         merge_method: MergeMethod,
     ) -> Result<PipelineOutcome, String> {
+        // Bound the approved-merge retry loop. The counter is keyed to the head
+        // SHA so a new push (a fresh merge target) resets the budget, mirroring
+        // the per-SHA pattern used for the CI-repair and empty-CI counters.
+        let attempts =
+            if metadata_string(&task.metadata, "merge_attempts_sha").as_deref() == Some(head_sha) {
+                metadata_u64(&task.metadata, "merge_attempts")
+            } else {
+                0
+            };
+        if attempts >= u64::from(self.config.max_merge_attempts) {
+            self.block_task(
+                repo,
+                task,
+                &format!(
+                    "Merge gate approved but #{number} failed to merge after {attempts} attempt(s); \
+                     human intervention required."
+                ),
+            )
+            .await?;
+            return Ok(PipelineOutcome::AwaitingHuman {
+                reason: format!(
+                    "merge gate approved but unable to merge after {attempts} attempts"
+                ),
+            });
+        }
+
         let request = GitHubMergePullRequestRequest {
             commit_title: Some(redact_sensitive_text(&format!(
                 "{} (#{number})",
@@ -527,6 +560,9 @@ impl GitHubPipeline {
                     ),
                 )
                 .await;
+                // A successful merge clears the merge-attempt budget.
+                task.metadata =
+                    merge_metadata(&task.metadata, serde_json::json!({ "merge_attempts": 0 }));
                 self.finish_merged(task, &response.sha).await
             }
             Ok(response) => {
@@ -540,6 +576,7 @@ impl GitHubPipeline {
                     serde_json::json!({ "pull_request_number": number, "message": response.message }),
                 )
                 .await?;
+                self.record_merge_attempt(task, head_sha, attempts).await?;
                 Ok(PipelineOutcome::MergeGateRecorded { approved: true })
             }
             Err(error) => {
@@ -553,9 +590,30 @@ impl GitHubPipeline {
                     serde_json::json!({ "pull_request_number": number, "error": message }),
                 )
                 .await?;
+                self.record_merge_attempt(task, head_sha, attempts).await?;
                 Ok(PipelineOutcome::MergeGateRecorded { approved: true })
             }
         }
+    }
+
+    /// Persist an incremented merge-attempt counter keyed to the current head
+    /// SHA. The bound therefore survives a supervisor restart (metadata is
+    /// durable) and resets whenever a new commit becomes the merge target.
+    async fn record_merge_attempt(
+        &self,
+        task: &mut RepoProjectTask,
+        head_sha: &str,
+        attempts: u64,
+    ) -> Result<(), String> {
+        task.metadata = merge_metadata(
+            &task.metadata,
+            serde_json::json!({
+                "merge_attempts": attempts + 1,
+                "merge_attempts_sha": head_sha,
+            }),
+        );
+        task.updated_at = Utc::now();
+        self.persist_task(task).await
     }
 
     async fn finish_merged(

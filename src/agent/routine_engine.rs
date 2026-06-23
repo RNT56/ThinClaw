@@ -17,15 +17,15 @@ use chrono::{Duration as ChronoDuration, Timelike, Utc};
 use regex::Regex;
 use thinclaw_agent::routine_engine::{
     ClaimedScheduledTriggerDecisionInput, EVENT_CONTENT_PREVIEW_LIMIT, FullJobRuntimeMetadata,
-    RoutineEventEvaluationPlan, RoutineEventFilterOutcome, ScheduledTriggerAction,
+    HeartbeatTarget, RoutineEventEvaluationPlan, RoutineEventFilterOutcome, ScheduledTriggerAction,
     active_hour_allows, build_heartbeat_prompt, build_lightweight_routine_prompt,
     build_routine_event_from_message, build_routine_notification, build_scheduled_routine_triggers,
     classify_lightweight_routine_response, compare_event_cache_routines,
     decide_claimed_scheduled_trigger, decide_missing_scheduled_trigger_routine,
     decide_routine_event_dispatch, effective_lightweight_max_tokens,
     evaluate_routine_event_filters, full_job_metadata, heartbeat_job_metadata,
-    increment_decision_count, lightweight_routine_messages, routine_cooldown_allows,
-    routine_event_evaluation_details, routine_event_owner_matches,
+    increment_decision_count, lightweight_routine_messages, render_trigger_payload_block,
+    routine_cooldown_allows, routine_event_evaluation_details, routine_event_owner_matches,
     routine_requests_desktop_capabilities, routine_runtime_update_for_run, sanitize_routine_name,
     scheduled_run_trigger_key, should_continue_queue_drain, should_refresh_event_cache,
     summarize_runtime_capabilities, truncate,
@@ -36,9 +36,9 @@ use uuid::Uuid;
 use crate::agent::Scheduler;
 use crate::agent::outcomes;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventEvaluation, RoutineRun,
-    RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind, RunStatus, Trigger,
-    compile_event_trigger_pattern, next_fire_for_routine,
+    NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventDecision,
+    RoutineEventEvaluation, RoutineRun, RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind,
+    RunStatus, Trigger, compile_event_trigger_pattern, next_fire_for_routine,
 };
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
 use crate::agent::{AgentRunArtifact, AgentRunStatus};
@@ -324,6 +324,19 @@ impl RoutineEngine {
 
     /// Fire a routine manually (from tool call or CLI).
     pub async fn fire_manual(&self, routine_id: Uuid) -> Result<Uuid, RoutineError> {
+        self.fire_manual_with_payload(routine_id, None).await
+    }
+
+    /// Fire a routine manually with an optional trigger payload.
+    ///
+    /// Used by the webhook trigger path to forward the (validated, size-capped)
+    /// request body into the routine's effective prompt via
+    /// [`RoutineRun::trigger_detail`]. Non-webhook callers pass `None`.
+    pub async fn fire_manual_with_payload(
+        &self,
+        routine_id: Uuid,
+        payload: Option<String>,
+    ) -> Result<Uuid, RoutineError> {
         let routine = self
             .store
             .get_routine(routine_id)
@@ -345,7 +358,12 @@ impl RoutineEngine {
             });
         }
 
-        self.spawn_fire(routine, "manual", None, None).await
+        let trigger_type = if payload.is_some() {
+            "webhook"
+        } else {
+            "manual"
+        };
+        self.spawn_fire(routine, trigger_type, payload, None).await
     }
 
     async fn enqueue_due_cron_triggers(&self) -> Result<(), RoutineError> {
@@ -819,6 +837,55 @@ impl RoutineEngine {
                     trigger_key: candidate_trigger_key,
                 } => {
                     matched_routines += 1;
+
+                    // Content-hash window dedup (RoutineGuardrails.dedup_window):
+                    // suppress semantically duplicate *distinct* events that
+                    // already fired this routine within the window. The extra
+                    // query only runs when a window is configured, so the
+                    // common `dedup_window = None` path is unchanged.
+                    let dedup_skip = match routine.guardrails.dedup_window {
+                        Some(window) => {
+                            let since = now
+                                - ChronoDuration::from_std(window).unwrap_or_else(|_| {
+                                    ChronoDuration::seconds(window.as_secs() as i64)
+                                });
+                            self.store
+                                .routine_event_recent_content_match(
+                                    routine.id,
+                                    &event.content_hash,
+                                    since,
+                                )
+                                .await
+                                .map_err(|error| RoutineError::Database {
+                                    reason: error.to_string(),
+                                })?
+                        }
+                        None => false,
+                    };
+                    if dedup_skip {
+                        increment_decision_count(
+                            &mut decision_counts,
+                            RoutineEventDecision::SkippedDuplicate,
+                        );
+                        plans.push(RoutineEventEvaluationPlan {
+                            routine: routine.clone(),
+                            decision: RoutineEventDecision::SkippedDuplicate,
+                            reason: Some(
+                                "content matched a recent fire within dedup_window".to_string(),
+                            ),
+                            details: routine_event_evaluation_details(
+                                &self.worker_id,
+                                &event,
+                                now,
+                                None,
+                            ),
+                            should_fire: false,
+                            sequence_num,
+                            trigger_key: None,
+                        });
+                        continue;
+                    }
+
                     let duplicate_exists = self
                         .store
                         .routine_run_exists_for_trigger_key(routine.id, &candidate_trigger_key)
@@ -895,7 +962,12 @@ impl RoutineEngine {
                 })?;
         }
 
-        let mut dispatch_error = None;
+        // Per-event error isolation: a single routine that fails to spawn must
+        // not defer its sibling routines on the same event. Each spawn is
+        // independently idempotent via `routine_run_exists_for_trigger_key`, so
+        // failed routines are safely retried on the next drain while successful
+        // siblings fire now. Accumulate every error for diagnostics.
+        let mut dispatch_errors: Vec<String> = Vec::new();
         for plan in plans.iter().filter(|plan| plan.should_fire) {
             let Some(trigger_key) = plan.trigger_key.clone() else {
                 continue;
@@ -909,12 +981,20 @@ impl RoutineEngine {
                 )
                 .await
             {
-                dispatch_error = Some(error.to_string());
+                tracing::warn!(
+                    routine = %plan.routine.name,
+                    event_id = %event.id,
+                    "Failed to spawn routine for event — continuing with siblings: {}",
+                    error
+                );
+                dispatch_errors.push(format!("{}: {}", plan.routine.name, error));
                 has_deferred = true;
-                break;
             }
         }
 
+        // Preserve the legacy singular `dispatch_error` key (first error) for any
+        // existing diagnostics consumers while also exposing the full list.
+        let dispatch_error = dispatch_errors.first().cloned();
         let diagnostics = serde_json::json!({
             "channel": event.channel,
             "event_type": event.event_type,
@@ -928,6 +1008,7 @@ impl RoutineEngine {
             "claimed_by": self.worker_id,
             "deferred": has_deferred,
             "dispatch_error": dispatch_error,
+            "dispatch_errors": dispatch_errors,
         });
 
         if has_deferred {
@@ -1163,7 +1244,17 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             prompt,
             context_paths,
             max_tokens,
-        } => execute_lightweight(&ctx, &routine, prompt, context_paths, *max_tokens).await,
+        } => {
+            execute_lightweight(
+                &ctx,
+                &routine,
+                prompt,
+                context_paths,
+                *max_tokens,
+                run.trigger_detail.as_deref(),
+            )
+            .await
+        }
         RoutineAction::FullJob {
             title,
             description,
@@ -1172,13 +1263,21 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             allowed_skills,
             tool_profile,
         } => {
+            // Append any trigger payload (e.g. signed webhook body) into the
+            // job description as a delimited, untrusted-data block.
+            let payload_block = render_trigger_payload_block(run.trigger_detail.as_deref());
+            let effective_description = if payload_block.is_empty() {
+                description.clone()
+            } else {
+                format!("{description}{payload_block}")
+            };
             if ctx.subagent_executor.is_some() {
                 execute_as_subagent(
                     &ctx,
                     &routine,
                     &run,
                     title,
-                    description,
+                    &effective_description,
                     allowed_tools.as_deref(),
                     allowed_skills.as_deref(),
                     *tool_profile,
@@ -1190,7 +1289,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                     &routine,
                     &run,
                     title,
-                    description,
+                    &effective_description,
                     *max_iterations,
                     allowed_tools.as_deref(),
                     allowed_skills.as_deref(),
@@ -1659,10 +1758,10 @@ async fn execute_heartbeat(
     run: &RoutineRun,
     light_context: bool,
     custom_prompt: Option<&str>,
-    _include_reasoning: bool,
+    include_reasoning: bool,
     active_start_hour: Option<u8>,
     active_end_hour: Option<u8>,
-    _target: &str,
+    target: &str,
     max_iterations: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // 0. Active hours check
@@ -1746,13 +1845,17 @@ async fn execute_heartbeat(
         Ok(Some(summary)) => Some(summary),
         _ => None,
     };
-    let full_prompt = build_heartbeat_prompt(
+    let mut full_prompt = build_heartbeat_prompt(
         custom_prompt,
         &checklist,
         &daily_context,
         &critique_context,
         outcome_summary.as_deref(),
+        include_reasoning,
     );
+    // Forward any trigger payload (e.g. a signed webhook body) into the
+    // heartbeat prompt as a delimited, untrusted-data block.
+    full_prompt.push_str(&render_trigger_payload_block(run.trigger_detail.as_deref()));
 
     if !light_context {
         // ── Main-session injection mode ──────────────────────────────
@@ -1760,11 +1863,15 @@ async fn execute_heartbeat(
         // The dispatcher processes it as a normal turn with full session history
         // and tool access. The response flows through normal SSE → chat.
         if let Some(ref tx) = ctx.system_event_tx {
+            let heartbeat_target = HeartbeatTarget::parse(target);
             let message = IncomingMessage::new("heartbeat", "system", &full_prompt).with_metadata(
                 serde_json::json!({
                     "source": "heartbeat",
                     "routine_name": routine.name,
                     "run_id": run.id.to_string(),
+                    "include_reasoning": include_reasoning,
+                    "suppress_output": heartbeat_target.suppresses_output(),
+                    "notify_channel": heartbeat_target.channel_override(),
                 }),
             );
 
@@ -1806,7 +1913,7 @@ async fn execute_heartbeat(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let metadata = heartbeat_job_metadata(routine, max_iterations);
+    let metadata = heartbeat_job_metadata(routine, max_iterations, target, include_reasoning);
 
     let job_id = scheduler
         .dispatch_job_reserved_for_routine(
@@ -1859,6 +1966,7 @@ async fn execute_lightweight(
     prompt: &str,
     context_paths: &[String],
     max_tokens: u32,
+    trigger_detail: Option<&str>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Load context from workspace
     let mut context_parts = Vec::new();
@@ -1884,8 +1992,9 @@ async fn execute_lightweight(
         Err(_) => None,
     };
 
-    let full_prompt =
+    let mut full_prompt =
         build_lightweight_routine_prompt(prompt, &context_parts, state_content.as_deref());
+    full_prompt.push_str(&render_trigger_payload_block(trigger_detail));
 
     // Get system prompt
     let system_prompt = match ctx.workspace.system_prompt().await {
@@ -2531,6 +2640,156 @@ mod tests {
         assert_eq!(
             runs[0].trigger_key.as_deref(),
             Some("event:event:slack:default:actor-a:reaction_added:structured-1")
+        );
+    }
+
+    /// `dedup_window` suppresses a second *distinct* event with identical
+    /// content within the window; outside the window it fires again.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn dedup_window_suppresses_duplicate_content_within_window() {
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            Arc::new(StubLlm::new("deploy noticed")),
+            workspace,
+            notify_tx,
+            None,
+        ));
+
+        let mut routine = make_test_routine(
+            "dedup-window",
+            Trigger::Event {
+                channel: Some("slack".to_string()),
+                event_type: Some("message".to_string()),
+                actor: None,
+                metadata: None,
+                pattern: "deploy".to_string(),
+                priority: 0,
+            },
+            RoutineAction::Lightweight {
+                prompt: "Inspect deploy".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 32,
+            },
+        );
+        routine.guardrails.dedup_window = Some(std::time::Duration::from_secs(3600));
+        // Disable cooldown so suppression is attributable to content dedup.
+        routine.guardrails.cooldown = std::time::Duration::from_secs(0);
+        db.create_routine(&routine).await.unwrap();
+        engine.refresh_event_cache().await;
+
+        let identity = crate::identity::ResolvedIdentity {
+            principal_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            conversation_scope_id: Uuid::new_v4(),
+            conversation_kind: crate::identity::ConversationKind::Direct,
+            raw_sender_id: "default".to_string(),
+            stable_external_conversation_key: "test://dedup-window".to_string(),
+        };
+        // Two distinct messages (different message ids => different trigger keys)
+        // with identical content.
+        let first = IncomingMessage::new("slack", "default", "deploy prod now")
+            .with_identity(identity.clone())
+            .with_metadata(serde_json::json!({ "message_id": "dedup-1" }));
+        let second = IncomingMessage::new("slack", "default", "deploy prod now")
+            .with_identity(identity)
+            .with_metadata(serde_json::json!({ "message_id": "dedup-2" }));
+
+        assert_eq!(engine.check_event_triggers(&first).await, 1);
+        assert_eq!(
+            engine.check_event_triggers(&second).await,
+            0,
+            "identical content within dedup_window must be suppressed"
+        );
+
+        let runs = db.list_routine_runs(routine.id, 10).await.unwrap();
+        assert_eq!(runs.len(), 1, "only the first event should fire");
+
+        // The second event records a SkippedDuplicate evaluation.
+        let second_event = db
+            .list_routine_events_for_actor("default", "default", 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.idempotency_key.contains("dedup-2"))
+            .expect("second durable event should be queryable");
+        let evaluation = db
+            .list_routine_event_evaluations_for_event(second_event.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("second event evaluation should be recorded");
+        assert_eq!(evaluation.decision, RoutineEventDecision::SkippedDuplicate);
+    }
+
+    /// Two distinct routines matching the same event must both fire in a single
+    /// drain — the dispatch loop isolates per-routine failures and never aborts
+    /// siblings (T2: `continue` instead of `break`).
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn sibling_routines_both_fire_for_same_event() {
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            Arc::new(StubLlm::new("handled")),
+            workspace,
+            notify_tx,
+            None,
+        ));
+
+        for name in ["sibling-a", "sibling-b"] {
+            let routine = make_test_routine(
+                name,
+                Trigger::Event {
+                    channel: Some("slack".to_string()),
+                    event_type: Some("message".to_string()),
+                    actor: None,
+                    metadata: None,
+                    pattern: "deploy".to_string(),
+                    priority: 0,
+                },
+                RoutineAction::Lightweight {
+                    prompt: format!("Inspect deploy for {name}"),
+                    context_paths: Vec::new(),
+                    max_tokens: 32,
+                },
+            );
+            db.create_routine(&routine).await.unwrap();
+        }
+        engine.refresh_event_cache().await;
+
+        let identity = crate::identity::ResolvedIdentity {
+            principal_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            conversation_scope_id: Uuid::new_v4(),
+            conversation_kind: crate::identity::ConversationKind::Direct,
+            raw_sender_id: "default".to_string(),
+            stable_external_conversation_key: "test://siblings".to_string(),
+        };
+        let message = IncomingMessage::new("slack", "default", "deploy prod")
+            .with_identity(identity)
+            .with_metadata(serde_json::json!({ "message_id": "siblings-1" }));
+
+        assert_eq!(
+            engine.check_event_triggers(&message).await,
+            2,
+            "both sibling routines should fire from one event"
         );
     }
 }

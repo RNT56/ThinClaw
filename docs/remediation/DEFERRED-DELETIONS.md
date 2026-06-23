@@ -28,4 +28,14 @@
 
 ---
 
+## Wave 1 (WS-06 / WS-09)
+
+### D-02 — Orphaned standalone heartbeat runner
+- **What:** `HeartbeatRunner::run()` + `spawn_heartbeat(...)` on both the root wrapper (`src/agent/heartbeat.rs`, + the `src/agent/mod.rs:81` re-export) and the extracted crate (`crates/thinclaw-agent/src/heartbeat.rs`). When these go, the now-orphaned `consecutive_failures` field, `HeartbeatConfig.max_failures`/`interval`, and the private `send_notification` helper must be removed in the same commit.
+- **Why safe:** zero callers; superseded by the routine engine (documented at `src/agent/agent_loop.rs:725`). `check_heartbeat`/`new`/builders must STAY — they back the `/heartbeat` command (`commands.rs:248`).
+- **Precondition:** none beyond confirming the `/heartbeat` command path is untouched.
+- **Owner:** WS-09 (recorded) → Wave 4. Decision register WS-09 DP-5.
+
+---
+
 *Add new entries under the owning wave as they arise.*

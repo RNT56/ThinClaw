@@ -1014,6 +1014,17 @@ impl RoutineStore for PgBackend {
             .await
     }
 
+    async fn routine_event_recent_content_match(
+        &self,
+        routine_id: Uuid,
+        content_hash: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .routine_event_recent_content_match(routine_id, content_hash, since)
+            .await
+    }
+
     async fn enqueue_routine_trigger(&self, trigger: &RoutineTrigger) -> Result<(), DatabaseError> {
         self.store.enqueue_routine_trigger(trigger).await
     }

@@ -117,8 +117,12 @@ pub(crate) async fn github_repo_projects_webhook_handler(
         }));
     }
 
-    let matched_project_id =
-        find_project_id_for_repo(&state, envelope.repository_full_name.as_deref()).await?;
+    let matched_project_id = find_project_id_for_repo(
+        &state,
+        envelope.repository_full_name.as_deref(),
+        envelope.installation_id,
+    )
+    .await?;
     let supervisor_woken = wake_repo_project_supervisor(&state, &envelope).await?;
 
     if let Some(project_id) = matched_project_id {
@@ -212,6 +216,7 @@ async fn resolve_github_webhook_secret(
 async fn find_project_id_for_repo(
     state: &GatewayState,
     repository_full_name: Option<&str>,
+    installation_id: Option<i64>,
 ) -> Result<Option<Uuid>, (StatusCode, String)> {
     let Some(repository_full_name) = repository_full_name else {
         return Ok(None);
@@ -223,18 +228,51 @@ async fn find_project_id_for_repo(
         return Ok(None);
     };
 
+    match_and_backfill_repo(store, owner, repo_name, installation_id)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))
+}
+
+/// Find the project enrolling `owner/repo_name` and, when the webhook envelope
+/// carries an `installation_id` that differs from the stored one, backfill it
+/// onto the matched repo row (best-effort — a failed upsert is logged, not
+/// surfaced, so the webhook never fails on a stored-state write).
+async fn match_and_backfill_repo(
+    store: &Arc<dyn crate::db::Database>,
+    owner: &str,
+    repo_name: &str,
+    installation_id: Option<i64>,
+) -> Result<Option<Uuid>, String> {
     let projects = store
         .list_repo_projects()
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        .map_err(|error| error.to_string())?;
     for project in projects {
         let repos = store
             .list_repo_project_repos(project.id)
             .await
-            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-        if repos.iter().any(|repo| {
+            .map_err(|error| error.to_string())?;
+        if let Some(repo) = repos.iter().find(|repo| {
             repo.owner.eq_ignore_ascii_case(owner) && repo.repo.eq_ignore_ascii_case(repo_name)
         }) {
+            // Backfill the per-repo installation id discovered from the webhook
+            // envelope so multi-installation App auth can pin the correct
+            // installation instead of falling back to the global default.
+            if let Some(installation_id) = installation_id
+                && repo.installation_id != Some(installation_id)
+            {
+                let mut updated = repo.clone();
+                updated.installation_id = Some(installation_id);
+                updated.updated_at = chrono::Utc::now();
+                if let Err(error) = store.upsert_repo_project_repo(&updated).await {
+                    tracing::warn!(
+                        project_id = %project.id,
+                        repo_id = %repo.id,
+                        error = %error,
+                        "failed to persist webhook-discovered installation_id"
+                    );
+                }
+            }
             return Ok(Some(project.id));
         }
     }
@@ -354,5 +392,109 @@ mod tests {
             github_webhook_error_response(GitHubWebhookError::DuplicateDelivery).0,
             StatusCode::CONFLICT
         );
+    }
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod backfill_tests {
+    use super::*;
+    use crate::testing::test_db;
+    use chrono::Utc;
+    use thinclaw_repo_projects::{
+        GitHubAuthMode, ProjectPolicy, RepoProject, RepoProjectRepo, RepoProjectState,
+    };
+
+    fn project() -> RepoProject {
+        let now = Utc::now();
+        RepoProject {
+            id: Uuid::new_v4(),
+            slug: "proj".to_string(),
+            name: "Proj".to_string(),
+            state: RepoProjectState::Active,
+            policy: ProjectPolicy::default(),
+            description: None,
+            current_run_id: None,
+            created_at: now,
+            updated_at: now,
+            started_at: Some(now),
+            completed_at: None,
+        }
+    }
+
+    fn repo(project_id: Uuid, installation_id: Option<i64>) -> RepoProjectRepo {
+        let now = Utc::now();
+        RepoProjectRepo {
+            id: Uuid::new_v4(),
+            project_id,
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            github_repo_id: None,
+            installation_id,
+            default_branch: "main".to_string(),
+            base_branch: Some("main".to_string()),
+            enrolled: true,
+            local_path: None,
+            auth_mode: GitHubAuthMode::GitHubApp,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn webhook_backfills_installation_id_onto_matched_repo() {
+        let (db, _guard) = test_db().await;
+        let project = project();
+        let repo = repo(project.id, None);
+        let repo_id = repo.id;
+        db.create_repo_project(&project).await.unwrap();
+        db.upsert_repo_project_repo(&repo).await.unwrap();
+
+        let matched = match_and_backfill_repo(&db, "acme", "widgets", Some(4242))
+            .await
+            .unwrap();
+        assert_eq!(matched, Some(project.id));
+
+        let stored = db
+            .list_repo_project_repos(project.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|repo| repo.id == repo_id)
+            .unwrap();
+        assert_eq!(
+            stored.installation_id,
+            Some(4242),
+            "installation id is backfilled from the webhook envelope"
+        );
+
+        // Re-delivery with the same id is idempotent (no spurious change).
+        let matched_again = match_and_backfill_repo(&db, "ACME", "Widgets", Some(4242))
+            .await
+            .unwrap();
+        assert_eq!(matched_again, Some(project.id), "case-insensitive match");
+        let stored_again = db
+            .list_repo_project_repos(project.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|repo| repo.id == repo_id)
+            .unwrap();
+        assert_eq!(stored_again.installation_id, Some(4242));
+    }
+
+    #[tokio::test]
+    async fn unmatched_repo_returns_none() {
+        let (db, _guard) = test_db().await;
+        let project = project();
+        db.create_repo_project(&project).await.unwrap();
+        db.upsert_repo_project_repo(&repo(project.id, None))
+            .await
+            .unwrap();
+
+        let matched = match_and_backfill_repo(&db, "other", "thing", Some(1))
+            .await
+            .unwrap();
+        assert_eq!(matched, None);
     }
 }
