@@ -52,4 +52,18 @@
 
 ---
 
+## Wave 1 — WS-03 (WASM channels)
+
+### F-09 — Shared channel/tool SDK extraction (kills copy-paste drift)
+- **Done:** the `split_message` UTF-8 fix is now correct in all four channels (telegram/slack/discord/whatsapp); Discord Ed25519 verification is implemented end-to-end.
+- **Remains:** `split_message`/`byte_index_for_char_limit`/`json_response`/`conversation_scope_id`/`external_conversation_key` (channels) and `url_encode_path`/`validate_input_length` (tools) are still duplicated byte-for-byte across the `channels-src/*` and `tools-src/*` crates — the exact pattern that caused the panic fix to originally land in only one copy.
+- **Takes:** extract a shared `include!`-style source module (mirroring `channels-src/shared_webhook_channel`) consumed by each standalone crate. Deferred to the **Wave 3 architecture pass** (it's a dedup/maintainability refactor, not a correctness fix). Decision register WS-03 "shared SDK packaging" = Option B (`include!`).
+
+### F-10 — Thin-shim channel dispositions
+- **Done:** all 13 thin-shim channels classified — see [WS-03-shim-classification.md](./WS-03-shim-classification.md).
+- **Remains:** for each shim, execute the recommendation (finish the gap, or mark non-production in its capabilities manifest + README).
+- **Takes:** per-channel work sized in the classification doc; schedule alongside Wave 3 or as opportunistic follow-ups.
+
+---
+
 *Add follow-ups under the owning wave as they arise. Resolve or explicitly accept each before declaring a workstream done.*

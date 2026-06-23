@@ -301,6 +301,61 @@ fn verify_twitch_eventsub_signature(
     verify_signature(secret, &signed, signature)
 }
 
+/// Verify a Discord interaction signature.
+///
+/// Discord signs every interaction webhook with Ed25519. The signed message is
+/// the bytes of the `X-Signature-Timestamp` header concatenated with the raw
+/// request body. The signature itself arrives as a hex string in the
+/// `X-Signature-Ed25519` header (passed in as `signature`) and is verified
+/// against the application's hex-encoded public key (`discord_public_key`,
+/// passed in as `public_key_hex`).
+///
+/// Returns `true` only when the timestamp header is present, the public key
+/// decodes to 32 bytes, the signature decodes to 64 bytes, and the signature
+/// verifies. Ed25519 verification is constant-time internally.
+fn verify_discord_ed25519_signature(
+    public_key_hex: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    signature_hex: &str,
+) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let Some(timestamp) = headers
+        .get("X-Signature-Timestamp")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+
+    // Decode the hex-encoded public key into a fixed 32-byte array.
+    let Ok(public_key_bytes) = hex::decode(public_key_hex) else {
+        return false;
+    };
+    let Ok(public_key_bytes) = <[u8; 32]>::try_from(public_key_bytes.as_slice()) else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key_bytes) else {
+        return false;
+    };
+
+    // Decode the hex-encoded signature into a fixed 64-byte array.
+    let Ok(signature_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(signature_bytes) = <[u8; 64]>::try_from(signature_bytes.as_slice()) else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&signature_bytes);
+
+    // Signed message is timestamp bytes followed by the raw body bytes.
+    let mut signed = Vec::with_capacity(timestamp.len() + body.len());
+    signed.extend_from_slice(timestamp.as_bytes());
+    signed.extend_from_slice(body);
+
+    verifying_key.verify(&signed, &signature).is_ok()
+}
+
 fn verify_twilio_request_signature(
     auth_token: &[u8],
     headers: &HeaderMap,
@@ -642,6 +697,9 @@ async fn webhook_handler(
                     &body,
                     &provided,
                 ),
+                WebhookSecretValidation::DiscordEd25519 => {
+                    verify_discord_ed25519_signature(expected, &headers, &body, &provided)
+                }
             };
 
             if !valid {
@@ -658,7 +716,8 @@ async fn webhook_handler(
                             WebhookSecretValidation::HmacSha256Body
                             | WebhookSecretValidation::HmacSha256Base64Body
                             | WebhookSecretValidation::TwitchEventsubHmacSha256
-                            | WebhookSecretValidation::TwilioRequestSignature => {
+                            | WebhookSecretValidation::TwilioRequestSignature
+                            | WebhookSecretValidation::DiscordEd25519 => {
                                 "Invalid webhook signature"
                             }
                         }
@@ -1242,6 +1301,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_discord_ed25519_signature_validation() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        // Deterministic test keypair (mirrors src/extensions/signing.rs test pattern).
+        let mut seed = [0u8; 32];
+        seed[0] = 7;
+        seed[31] = 42;
+        let signing_key = SigningKey::from_bytes(&seed);
+        let public_key_hex = hex::encode(signing_key.verifying_key().as_bytes());
+
+        let router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("discord");
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "discord".to_string(),
+            path: "/webhook/discord".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: true,
+        }];
+
+        router
+            .register(
+                channel,
+                endpoints,
+                RegisteredWebhookAuth {
+                    secret_header: Some("X-Signature-Ed25519".to_string()),
+                    secret_validation: WebhookSecretValidation::DiscordEd25519,
+                    // For Discord the "secret" is the application public key.
+                    signature_secret: Some(public_key_hex),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let app = create_wasm_channel_router(Arc::clone(&router));
+        let body = Bytes::from_static(br#"{"type":1}"#);
+        let timestamp = "1700000000";
+
+        // Sign timestamp || body, the way Discord does.
+        let mut signed = Vec::new();
+        signed.extend_from_slice(timestamp.as_bytes());
+        signed.extend_from_slice(&body);
+        let signature_hex = hex::encode(signing_key.sign(&signed).to_bytes());
+
+        // Valid signature is accepted.
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/discord")
+                    .header("X-Signature-Timestamp", timestamp)
+                    .header("X-Signature-Ed25519", &signature_hex)
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        // Tampered body is rejected (signature no longer matches).
+        let tampered_body = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/discord")
+                    .header("X-Signature-Timestamp", timestamp)
+                    .header("X-Signature-Ed25519", &signature_hex)
+                    .body(Body::from(Bytes::from_static(br#"{"type":2}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tampered_body.status(), StatusCode::UNAUTHORIZED);
+
+        // Tampered signature is rejected.
+        let bad_signature = hex::encode([0u8; 64]);
+        let tampered_sig = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/discord")
+                    .header("X-Signature-Timestamp", timestamp)
+                    .header("X-Signature-Ed25519", &bad_signature)
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tampered_sig.status(), StatusCode::UNAUTHORIZED);
+
+        // Missing timestamp header is rejected.
+        let missing_ts = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/discord")
+                    .header("X-Signature-Ed25519", &signature_hex)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_ts.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

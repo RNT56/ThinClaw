@@ -14,7 +14,12 @@
 //!
 //! # Security
 //!
-//! - Signature validation is handled by the host (webhook secrets)
+//! - Interaction signatures are verified host-side: the host checks the
+//!   `X-Signature-Ed25519` header (an Ed25519 signature over
+//!   `X-Signature-Timestamp` + the raw body) against `discord_public_key`
+//!   before dispatch, and this component additionally rejects any request the
+//!   host did not validate (`secret_validated`) when signature verification is
+//!   required.
 //! - Bot token is injected by host during HTTP requests
 //! - WASM never sees raw credentials
 
@@ -138,6 +143,8 @@ const OWNER_ID_PATH: &str = "state/owner_id";
 const DM_POLICY_PATH: &str = "state/dm_policy";
 /// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
 const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Workspace path for persisting require_signature_verification across WASM callbacks.
+const REQUIRE_SIG_PATH: &str = "state/require_signature_verification";
 /// Channel name for pairing store (used by pairing host APIs).
 const CHANNEL_NAME: &str = "discord";
 
@@ -145,7 +152,6 @@ const CHANNEL_NAME: &str = "discord";
 #[derive(Debug, Deserialize)]
 struct DiscordConfig {
     #[serde(default)]
-    #[allow(dead_code)]
     require_signature_verification: bool,
     #[serde(default)]
     owner_id: Option<String>,
@@ -183,6 +189,17 @@ impl Guest for DiscordChannel {
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
+        // Persist whether host-side Ed25519 signature verification is required so
+        // on_http_request can reject interactions that the host did not validate.
+        let _ = channel_host::workspace_write(
+            REQUIRE_SIG_PATH,
+            if config.require_signature_verification {
+                "1"
+            } else {
+                "0"
+            },
+        );
+
         Ok(ChannelConfig {
             display_name: "Discord".to_string(),
             http_endpoints: vec![HttpEndpointConfig {
@@ -195,6 +212,21 @@ impl Guest for DiscordChannel {
     }
 
     fn on_http_request(req: IncomingHttpRequest) -> OutgoingHttpResponse {
+        // The host verifies the Discord Ed25519 interaction signature
+        // (X-Signature-Ed25519 over X-Signature-Timestamp + raw body) against
+        // discord_public_key before dispatching. When signature verification is
+        // required, reject any request the host did not validate so forged
+        // interactions never reach command handling.
+        let require_signature_verification =
+            channel_host::workspace_read(REQUIRE_SIG_PATH).as_deref() != Some("0");
+        if require_signature_verification && !req.secret_validated {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "Discord interaction rejected: host-side Ed25519 signature validation failed",
+            );
+            return json_response(401, serde_json::json!({"error": "Invalid request signature"}));
+        }
+
         let body_str = match std::str::from_utf8(&req.body) {
             Ok(s) => s,
             Err(_) => {
@@ -733,42 +765,48 @@ const DISCORD_MAX_MESSAGE_LENGTH: usize = 2000;
 /// Tries to split at paragraph boundaries (`\n\n`), then line boundaries (`\n`),
 /// then at the last space. Falls back to hard splitting at the char limit.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
+    if text.chars().count() <= max_len {
         return vec![text.to_string()];
+    }
+
+    /// Map a character budget to a byte index on a UTF-8 char boundary.
+    ///
+    /// Returns the byte offset of the `max_chars`-th character, or the full
+    /// byte length when the string has fewer characters. This never lands
+    /// mid-codepoint, so slicing at the returned index cannot panic.
+    fn byte_index_for_char_limit(text: &str, max_chars: usize) -> usize {
+        text.char_indices()
+            .nth(max_chars)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len())
     }
 
     let mut chunks = Vec::new();
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        if remaining.len() <= max_len {
+        if remaining.chars().count() <= max_len {
             chunks.push(remaining.to_string());
             break;
         }
 
-        // Find the best split point within max_len characters
-        let search_area = &remaining[..max_len];
+        // Byte index of the char-count budget; always a valid char boundary.
+        let search_end = byte_index_for_char_limit(remaining, max_len);
+        let search_area = &remaining[..search_end];
 
-        // Priority 1: split at a paragraph break (\n\n)
+        // Priority 1: paragraph break (\n\n); Priority 2: line break;
+        // Priority 3: last space; Fallback: hard split at the char boundary.
         let split_at = search_area
             .rfind("\n\n")
             .map(|pos| pos + 1)
-            // Priority 2: split at a line break
             .or_else(|| search_area.rfind('\n'))
-            // Priority 3: split at a space
             .or_else(|| search_area.rfind(' '))
-            // Fallback: hard split at max_len (but on a char boundary)
-            .unwrap_or_else(|| {
-                let mut boundary = max_len;
-                while boundary > 0 && !remaining.is_char_boundary(boundary) {
-                    boundary -= 1;
-                }
-                boundary
-            });
+            .unwrap_or(search_end);
 
         if split_at == 0 {
-            chunks.push(remaining.to_string());
-            break;
+            chunks.push(search_area.to_string());
+            remaining = remaining[search_end..].trim_start();
+            continue;
         }
 
         chunks.push(remaining[..split_at].trim_end().to_string());
@@ -812,6 +850,27 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].starts_with('a'));
         assert!(chunks[1].starts_with('b'));
+    }
+
+    #[test]
+    fn test_split_message_is_unicode_safe() {
+        // A byte-index slice at the limit would land mid-codepoint and panic;
+        // the char-aware splitter must handle this without panicking.
+        let text = "🙂".repeat(5000);
+        let chunks = split_message(&text, DISCORD_MAX_MESSAGE_LENGTH);
+
+        // 5000 chars / 2000-char limit => 3 chunks.
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.chars().count())
+                .sum::<usize>(),
+            5000
+        );
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= DISCORD_MAX_MESSAGE_LENGTH);
+        }
     }
 
     #[test]
