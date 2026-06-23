@@ -27,5 +27,8 @@
     "memory_chunks.embedding_blob",
     "memory_chunks.embedding_dim"
   ],
+  "ignore_types": [],
+  "ignore_nullability": [],
+  "ignore_indexes": [],
   "allowed_exact": []
 }

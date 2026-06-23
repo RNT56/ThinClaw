@@ -123,44 +123,60 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 
 /// Validate that a path is safe (no traversal attacks).
 ///
-/// For sandboxed paths (base_dir is set), we normalize the joined path lexically
-/// and then verify it lives under the canonical base. This prevents escapes through
-/// non-existent parent directories where `canonicalize()` would fall back to the
-/// raw (un-normalized) path.
+/// When `base_dir` is `Some`, containment is fail-closed: the resolved path must
+/// live under that canonical base, and `..` traversal or symlink escapes are
+/// rejected even through non-existent parent directories (we normalize the
+/// joined path lexically before checking, so an escape cannot slip through where
+/// `canonicalize()` would fall back to the raw path).
+///
+/// When `base_dir` is `None` the tool operates in unrestricted mode — the
+/// deliberate trusted-local-operator contract used when no workspace base is
+/// configured (see [`crate::registry::ToolRegistry::register_filesystem_tools`],
+/// which warns at registration time when no base is set). Relative paths resolve
+/// against the current working directory and absolute paths are accepted as-is;
+/// untrusted contexts must register the filesystem tools WITH a base directory to
+/// sandbox access.
 pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
     let path = PathBuf::from(path_str);
 
-    // Resolve to absolute path
+    // Base against which relative paths are resolved. With an explicit
+    // `base_dir` this is also the containment root; with no base we resolve
+    // relative paths against the current working directory.
+    let containment_base: PathBuf = match base_dir {
+        Some(base) => base.to_path_buf(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+
+    // Resolve to an absolute path. Absolute inputs are taken as-is; relative
+    // inputs are joined onto the base.
     let resolved = if path.is_absolute() {
         path.canonicalize()
             .unwrap_or_else(|_| normalize_lexical(&path))
-    } else if let Some(base) = base_dir {
-        let joined = base.join(&path);
+    } else {
+        let joined = containment_base.join(&path);
         joined
             .canonicalize()
             .unwrap_or_else(|_| normalize_lexical(&joined))
-    } else {
-        let joined = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(&path);
-        normalize_lexical(&joined)
     };
 
-    // If base_dir is set, ensure the resolved path is within it
-    if let Some(base) = base_dir {
-        let base_canonical = base
+    // Containment is enforced only when an explicit base directory is
+    // configured. With no base, the tool runs in unrestricted mode (the
+    // trusted-operator contract); registration emits a warning so the
+    // unsandboxed state is observable.
+    if base_dir.is_some() {
+        let base_canonical = containment_base
             .canonicalize()
-            .unwrap_or_else(|_| normalize_lexical(base));
+            .unwrap_or_else(|_| normalize_lexical(&containment_base));
 
         // For existing paths, canonicalize to resolve symlinks.
-        // For non-existent paths, the lexical normalization above already removed
-        // all `..` components, so starts_with is reliable.
+        // For non-existent paths, the lexical normalization above already
+        // removed all `..` components, so starts_with is reliable.
         let check_path = if resolved.exists() {
             resolved.canonicalize().unwrap_or_else(|_| resolved.clone())
         } else {
-            // Walk up to the nearest existing ancestor directory, canonicalize it,
-            // then re-append the remaining tail. This handles the case where a
-            // symlink sits above the new file.
+            // Walk up to the nearest existing ancestor directory, canonicalize
+            // it, then re-append the remaining tail. This handles the case
+            // where a symlink sits above the new file.
             let mut ancestor = resolved.as_path();
             let mut tail_parts: Vec<&std::ffi::OsStr> = Vec::new();
             loop {
@@ -1505,6 +1521,47 @@ mod tests {
         assert!(
             result.is_ok(),
             "Should allow .. that stays within sandbox: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_path_no_base_dir_allows_relative_under_cwd() {
+        // Unrestricted mode (no base configured): a relative path resolves
+        // against the cwd and is allowed.
+        let result = validate_path("Cargo.toml", None);
+        assert!(
+            result.is_ok(),
+            "Relative path should resolve against cwd when unconfigured: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_path_no_base_dir_allows_absolute_path() {
+        // Unrestricted mode is the deliberate trusted-local-operator contract:
+        // with no base configured, absolute paths outside the cwd are allowed.
+        // Untrusted contexts must register the tools WITH a base_dir (see
+        // ToolRegistry::register_filesystem_tools, which warns when none is set).
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, "hi").unwrap();
+        let result = validate_path(file.to_str().unwrap(), None);
+        assert!(
+            result.is_ok(),
+            "Absolute path should be allowed in unrestricted mode: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_path_with_base_dir_still_rejects_absolute_escape() {
+        // Containment remains fail-closed when a base IS configured.
+        let dir = TempDir::new().unwrap();
+        let result = validate_path("/etc/passwd", Some(dir.path()));
+        assert!(
+            result.is_err(),
+            "Absolute escape must be rejected when a base_dir is configured, got: {:?}",
             result
         );
     }

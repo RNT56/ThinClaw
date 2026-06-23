@@ -678,12 +678,7 @@ impl WorkspaceStore for LibSqlBackend {
             // characters (hyphens, colons, etc.) aren't interpreted as FTS5
             // operators. e.g. "time-sensitive notes" → `"time" "sensitive" "notes"`
             let sanitized_query: String = if keywords.is_empty() {
-                query
-                    .split(|c: char| !c.is_alphanumeric() && c != '_')
-                    .filter(|w| !w.is_empty())
-                    .map(|w| format!("\"{}\"", w))
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                super::fts::sanitize_fts5_match(query)
             } else {
                 keywords
                     .iter()

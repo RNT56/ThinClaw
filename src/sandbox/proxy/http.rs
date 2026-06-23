@@ -1,13 +1,21 @@
 //! HTTP proxy server for sandboxed network access.
 //!
 //! This proxy runs on the host and handles all network requests from containers.
-//! It validates requests against the allowlist and injects credentials when needed.
+//! It validates every request against the allowlist. Credential injection is
+//! **HTTP-only**: for plaintext `http://` forwards (`forward_request`) the proxy
+//! resolves the secret through the configured [`CredentialResolver`] and adds it
+//! to the outbound request. HTTPS traffic is tunneled opaquely via `CONNECT`
+//! (`handle_connect`) and cannot be inspected or modified without MITM, so HTTPS
+//! credentials are *not* injected here — containers that need authenticated HTTPS
+//! fetch them out-of-band from the orchestrator's `/worker/{id}/credentials`
+//! endpoint. The production [`StoreCredentialResolver`] reads secrets from the
+//! encrypted [`SecretsStore`]; [`EnvCredentialResolver`] is the env fallback.
 //!
 //! ```text
 //! Container ──► http_proxy=host.docker.internal:PORT ──► This Proxy ──► Internet
 //!                                                             │
 //!                                                             ├─► Validate domain
-//!                                                             ├─► Inject credentials
+//!                                                             ├─► Inject credentials (HTTP forward only)
 //!                                                             └─► Log requests
 //! ```
 
@@ -26,7 +34,7 @@ use tokio::sync::RwLock;
 
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::policy::{NetworkDecision, NetworkPolicyDecider, NetworkRequest};
-use crate::secrets::CredentialLocation;
+use crate::secrets::{CredentialLocation, SecretAccessContext, SecretsStore};
 
 /// State shared across proxy connections.
 struct ProxyState {
@@ -66,6 +74,54 @@ pub struct NoCredentialResolver;
 impl CredentialResolver for NoCredentialResolver {
     async fn resolve(&self, _name: &str) -> Option<String> {
         None
+    }
+}
+
+/// A credential resolver backed by the encrypted [`SecretsStore`].
+///
+/// This is the production resolver: it pulls credentials from the AES-256-GCM
+/// secrets store via the audited injection path (`get_for_injection`) rather
+/// than from the host process environment. Wire it through
+/// [`NetworkProxyBuilder::with_credential_resolver`](super::NetworkProxyBuilder::with_credential_resolver)
+/// (or [`NetworkProxyBuilder::from_config_with_store`](super::NetworkProxyBuilder::from_config_with_store))
+/// when a store and the owning user are available; callers without a store fall
+/// back to [`EnvCredentialResolver`].
+pub struct StoreCredentialResolver {
+    store: Arc<dyn SecretsStore>,
+    user_id: String,
+}
+
+impl StoreCredentialResolver {
+    /// Create a resolver that reads secrets for `user_id` from `store`.
+    pub fn new(store: Arc<dyn SecretsStore>, user_id: impl Into<String>) -> Self {
+        Self {
+            store,
+            user_id: user_id.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CredentialResolver for StoreCredentialResolver {
+    async fn resolve(&self, name: &str) -> Option<String> {
+        // Use the audited runtime-injection path so the access is recorded and
+        // the value is decrypted only at the point of use, mirroring the WASM
+        // credential injector (`thinclaw-tools` wasm::credential_injector).
+        let context =
+            SecretAccessContext::new("sandbox.proxy.credential_resolver", "http_proxy_injection");
+        match self
+            .store
+            .get_for_injection(&self.user_id, name, context)
+            .await
+        {
+            Ok(secret) => Some(secret.expose().to_string()),
+            Err(err) => {
+                // Never log the secret value; `SecretError`'s Display is safe and
+                // names only the secret, not its plaintext.
+                tracing::debug!("Proxy: secret {} unavailable from store: {}", name, err);
+                None
+            }
+        }
     }
 }
 
@@ -543,6 +599,45 @@ mod tests {
         assert!(is_hop_by_hop_header("transfer-encoding"));
         assert!(!is_hop_by_hop_header("content-type"));
         assert!(!is_hop_by_hop_header("authorization"));
+    }
+
+    fn test_secrets_crypto() -> Arc<crate::secrets::SecretsCrypto> {
+        // Matches the fixed-key fixture used by the WASM credential-injector
+        // tests (`thinclaw-tools` wasm::credential_injector::tests::test_store).
+        let key = "0123456789abcdef0123456789abcdef";
+        Arc::new(
+            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(key.to_string()))
+                .expect("test crypto key is valid"),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_store_credential_resolver_returns_stored_value() {
+        use crate::secrets::{CreateSecretParams, InMemorySecretsStore};
+
+        let store = Arc::new(InMemorySecretsStore::new(test_secrets_crypto()));
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("OPENAI_API_KEY", "sk-test123"),
+            )
+            .await
+            .expect("create secret");
+
+        let resolver = StoreCredentialResolver::new(store, "user1");
+        assert_eq!(
+            resolver.resolve("OPENAI_API_KEY").await,
+            Some("sk-test123".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_credential_resolver_missing_secret_is_none() {
+        use crate::secrets::InMemorySecretsStore;
+
+        let store = Arc::new(InMemorySecretsStore::new(test_secrets_crypto()));
+        let resolver = StoreCredentialResolver::new(store, "user1");
+        assert_eq!(resolver.resolve("ABSENT_KEY").await, None);
     }
 
     #[test]

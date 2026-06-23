@@ -1000,8 +1000,11 @@ mod tests {
             metadata: serde_json::json!({}),
         };
 
-        let summary = trajectory_summary(&[trajectory.clone()]);
-        assert_eq!(average_trajectory_score(&[trajectory.clone()]), 0.5);
+        let summary = trajectory_summary(std::slice::from_ref(&trajectory));
+        assert_eq!(
+            average_trajectory_score(std::slice::from_ref(&trajectory)),
+            0.5
+        );
         assert_eq!(summary["env_names"], serde_json::json!(["skill_bench"]));
         assert_eq!(summary["episode_count"], serde_json::json!(1));
         assert_eq!(summary["step_count"], serde_json::json!(1));

@@ -33,7 +33,10 @@ pub mod http;
 pub mod policy;
 
 pub use allowlist::{DomainAllowlist, DomainPattern, DomainValidationResult};
-pub use http::{CredentialResolver, EnvCredentialResolver, HttpProxy, NoCredentialResolver};
+pub use http::{
+    CredentialResolver, EnvCredentialResolver, HttpProxy, NoCredentialResolver,
+    StoreCredentialResolver,
+};
 pub use policy::{
     AllowAllDecider, DefaultPolicyDecider, DenyAllDecider, NetworkDecision, NetworkPolicyDecider,
     NetworkRequest,
@@ -43,7 +46,7 @@ use std::sync::Arc;
 
 use crate::sandbox::config::{SandboxConfig, SandboxPolicy, default_credential_mappings};
 use crate::sandbox::error::Result;
-use crate::secrets::CredentialMapping;
+use crate::secrets::{CredentialMapping, SecretsStore};
 
 /// Creates a configured network proxy from sandbox config.
 pub struct NetworkProxyBuilder {
@@ -65,6 +68,10 @@ impl NetworkProxyBuilder {
     }
 
     /// Create from a sandbox config.
+    ///
+    /// Uses [`EnvCredentialResolver`] (process env) as the credential source.
+    /// Prefer [`Self::from_config_with_store`] in production so credentials are
+    /// resolved from the encrypted secrets store instead.
     pub fn from_config(config: &SandboxConfig) -> Self {
         Self {
             allowlist: config.network_allowlist.clone(),
@@ -72,6 +79,21 @@ impl NetworkProxyBuilder {
             credential_resolver: Arc::new(EnvCredentialResolver),
             policy: config.policy,
         }
+    }
+
+    /// Create from a sandbox config with a [`SecretsStore`]-backed resolver.
+    ///
+    /// Credentials for the HTTP forward path are resolved from the encrypted
+    /// store for `user_id` rather than from process env. This is the wiring the
+    /// sandbox manager should use when secrets are configured; callers without a
+    /// store should use [`Self::from_config`] (env fallback).
+    pub fn from_config_with_store(
+        config: &SandboxConfig,
+        store: Arc<dyn SecretsStore>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        Self::from_config(config)
+            .with_credential_resolver(Arc::new(StoreCredentialResolver::new(store, user_id)))
     }
 
     /// Set the domain allowlist.

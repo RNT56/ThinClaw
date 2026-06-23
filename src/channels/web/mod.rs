@@ -70,7 +70,26 @@ impl GatewayChannel {
     ///
     /// If no auth token is configured, generates a random one and prints it.
     pub fn new(config: GatewayConfig) -> Self {
-        let auth_token = config.auth_token.clone().unwrap_or_else(|| {
+        // Defense in depth: treat a missing OR empty/whitespace-only configured
+        // token as absent. The bearer compare in `auth_middleware` is
+        // constant-time against this value, so an empty token here would let an
+        // empty `Authorization: Bearer` authenticate. Generate a random token
+        // in that case so an empty configured token can never authenticate.
+        let configured = config
+            .auth_token
+            .clone()
+            .filter(|token| !token.trim().is_empty());
+        if config
+            .auth_token
+            .as_deref()
+            .is_some_and(|t| t.trim().is_empty())
+        {
+            tracing::warn!(
+                "Gateway auth token was configured empty/whitespace-only; \
+                 generating a random token instead"
+            );
+        }
+        let auth_token = configured.unwrap_or_else(|| {
             use rand::Rng;
             let token: String = rand::thread_rng()
                 .sample_iter(&rand::distributions::Alphanumeric)
@@ -657,5 +676,36 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn gateway_new_replaces_empty_auth_token_with_random() {
+        for empty in ["", "   ", "\t"] {
+            let gateway = GatewayChannel::new(GatewayConfig {
+                host: "127.0.0.1".to_string(),
+                port: 3000,
+                auth_token: Some(empty.to_string()),
+                user_id: "u".to_string(),
+                actor_id: None,
+            });
+            let token = gateway.auth_token();
+            assert!(
+                !token.trim().is_empty(),
+                "empty configured token {empty:?} must be replaced with a non-empty random token"
+            );
+            assert_eq!(token.len(), 32, "generated token should be 32 chars");
+        }
+    }
+
+    #[test]
+    fn gateway_new_preserves_configured_auth_token() {
+        let gateway = GatewayChannel::new(GatewayConfig {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            auth_token: Some("configured-secret".to_string()),
+            user_id: "u".to_string(),
+            actor_id: None,
+        });
+        assert_eq!(gateway.auth_token(), "configured-secret");
     }
 }

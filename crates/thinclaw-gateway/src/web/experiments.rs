@@ -1247,7 +1247,8 @@ mod tests {
         assert_eq!(parse_experiment_target_id(id), Ok(parsed));
         assert_eq!(parse_experiment_lease_id(id), Ok(parsed));
 
-        let cases: [(&str, fn(&str) -> Result<Uuid, (StatusCode, String)>); 6] = [
+        type ParseFn = fn(&str) -> Result<Uuid, (StatusCode, String)>;
+        let cases: [(&str, ParseFn); 6] = [
             ("Invalid project ID", parse_experiment_project_id),
             ("Invalid runner ID", parse_experiment_runner_id),
             ("Invalid campaign ID", parse_experiment_campaign_id),

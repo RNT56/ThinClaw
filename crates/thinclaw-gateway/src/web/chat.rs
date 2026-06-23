@@ -979,7 +979,7 @@ mod tests {
         };
 
         assert_eq!(
-            thread_export_content("markdown", &[message.clone()]).unwrap(),
+            thread_export_content("markdown", std::slice::from_ref(&message)).unwrap(),
             "## user\n\nhello"
         );
 

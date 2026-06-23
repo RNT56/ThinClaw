@@ -1442,11 +1442,26 @@ pub async fn start_server(
         ]))
         .allow_credentials(true);
 
-    let app = Router::new()
+    // Build the stateful router and finalize state first so it becomes a
+    // `Router<()>`, then merge the extra public routes (WASM webhook endpoints,
+    // already `Router<()>`) BEFORE applying the layer stack. axum applies a
+    // layer only to the routes present when `.layer(...)` is called, and layers
+    // run outermost-first — merging after `.layer(...)` (the previous behavior)
+    // left these webhook routes with no body-limit/CORS/nosniff/frame-options
+    // coverage. Merging first and then layering ensures the extra public routes
+    // inherit the identical security stack as the main router.
+    let mut app = Router::new()
         .merge(public)
         .merge(statics)
         .merge(projects)
         .merge(protected)
+        .with_state(state.clone());
+
+    for routes in extra_public_routes {
+        app = app.merge(routes);
+    }
+
+    let app = app
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
@@ -1456,15 +1471,7 @@ pub async fn start_server(
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_FRAME_OPTIONS,
             header::HeaderValue::from_static("DENY"),
-        ))
-        .with_state(state.clone());
-
-    // Merge extra public routes (e.g. WASM webhook endpoints) AFTER
-    // .with_state() so both sides are Router<()>.
-    let mut app = app;
-    for routes in extra_public_routes {
-        app = app.merge(routes);
-    }
+        ));
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
