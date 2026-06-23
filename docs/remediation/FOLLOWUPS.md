@@ -1,0 +1,34 @@
+# Follow-ups Ledger (non-deletion deferred work)
+
+> Tracks work that was intentionally scoped-down during a wave because completing it required reaching outside the current change's safe boundary (a larger refactor, cross-crate plumbing, or another workstream's files). These are **not** deletions (see `DEFERRED-DELETIONS.md` for those) — they are remaining steps to fully close a fix.
+>
+> Each entry: what's done, what remains, and what it takes.
+
+## Wave 0 — WS-01 (security)
+
+### F-01 — Sandbox credential resolver: one runtime path still env-backed
+- **Done:** `SandboxManager::with_credential_store` + `AppBuilder::build_sandbox_manager` wire the encrypted `SecretsStore` (owner `"default"`) into all three production sandbox-construction sites; the proxy now resolves credentials via the audited `get_for_injection` path. Env resolver retained as fallback.
+- **Remains:** `src/api/experiments.rs` `experiment_execution_backend` (LocalDocker branch, ~:4144) builds a `DockerSandboxExecutionBackend` whose proxy still uses the env resolver — no `SecretsStore` is in scope in that free function.
+- **Takes:** thread an `Arc<dyn SecretsStore + Send + Sync>` (+ owning user) through `experiment_execution_backend` and its callers, then call `NetworkProxyBuilder::from_config_with_store`. Coordinate with WS-07 (experiments) since it touches that file.
+
+### F-02 — DNS-rebind pin: MCP HTTP client path still unpinned
+- **Done:** the builtin HTTP tool, `extract_document`, the WASM HTTP host, and the WASM OAuth token-refresh client all now connect to the validated pinned IPs via `reqwest` `resolve_to_addrs`.
+- **Remains:** the MCP Streamable-HTTP client (`crates/thinclaw-tools/src/mcp/client.rs`, long-lived `http_client` built ~:577, requests ~:770/813/858) and the MCP OAuth clients in `mcp/auth.rs` (~:366/402/489) are not pinned. `mcp/config.rs` validation is correctly left alone (no connection there).
+- **Takes:** re-validate `self.server_url` with `validate_outbound_url_pinned` and thread pinned addrs into a per-request or rebuilt client at the send sites. Larger because the client is shared across many requests.
+
+### F-03 — Shared constant-time state comparator (consistency, not a gap)
+- **Done:** OAuth `state` is now generated + constant-time-validated end-to-end in both WASM-tool flow drivers; the MCP callback check was upgraded from plain `!=` to a local constant-time comparator.
+- **Remains (optional):** `crates/thinclaw-tools/src/mcp/auth.rs` uses a local hand-rolled constant-time comparator because `subtle` isn't a dep of that crate, while `src/cli/oauth_defaults.rs` uses `subtle::ConstantTimeEq`.
+- **Takes:** add `subtle` to `thinclaw-tools/Cargo.toml` and dedupe onto one shared helper. Low priority.
+
+### F-04 — CLI status surface for shell scanner
+- **Done:** `ShellTool::scanner_status()` exposes external-scanner health/fail-open state in the tool's `execute` output.
+- **Remains:** wire a "Shell scanner" line into `src/cli/status.rs` `run_status_command` so an operator sees scanner mode/reachability in `thinclaw status`.
+- **Takes:** small CLI edit (out of the tool crate's lane).
+
+### F-05 — `search_files` base_dir consistency
+- **Note:** `crates/thinclaw-tools/src/builtin/search_files.rs` has its own `validate_path` duplicate. Now consistent with `file.rs` again (both treat `None` base as unrestricted). If a future change tightens containment, consolidate both onto the shared `file.rs::validate_path` and have search pass an explicit base. No action needed now.
+
+---
+
+*Add follow-ups under the owning wave as they arise. Resolve or explicitly accept each before declaring a workstream done.*

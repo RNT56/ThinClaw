@@ -807,6 +807,28 @@ pub fn build_authorization_url(
     url
 }
 
+/// Compare two OAuth `state` values in constant time.
+///
+/// Avoids leaking the expected `state` through a timing side channel when
+/// validating the loopback callback. Mirrors the constant-time `state`
+/// comparison used by the WASM tool OAuth flow in
+/// `crate::wasm::oauth` / `cli::oauth_defaults`.
+fn oauth_state_matches(expected: &str, received: &str) -> bool {
+    let expected = expected.as_bytes();
+    let received = received.as_bytes();
+    // Fold the length check into the accumulator so the comparison runs over a
+    // fixed iteration count regardless of where (or whether) a mismatch occurs.
+    let mut diff = (expected.len() ^ received.len()) as u8;
+    for (i, &e) in expected.iter().enumerate() {
+        // `received.get(i)` keeps indexing in-bounds for shorter inputs while
+        // still contributing to `diff` via the length mismatch above. Iterating
+        // over the full `expected` slice keeps the comparison constant-time.
+        let r = received.get(i).copied().unwrap_or(0);
+        diff |= e ^ r;
+    }
+    diff == 0
+}
+
 /// Wait for the authorization callback and validate an optional state nonce.
 async fn wait_for_authorization_callback(
     listener: TcpListener,
@@ -856,7 +878,10 @@ async fn wait_for_authorization_callback(
                 };
 
                 if let Some(expected_state) = expected_state.as_deref()
-                    && params.get("state").map(String::as_str) != Some(expected_state)
+                    && !params
+                        .get("state")
+                        .map(|received| oauth_state_matches(expected_state, received))
+                        .unwrap_or(false)
                 {
                     let response = format!(
                         "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
@@ -1186,6 +1211,20 @@ mod tests {
         // Two challenges should be different
         let pkce2 = PkceChallenge::generate();
         assert_ne!(pkce.verifier, pkce2.verifier);
+    }
+
+    #[test]
+    fn test_oauth_state_matches_constant_time() {
+        let state = "a3f1c9d2e4b5a6071829304a5b6c7d8e";
+        assert!(oauth_state_matches(state, state));
+        assert!(!oauth_state_matches(state, "wrong"));
+        assert!(!oauth_state_matches(state, ""));
+        // Same length, single-byte difference must be rejected.
+        let mut tampered = state.to_string();
+        tampered.replace_range(0..1, if state.starts_with('a') { "b" } else { "a" });
+        assert!(!oauth_state_matches(state, &tampered));
+        // A longer received value with the expected as a prefix must be rejected.
+        assert!(!oauth_state_matches(state, &format!("{state}extra")));
     }
 
     #[test]

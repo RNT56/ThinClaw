@@ -87,13 +87,13 @@ impl CredentialResolver for NoCredentialResolver {
 /// when a store and the owning user are available; callers without a store fall
 /// back to [`EnvCredentialResolver`].
 pub struct StoreCredentialResolver {
-    store: Arc<dyn SecretsStore>,
+    store: Arc<dyn SecretsStore + Send + Sync>,
     user_id: String,
 }
 
 impl StoreCredentialResolver {
     /// Create a resolver that reads secrets for `user_id` from `store`.
-    pub fn new(store: Arc<dyn SecretsStore>, user_id: impl Into<String>) -> Self {
+    pub fn new(store: Arc<dyn SecretsStore + Send + Sync>, user_id: impl Into<String>) -> Self {
         Self {
             store,
             user_id: user_id.into(),

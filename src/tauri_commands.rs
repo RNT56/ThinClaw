@@ -576,8 +576,11 @@ pub async fn wasm_tool_oauth_start(tool_name: String) -> Result<GmailOAuthResult
     let store = InMemorySecretsStore::new(crypto);
     let tools_dir = crate::platform::state_paths().tools_dir;
     let flow = WasmToolOAuthFlow::new(&store, "tauri", &tools_dir);
+    // CSRF defense: generate a state nonce, send it on the authorization request,
+    // and require the loopback callback to echo it back unchanged.
+    let oauth_state = oauth_defaults::generate_oauth_state();
     let auth_request = flow
-        .prepare_authorization(&auth, &redirect_uri, "local", None)
+        .prepare_authorization(&auth, &redirect_uri, "local", Some(&oauth_state))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -592,11 +595,12 @@ pub async fn wasm_tool_oauth_start(tool_name: String) -> Result<GmailOAuthResult
     let listener = oauth_defaults::bind_callback_listener()
         .await
         .map_err(|e| format!("Failed to bind OAuth callback listener: {}", e))?;
-    let code = oauth_defaults::wait_for_callback(
+    let code = oauth_defaults::wait_for_callback_with_state(
         listener,
         "/callback",
         "code",
         auth.display_name.as_deref().unwrap_or(&tool_name),
+        Some(&oauth_state),
     )
     .await
     .map_err(|e| format!("OAuth callback failed: {}", e))?;

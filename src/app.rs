@@ -205,6 +205,26 @@ impl AppBuilder {
         self.secrets_store.as_ref()
     }
 
+    /// Construct a [`SandboxManager`](crate::sandbox::SandboxManager) for the
+    /// given config, attaching the encrypted secrets store as the credential
+    /// source for its network proxy when one is available.
+    ///
+    /// The sandbox network proxy is owned per-manager (shared across the jobs
+    /// that run through it), so the owning user is bound here as the canonical
+    /// `"default"` operator used elsewhere in startup. When no store is
+    /// configured the manager falls back to the process-env credential
+    /// resolver.
+    fn build_sandbox_manager(
+        &self,
+        config: crate::sandbox::SandboxConfig,
+    ) -> crate::sandbox::SandboxManager {
+        let manager = crate::sandbox::SandboxManager::new(config);
+        match self.secrets_store.as_ref() {
+            Some(store) => manager.with_credential_store(Arc::clone(store), "default"),
+            None => manager,
+        }
+    }
+
     fn default_sandbox_workspace_dir() -> std::path::PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -593,9 +613,9 @@ impl AppBuilder {
                     (self.config.agent.workspace_mode == "sandboxed"
                         && self.config.sandbox.enabled)
                         .then(|| {
-                            Arc::new(crate::sandbox::SandboxManager::new(
-                                self.config.sandbox.to_sandbox_config(),
-                            ))
+                            Arc::new(
+                                self.build_sandbox_manager(self.config.sandbox.to_sandbox_config()),
+                            )
                         }),
                     Some(crate::sandbox::SandboxPolicy::WorkspaceWrite),
                     cost_tracker.clone(),
@@ -935,9 +955,7 @@ impl AppBuilder {
             );
             let sandbox =
                 matches!(tool_plan.workspace_mode, RuntimeWorkspaceMode::Sandboxed).then(|| {
-                    Arc::new(crate::sandbox::SandboxManager::new(
-                        self.config.sandbox.to_sandbox_config(),
-                    ))
+                    Arc::new(self.build_sandbox_manager(self.config.sandbox.to_sandbox_config()))
                 });
             let sandbox_policy = sandbox
                 .as_ref()
@@ -1027,9 +1045,8 @@ impl AppBuilder {
         if tool_plan.local_tools_enabled {
             let process_registry: crate::tools::builtin::SharedProcessRegistry =
                 Arc::new(tokio::sync::RwLock::new(Default::default()));
-            let sandbox_backend = Arc::new(crate::sandbox::SandboxManager::new(
-                self.config.sandbox.to_sandbox_config(),
-            ));
+            let sandbox_backend =
+                Arc::new(self.build_sandbox_manager(self.config.sandbox.to_sandbox_config()));
 
             match tool_plan.process_registration {
                 RuntimeExecRegistrationMode::LocalHost => {

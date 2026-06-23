@@ -802,6 +802,80 @@ mod tests {
         assert!(!super::oauth_state_matches(&state, &tampered));
     }
 
+    #[tokio::test]
+    async fn test_wait_for_callback_with_state_rejects_mismatch() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        // Bind an ephemeral loopback listener so the test never touches the
+        // fixed OAuth port or a real browser.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let expected = super::generate_oauth_state();
+        let server = tokio::spawn(async move {
+            super::wait_for_callback_with_state(
+                listener,
+                "/callback",
+                "code",
+                "Test",
+                Some(&expected),
+            )
+            .await
+        });
+
+        // Simulate the browser redirect with an attacker-controlled state value.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /callback?code=injected&state=attacker HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        // Drain the failure landing page so the server can finish writing.
+        let mut buf = Vec::new();
+        let _ = client.read_to_end(&mut buf).await;
+
+        let result = server.await.unwrap();
+        assert!(
+            matches!(result, Err(super::OAuthCallbackError::Denied)),
+            "mismatched state must be rejected, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_callback_with_state_accepts_match() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let expected = super::generate_oauth_state();
+        let expected_for_client = expected.clone();
+        let server = tokio::spawn(async move {
+            super::wait_for_callback_with_state(
+                listener,
+                "/callback",
+                "code",
+                "Test",
+                Some(&expected),
+            )
+            .await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET /callback?code=good-code&state={expected_for_client} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let _ = client.read_to_end(&mut buf).await;
+
+        let result = server.await.unwrap();
+        assert_eq!(result.unwrap(), "good-code");
+    }
+
     #[test]
     fn test_gmail_auth_url_contains_required_params() {
         let url = GmailOAuthConfig::auth_url("test-state", "test-challenge");

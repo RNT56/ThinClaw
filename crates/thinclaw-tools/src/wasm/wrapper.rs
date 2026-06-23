@@ -420,7 +420,9 @@ impl near::agent::host::Host for StoreData {
             .unwrap_or(10 * 1024 * 1024);
 
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        reject_private_ip(&url)?;
+        // The returned addresses are pinned into the request client below so the
+        // connection targets an address that already passed the private-IP check.
+        let validated = reject_private_ip(&url)?;
 
         // Make HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -437,9 +439,17 @@ impl near::agent::host::Host for StoreData {
         }
         let rt = self.http_runtime.as_ref().expect("just initialized");
         let result = rt.block_on(async {
-            let client = reqwest::Client::builder()
+            let mut client_builder = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
-                .redirect(reqwest::redirect::Policy::none())
+                .redirect(reqwest::redirect::Policy::none());
+            // Pin the connection to the validated addresses to close the
+            // DNS-rebinding TOCTOU window. Empty for IP-literal hosts, where
+            // reqwest connects to the literal directly and cannot rebind.
+            if !validated.pinned_addrs.is_empty() {
+                client_builder =
+                    client_builder.resolve_to_addrs(&validated.host, &validated.pinned_addrs);
+            }
+            let client = client_builder
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
@@ -1189,6 +1199,47 @@ mod tool_invoke_host_tests {
         );
         assert_eq!(invoker.calls().len(), 1);
     }
+
+    // ── DNS-rebinding pin tests for the WASM HTTP host ──────────────────
+
+    #[test]
+    fn reject_private_ip_blocks_private_literal() {
+        let err = super::reject_private_ip("https://192.168.1.1/x").unwrap_err();
+        assert!(err.contains("private/internal IP"));
+    }
+
+    #[test]
+    fn reject_private_ip_blocks_loopback_literal() {
+        assert!(super::reject_private_ip("https://127.0.0.1/x").is_err());
+    }
+
+    #[test]
+    fn reject_private_ip_public_literal_has_empty_pin() {
+        // Public IP literal: validated directly, nothing to pin.
+        let validated = super::reject_private_ip("https://8.8.8.8/x").unwrap();
+        assert_eq!(validated.host, "8.8.8.8");
+        assert!(
+            validated.pinned_addrs.is_empty(),
+            "IP-literal hosts must not be pinned"
+        );
+    }
+
+    #[test]
+    fn reject_private_ip_hostname_pin_is_consistent() {
+        // For a real hostname, when resolution succeeds (it may not in a
+        // sandboxed CI) the returned host is the bracket-stripped host and any
+        // pinned address must have passed the private-IP check.
+        if let Ok(validated) = super::reject_private_ip("https://example.com/") {
+            assert_eq!(validated.host, "example.com");
+            for addr in &validated.pinned_addrs {
+                assert!(
+                    !super::is_private_ip(addr.ip()),
+                    "pinned address {} should have passed the private-IP check",
+                    addr.ip()
+                );
+            }
+        }
+    }
 }
 
 /// Refresh an expired OAuth access token using the stored refresh token.
@@ -1216,14 +1267,17 @@ async fn refresh_oauth_token(
         );
         return false;
     }
-    if let Err(reason) = reject_private_ip(&config.token_url) {
-        tracing::warn!(
-            token_url = %config.token_url,
-            reason = %reason,
-            "OAuth token_url points to a private/internal IP, refusing token refresh"
-        );
-        return false;
-    }
+    let validated = match reject_private_ip(&config.token_url) {
+        Ok(validated) => validated,
+        Err(reason) => {
+            tracing::warn!(
+                token_url = %config.token_url,
+                reason = %reason,
+                "OAuth token_url points to a private/internal IP, refusing token refresh"
+            );
+            return false;
+        }
+    };
 
     let refresh_name = format!("{}_refresh_token", config.secret_name);
     let refresh_secret = match store
@@ -1251,11 +1305,15 @@ async fn refresh_oauth_token(
         }
     };
 
-    let client = match reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
+        .redirect(reqwest::redirect::Policy::none());
+    // Pin the connection to the addresses validated above so the token_url host
+    // cannot rebind to a private/internal IP between validation and connect time.
+    if !validated.pinned_addrs.is_empty() {
+        client_builder = client_builder.resolve_to_addrs(&validated.host, &validated.pinned_addrs);
+    }
+    let client = match client_builder.build() {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to build HTTP client for token refresh");
@@ -1504,10 +1562,29 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+/// Outcome of validating a URL against the private-IP / DNS-rebinding policy.
+///
+/// `host` is the bracket-stripped host string from the URL (suitable for
+/// `reqwest::ClientBuilder::resolve_to_addrs`). `pinned_addrs` holds the exact
+/// addresses the host resolved to *at validation time*; it is empty for
+/// IP-literal hosts (nothing to pin — `reqwest` connects to the literal
+/// directly and cannot rebind it).
+#[derive(Debug, Clone)]
+struct ValidatedHost {
+    host: String,
+    pinned_addrs: Vec<std::net::SocketAddr>,
+}
+
 /// Resolve the URL's hostname and reject connections to private/internal IP addresses.
 /// This prevents DNS rebinding attacks where an attacker's domain resolves to an
 /// internal IP after passing the allowlist check.
-fn reject_private_ip(url: &str) -> Result<(), String> {
+///
+/// On success it returns the validated host and the resolved addresses, so the
+/// caller can pin the connection to exactly those addresses
+/// (`resolve_to_addrs`) and close the time-of-check / time-of-use gap where the
+/// host could rebind to a private address before `reqwest` performs its own
+/// connect-time resolution.
+fn reject_private_ip(url: &str) -> Result<ValidatedHost, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
@@ -1523,9 +1600,11 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
                 .and_then(|v| v.strip_suffix(']'))
                 .unwrap_or(h)
         })
-        .ok_or_else(|| "Failed to parse host from URL".to_string())?;
+        .ok_or_else(|| "Failed to parse host from URL".to_string())?
+        .to_string();
 
-    // If the host is already an IP, check it directly
+    // If the host is already an IP, check it directly. There is nothing to pin
+    // because reqwest connects to the literal and cannot rebind it.
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return if is_private_ip(ip) {
             Err(format!(
@@ -1533,15 +1612,20 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
                 ip
             ))
         } else {
-            Ok(())
+            Ok(ValidatedHost {
+                host,
+                pinned_addrs: Vec::new(),
+            })
         };
     }
 
     // Resolve DNS and check all addresses
     use std::net::ToSocketAddrs;
     // Port 0 is a placeholder; ToSocketAddrs needs host:port but the port
-    // doesn't affect which IPs the hostname resolves to.
-    let addrs: Vec<_> = format!("{}:0", host)
+    // doesn't affect which IPs the hostname resolves to. reqwest's
+    // resolve_to_addrs also ignores the override port and uses the request
+    // URL's port, so the placeholder is fine for pinning too.
+    let addrs: Vec<std::net::SocketAddr> = format!("{}:0", host)
         .to_socket_addrs()
         .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
         .collect();
@@ -1560,7 +1644,10 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    Ok(ValidatedHost {
+        host,
+        pinned_addrs: addrs,
+    })
 }
 
 /// Check if an IP address belongs to a private/internal range.

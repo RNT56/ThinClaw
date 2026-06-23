@@ -89,7 +89,7 @@ impl NetworkProxyBuilder {
     /// store should use [`Self::from_config`] (env fallback).
     pub fn from_config_with_store(
         config: &SandboxConfig,
-        store: Arc<dyn SecretsStore>,
+        store: Arc<dyn SecretsStore + Send + Sync>,
         user_id: impl Into<String>,
     ) -> Self {
         Self::from_config(config)
