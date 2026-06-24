@@ -331,8 +331,32 @@ pub async fn cloud_migrate_to_cloud(
     app: tauri::AppHandle,
     db: State<'_, sqlx::SqlitePool>,
 ) -> Result<(), String> {
+    use tauri::Manager;
+
     info!("[cloud] Frontend requested: migrate to cloud");
-    cloud.migrate_to_cloud(app.clone(), &db).await
+    cloud.migrate_to_cloud(app.clone(), &db).await?;
+
+    // Migration succeeded → the manager is now in cloud mode. Activate the live
+    // upload worker + sync engine + read-path download fallback so new writes
+    // actually reach the cloud and a fresh device can pull them back.
+    let file_store = app.state::<crate::file_store::FileStore>();
+    match super::live_sync::start_live_sync(&file_store, &cloud).await {
+        Ok(handles) => cloud.install_sync_handles(handles).await,
+        Err(e) => {
+            // The data is already in the cloud and the mode is persisted; surface
+            // the activation failure so the operator can retry (e.g. restart).
+            tracing::warn!(
+                "[cloud] Migration succeeded but live sync failed to start: {}",
+                e
+            );
+            return Err(format!(
+                "Migrated to cloud, but live sync failed to start: {}. Restart the app to retry.",
+                e
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Start migration from cloud to local storage.
@@ -343,8 +367,19 @@ pub async fn cloud_migrate_to_local(
     app: tauri::AppHandle,
     db: State<'_, sqlx::SqlitePool>,
 ) -> Result<(), String> {
+    use tauri::Manager;
+
     info!("[cloud] Frontend requested: migrate to local");
-    cloud.migrate_to_local(app.clone(), &db).await
+    cloud.migrate_to_local(app.clone(), &db).await?;
+
+    // Back in local mode: stop the live-sync tasks and revert the FileStore to
+    // local pass-through so writes no longer queue cloud uploads.
+    cloud.stop_sync().await;
+    app.state::<crate::file_store::FileStore>()
+        .clear_cloud_wiring()
+        .await;
+
+    Ok(())
 }
 
 /// Cancel an in-progress migration.

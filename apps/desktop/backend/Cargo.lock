@@ -10147,6 +10147,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs",
+ "ed25519-dalek",
  "fs4",
  "futures",
  "hex",

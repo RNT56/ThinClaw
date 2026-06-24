@@ -100,17 +100,58 @@ pub(crate) mod sub_agent_registry {
     }
 
     /// Remove all child records for a parent (called on session deletion).
-    #[allow(dead_code)]
+    ///
+    /// Wired into `thinclaw_delete_session` (both local and remote branches).
     pub async fn remove_parent(parent: &str) {
         let mut s = store().write().await;
         s.children.remove(parent);
     }
 
     /// Clear the entire registry (called on engine stop).
-    #[allow(dead_code)]
+    ///
+    /// Wired into `ThinClawRuntimeState::stop`.
     pub async fn clear() {
         let mut s = store().write().await;
         s.children.clear();
+    }
+}
+
+#[cfg(test)]
+mod sub_agent_registry_tests {
+    use super::super::types::ChildSessionInfo;
+    use super::sub_agent_registry;
+
+    fn child(session_key: &str) -> ChildSessionInfo {
+        ChildSessionInfo {
+            session_key: session_key.to_string(),
+            task: "test task".to_string(),
+            status: "running".to_string(),
+            spawned_at: 0.0,
+            result_summary: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_parent_evicts_children() {
+        // Unique parent key so this test does not race the shared registry.
+        let parent = "test-parent:remove-parent-evicts";
+        sub_agent_registry::register(parent, child(&format!("{parent}:task-1"))).await;
+        sub_agent_registry::register(parent, child(&format!("{parent}:task-2"))).await;
+        assert_eq!(sub_agent_registry::list_children(parent).await.len(), 2);
+
+        sub_agent_registry::remove_parent(parent).await;
+        assert!(sub_agent_registry::list_children(parent).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_empties_registered_children() {
+        // `clear()` is global; assert via this parent's own view to avoid a
+        // cross-test count race on the process-wide registry.
+        let parent = "test-parent:clear-empties";
+        sub_agent_registry::register(parent, child(&format!("{parent}:task-1"))).await;
+        sub_agent_registry::clear().await;
+        assert!(sub_agent_registry::list_children(parent).await.is_empty());
+        assert_eq!(sub_agent_registry::all_children().await, 0);
     }
 }
 

@@ -21,8 +21,8 @@ use std::collections::HashSet;
 use tracing::{debug, info};
 
 use super::super::provider::{
-    primary_object_root, should_read_legacy_object_root, CloudEntry, CloudError, CloudProvider,
-    CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
+    opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root, CloudEntry,
+    CloudError, CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
 };
 
 /// WebDAV storage provider.
@@ -133,7 +133,7 @@ impl WebDavProvider {
                     results.push(CloudEntry {
                         key: entry.path().to_string(),
                         size: m.content_length(),
-                        last_modified: 0,
+                        last_modified: m.last_modified().map(opendal_timestamp_millis).unwrap_or(0),
                         checksum: m.etag().map(|e| e.to_string()),
                     });
                 }

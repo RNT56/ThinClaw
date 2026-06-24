@@ -316,6 +316,12 @@ pub async fn thinclaw_delete_session(
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.delete_session(&session_key).await?;
+        // Evict any in-memory sub-agent records for this parent. The registry
+        // is keyed by session key regardless of local/remote mode.
+        crate::thinclaw::commands::rpc_orchestration::sub_agent_registry::remove_parent(
+            &session_key,
+        )
+        .await;
         info!("[thinclaw-runtime] Deleted remote session: {}", session_key);
         return Ok(());
     }
@@ -335,6 +341,11 @@ pub async fn thinclaw_delete_session(
     )
     .await
     .map_err(|e| e.to_string())?;
+
+    // Evict the deleted parent's children from the in-memory sub-agent registry
+    // so the per-process registry does not slowly leak `ChildSessionInfo`.
+    crate::thinclaw::commands::rpc_orchestration::sub_agent_registry::remove_parent(&session_key)
+        .await;
 
     info!(
         "[thinclaw-runtime] Successfully deleted session: {}",

@@ -41,6 +41,7 @@
 pub mod app_nap;
 pub mod commands;
 pub mod encryption;
+pub mod live_sync;
 pub mod manifest;
 pub mod migration;
 pub mod network;
@@ -125,6 +126,9 @@ struct CloudManagerInner {
     migration_in_progress: bool,
     /// Cancellation flag for active migration
     cancel_flag: Option<Arc<RwLock<bool>>>,
+    /// Handles for the live-sync background tasks (upload worker + sync engine).
+    /// `None` whenever the app is in local mode.
+    sync_handles: Option<live_sync::SyncHandles>,
 }
 
 impl CloudManager {
@@ -139,6 +143,7 @@ impl CloudManager {
                 master_key: None,
                 migration_in_progress: false,
                 cancel_flag: None,
+                sync_handles: None,
             }),
         }
     }
@@ -326,6 +331,49 @@ impl CloudManager {
 
     pub async fn provider_config(&self) -> Option<CloudProviderConfig> {
         self.inner.read().await.provider_config.clone()
+    }
+
+    /// Currently active cloud provider, if any (used by the live-sync worker).
+    pub(crate) async fn active_provider(&self) -> Option<Arc<dyn CloudProvider>> {
+        self.inner.read().await.provider.clone()
+    }
+
+    /// Current encryption master key, if loaded (used by the live-sync worker).
+    pub(crate) async fn master_key(&self) -> Option<MasterKey> {
+        self.inner.read().await.master_key.clone()
+    }
+
+    /// App data directory (local root for all files).
+    pub(crate) async fn app_data_dir(&self) -> PathBuf {
+        self.inner.read().await.app_data_dir.clone()
+    }
+
+    /// Whether the manager is currently in cloud mode.
+    pub async fn is_cloud_mode(&self) -> bool {
+        !matches!(self.inner.read().await.mode, StorageMode::Local)
+    }
+
+    /// Store the handles for the running live-sync tasks. Any previously stored
+    /// handles are stopped first to avoid orphaning a worker/engine.
+    pub(crate) async fn install_sync_handles(&self, handles: live_sync::SyncHandles) {
+        let previous = {
+            let mut inner = self.inner.write().await;
+            inner.sync_handles.replace(handles)
+        };
+        if let Some(previous) = previous {
+            warn!("[cloud] Replacing existing sync handles; stopping the previous worker/engine");
+            previous.stop().await;
+        }
+    }
+
+    /// Stop the live-sync worker + engine (cancels the engine, drops the upload
+    /// channel so the worker drains and exits, then awaits both tasks).
+    pub async fn stop_sync(&self) {
+        let handles = self.inner.write().await.sync_handles.take();
+        if let Some(handles) = handles {
+            info!("[cloud] Stopping live sync");
+            handles.stop().await;
+        }
     }
 
     /// Get the recovery key (base64-encoded master key).
