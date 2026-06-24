@@ -611,6 +611,23 @@ impl Agent {
         if let Some(ref store) = self.deps.store {
             repair = repair.with_store(Arc::clone(store));
         }
+        // Wire the software builder + tool registry so broken WASM tools are
+        // automatically rebuilt (returning Success/Retry) instead of always
+        // short-circuiting to ManualRequired. Bounded by `max_repair_attempts`.
+        {
+            use crate::tools::builder::{BuilderConfig, LlmSoftwareBuilder};
+            let mut b = LlmSoftwareBuilder::new(
+                BuilderConfig::default(),
+                self.deps.llm.clone(),
+                self.deps.safety.clone(),
+                self.deps.tools.clone(),
+            );
+            if let Some(tracker) = self.deps.cost_tracker.clone() {
+                b = b.with_cost_tracker(tracker);
+            }
+            let builder = Arc::new(b) as Arc<dyn crate::tools::SoftwareBuilder>;
+            repair = repair.with_builder(builder, self.deps.tools.clone());
+        }
         let repair = Arc::new(repair);
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();

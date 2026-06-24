@@ -105,6 +105,9 @@ pub struct AppComponents {
     pub response_cache: Arc<tokio::sync::RwLock<CachedResponseStore>>,
     /// Live smart routing policy owned by the runtime manager.
     pub routing_policy: Arc<std::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>,
+    /// Observability backend selected by the operator (wizard/config). Defaults
+    /// to a no-op observer; `OBSERVABILITY_BACKEND=log` emits structured events.
+    pub observer: Arc<dyn crate::observability::Observer>,
 }
 
 /// Builder that orchestrates the 5 mechanical init phases.
@@ -929,6 +932,13 @@ impl AppBuilder {
             ));
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::info!("Extension manager initialized with in-chat discovery tools");
+
+            // Native dynamic-library plugins are default-off and signature-gated.
+            // Register any signed manifests from operator-configured allowlist dirs
+            // (no-op unless `allow_native_plugins` is enabled; registration loads no
+            // code — the signature-checked dlopen only happens on explicit activation).
+            let _ = manager.register_native_plugins_from_allowlist().await;
+
             Some(manager)
         };
 
@@ -1627,6 +1637,19 @@ impl AppBuilder {
             "Startup phase: build_all total"
         );
 
+        // Construct the operator-selected observability backend and record a
+        // startup event so the choice (wizard Step 18 / OBSERVABILITY_BACKEND)
+        // has an observable effect. NoopObserver discards it at zero cost.
+        let observer = crate::observability::create_observer(&self.config.observability);
+        observer.record_event(&crate::observability::ObserverEvent::AgentStart {
+            provider: self.config.llm.backend.to_string(),
+            model: llm.model_name().to_string(),
+        });
+        tracing::debug!(
+            backend = observer.name(),
+            "Observability backend initialized"
+        );
+
         Ok(AppComponents {
             config: self.config,
             db: self.db,
@@ -1660,6 +1683,7 @@ impl AppBuilder {
                 CacheConfig::default(),
             ))),
             routing_policy: Arc::clone(&llm_runtime.routing_policy),
+            observer,
         })
     }
 }

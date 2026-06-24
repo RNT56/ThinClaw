@@ -38,4 +38,12 @@
 
 ---
 
+### D-03 — Orphaned `RepairTask` duplicate
+- **What:** `RepairTask` struct + impl at `crates/thinclaw-agent/src/self_repair.rs:324-388`, plus its `pub use ... RepairTask` re-export at `src/agent/self_repair.rs:15`.
+- **Why safe:** a drifted near-duplicate of the inline self-repair loop, which is now the canonical authority (wired with `with_builder` in Wave 1C). Zero non-test, non-definition callers (workspace grep). The `pub use` keeps it from tripping `dead_code` while it remains.
+- **Precondition:** remove the struct/impl AND drop it from the root `pub use` (a public-path change).
+- **Owner:** WS-05 (recorded) → Wave 4. Decision register WS-05 DP-4 / AUDIT §6.
+
+---
+
 *Add new entries under the owning wave as they arise.*

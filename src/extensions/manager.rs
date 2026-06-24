@@ -24,6 +24,7 @@ use crate::channels::wasm::{
 };
 use crate::extensions::clawhub::CatalogCache;
 use crate::extensions::discovery::OnlineDiscovery;
+use crate::extensions::native_activation::{NativePluginState, RegisteredNativePlugin};
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
     ActivateResult, AuthResult, ExtensionError, ExtensionKind, ExtensionSource, InstallResult,
@@ -170,6 +171,11 @@ pub struct ExtensionManager {
     catalog_cache: Arc<tokio::sync::Mutex<CatalogCache>>,
     /// Optional lifecycle audit hook for recording install/activate/remove events.
     lifecycle_audit_hook: RwLock<Option<Arc<crate::extensions::lifecycle_hooks::AuditLogHook>>>,
+    /// Native dynamic-library plugin state (registered manifests, loaded
+    /// runtimes, health). Strictly opt-in and default-off: nothing here loads
+    /// native code unless `extensions.allow_native_plugins` is enabled and an
+    /// operator has placed a signed manifest in an allowlisted directory.
+    native_plugins: RwLock<NativePluginState>,
 }
 
 impl ExtensionManager {
@@ -214,6 +220,7 @@ impl ExtensionManager {
             sse_sender: RwLock::new(None),
             catalog_cache: Arc::new(tokio::sync::Mutex::new(CatalogCache::new(3600))),
             lifecycle_audit_hook: RwLock::new(None),
+            native_plugins: RwLock::new(NativePluginState::new()),
         }
     }
 
@@ -578,6 +585,15 @@ impl ExtensionManager {
                 ExtensionKind::WasmChannel => {
                     self.install_wasm_channel_from_url(name, url, None).await
                 }
+                // Native plugins are never installed from a URL. They are
+                // operator-side artifacts: a signed manifest placed by hand into
+                // an allowlisted directory, then discovered via a manifest scan.
+                // We deliberately refuse a network download for native binaries.
+                ExtensionKind::NativePlugin => Err(ExtensionError::InstallFailed(
+                    "native plugins are not installed from a URL; place a signed manifest in an \
+                     allowlisted directory (extensions.native_plugin_allowlist_dirs) and rescan"
+                        .to_string(),
+                )),
             }
             .map_err(|e| {
                 tracing::error!(extension = %name, url = %url, error = %e, "Extension install from URL failed");
@@ -641,6 +657,14 @@ impl ExtensionManager {
             ExtensionKind::McpServer => self.auth_mcp(name, token).await,
             ExtensionKind::WasmTool => self.auth_wasm_tool(name, token, context).await,
             ExtensionKind::WasmChannel => self.auth_wasm_channel(name, token).await,
+            // Native plugins authenticate via manifest signature verification at
+            // load time, not via OAuth/token. There is no interactive auth step.
+            ExtensionKind::NativePlugin => Ok(self.auth_result(
+                name,
+                ExtensionKind::NativePlugin,
+                "none",
+                "no_auth_required",
+            )),
         }
     }
 
@@ -660,6 +684,7 @@ impl ExtensionManager {
             ExtensionKind::McpServer => self.activate_mcp(name).await,
             ExtensionKind::WasmTool => self.activate_wasm_tool(name).await,
             ExtensionKind::WasmChannel => self.activate_wasm_channel(name).await,
+            ExtensionKind::NativePlugin => self.activate_native_plugin(name).await,
         };
 
         match &result {
@@ -831,6 +856,36 @@ impl ExtensionManager {
             }
         }
 
+        // List native plugins (registered from a signed manifest scan; only
+        // present when the operator opted in via allow_native_plugins).
+        if kind_filter.is_none() || kind_filter == Some(ExtensionKind::NativePlugin) {
+            let native = self.native_plugins.read().await;
+            for id in native.registered_ids() {
+                let active = native.is_loaded(&id);
+                extensions.push(InstalledExtension {
+                    name: id.clone(),
+                    kind: ExtensionKind::NativePlugin,
+                    description: Some(
+                        "Native dynamic-library plugin (in-process, full host privileges)"
+                            .to_string(),
+                    ),
+                    url: None,
+                    // Native plugins authenticate via manifest signature, which
+                    // was verified before registration.
+                    authenticated: true,
+                    auth_mode: "none".to_string(),
+                    auth_status: "no_auth_required".to_string(),
+                    active,
+                    tools: if active { vec![id.clone()] } else { Vec::new() },
+                    needs_setup: false,
+                    shared_auth_provider: None,
+                    missing_scopes: Vec::new(),
+                    installed: true,
+                    activation_error: None,
+                });
+            }
+        }
+
         // Append available-but-not-installed registry entries
         if include_available {
             let installed_names: std::collections::HashSet<(String, ExtensionKind)> = extensions
@@ -968,6 +1023,19 @@ impl ExtensionManager {
                     "Removed channel '{}'. The hot-reload watcher will unload it automatically.",
                     name
                 ))
+            }
+            ExtensionKind::NativePlugin => {
+                // Unload the in-process runtime if loaded. We intentionally do
+                // NOT delete the operator-placed manifest/artifact from disk —
+                // removal here means "stop running it", not "delete operator
+                // files". To stop it permanently, the operator removes the
+                // manifest from the allowlisted directory.
+                let unloaded = self.native_plugins.write().await.deactivate(name);
+                if unloaded {
+                    Ok(format!("Unloaded native plugin '{}'", name))
+                } else {
+                    Ok(format!("Native plugin '{}' was not loaded", name))
+                }
             }
         };
 
@@ -1212,6 +1280,12 @@ impl ExtensionManager {
                     // MCP servers can't be bundled as WASM; fall through
                     return self.try_standard_install(entry).await;
                 }
+                ExtensionKind::NativePlugin => {
+                    // Native plugins are never bundled as WASM and are not
+                    // installed via this path; fall through to the standard
+                    // install chain, which returns the operator-side guidance.
+                    return self.try_standard_install(entry).await;
+                }
             };
 
             tracing::info!(
@@ -1225,6 +1299,7 @@ impl ExtensionManager {
                         ExtensionKind::WasmTool => "WASM tool",
                         ExtensionKind::WasmChannel => "WASM channel",
                         ExtensionKind::McpServer => "MCP server",
+                        ExtensionKind::NativePlugin => "native plugin",
                     };
                     return Ok(InstallResult {
                         name: entry.name.clone(),
@@ -1375,6 +1450,13 @@ impl ExtensionManager {
                     "WASM channel entry has no download URL or build info".to_string(),
                 )),
             },
+            // Native plugins are not installed from a registry source. They are
+            // operator-placed signed manifests discovered via a manifest scan.
+            ExtensionKind::NativePlugin => Err(ExtensionError::InstallFailed(
+                "native plugins are installed by placing a signed manifest in an allowlisted \
+                 directory (extensions.native_plugin_allowlist_dirs), not from a registry source"
+                    .to_string(),
+            )),
         }
     }
 
@@ -1765,6 +1847,8 @@ impl ExtensionManager {
             ExtensionKind::WasmTool => "WASM tool",
             ExtensionKind::WasmChannel => "WASM channel",
             ExtensionKind::McpServer => "MCP server",
+            // Native plugins never reach the WASM buildable-install path.
+            ExtensionKind::NativePlugin => "native plugin",
         };
 
         tracing::info!(
@@ -2723,6 +2807,186 @@ impl ExtensionManager {
         })
     }
 
+    // ── Native dynamic-library plugins (operator-only, default-off) ──────────
+    //
+    // SECURITY MODEL (see also `native_activation.rs` and `native.rs`):
+    //   * Default-off: nothing here loads native code unless
+    //     `extensions.allow_native_plugins` is explicitly true.
+    //   * No auto-discovery/auto-load: a manifest is only registered when the
+    //     operator places a signed manifest in an allowlisted directory and a
+    //     scan is invoked. Registration loads NO code.
+    //   * Signature-before-load: `NativePluginRuntime::load` verifies the
+    //     ed25519 manifest signature (and ABI/version, path allowlist, SHA-256)
+    //     BEFORE any `dlopen`. We never bypass or weaken those gates.
+    //   * In-process, full host privileges: native plugins are NOT sandboxed
+    //     like WASM. Only signed, audited binaries should be trusted.
+
+    /// Load the live extension settings (DB-backed if available, else file).
+    ///
+    /// Used to gate native-plugin loading against the operator's current
+    /// `allow_native_plugins`/signature/allowlist configuration rather than a
+    /// stale snapshot.
+    async fn current_extensions_settings(&self) -> crate::settings::ExtensionsSettings {
+        if let Some(ref store) = self.store
+            && let Ok(map) = store.get_all_settings(&self.user_id).await
+        {
+            return Settings::from_db_map(&map).extensions;
+        }
+        Settings::load().extensions
+    }
+
+    /// Scan a directory for signed plugin manifests and register any native
+    /// contributions for later, operator-initiated activation.
+    ///
+    /// This is the entrypoint that makes the native pipeline reachable. It is
+    /// strictly gated: when `allow_native_plugins` is false (the default), native
+    /// contributions are skipped and nothing is registered or loaded. When it is
+    /// enabled, each manifest must pass full policy + signature validation (via
+    /// `register_plugin_manifest_contributions`) before its native contributions
+    /// are recorded. Recording still loads NO code — `activate` is a separate,
+    /// equally-gated step.
+    ///
+    /// Returns the list of native contribution ids that were registered.
+    pub async fn scan_and_register_plugin_manifests(
+        &self,
+        plugins_dir: &std::path::Path,
+    ) -> Vec<String> {
+        let settings = self.current_extensions_settings().await;
+
+        let mut registered_ids = Vec::new();
+        let Ok(mut read_dir) = tokio::fs::read_dir(plugins_dir).await else {
+            return registered_ids;
+        };
+
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(manifest) = crate::extensions::native_activation::parse_native_manifest(&path)
+            else {
+                continue;
+            };
+
+            // Route non-native contributions through the existing registry path
+            // and let it apply policy + signature validation. This also produces
+            // the `native_plugins_available`/`native_plugins_skipped` accounting.
+            match self
+                .registry
+                .register_plugin_manifest_contributions(&manifest, &settings)
+                .await
+            {
+                Ok(registration) => {
+                    // Default-off: only register native contributions for
+                    // activation when the operator opted in. `native_plugins_available`
+                    // is empty unless `allow_native_plugins` is true.
+                    if registration.native_plugins_available.is_empty() {
+                        if !registration.native_plugins_skipped.is_empty() {
+                            tracing::debug!(
+                                manifest = %manifest.id,
+                                skipped = ?registration.native_plugins_skipped,
+                                "Native plugin contributions skipped (allow_native_plugins disabled)"
+                            );
+                        }
+                        continue;
+                    }
+
+                    let plugin_root = path
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or_else(|| plugins_dir.to_path_buf());
+                    let mut state = self.native_plugins.write().await;
+                    for contribution in &manifest.contributions.native_plugins {
+                        if registration
+                            .native_plugins_available
+                            .iter()
+                            .any(|id| id == &contribution.id)
+                        {
+                            state.register(RegisteredNativePlugin {
+                                manifest: manifest.clone(),
+                                contribution: contribution.clone(),
+                                plugin_root: plugin_root.clone(),
+                            });
+                            registered_ids.push(contribution.id.clone());
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        manifest = %manifest.id,
+                        error = %e,
+                        "Plugin manifest failed validation during native scan"
+                    );
+                }
+            }
+        }
+
+        registered_ids
+    }
+
+    /// Scan every operator-configured native-plugin allowlist directory and
+    /// register any signed manifests found.
+    ///
+    /// Default-off: returns immediately (registering nothing) unless
+    /// `allow_native_plugins` is enabled, and the allowlist is empty by default.
+    /// Registration loads no code — activation (which performs the signature-gated
+    /// `dlopen`) remains an explicit, separate operator action.
+    pub async fn register_native_plugins_from_allowlist(&self) -> Vec<String> {
+        let settings = self.current_extensions_settings().await;
+        if !settings.allow_native_plugins || settings.native_plugin_allowlist_dirs.is_empty() {
+            return Vec::new();
+        }
+        let mut registered = Vec::new();
+        for dir in &settings.native_plugin_allowlist_dirs {
+            let expanded = crate::platform::expand_home_dir(dir);
+            registered.extend(
+                self.scan_and_register_plugin_manifests(std::path::Path::new(&expanded))
+                    .await,
+            );
+        }
+        if !registered.is_empty() {
+            tracing::info!(
+                count = registered.len(),
+                "Registered native plugin manifests from operator allowlist"
+            );
+        }
+        registered
+    }
+
+    /// Activate (load) a registered native plugin.
+    ///
+    /// Delegates to [`NativePluginState::activate`], which calls the unsafe
+    /// `NativePluginRuntime::load`. Every trust gate runs inside `load` BEFORE
+    /// any `dlopen`; if `allow_native_plugins` is off, load refuses first.
+    async fn activate_native_plugin(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+        let settings = self.current_extensions_settings().await;
+        self.native_plugins.write().await.activate(name, &settings)
+    }
+
+    /// Invoke an operation on an active native plugin, with panic isolation and
+    /// health tracking.
+    ///
+    /// A panic crossing the C-ABI boundary is caught and recorded as a health
+    /// failure rather than crashing the host. Repeated failures drive the plugin
+    /// to `Unhealthy` via the shared health monitor.
+    pub async fn invoke_native_plugin(
+        &self,
+        name: &str,
+        operation: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, ExtensionError> {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        self.native_plugins
+            .write()
+            .await
+            .invoke(name, operation, payload, &timestamp)
+    }
+
+    /// Health status label for a native plugin, if it is being tracked.
+    pub async fn native_plugin_health(&self, name: &str) -> Option<&'static str> {
+        self.native_plugins.read().await.health_label(name)
+    }
+
     /// Determine what kind of installed extension this is.
     async fn determine_installed_kind(&self, name: &str) -> Result<ExtensionKind, ExtensionError> {
         // Check MCP servers first
@@ -2742,8 +3006,16 @@ impl ExtensionManager {
             return Ok(ExtensionKind::WasmChannel);
         }
 
+        // Check native plugins. A native plugin is "installed" once its signed
+        // manifest has been scanned and registered (which only happens when the
+        // operator has opted in via allow_native_plugins). Registration loads no
+        // code; activation is still a separate, gated step.
+        if self.native_plugins.read().await.is_registered(name) {
+            return Ok(ExtensionKind::NativePlugin);
+        }
+
         Err(ExtensionError::NotInstalled(format!(
-            "'{}' is not installed as an MCP server, WASM tool, or WASM channel",
+            "'{}' is not installed as an MCP server, WASM tool, WASM channel, or native plugin",
             name
         )))
     }

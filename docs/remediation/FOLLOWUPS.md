@@ -66,4 +66,18 @@
 
 ---
 
+## Wave 1 — WS-05 (self-repair / extensions / native plugins)
+
+### F-11 — Observability event emission beyond startup
+- **Done:** `create_observer` is wired through `AppBuilder`, the configured observer is constructed, stored on `AppComponents`, and emits a startup `AgentStart` event (the wizard/`OBSERVABILITY_BACKEND` choice now has effect).
+- **Remains:** route the stored observer into per-turn/per-tool event sites (`ToolCallStart/End`, `LlmRequest/Response`, `TurnComplete`) so events flow beyond startup. The plan scoped these emission sites as optional.
+- **Takes:** thread `AppComponents.observer` into the agent loop's event points.
+
+### F-12 — Native-plugin gateway exposure + safety docs
+- **Done:** native plugins are reachable via `ExtensionKind::NativePlugin` (operator-only), default-off, signature-gated (all gates run before dlopen), `catch_unwind`-isolated, with a startup allowlist scan. Security model documented in code comments.
+- **Remains:** (a) if native install/activate should be drivable from the web gateway, add `ExtensionKindHint::NativePlugin` to `crates/thinclaw-gateway/src/web/extensions.rs` + the `src/api/extensions.rs` mapping arm (deliberately NOT exposed today — operator-only); (b) mirror the in-code safety model into `docs/EXTENSION_SYSTEM.md` + `src/NETWORK_SECURITY.md` (signature/ABI/allowlist/SHA-256/panic-isolation/default-off + the in-process non-sandboxed caveat) and a `FEATURE_PARITY.md` row — WS-12 doc lane.
+- **Note:** native plugins run **in-process with full host privilege** (not WASM-sandboxed). This is the documented trade-off of native extensibility; the signature gate + default-off + operator-allowlist are the controls.
+
+---
+
 *Add follow-ups under the owning wave as they arise. Resolve or explicitly accept each before declaring a workstream done.*

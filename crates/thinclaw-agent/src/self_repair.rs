@@ -390,6 +390,7 @@ impl RepairTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn test_repair_result_variants() {
@@ -402,5 +403,120 @@ mod tests {
             message: "Help needed".to_string(),
         };
         assert!(matches!(manual, RepairResult::ManualRequired { .. }));
+    }
+
+    struct NoopContext;
+
+    #[async_trait]
+    impl RepairContextPort for NoopContext {
+        async fn find_stuck_jobs(&self) -> Vec<Uuid> {
+            vec![]
+        }
+        async fn get_stuck_job_snapshot(
+            &self,
+            _job_id: Uuid,
+        ) -> Result<StuckJobContextSnapshot, String> {
+            Err("not used".to_string())
+        }
+        async fn attempt_recovery(&self, _job_id: Uuid) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Records repair-attempt increments so we can assert the loop is bounded.
+    #[derive(Default)]
+    struct CountingStore {
+        increments: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl BrokenToolStorePort for CountingStore {
+        async fn get_broken_tools(&self, _threshold: i32) -> Result<Vec<BrokenTool>, String> {
+            Ok(vec![])
+        }
+        async fn mark_tool_repaired(&self, _tool_name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn increment_repair_attempts(&self, _tool_name: &str) -> Result<(), String> {
+            *self.increments.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    /// Stub builder that always reports a successful rebuild.
+    struct SuccessfulBuilder;
+
+    #[async_trait]
+    impl ToolRepairBuilderPort for SuccessfulBuilder {
+        async fn repair_tool(&self, _tool: &BrokenTool) -> Result<ToolRepairBuildResult, String> {
+            Ok(ToolRepairBuildResult {
+                success: true,
+                registered: true,
+                iterations: 2,
+                error: None,
+            })
+        }
+    }
+
+    struct AlwaysPresentProbe;
+
+    #[async_trait]
+    impl ToolRegistryProbePort for AlwaysPresentProbe {
+        async fn has_tool(&self, _tool_name: &str) -> bool {
+            true
+        }
+    }
+
+    fn broken_tool(attempts: u32) -> BrokenTool {
+        let now = Utc::now();
+        BrokenTool {
+            name: "flaky_tool".to_string(),
+            failure_count: 6,
+            last_error: Some("panic at the disco".to_string()),
+            first_failure: now,
+            last_failure: now,
+            last_build_result: None,
+            repair_attempts: attempts,
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_broken_tool_returns_success_with_builder() {
+        let repair = DefaultSelfRepair::new(Arc::new(NoopContext), Duration::from_secs(60), 3)
+            .with_store(Arc::new(CountingStore::default()))
+            .with_builder(Arc::new(SuccessfulBuilder), Arc::new(AlwaysPresentProbe));
+
+        let result = repair.repair_broken_tool(&broken_tool(0)).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "expected Success with a builder injected, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_broken_tool_without_builder_is_manual() {
+        let repair = DefaultSelfRepair::new(Arc::new(NoopContext), Duration::from_secs(60), 3)
+            .with_store(Arc::new(CountingStore::default()));
+
+        let result = repair.repair_broken_tool(&broken_tool(0)).await.unwrap();
+        assert!(matches!(result, RepairResult::ManualRequired { .. }));
+    }
+
+    #[tokio::test]
+    async fn repair_broken_tool_caps_at_max_attempts() {
+        // At or beyond max_repair_attempts the loop must stop (ManualRequired)
+        // rather than rebuilding again — guards against an unbounded repair loop.
+        let store = Arc::new(CountingStore::default());
+        let repair = DefaultSelfRepair::new(Arc::new(NoopContext), Duration::from_secs(60), 3)
+            .with_store(store.clone())
+            .with_builder(Arc::new(SuccessfulBuilder), Arc::new(AlwaysPresentProbe));
+
+        let result = repair.repair_broken_tool(&broken_tool(3)).await.unwrap();
+        assert!(matches!(result, RepairResult::ManualRequired { .. }));
+        assert_eq!(
+            *store.increments.lock().unwrap(),
+            0,
+            "no rebuild should be attempted once the attempt cap is reached"
+        );
     }
 }

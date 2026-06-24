@@ -50,7 +50,6 @@ impl DefaultSelfRepair {
     }
 
     /// Add a Builder and ToolRegistry for automatic tool repair.
-    #[allow(dead_code)] // Requires a SoftwareBuilder impl to be wired — see tools/builder/core.rs
     pub(crate) fn with_builder(
         mut self,
         builder: Arc<dyn SoftwareBuilder>,
