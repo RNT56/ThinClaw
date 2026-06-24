@@ -46,4 +46,25 @@
 
 ---
 
+## Wave 2 (WS-08 LLM)
+
+### D-04 — `SmartRoutingProvider` decorator
+- **What:** the `SmartRoutingProvider` routing decorator in `crates/thinclaw-llm` (and its internal `response_is_uncertain` copy), plus its `pub` re-exports (lib.rs:28, src/llm/mod.rs:73).
+- **Why safe:** `RoutePlanner` is the canonical hot-path router; after Wave 2, the fallback/kill-switch/override paths use the role-selected provider directly, so `SmartRoutingProvider::new` has zero callers. The cascade logic was extracted to the new `cascade.rs`. Left defined (so no `dead_code`) and recorded.
+- **Owner:** WS-08 → Wave 4. Decision register WS-08 DP-1.
+
+### D-05 — Dead leaky-abstraction fields
+- **What:** `Reasoning.safety` (`src/llm/reasoning.rs`, 28 `Reasoning::new` callers) and `SpawnSubagentTool.executor`.
+- **Why safe:** both unused. NOT removed because `reasoning.rs` is a WS-10 decomposition target and the constructor ripple would collide with that split.
+- **Owner:** WS-08 semantic removal, sequenced with WS-10 → Wave 4. Decision register WS-08 DP-3.
+
+## Wave 1 (WS-04 desktop)
+
+### D-06 — Dead InferenceRouter chat modality
+- **What:** the chat modality on `InferenceRouter` (`apps/desktop/backend/src/inference/router.rs`: `chat` field, `chat_backend()`, `set_chat_backend()`, the `Modality::Chat` arms in `clear_backend`/`active_backends`, and the `reconfigure()` chat-construction block), plus the entire `inference/chat/{mod,local,cloud}.rs` (`ChatBackend` trait + `LocalChatBackend`/`CloudChatBackend`) and the `pub mod chat;` decl. KEEP `available_backends_for(Chat)` and the `Modality::Chat` enum variant (both live — config/UI path).
+- **Why safe:** zero non-router callers of the chat backend (verified by grep). The live chat path is `chat.rs::resolve_provider` (reads `config.chat_backend`, builds `UnifiedProvider` directly), which never touches the router field.
+- **Owner:** WS-04 → Wave 4. Decision register WS-04 DP-2 (sign-off-gated).
+
+---
+
 *Add new entries under the owning wave as they arise.*

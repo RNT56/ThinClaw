@@ -17,11 +17,10 @@ use crate::failover::{
 };
 use crate::response_cache::{CachedProvider, ResponseCacheConfig};
 use crate::retry::{RetryConfig, RetryProvider};
-use crate::smart_routing::{SmartRoutingConfig, SmartRoutingProvider};
 use thinclaw_config::{LlmBackend, LlmConfig};
 use thinclaw_llm_core::{LlmProvider, StreamSupport, TokenCaptureSupport};
 use thinclaw_settings::{
-    CredentialSelectionStrategy, ProviderCredentialMode, ProvidersSettings, RoutingMode,
+    CredentialSelectionStrategy, ProviderCredentialMode, ProvidersSettings,
     normalize_credential_max_concurrent,
 };
 use thinclaw_types::error::LlmError;
@@ -659,7 +658,8 @@ pub async fn probe_provider_model(provider_slug: &str, model: &str) -> Result<()
 
 /// Create a cheap model provider from a "provider/model" string.
 ///
-/// Used for SmartRoutingProvider's cheap model split.
+/// Used for the planner-driven cheap/primary split (the runtime resolves the
+/// "cheap" lane to this provider).
 fn create_cheap_model_provider(
     cheap_model_spec: &str,
     config: &LlmConfig,
@@ -857,9 +857,13 @@ fn create_llama_cpp_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
 /// 1. Raw primary provider (from LlmConfig — the user's selected backend)
 /// 2. FailoverProvider wrapping primary + all enabled fallback providers
 /// 3. RetryProvider (per-provider retry with exponential backoff)
-/// 4. SmartRoutingProvider (cheap/primary split when cheap model is configured)
-/// 5. CircuitBreakerProvider (fast-fail when backend is degraded)
-/// 6. CachedProvider (in-memory response cache)
+/// 4. CircuitBreakerProvider (fast-fail when backend is degraded)
+/// 5. CachedProvider (in-memory response cache)
+///
+/// Cheap/primary routing and CheapSplit cascade escalation are **not** chain
+/// decorators — they are owned by `RoutePlanner` in the runtime route-resolution
+/// path. The cheap model is still constructed and returned for the runtime's
+/// cheap-lane resolution and for heartbeat/evaluation.
 ///
 /// When `providers_settings` is `Some`, creates additional providers from the
 /// catalog for each enabled provider that has an API key available. This enables
@@ -971,30 +975,19 @@ pub fn build_provider_chain(
         None
     };
 
-    let smart_routing_enabled = providers_settings
-        .map(|ps| ps.smart_routing_enabled && ps.routing_mode == RoutingMode::CheapSplit)
-        .unwrap_or(cheap_model_spec.is_some());
-    let cascade_enabled = providers_settings
-        .map(|ps| ps.smart_routing_cascade)
-        .unwrap_or(rel.smart_routing_cascade);
-
-    let llm: Arc<dyn LlmProvider> = if smart_routing_enabled {
-        if let Some(ref cheap) = cheap_llm {
-            tracing::info!("SmartRoutingProvider enabled (primary + cheap model)");
-            Arc::new(SmartRoutingProvider::new(
-                llm,
-                cheap.clone(),
-                SmartRoutingConfig {
-                    cascade_enabled,
-                    ..SmartRoutingConfig::default()
-                },
-            ))
-        } else {
-            llm
-        }
-    } else {
-        llm
-    };
+    // ── 3. Smart routing (cheap/primary split) is now owned by RoutePlanner ──
+    //
+    // The cheap/primary classification and CheapSplit cascade escalation are
+    // performed by `RoutePlanner` in the runtime route-resolution path
+    // (`src/llm/runtime_manager.rs`), not by a provider-chain decorator. The
+    // chain therefore stays unwrapped here; the planner resolves the "cheap"
+    // and "primary" lanes directly and drives inspect-and-escalate cascade
+    // itself. `cheap_llm` is still returned below for heartbeat/evaluation and
+    // for the runtime's cheap-lane resolution.
+    //
+    // Wrapping the chain in `SmartRoutingProvider` here previously stacked a
+    // second, independent classifier on top of the planner (double-routing);
+    // that decorator is retired in favor of the single planner engine.
 
     // ── 4. Circuit breaker ───────────────────────────────────────────────
     let llm: Arc<dyn LlmProvider> = if let Some(threshold) = rel.circuit_breaker_threshold {

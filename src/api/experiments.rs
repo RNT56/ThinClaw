@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use tokio::time::{Duration as TokioDuration, interval};
@@ -20,6 +21,7 @@ use crate::agent::{AgentRunArtifact, AgentRunStatus};
 use crate::api::{ApiError, ApiResult};
 use crate::db::Database;
 use crate::experiments::adapters::{self, RemoteLaunchAction, RunnerLaunchOutcome};
+use crate::experiments::artifact_store::{ArtifactStore, LocalArtifactStore};
 use crate::experiments::{
     CampaignStatusDecisionInput, ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign,
     ExperimentCampaignQueueState, ExperimentCampaignStatus, ExperimentLease,
@@ -81,6 +83,7 @@ pub use thinclaw_gateway::web::experiments::*;
 
 const DEFAULT_REMOTE_LEASE_MINUTES: i64 = 60;
 const DEFAULT_EXPERIMENT_CONTROLLER_TICK_SECS: u64 = 30;
+const DEFAULT_ARTIFACT_REAPER_TICK_SECS: u64 = 86_400;
 const STALE_LEASE_GRACE_MINUTES: i64 = 10;
 const RESEARCH_SUBAGENT_CHANNEL: &str = "tauri";
 const RESEARCH_SUBAGENT_THREAD_ID: &str = "agent:research";
@@ -775,6 +778,109 @@ pub async fn start_experiment_controller_loop(store: Arc<dyn Database>) {
             },
         }
         interval.tick().await;
+    }
+}
+
+/// Background loop that enforces `experiments.default_artifact_retention_days` by
+/// pruning `experiment_artifact_refs` (and best-effort the underlying durable
+/// files) older than the retention window. Mirrors the controller loop shape:
+/// tick-first `interval`, `tracing::warn!` on error, never panics the task.
+///
+/// A `retention_days` of `0` disables reaping (the loop still runs but each pass
+/// is a no-op), so an operator can opt out without tearing down the task.
+pub async fn start_experiment_artifact_reaper_loop(store: Arc<dyn Database>, retention_days: u32) {
+    let mut interval = interval(TokioDuration::from_secs(DEFAULT_ARTIFACT_REAPER_TICK_SECS));
+    interval.tick().await;
+    loop {
+        match reap_expired_artifacts_once(&store, retention_days).await {
+            Ok(pruned) => {
+                if pruned > 0 {
+                    tracing::info!(
+                        "Experiment artifact reaper pruned {pruned} expired artifact(s)"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!("Experiment artifact reaper failed: {error}");
+            }
+        }
+        interval.tick().await;
+    }
+}
+
+/// Run a single reaper pass: prune every artifact whose `created_at` is older than
+/// `now - retention_days`, best-effort deleting the on-disk file when it lives
+/// under the durable artifact root. Returns the number of pruned artifact rows.
+///
+/// Deletion goes through the `Database` trait (no backend-specific code) and
+/// re-persists the surviving set via `replace_experiment_artifacts`, mirroring the
+/// list/mutate/replace round-trip used by ingest.
+async fn reap_expired_artifacts_once(
+    store: &Arc<dyn Database>,
+    retention_days: u32,
+) -> ApiResult<usize> {
+    if retention_days == 0 {
+        return Ok(0);
+    }
+    let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+    let artifact_root = crate::experiments::artifact_store::default_artifact_root();
+    let campaigns = store
+        .list_experiment_campaigns()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let mut pruned_total = 0usize;
+    for campaign in campaigns {
+        let trials = store
+            .list_experiment_trials(campaign.id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        for trial in trials {
+            let artifacts = store
+                .list_experiment_artifacts(trial.id)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let (expired, surviving): (Vec<_>, Vec<_>) = artifacts
+                .into_iter()
+                .partition(|artifact| artifact.created_at < cutoff);
+            if expired.is_empty() {
+                continue;
+            }
+            for artifact in &expired {
+                remove_durable_artifact_file(&artifact_root, &artifact.uri_or_local_path).await;
+            }
+            store
+                .replace_experiment_artifacts(trial.id, &surviving)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            pruned_total += expired.len();
+        }
+    }
+    Ok(pruned_total)
+}
+
+/// Best-effort delete a durable artifact file, but only when its canonicalized
+/// path is contained within `artifact_root`. Runner-supplied pod-local paths and
+/// any path outside the operator-controlled root are left untouched — never delete
+/// based on an unvalidated runner path (see WS-07 pitfalls).
+async fn remove_durable_artifact_file(artifact_root: &Path, raw_path: &str) {
+    let path = PathBuf::from(raw_path);
+    let canonical_root = match tokio::fs::canonicalize(artifact_root).await {
+        Ok(root) => root,
+        Err(_) => return,
+    };
+    let canonical_path = match tokio::fs::canonicalize(&path).await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if !canonical_path.starts_with(&canonical_root) {
+        return;
+    }
+    if let Err(error) = tokio::fs::remove_file(&canonical_path).await {
+        tracing::debug!(
+            "Experiment artifact reaper could not remove {}: {error}",
+            canonical_path.display()
+        );
     }
 }
 
@@ -2576,8 +2682,8 @@ pub async fn lease_job(
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
-    let job: ExperimentRunnerJob = serde_json::from_value(lease.job_payload.clone())
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let job: ExperimentRunnerJob =
+        serde_json::from_value(lease.job_payload.clone()).map_err(ApiError::Serialization)?;
     Ok(ExperimentLeaseJobResponse { job })
 }
 
@@ -2694,19 +2800,55 @@ pub async fn lease_artifact(
     token: &str,
     artifact: ExperimentRunnerArtifactUpload,
 ) -> ApiResult<ExperimentCampaignActionResponse> {
+    let artifact_store = LocalArtifactStore::shared_default();
+    lease_artifact_with_store(store, &artifact_store, user_id, lease_id, token, artifact).await
+}
+
+/// Core of [`lease_artifact`] parameterized over the durable [`ArtifactStore`] so
+/// tests can inject a temp-rooted store. When the runner attaches inline
+/// `content_base64`, the bytes are persisted to durable host storage and the
+/// recorded `ExperimentArtifactRef` points at the durable path with
+/// `fetchable: true`; otherwise the upload is recorded as posted (pod-local
+/// breadcrumb only).
+async fn lease_artifact_with_store(
+    store: &Arc<dyn Database>,
+    artifact_store: &Arc<dyn ArtifactStore>,
+    user_id: &str,
+    lease_id: Uuid,
+    token: &str,
+    artifact: ExperimentRunnerArtifactUpload,
+) -> ApiResult<ExperimentCampaignActionResponse> {
     ensure_experiments_enabled(store, user_id).await?;
     let lease = verified_lease(store, lease_id, token).await?;
     let mut artifacts = store
         .list_experiment_artifacts(lease.trial_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let artifact_id = Uuid::new_v4();
+    let mut uri_or_local_path = artifact.uri_or_local_path;
+    let mut size_bytes = artifact.size_bytes;
+    let mut fetchable = artifact.fetchable;
+    if let Some(content_base64) = artifact.content_base64 {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(content_base64.as_bytes())
+            .map_err(|e| ApiError::InvalidInput(format!("invalid artifact content_base64: {e}")))?;
+        let durable = artifact_store
+            .put(lease.trial_id, artifact_id, &artifact.kind, &bytes)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to persist artifact: {e}")))?;
+        size_bytes = Some(bytes.len() as u64);
+        uri_or_local_path = durable;
+        fetchable = true;
+    }
+
     artifacts.push(ExperimentArtifactRef {
-        id: Uuid::new_v4(),
+        id: artifact_id,
         trial_id: lease.trial_id,
         kind: artifact.kind,
-        uri_or_local_path: artifact.uri_or_local_path,
-        size_bytes: artifact.size_bytes,
-        fetchable: artifact.fetchable,
+        uri_or_local_path,
+        size_bytes,
+        fetchable,
         metadata: artifact.metadata,
         created_at: Utc::now(),
     });
@@ -2935,6 +3077,19 @@ async fn finalize_trial(
     if let Some(provider_overlay) = runner_cost.provider_metadata_overlay {
         trial.provider_job_metadata = merge_json(&trial.provider_job_metadata, &provider_overlay);
     }
+    // Surface the runner cost-basis assumptions (e.g. RunPod's
+    // `assumed_1_credit_equals_1_usd` normalization) onto the headline campaign
+    // `cost_summary` so an operator deciding whether a campaign is within budget
+    // can see the runner USD figure is an approximation. The values are lifted
+    // verbatim from `runner_cost.details`; they are not recomputed (DP-3: surface,
+    // do not gate).
+    let runner_cost_basis = serde_json::json!({
+        "estimated": runner_cost.details.get("estimated").and_then(|v| v.as_bool()),
+        "native_currency": runner_cost.details.get("native_currency").cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "normalization": runner_cost.details.get("normalization").cloned()
+            .unwrap_or(serde_json::Value::Null),
+    });
     campaign.metadata = merge_json(
         &campaign.metadata,
         &serde_json::json!({
@@ -2942,6 +3097,7 @@ async fn finalize_trial(
                 "total_usd": campaign.total_cost_usd,
                 "llm_usd": campaign.total_llm_cost_usd,
                 "runner_usd": campaign.total_runner_cost_usd,
+                "runner_cost_basis": runner_cost_basis,
                 "updated_at": Utc::now().to_rfc3339(),
             }
         }),
@@ -3287,6 +3443,15 @@ async fn validate_runner_profile_impl(
     adapters::validate_runner_profile(runner, settings, provider_api_key.as_deref()).await
 }
 
+// WS-13: suspected worktree-teardown race. The quarantined E2E
+// `autonomous_campaign_runs_planner_mutator_reviewer_and_docker_trial_end_to_end`
+// (`#[ignore]`) fails with `Internal("No such file or directory (os error 2)")`.
+// The race is between trial-completion cleanup (which restores the worktree to a
+// clean committed state) and the next reconcile preparing the worktree here: the
+// sequence below does `worktree remove --force` -> `worktree prune` ->
+// `remove_dir_all` -> `create_dir_all(parent)`, and a git op can spawn against a
+// worktree path that has just vanished mid-trial. Root-cause + de-quarantine is
+// owned by WS-13; this WS only annotates the mechanism and does not change behavior.
 async fn prepare_campaign_worktree(
     project: &ExperimentProject,
     worktree_path: &Path,
@@ -4298,6 +4463,7 @@ mod tests {
         ApplyPatchTool, ListDirTool, ReadFileTool, SearchFilesTool, WriteFileTool,
     };
     use async_trait::async_trait;
+    use base64::Engine as _;
     use chrono::Utc;
     use rust_decimal::Decimal;
     use std::path::Path;
@@ -5430,5 +5596,324 @@ mod tests {
             .status()
             .expect("git command should start");
         assert!(status.success(), "git {:?} failed with {:?}", args, status);
+    }
+
+    /// Seed an `ExperimentProject` + `ExperimentRunnerProfile` so a campaign's
+    /// foreign keys (project_id, runner_profile_id) resolve, and return their ids.
+    async fn seed_reaper_project_and_runner(
+        store: &std::sync::Arc<dyn crate::db::Database>,
+        now: chrono::DateTime<Utc>,
+    ) -> (Uuid, Uuid) {
+        let project = ExperimentProject {
+            id: Uuid::new_v4(),
+            name: "reaper-test".to_string(),
+            workspace_path: "/tmp/reaper-test".to_string(),
+            git_remote_name: "origin".to_string(),
+            base_branch: "main".to_string(),
+            preset: Default::default(),
+            strategy_prompt: "reaper test".to_string(),
+            workdir: ".".to_string(),
+            prepare_command: None,
+            run_command: "true".to_string(),
+            mutable_paths: Vec::new(),
+            fixed_paths: Vec::new(),
+            primary_metric: ExperimentMetricDefinition {
+                name: "score".to_string(),
+                regex: None,
+                json_path: Some("score".to_string()),
+                comparator: ExperimentMetricComparator::HigherIsBetter,
+            },
+            secondary_metrics: Vec::new(),
+            comparison_policy: Default::default(),
+            stop_policy: Default::default(),
+            default_runner_profile_id: None,
+            promotion_mode: "manual".to_string(),
+            autonomy_mode: Default::default(),
+            status: ExperimentProjectStatus::Ready,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_project(&project)
+            .await
+            .expect("seed project");
+
+        let runner = ExperimentRunnerProfile {
+            id: Uuid::new_v4(),
+            name: "reaper-runner".to_string(),
+            backend: ExperimentRunnerBackend::GenericRemoteRunner,
+            backend_config: serde_json::json!({}),
+            image_or_runtime: None,
+            gpu_requirements: serde_json::json!({}),
+            env_grants: serde_json::json!({}),
+            secret_references: Vec::new(),
+            cache_policy: serde_json::json!({}),
+            status: ExperimentRunnerStatus::Validated,
+            readiness_class: crate::experiments::ExperimentRunnerReadinessClass::LaunchReady,
+            launch_eligible: true,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_runner_profile(&runner)
+            .await
+            .expect("seed runner");
+
+        (project.id, runner.id)
+    }
+
+    fn reaper_test_trial(campaign_id: Uuid, now: chrono::DateTime<Utc>) -> ExperimentTrial {
+        ExperimentTrial {
+            id: Uuid::new_v4(),
+            campaign_id,
+            sequence: 1,
+            candidate_commit: None,
+            parent_best_commit: None,
+            status: ExperimentTrialStatus::Accepted,
+            runner_backend: ExperimentRunnerBackend::GenericRemoteRunner,
+            exit_code: Some(0),
+            metrics_json: serde_json::json!({}),
+            summary: None,
+            decision_reason: None,
+            artifact_manifest_json: serde_json::json!({}),
+            log_preview_path: None,
+            reviewer_decision: None,
+            runtime_ms: Some(1),
+            attributed_cost_usd: None,
+            llm_cost_usd: None,
+            runner_cost_usd: None,
+            hypothesis: None,
+            mutation_summary: None,
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({}),
+            started_at: Some(now),
+            completed_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn reaper_test_campaign(
+        project_id: Uuid,
+        runner_profile_id: Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> super::ExperimentCampaign {
+        super::ExperimentCampaign {
+            id: Uuid::new_v4(),
+            project_id,
+            runner_profile_id,
+            owner_user_id: "default".to_string(),
+            status: ExperimentCampaignStatus::Completed,
+            baseline_commit: None,
+            best_commit: None,
+            best_metrics: serde_json::json!({}),
+            experiment_branch: None,
+            remote_ref: None,
+            worktree_path: None,
+            started_at: Some(now),
+            ended_at: Some(now),
+            trial_count: 1,
+            failure_count: 0,
+            pause_reason: None,
+            queue_state: ExperimentCampaignQueueState::NotQueued,
+            queue_position: 0,
+            active_trial_id: None,
+            total_runtime_ms: 0,
+            total_cost_usd: 0.0,
+            total_llm_cost_usd: 0.0,
+            total_runner_cost_usd: 0.0,
+            consecutive_non_improving_trials: 0,
+            max_trials_override: None,
+            gateway_url: None,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn reap_expired_artifacts_removes_only_expired() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let now = Utc::now();
+        let (project_id, runner_id) = seed_reaper_project_and_runner(&store, now).await;
+        let campaign = reaper_test_campaign(project_id, runner_id, now);
+        store
+            .create_experiment_campaign(&campaign)
+            .await
+            .expect("store campaign");
+        let trial = reaper_test_trial(campaign.id, now);
+        store
+            .create_experiment_trial(&trial)
+            .await
+            .expect("store trial");
+
+        let stale = crate::experiments::ExperimentArtifactRef {
+            id: Uuid::new_v4(),
+            trial_id: trial.id,
+            kind: "run_log".to_string(),
+            uri_or_local_path: "/pod/run.log".to_string(),
+            size_bytes: Some(3),
+            fetchable: false,
+            metadata: serde_json::json!({}),
+            created_at: now - chrono::Duration::days(40),
+        };
+        let fresh = crate::experiments::ExperimentArtifactRef {
+            id: Uuid::new_v4(),
+            trial_id: trial.id,
+            kind: "summary_json".to_string(),
+            uri_or_local_path: "/pod/summary.json".to_string(),
+            size_bytes: Some(2),
+            fetchable: false,
+            metadata: serde_json::json!({}),
+            created_at: now,
+        };
+        store
+            .replace_experiment_artifacts(trial.id, &[stale.clone(), fresh.clone()])
+            .await
+            .expect("seed artifacts");
+
+        let pruned = super::reap_expired_artifacts_once(&store, 30)
+            .await
+            .expect("reaper pass");
+        assert_eq!(pruned, 1, "exactly the stale artifact should be pruned");
+
+        let remaining = store
+            .list_experiment_artifacts(trial.id)
+            .await
+            .expect("list artifacts");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].id, fresh.id,
+            "only the fresh artifact survives"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_expired_artifacts_disabled_when_retention_zero() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let now = Utc::now();
+        let (project_id, runner_id) = seed_reaper_project_and_runner(&store, now).await;
+        let campaign = reaper_test_campaign(project_id, runner_id, now);
+        store
+            .create_experiment_campaign(&campaign)
+            .await
+            .expect("store campaign");
+        let trial = reaper_test_trial(campaign.id, now);
+        store
+            .create_experiment_trial(&trial)
+            .await
+            .expect("store trial");
+        let ancient = crate::experiments::ExperimentArtifactRef {
+            id: Uuid::new_v4(),
+            trial_id: trial.id,
+            kind: "run_log".to_string(),
+            uri_or_local_path: "/pod/run.log".to_string(),
+            size_bytes: Some(3),
+            fetchable: false,
+            metadata: serde_json::json!({}),
+            created_at: now - chrono::Duration::days(3650),
+        };
+        store
+            .replace_experiment_artifacts(trial.id, &[ancient])
+            .await
+            .expect("seed artifact");
+
+        let pruned = super::reap_expired_artifacts_once(&store, 0)
+            .await
+            .expect("reaper pass");
+        assert_eq!(pruned, 0, "retention_days=0 disables reaping");
+        let remaining = store
+            .list_experiment_artifacts(trial.id)
+            .await
+            .expect("list artifacts");
+        assert_eq!(remaining.len(), 1, "nothing pruned when disabled");
+    }
+
+    #[tokio::test]
+    async fn lease_artifact_with_inline_bytes_persists_durable_fetchable_ref() {
+        let (store, _guard) = crate::testing::test_db().await;
+        store
+            .set_setting(
+                "default",
+                "experiments.enabled",
+                &serde_json::Value::Bool(true),
+            )
+            .await
+            .expect("enable experiments");
+
+        let now = Utc::now();
+        let (project_id, runner_id) = seed_reaper_project_and_runner(&store, now).await;
+        let campaign = reaper_test_campaign(project_id, runner_id, now);
+        store
+            .create_experiment_campaign(&campaign)
+            .await
+            .expect("store campaign");
+        let trial = reaper_test_trial(campaign.id, now);
+        store
+            .create_experiment_trial(&trial)
+            .await
+            .expect("store trial");
+
+        let token = "durable-artifact-token";
+        let lease = ExperimentLease {
+            id: Uuid::new_v4(),
+            campaign_id: campaign.id,
+            trial_id: trial.id,
+            runner_profile_id: campaign.runner_profile_id,
+            status: ExperimentLeaseStatus::Claimed,
+            token_hash: super::hash_lease_token(token),
+            job_payload: serde_json::json!({}),
+            credentials_payload: serde_json::json!({}),
+            expires_at: now + chrono::Duration::hours(1),
+            claimed_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_lease(&lease)
+            .await
+            .expect("store lease");
+
+        let artifact_dir = TempDir::new().expect("tempdir");
+        let artifact_store: Arc<dyn super::ArtifactStore> = Arc::new(
+            crate::experiments::LocalArtifactStore::new(artifact_dir.path()),
+        );
+        let payload = b"benchmark-ok\nscore=1\n";
+        let upload = crate::experiments::ExperimentRunnerArtifactUpload {
+            kind: "run_log".to_string(),
+            uri_or_local_path: "/pod/run.log".to_string(),
+            size_bytes: Some(payload.len() as u64),
+            fetchable: false,
+            metadata: serde_json::json!({}),
+            content_base64: Some(base64::engine::general_purpose::STANDARD.encode(payload)),
+        };
+
+        super::lease_artifact_with_store(
+            &store,
+            &artifact_store,
+            "default",
+            lease.id,
+            token,
+            upload,
+        )
+        .await
+        .expect("lease artifact");
+
+        let artifacts = store
+            .list_experiment_artifacts(trial.id)
+            .await
+            .expect("list artifacts");
+        assert_eq!(artifacts.len(), 1);
+        let recorded = &artifacts[0];
+        assert!(recorded.fetchable, "durable artifact should be fetchable");
+        let durable_path = Path::new(&recorded.uri_or_local_path);
+        assert!(durable_path.exists(), "durable artifact path should exist");
+        assert!(
+            durable_path.starts_with(artifact_dir.path()),
+            "artifact must live under the durable root"
+        );
+        let bytes = std::fs::read(durable_path).expect("read durable artifact");
+        assert_eq!(bytes, payload);
     }
 }

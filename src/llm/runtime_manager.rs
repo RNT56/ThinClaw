@@ -12,6 +12,7 @@ use secrecy::SecretString;
 use crate::config::{Config, LlmBackend};
 use crate::db::Database;
 use crate::error::LlmError;
+use crate::llm::cascade::response_is_uncertain;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunkStream,
     StreamSupport, TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
@@ -20,7 +21,7 @@ use crate::llm::provider_factory::{
     build_provider_chain, create_llm_provider, create_provider_for_catalog_entry_with_settings,
 };
 use crate::llm::route_planner::{
-    RequiredCapabilities, RoutePlanner, RoutePlannerInput, log_routing_decision,
+    CascadePolicy, RequiredCapabilities, RoutePlanner, RoutePlannerInput, log_routing_decision,
     validate_providers_settings as validate_planner_settings,
 };
 use crate::llm::routing_policy::{
@@ -137,6 +138,20 @@ impl ProviderModelRole {
 }
 
 struct ResolvedRoute {
+    provider: Arc<dyn LlmProvider>,
+    telemetry_key: String,
+    /// Planner-decided post-response cascade behavior. `None` for every
+    /// non-planner path (model override, kill-switch, fallback).
+    cascade: CascadePolicy,
+    /// When `cascade == InspectAndEscalate` and the resolved `provider` is the
+    /// cheap lane, this carries the pre-resolved primary chain to re-issue
+    /// against (and its telemetry key) so escalation does not re-run the
+    /// planner. `None` otherwise.
+    escalation: Option<CascadeEscalation>,
+}
+
+/// Pre-resolved primary escalation target for a cheap-lane cascade decision.
+struct CascadeEscalation {
     provider: Arc<dyn LlmProvider>,
     telemetry_key: String,
 }
@@ -552,6 +567,8 @@ impl RuntimeLlmProvider {
             return Ok(ResolvedRoute {
                 provider,
                 telemetry_key,
+                cascade: CascadePolicy::None,
+                escalation: None,
             });
         }
 
@@ -574,6 +591,8 @@ impl RuntimeLlmProvider {
             return Ok(ResolvedRoute {
                 provider,
                 telemetry_key,
+                cascade: CascadePolicy::None,
+                escalation: None,
             });
         }
 
@@ -637,9 +656,57 @@ impl RuntimeLlmProvider {
                     .unwrap_or_else(|| format!("unknown|unknown|{}", decision.target));
                 decision.telemetry_key = telemetry_key.clone();
                 log_routing_decision(&decision, snapshot.providers.routing_mode.as_str());
+
+                // ── Cascade (CheapSplit inspect-and-escalate) ──
+                // The planner decides `InspectAndEscalate` for Moderate-complexity
+                // CheapSplit turns when cascade is enabled. Escalation only makes
+                // sense when the selected lane is the cheap one; if the planner
+                // already picked primary there is nothing to escalate to. We
+                // pre-resolve a pure-primary chain here so the completion path can
+                // re-issue without re-running the planner.
+                let target_is_cheap =
+                    decision.target == "cheap" || decision.target.ends_with("@cheap");
+                let escalation =
+                    if decision.cascade == CascadePolicy::InspectAndEscalate && target_is_cheap {
+                        match self
+                            .manager
+                            .provider_chain_for_targets(&["primary".to_string()], &snapshot)
+                        {
+                            Ok(primary_provider) => {
+                                let escalation_key = self
+                                    .manager
+                                    .resolve_telemetry_key_for_target("primary", &snapshot)
+                                    .unwrap_or_else(|| "unknown|unknown|primary".to_string());
+                                Some(CascadeEscalation {
+                                    provider: primary_provider,
+                                    telemetry_key: escalation_key,
+                                })
+                            }
+                            Err(err) => {
+                                // Without a usable primary chain there is nothing to
+                                // escalate to; degrade to the cheap result rather than
+                                // failing the turn.
+                                tracing::warn!(
+                                    error = %err,
+                                    "Cascade escalation disabled: no usable primary chain"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                let cascade = if escalation.is_some() {
+                    CascadePolicy::InspectAndEscalate
+                } else {
+                    CascadePolicy::None
+                };
+
                 return Ok(ResolvedRoute {
                     provider,
                     telemetry_key,
+                    cascade,
+                    escalation,
                 });
             }
         }
@@ -652,6 +719,8 @@ impl RuntimeLlmProvider {
         Ok(ResolvedRoute {
             provider,
             telemetry_key: "unknown|unknown|runtime_fallback".to_string(),
+            cascade: CascadePolicy::None,
+            escalation: None,
         })
     }
 
@@ -726,6 +795,18 @@ impl LlmProvider for RuntimeLlmProvider {
         let (ctx, last_user_message) = self.routing_context(&request.messages, false, false);
         let route =
             self.provider_for_request(request.model.as_deref(), Some(&ctx), last_user_message)?;
+
+        // When the planner selected the cheap lane with inspect-and-escalate
+        // cascade, keep a clone of the request so we can re-issue against the
+        // pre-resolved primary chain if the cheap response looks uncertain.
+        let cascade_active =
+            route.cascade == CascadePolicy::InspectAndEscalate && route.escalation.is_some();
+        let escalation_request = if cascade_active {
+            Some(request.clone())
+        } else {
+            None
+        };
+
         let start = Instant::now();
         let result = route
             .provider
@@ -737,6 +818,38 @@ impl LlmProvider for RuntimeLlmProvider {
             .await;
         self.manager
             .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
+
+        // Cascade escalation: if the cheap response is uncertain, re-issue
+        // against the primary chain. Mirrors the legacy SmartRoutingProvider
+        // behavior, now driven by the planner's decision.
+        if cascade_active
+            && let Ok(ref response) = result
+            && response_is_uncertain(response)
+            && let (Some(escalation), Some(escalation_request)) =
+                (route.escalation.as_ref(), escalation_request)
+        {
+            tracing::info!(
+                cheap_telemetry_key = %route.telemetry_key,
+                primary_telemetry_key = %escalation.telemetry_key,
+                "Cascade: escalating to primary (cheap model response uncertain)"
+            );
+            let escalation_start = Instant::now();
+            let escalation_result = escalation
+                .provider
+                .complete(Self::resolved_completion_request(
+                    escalation_request,
+                    &escalation.telemetry_key,
+                    "chat_completion",
+                ))
+                .await;
+            self.manager.record_route_outcome(
+                &escalation.telemetry_key,
+                escalation_start.elapsed(),
+                escalation_result.is_ok(),
+            );
+            return escalation_result;
+        }
+
         result
     }
 

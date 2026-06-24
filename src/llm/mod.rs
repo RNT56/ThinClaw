@@ -8,6 +8,7 @@
 //! - **Tinfoil**: Private inference via Tinfoil
 
 pub mod bedrock;
+pub mod cascade;
 pub mod circuit_breaker;
 pub mod cost_tracker;
 pub mod costs;

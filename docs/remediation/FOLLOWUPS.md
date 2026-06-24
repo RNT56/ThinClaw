@@ -80,4 +80,30 @@
 
 ---
 
+## Wave 2 — WS-07 (experiments)
+
+### F-13 — Durable artifact storage: object-store backend
+- **Done:** `ArtifactStore` port + `LocalArtifactStore` (host-disk) impl; remote-runner artifacts upload through it (content_base64, 16 MiB inline cap) and record `fetchable:true`; a daily retention reaper prunes expired artifacts; RunPod credit≈USD surfaced in `cost_summary`.
+- **Remains:** an opendal/S3 `ArtifactStore` impl for cloud durability (the port is shaped to accept it). Over-cap artifacts still fall back to the pod-local breadcrumb.
+- **Takes:** implement the object-store backend behind the existing port. Decision register WS-07 DP-1 Option B.
+
+### F-14 — Experiments error-taxonomy + god-file split
+- **Remains:** the ~106 `map_err(ApiError::Internal)` flattening and the Internal-vs-InvalidInput inconsistency for "campaign missing worktree/branch" (lines ~1823/3181/… vs ~1915/2333) plus the structural split of `src/api/experiments.rs` (5400+L). Left additive/rebase-friendly.
+- **Takes:** WS-10 architecture pass (the Wave 2 work deliberately stayed additive for this).
+
+## Wave 1 — WS-04 (desktop)
+
+### F-15 — Skill parameters from `save_skill`
+- **Done:** `sandbox_factory` `tools_used` is best-effort populated.
+- **Remains:** `SkillManifest.parameters` is left empty because the Rhai `save_skill(id, script, description)` builtin has no parameter input.
+- **Takes:** define a skill-parameter convention + extend the builtin signature (out of scope this pass).
+
+## Wave 2 / cross — test infra (WS-13)
+
+### F-16 — Quarantine live-network desktop tests
+- **Observed:** `apps/desktop/backend` `rig_lib::tools::web_search::tests::test_ddg_search_with_scraping` does a live DuckDuckGo search+scrape and fails offline / under anti-bot variance (pre-existing, untouched by WS-04).
+- **Takes:** `#[ignore]` it (and audit sibling live tests) so the desktop test suite is deterministic offline; run live tests in a dedicated nightly job. WS-13.
+
+---
+
 *Add follow-ups under the owning wave as they arise. Resolve or explicitly accept each before declaring a workstream done.*

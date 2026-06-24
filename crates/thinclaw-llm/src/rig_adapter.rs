@@ -609,11 +609,7 @@ fn extract_response(
         Some(thinking_parts.join("\n"))
     };
 
-    let finish = if !tool_calls.is_empty() {
-        FinishReason::ToolUse
-    } else {
-        FinishReason::Stop
-    };
+    let finish = finish_reason_for_tool_use(!tool_calls.is_empty());
 
     (text, tool_calls, thinking, finish)
 }
@@ -621,6 +617,18 @@ fn extract_response(
 /// Saturate u64 to u32 for token counts.
 fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
+}
+
+/// Derive the terminal finish reason for a completion from whether any tool
+/// call was produced. Shared by the non-streaming and streaming paths so the
+/// two agree: a turn that emitted any tool call ends with
+/// [`FinishReason::ToolUse`], otherwise [`FinishReason::Stop`].
+fn finish_reason_for_tool_use(saw_tool_call: bool) -> FinishReason {
+    if saw_tool_call {
+        FinishReason::ToolUse
+    } else {
+        FinishReason::Stop
+    }
 }
 
 /// Build a rig-core CompletionRequest from our internal types.
@@ -1522,6 +1530,11 @@ where
     let mut tc_id_to_index: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
     let mut next_tc_index: u32 = 0;
+    // Track whether any tool-call activity was seen so the terminal `Done`
+    // chunk reports the real finish reason. Mirrors the non-streaming
+    // derivation in `rig_message_to_completion_response` (tool calls present
+    // => `FinishReason::ToolUse`, else `Stop`).
+    let mut saw_tool_call = false;
 
     let stream = async_stream::stream! {
         while let Some(chunk_result) = streaming_resp.next().await {
@@ -1543,6 +1556,7 @@ where
                     }
                 }
                 Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
+                    saw_tool_call = true;
                     let mut name = tool_call.function.name;
                     if !known_tool_names.is_empty() {
                         name = normalize_tool_name(&name, &known_tool_names);
@@ -1559,6 +1573,7 @@ where
                     }));
                 }
                 Ok(StreamedAssistantContent::ToolCallDelta { id, content, .. }) => {
+                    saw_tool_call = true;
                     let (name_delta, args_delta) = match content {
                         ToolCallDeltaContent::Name(n) => (Some(n), None),
                         ToolCallDeltaContent::Delta(d) => (None, Some(d)),
@@ -1608,7 +1623,7 @@ where
                         cost_usd: Some(cost_usd),
                         input_tokens,
                         output_tokens,
-                        finish_reason: FinishReason::Stop,
+                        finish_reason: finish_reason_for_tool_use(saw_tool_call),
                         token_capture,
                     });
                 }
@@ -1970,6 +1985,15 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
         assert_eq!(finish, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn test_finish_reason_for_tool_use_maps_streaming_done() {
+        // A streaming turn that saw a tool call must terminate with ToolUse,
+        // mirroring the non-streaming derivation in `extract_response`.
+        assert_eq!(finish_reason_for_tool_use(true), FinishReason::ToolUse);
+        // A plain text stream terminates with Stop.
+        assert_eq!(finish_reason_for_tool_use(false), FinishReason::Stop);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, anyhow};
+use base64::Engine as _;
 use uuid::Uuid;
 
 use crate::api::experiments::{
@@ -15,6 +16,12 @@ use crate::experiments::{
 use crate::tools::execution_backend::{
     CommandExecutionRequest, ExecutionBackend, LocalHostExecutionBackend, ScriptExecutionRequest,
 };
+
+/// Upper bound on artifact bytes we inline as base64 in a lease `/artifact` post.
+/// Larger artifacts fall back to the pod-local-path breadcrumb only (no durable
+/// upload). This caps memory/transport pressure from runaway logs while still
+/// covering typical run logs and summary JSON.
+const MAX_INLINE_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub async fn run_remote_runner(
     gateway_url: &str,
@@ -151,36 +158,17 @@ pub async fn run_remote_runner(
         let exit_code = run_output.exit_code;
         let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
 
-        let artifact_log = ExperimentRunnerArtifactUpload {
-            kind: "run_log".to_string(),
-            uri_or_local_path: log_path.to_string_lossy().to_string(),
-            size_bytes: Some(
-                tokio::fs::metadata(&log_path)
-                    .await
-                    .map(|meta| meta.len())
-                    .unwrap_or_default(),
-            ),
-            fetchable: false,
-            metadata: serde_json::json!({}),
-        };
+        let artifact_log =
+            artifact_upload_from_file("run_log", &log_path, serde_json::json!({})).await;
         post_artifact(&client, gateway_url, lease_id, token, &artifact_log)
             .await
             .ok();
         ensure_shell_step_succeeded("run", &run_output)?;
 
         if summary_path.exists() {
-            let artifact_summary = ExperimentRunnerArtifactUpload {
-                kind: "summary_json".to_string(),
-                uri_or_local_path: summary_path.to_string_lossy().to_string(),
-                size_bytes: Some(
-                    tokio::fs::metadata(&summary_path)
-                        .await
-                        .map(|meta| meta.len())
-                        .unwrap_or_default(),
-                ),
-                fetchable: false,
-                metadata: serde_json::json!({}),
-            };
+            let artifact_summary =
+                artifact_upload_from_file("summary_json", &summary_path, serde_json::json!({}))
+                    .await;
             post_artifact(&client, gateway_url, lease_id, token, &artifact_summary)
                 .await
                 .ok();
@@ -241,18 +229,12 @@ pub async fn run_remote_runner(
         .await
         .ok();
         if let Some(log_path) = persisted_log_path.as_ref() {
-            let failure_log_artifact = ExperimentRunnerArtifactUpload {
-                kind: "run_log".to_string(),
-                uri_or_local_path: log_path.to_string_lossy().to_string(),
-                size_bytes: Some(
-                    tokio::fs::metadata(log_path)
-                        .await
-                        .map(|meta| meta.len())
-                        .unwrap_or_default(),
-                ),
-                fetchable: false,
-                metadata: serde_json::json!({ "failure": true }),
-            };
+            let failure_log_artifact = artifact_upload_from_file(
+                "run_log",
+                log_path,
+                serde_json::json!({ "failure": true }),
+            )
+            .await;
             post_artifact(&client, gateway_url, lease_id, token, &failure_log_artifact)
                 .await
                 .ok();
@@ -354,6 +336,34 @@ async fn post_artifact(
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+/// Build an artifact upload for a file on the runner pod, attaching the file
+/// bytes as inline base64 when they fit under [`MAX_INLINE_ARTIFACT_BYTES`] so the
+/// gateway host can persist them durably. The pod-local path is retained as a
+/// breadcrumb; `fetchable` stays `false` because the path itself does not survive
+/// pod teardown — durability comes from the inline bytes the host stores.
+async fn artifact_upload_from_file(
+    kind: &str,
+    path: &Path,
+    metadata: serde_json::Value,
+) -> ExperimentRunnerArtifactUpload {
+    let size_bytes = tokio::fs::metadata(path).await.map(|meta| meta.len()).ok();
+    let content_base64 = match size_bytes {
+        Some(len) if len <= MAX_INLINE_ARTIFACT_BYTES => tokio::fs::read(path)
+            .await
+            .ok()
+            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
+        _ => None,
+    };
+    ExperimentRunnerArtifactUpload {
+        kind: kind.to_string(),
+        uri_or_local_path: path.to_string_lossy().to_string(),
+        size_bytes,
+        fetchable: false,
+        metadata,
+        content_base64,
+    }
 }
 
 fn prepare_checkout_dir(
