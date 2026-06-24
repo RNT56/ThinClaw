@@ -516,6 +516,7 @@ Historical Scrappy/OpenClaw component inventories were removed from this parity 
 | Notification routing | ✅ | ✅ | P1 | `NotificationSettings` (preferred_channel + recipient) in `Settings`. Per-channel broadcast validation guards. Wizard step 16 collects preferences. Heartbeat/routine notifications route to user-chosen channel. WebUI Settings tab exposes notification preferences. |
 | Wizard notification preferences | ❌ | ✅ | P1 | `step_notification_preferences` in wizard: auto-selects single channel, prompts for multi-channel, collects recipient (phone/chat ID/email). |
 | Gmail pub/sub | ✅ | ✅ | P3 | `GmailConfig` + `parse_pubsub_push()` + sender filtering ([`src/channels/gmail_wiring.rs`](src/channels/gmail_wiring.rs)) |
+| Repo project supervisor | ❌ | ✅ | P2 | GitHub App backed repository project automation; CLI + gateway wired, default off. Shared domain types in [`crates/thinclaw-repo-projects`](crates/thinclaw-repo-projects), root runtime in [`src/repo_projects`](src/repo_projects), CLI in [`src/cli/repo_projects.rs`](src/cli/repo_projects.rs). |
 
 ### Owner: ThinClaw Agent
 
@@ -598,9 +599,11 @@ This file keeps broad ThinClaw parity and shipped-runtime capability tracking on
 
 ---
 
-## 20. Shipped Built-in Tools (80 max; some conditional or feature-gated)
+## 20. Shipped Built-in Tools
 
-> **Updated:** 2026-05-14
+> Counts are intentionally omitted; the live tool registry is authoritative. See
+> [`src/tools/README.md`](src/tools/README.md) and `crates/thinclaw-tools-core`.
+> Some tools are conditional or feature-gated.
 
 ### 20.1 File & Code Operations (9 tools)
 

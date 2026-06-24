@@ -65,6 +65,7 @@ The codebase is easier to reason about by subsystem than by file count.
 - `src/context/`: compatibility facades plus root-specific context wiring
 - `src/extensions/`: extension lifecycle, registry integration, manifest handling
 - `src/llm/`: compatibility facades plus reasoning and root-specific provider wiring
+- `src/repo_projects/`: root-owned repo-project supervisor runtime (reconcile loop, GitHub pipeline, executor, planner, merge gate); shared domain types live in `thinclaw-repo-projects`
 - `src/skills/`: skill registry, workspace/bundled skill loading, hot-reload
 - `src/safety/`, `src/sandbox/`, `src/secrets/`: trust boundaries and execution controls
 - `src/setup/`: onboarding wizard and first-run configuration
@@ -108,6 +109,7 @@ For a deeper walkthrough of startup and workspace shaping, use `src/setup/README
 - `thinclaw-channels` owns shared channel manager/runtime helpers, pairing store support, native transports for Signal, Discord, Gmail, HTTP, BlueBubbles, Apple Mail, iMessage, and Nostr, TUI channel mechanics/DTOs, plus WASM channel runtime wrapper/loader/router/watcher. Root `src/channels` still owns ACP stdio, REPL, the concrete TUI app runner, HTTP config conversion, and gateway app-state adapters that depend on root services.
 - `thinclaw-agent` owns support types, context monitoring, context compaction algorithms behind summarizer/archive ports, self-repair policy and repair loop behind context/store/builder ports, message command routing, dispatcher helper logic, workspace-level agent routing and agent registry logic behind persistence/seeding ports, session/task domain types, session-search rendering/windowing behind a transcript-store port, trajectory record/logging types, agent environment/eval runner framework behind a concrete-agent port, run artifact records plus run driver/harness behavior behind runtime lookup and memory-sync ports, filesystem checkpoint support, routine records and routine tools behind store/engine/outcome ports, job monitor event forwarding, and agent-owned port traits. The full agent loop/dispatcher/runtime remains root-owned until DB, tool, hook, skill, LLM, and channel dependencies are injected through ports.
 - `thinclaw-app` owns root-independent startup/runtime policy including quiet startup spinner behavior. Root `src/app.rs` still owns concrete dependency assembly.
+- The repo-project supervisor is a wired-but-default-off subsystem: a GitHub App backed automation that supervises enrolled repositories. `thinclaw-repo-projects` owns the shared domain types and state machines; `src/repo_projects/` owns the concrete root runtime (reconcile loop, pipeline, executor, planner, merge gate); it is operated via the `thinclaw repo-projects` CLI and gateway handlers, and stays off until enabled in settings.
 - Channel delivery is hybrid. Some channels are native Rust modules; others are packaged WASM channel artifacts.
 - Channel-specific formatting/rendering guidance is owned by the channel layer, not prompt assembly. Native channels should override `Channel::formatting_hints()`, and packaged WASM channels should declare `formatting_hints` in their `*.capabilities.json` metadata. Do not add channel-name switches back into `src/llm/reasoning.rs`.
 - Extension flows are split. `tool`, `mcp`, and registry installs are related but not interchangeable surfaces.
@@ -152,8 +154,8 @@ Temporary dev note:
 - Keep `README.md` as the front door, not the full manual.
 - Keep subsystem docs thinly scoped and explicit about ownership.
 - Avoid brittle counts, stale inventories, and “default forever” claims unless the code guarantees them.
-- When behavior changes, update the relevant canonical docs in the same branch.
-- If the change affects tracked feature behavior, update `FEATURE_PARITY.md` too.
+- Same-PR rule (enforceable): any PR that changes behavior in an area with a canonical doc (see the Canonical Docs table and Common Update Triggers) MUST update that canonical doc in the same PR — code-adjacent spec doc first, broader overview second. A doc claim must never run ahead of the code it describes.
+- If the change affects tracked feature behavior, the same PR MUST update `FEATURE_PARITY.md`. Treat this as a `/code-review` and `/ship` checklist item, not an after-the-fact follow-up.
 
 ## Common Update Triggers
 

@@ -187,7 +187,7 @@ impl Default for ChannelStatusView {
 /// SSE event payload for channel status changes.
 ///
 /// Emitted via `AppHandle::emit("openclaw-event", ...)` with `kind: "ChannelStatus"`.
-/// Scrappy subscribes to these for real-time status updates.
+/// ThinClaw Desktop subscribes to these for real-time status updates.
 /// See §17.4 integration contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelStatusEvent {

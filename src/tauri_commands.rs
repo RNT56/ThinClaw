@@ -1,10 +1,10 @@
 //! Unified Tauri command facade for ThinClaw backend services.
 //!
-//! Provides the adapter functions that Scrappy's Tauri command stubs
+//! Provides the adapter functions that ThinClaw Desktop's Tauri command stubs
 //! should call. Each function maps directly to an `openclaw_*` command
 //! from the §17.4 integration contract.
 //!
-//! # Usage from Scrappy `rpc.rs`
+//! # Usage from ThinClaw Desktop `rpc.rs`
 //!
 //! ```rust,ignore
 //! use thinclaw::tauri_commands;
@@ -159,7 +159,7 @@ pub struct InstallResult {
 /// Response: `InstallResult`
 ///
 /// This performs local validation and path resolution. The actual HTTP
-/// fetch is done by the caller (Scrappy) since it has the reqwest client.
+/// fetch is done by the caller (ThinClaw Desktop) since it has the reqwest client.
 pub fn clawhub_prepare_install(
     cache: &CatalogCache,
     plugin_id: &str,
@@ -747,7 +747,7 @@ pub async fn channel_status_list(
 
 use crate::agent::routine::{NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger};
 
-/// Parameters for creating a new routine (Scrappy sends this from the UI).
+/// Parameters for creating a new routine (ThinClaw Desktop sends this from the UI).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RoutineCreateParams {
     pub name: String,

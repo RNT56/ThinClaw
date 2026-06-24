@@ -118,7 +118,7 @@ pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
 ///
 /// Uses the same Google Desktop App credentials as `google_oauth_token`,
 /// but with scopes specific to Gmail access and pub/sub notifications.
-/// This is what `cloud_oauth_start("gmail")` dispatches to in Scrappy.
+/// This is what `cloud_oauth_start("gmail")` dispatches to in ThinClaw Desktop.
 pub struct GmailOAuthConfig;
 
 impl GmailOAuthConfig {

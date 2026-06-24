@@ -102,7 +102,7 @@ pub async fn import_settings(
 
 /// Reload secrets from the store into the config overlay.
 ///
-/// Zero-downtime secret refresh: when a user updates an API key in Scrappy's
+/// Zero-downtime secret refresh: when a user updates an API key in ThinClaw Desktop's
 /// UI, call this instead of stop→start. Re-reads all secrets from the store,
 /// updates the injected vars overlay, and the next LLM call picks up the new
 /// keys automatically.

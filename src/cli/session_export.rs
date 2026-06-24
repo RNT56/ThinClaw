@@ -185,7 +185,7 @@ impl SessionExporter {
 /// Response shape for `openclaw_export_session` Tauri command.
 ///
 /// Contains the exported content, format metadata, and MIME type
-/// for use by Scrappy's export format picker.
+/// for use by ThinClaw Desktop's export format picker.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionExportResponse {
     pub content: String,

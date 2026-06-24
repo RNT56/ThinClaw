@@ -98,7 +98,7 @@ impl Tool for AgentThinkTool {
 /// informed during long-running multi-step tasks.
 ///
 /// The dispatcher intercepts this tool's output and forwards the message
-/// to the user's channel (Scrappy, Telegram, CLI, etc.) as a real message.
+/// to the user's channel (Telegram, CLI, etc.) as a real message.
 /// The loop then continues with the next iteration.
 ///
 /// Contrast with a regular text response, which would end the loop entirely.

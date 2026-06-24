@@ -93,7 +93,7 @@ pub struct AppComponents {
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
     /// Hardware bridge for sensor access (camera, mic, screen).
-    /// Present when running inside a host (Scrappy) that provides sensor capture.
+    /// Present when running inside a host (ThinClaw Desktop) that provides sensor capture.
     pub tool_bridge: Option<Arc<dyn ToolBridge>>,
     /// Session-level sensor approvals (cleared on restart).
     pub session_approvals: Arc<SessionApprovals>,
@@ -121,7 +121,7 @@ pub struct AppBuilder {
     db: Option<Arc<dyn Database>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 
-    // Hardware bridge for sensor access (injected by Scrappy)
+    // Hardware bridge for sensor access (injected by ThinClaw Desktop)
     tool_bridge: Option<Arc<dyn ToolBridge>>,
 
     // Backend-specific handles needed by secrets store
@@ -162,7 +162,7 @@ impl AppBuilder {
         }
     }
 
-    /// Inject a pre-built secrets store (e.g. from Scrappy's Keychain backend).
+    /// Inject a pre-built secrets store (e.g. from ThinClaw Desktop's Keychain backend).
     ///
     /// When set, [`init_secrets()`] will use this store directly instead of
     /// creating one from the master key + database handles. Keys will still
@@ -176,7 +176,7 @@ impl AppBuilder {
     ///
     /// When set, `init_llm()` will create a multi-provider chain with
     /// failover and smart routing based on these settings.
-    /// In Scrappy mode, these come from the Cloud Intelligence UI.
+    /// In ThinClaw Desktop mode, these come from the Cloud Intelligence UI.
     /// In headless mode, they come from config.toml / DB settings.
     pub fn with_providers_settings(mut self, settings: crate::settings::ProvidersSettings) -> Self {
         self.providers_settings = Some(settings);
@@ -186,7 +186,7 @@ impl AppBuilder {
     /// Inject a hardware bridge for sensor access (camera, mic, screen).
     ///
     /// When set, `build_all()` will register bridged sensor tools in the
-    /// `ToolRegistry`. In desktop mode, Scrappy implements the `ToolBridge`
+    /// `ToolRegistry`. In desktop mode, ThinClaw Desktop implements the `ToolBridge`
     /// trait and passes it here at startup.
     pub fn with_tool_bridge(mut self, bridge: Arc<dyn ToolBridge>) -> Self {
         self.tool_bridge = Some(bridge);
@@ -352,7 +352,7 @@ impl AppBuilder {
 
         // Extract ProvidersSettings from DB settings if not already injected.
         // This enables headless deployments to configure multi-provider failover
-        // via config.toml or DB settings without needing Scrappy's UI.
+        // via config.toml or DB settings without needing ThinClaw Desktop's UI.
         if self.providers_settings.is_none() {
             match db.get_all_settings("default").await {
                 Ok(map) => {
@@ -399,7 +399,7 @@ impl AppBuilder {
     /// the store, injects any encrypted LLM API keys into the config overlay
     /// and re-resolves config.
     pub async fn init_secrets(&mut self) -> Result<(), anyhow::Error> {
-        // If a secrets store was pre-injected (e.g. Scrappy's Keychain backend),
+        // If a secrets store was pre-injected (e.g. ThinClaw Desktop's Keychain backend),
         // skip creation but still inject keys and re-resolve config.
         if self.secrets_store.is_some() {
             if let Some(ref secrets) = self.secrets_store {
@@ -1409,7 +1409,7 @@ impl AppBuilder {
         }
 
         // Register lifecycle hooks: bundled (AuditLogHook) + plugin + workspace.
-        // Without this, the HookRegistry remains empty in Scrappy/Tauri mode.
+        // Without this, the HookRegistry remains empty in ThinClaw Desktop/Tauri mode.
         let active_tool_names = tools.list().await;
         let hook_bootstrap = crate::hooks::bootstrap_hooks(
             &hooks,

@@ -13,7 +13,7 @@
 //! **Feature flag:** Enable `voice` in Cargo.toml for real audio capture.
 //! Without it, the detection loop runs as a polling placeholder.
 //! The `voice` feature is intended for headless/remote mode only;
-//! in desktop mode (Tauri), Scrappy owns the microphone.
+//! in desktop mode (Tauri), ThinClaw Desktop owns the microphone.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

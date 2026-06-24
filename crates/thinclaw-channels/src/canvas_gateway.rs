@@ -7,7 +7,7 @@
 //! - `POST /canvas/api/panels/:panel_id/action` — Handle form/button callbacks
 //!
 //! Panels are stored in memory with TTL expiry. The `CanvasTool` pushes
-//! panels here; clients (Scrappy, browser, Telegram webapps) consume them.
+//! panels here; clients (ThinClaw Desktop, browser, Telegram webapps) consume them.
 
 use std::collections::HashMap;
 use std::sync::Arc;

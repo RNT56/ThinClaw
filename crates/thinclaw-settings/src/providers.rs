@@ -16,7 +16,7 @@ where
 ///
 /// Enables ThinClaw to manage multiple LLM providers with failover,
 /// smart routing, and model allowlists — whether running headless
-/// (config.toml / env vars) or inside Scrappy (UI-driven).
+/// (config.toml / env vars) or inside ThinClaw Desktop (UI-driven).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutingMode {

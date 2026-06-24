@@ -97,6 +97,7 @@ for configuration, local/cloud mode, and workflow security details.
 
 - `thinclaw cron`: Manage scheduled background routines.
 - `thinclaw experiments`: Manage research automation (campaigns, providers, targets).
+- `thinclaw repo-projects`: Manage the GitHub repository project supervisor (default off until enabled in settings). See [Repo Project Supervisor](#repo-project-supervisor).
 - `thinclaw message`: Send a message to the agent directly from the CLI without starting the interactive prompt.
 - `thinclaw pairing`: DM pairing logic to approve inbound requests from unknown senders on supported channels.
 - `thinclaw logs`: Query, tail, and filter system logs.
@@ -140,6 +141,47 @@ Chromium fallback and host prerequisites, see [EXTERNAL_DEPENDENCIES.md](EXTERNA
 - `thinclaw registry install-defaults`: Install the recommended default bundle.
 - `thinclaw registry remove <NAME>`: Remove an installed registry extension.
 - `thinclaw registry validate <NAME|BUNDLE>`: Validate registry manifests and capabilities without installing. This checks that setup secrets declared by channel/tool capabilities are also represented in registry auth metadata.
+
+## Repo Project Supervisor
+
+The `thinclaw repo-projects` commands manage the GitHub repository project
+supervisor. The supervisor is default off and stays inactive until enabled in
+settings (`thinclaw repo-projects setup --enable`). Commands talk directly to the
+database and secrets store, the same layer the desktop commands and gateway
+handlers use.
+
+- `thinclaw repo-projects list`: List all repository projects.
+- `thinclaw repo-projects show <PROJECT_ID>`: Show one project's full status (backlog, workers, PRs, merge gates).
+- `thinclaw repo-projects status`: Show supervisor setup readiness (feature flag, credentials, policy).
+- `thinclaw repo-projects setup`: Enable and configure the supervisor (writes settings).
+  - `--enable` / `--disable`: Enable or disable the supervisor.
+  - `--app-id <ID>`: GitHub App id.
+  - `--installation-id <ID>`: GitHub App installation id.
+  - `--private-key-secret <NAME>`: Name of the secret holding the GitHub App PEM private key.
+  - `--webhook-secret-secret <NAME>`: Name of the secret holding the GitHub webhook secret.
+  - `--app-slug <SLUG>`: Public GitHub App slug (used to build the install URL).
+  - `--default-coding-backend <BACKEND>`: Default coding backend for new tasks.
+  - `--auto-merge <BOOL>`: Whether to auto-merge passing PRs.
+  - `--watchdog-interval-secs <SECS>`: Reconcile/watchdog interval in seconds.
+- `thinclaw repo-projects set-credential <NAME>`: Store a GitHub credential in the encrypted secrets store.
+  - `--value <VALUE>`: Credential value (prompts if omitted).
+- `thinclaw repo-projects create`: Create a project and enroll its first repository.
+  - `--name <NAME>`: Project name.
+  - `--repo-url <URL>`: Repository URL.
+  - `--default-branch <BRANCH>`: Default branch.
+  - `--description <TEXT>`: Project description.
+- `thinclaw repo-projects enroll <PROJECT_ID>`: Enroll an additional repository into a project.
+  - `--repo-url <URL>`: Repository URL.
+  - `--default-branch <BRANCH>`: Default branch.
+- `thinclaw repo-projects repos`: List the GitHub repositories the connected credential can act on, marking which are already enrolled.
+- `thinclaw repo-projects connect [REPOS...]`: Bring repositories under supervision (a project is created for each). Pass one or more `owner/repo`, or `--all` for every accessible repo.
+  - `--all`: Connect every repository the credential can access.
+- `thinclaw repo-projects start <PROJECT_ID>`: Start a project.
+- `thinclaw repo-projects pause <PROJECT_ID>`: Pause a project.
+- `thinclaw repo-projects resume <PROJECT_ID>`: Resume a paused project.
+- `thinclaw repo-projects cancel <PROJECT_ID>`: Cancel a project.
+- `thinclaw repo-projects events <PROJECT_ID>`: List recent project events.
+  - `--limit <N>`: Maximum number of events to show (default 20).
 
 ## Trajectory Archive
 

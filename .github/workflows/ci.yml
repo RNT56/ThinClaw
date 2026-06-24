@@ -737,6 +737,34 @@ jobs:
             manifest_path: channels-src/discord/Cargo.toml
           - name: whatsapp
             manifest_path: channels-src/whatsapp/Cargo.toml
+          # The webhook-family shims below `include!` the shared
+          # channels-src/shared_webhook_channel/src/impl.rs source (it is not a
+          # standalone crate, so it has no matrix leg of its own — it is build-
+          # checked transitively through every shim that includes it).
+          - name: dingtalk
+            manifest_path: channels-src/dingtalk/Cargo.toml
+          - name: feishu_lark
+            manifest_path: channels-src/feishu_lark/Cargo.toml
+          - name: google_chat
+            manifest_path: channels-src/google_chat/Cargo.toml
+          - name: line
+            manifest_path: channels-src/line/Cargo.toml
+          - name: matrix
+            manifest_path: channels-src/matrix/Cargo.toml
+          - name: mattermost
+            manifest_path: channels-src/mattermost/Cargo.toml
+          - name: ms_teams
+            manifest_path: channels-src/ms_teams/Cargo.toml
+          - name: qq
+            manifest_path: channels-src/qq/Cargo.toml
+          - name: twilio_sms
+            manifest_path: channels-src/twilio_sms/Cargo.toml
+          - name: twitch
+            manifest_path: channels-src/twitch/Cargo.toml
+          - name: wecom
+            manifest_path: channels-src/wecom/Cargo.toml
+          - name: weixin
+            manifest_path: channels-src/weixin/Cargo.toml
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -744,11 +772,16 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
           key: channel-crate-${{ matrix.name }}
       - name: Run channel crate tests
         run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+      - name: Build channel crate for wasm32-wasip2
+        # Channels ship as WASM components; a shim that stops compiling to WASM
+        # must fail CI even when its host-side unit tests still pass.
+        run: cargo build --manifest-path ${{ matrix.manifest_path }} --release --target wasm32-wasip2
 
   tool-crates:
     name: "Tool Crate: ${{ matrix.name }}"
