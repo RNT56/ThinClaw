@@ -42,7 +42,7 @@ only to reduce root file count.
 | `thinclaw-identity` | conversation-scope and identity resolution DTOs: conversation kind/scope, resolved identity, linked-conversation recall, actor endpoint references, actor status, and endpoint approval status |
 | `thinclaw-soul` | canonical/local soul parsing and rendering, seeded-soul composition, pack name canonicalization, and pack asset markdown |
 | `thinclaw-experiments` | experiment records/DTOs, target uniqueness and metadata merge policy, opportunity derivation, lifecycle/status/path policies, lease status/completion policy, subagent planning DTOs, prompt-context helpers, and runner/LLM cost attribution policy |
-| `thinclaw-media` | media content, storage helpers, channel media limits, and document text extraction primitives |
+| `thinclaw-media` | media content, storage helpers, channel media limits, document text extraction primitives, the `MediaExtractor` trait/`MediaExtractError`, and the image/PDF/document extractors. The audio extractor and the `MediaPipeline` glue stay root-owned in `src/media` because they depend on root `crate::config` (would otherwise cycle via `media → config → channels → media`) |
 | `thinclaw-workspace` | workspace core, repository helpers, search/chunking, document helpers |
 | `thinclaw-db` | persistence traits, DB backends, migrations, DB contract-facing glue |
 | `thinclaw-llm-core` | provider traits, transport-neutral LLM DTOs, and root-independent routing policy construction/helpers |
