@@ -38,7 +38,7 @@ as `thinclaw-acp` explicitly when you need them.
 |---------|---------|----------|
 | **edge** | `cargo build --release --no-default-features --features edge --bin thinclaw` | Small machines, VPS, SD cards, libSQL-only installs |
 | **light** (default) | `cargo build --release --bin thinclaw` | CLI agent, local gateway, API-only, cron agents |
-| **full** | `cargo build --release --features full --bin thinclaw` | Production runtime with tunnel, Docker sandbox, browser, Nostr, voice wake |
+| **full** | `cargo build --release --features full --bin thinclaw` | Production runtime with tunnel, Docker sandbox, browser, Nostr |
 | **desktop** | `cargo build --release --features desktop --bin thinclaw` | ThinClaw Desktop embedding |
 | **custom** | `cargo build --release --features light,browser --bin thinclaw` | Mix and match |
 
@@ -87,12 +87,13 @@ thinclaw
 Everything in `light` **plus**: ACP integration, REPL/TUI mode (interactive terminal
 with boot screen), tunnel providers (Tailscale/Cloudflare), Docker sandbox
 (container isolation for untrusted code), browser automation (Chromium-based),
-Nostr protocol integration, and headless voice wake word detection (`voice`).
+and Nostr protocol integration.
 
-The headless voice wake runtime is compiled into `full` but stays **off at
-runtime** until the operator sets `THINCLAW_VOICE_WAKE=1`. It is intended for
-headless/remote deployments only; in desktop mode ThinClaw Desktop owns the mic
-and runs its own browser-side wake path. See "Headless voice wake" below.
+Headless voice wake (`voice`) is **not** in `full` — it pulls `cpal`/ALSA, a system
+dependency we keep off the broad `full` profile and its release artifacts. It is
+opt-in (`--features voice`, and included in `--all-features`); in desktop mode
+ThinClaw Desktop owns the mic and runs its own browser-side wake path. See
+"Headless voice wake" below.
 
 Best for: Full production deployments with web UI and all non-desktop channel
 support. Users should normally install this from GitHub Releases rather than
@@ -123,7 +124,7 @@ app owns the microphone and runs its own browser-side wake path.
 
 Two switches must both be on for it to do anything:
 
-1. **Build time:** the `voice` cargo feature (in `full`, or add it explicitly).
+1. **Build time:** the `voice` cargo feature (`--features voice` or `--all-features`; not in `full`).
 2. **Runtime:** set `THINCLAW_VOICE_WAKE=1` (also accepts `true`/`on`). Default
    off — without it the runtime is never constructed.
 
@@ -271,7 +272,8 @@ That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
 edge     = libsql
 light    = edge + postgres + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones
 desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
-full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr + voice
+full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr
+voice    = opt-in (headless wake word; also in --all-features) — not in full
 ```
 
 ## `full` vs `--all-features`

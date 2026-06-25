@@ -108,14 +108,11 @@ jobs:
           # Feature profiles are compile-only gates; avoid failing a green
           # profile in the post-job cache save when hosted runners are low on disk.
           save-if: false
-      - name: Install Linux ALSA packages (cpal/voice — in full + all-features)
-        if: matrix.name == 'full' || matrix.name == 'all-features'
+      - name: Install Linux all-features packages
+        if: matrix.name == 'all-features'
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
-      - name: Install all-features wasm toolchain
-        if: matrix.name == 'all-features'
-        run: |
           rustup target add wasm32-wasip2
           cargo install wasm-tools --locked
       - name: cargo check

@@ -1841,7 +1841,10 @@ async fn webhook_routine_endpoint_runs_routine_and_enforces_signature() {
 
     let run = wait_for_terminal_run(&ctx.db, webhook_routine.id).await;
     assert_eq!(run.id, run_id);
-    assert_eq!(run.trigger_type, "manual");
+    // A webhook-triggered routine carries a payload, so the engine labels the run
+    // "webhook" (distinct from a payload-less "manual" fire) — see
+    // routine_engine::fire_manual_with_payload.
+    assert_eq!(run.trigger_type, "webhook");
     assert_eq!(run.status, RunStatus::Attention);
     assert_eq!(
         run.result_summary.as_deref(),

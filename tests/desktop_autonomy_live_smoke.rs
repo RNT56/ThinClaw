@@ -331,6 +331,10 @@ async fn linux_whole_machine_admin_live_desktop_smoke() {
     run_whole_machine_admin_live_desktop_smoke().await;
 }
 
+// Only the macOS and Windows dedicated-user smoke tests call this helper; the
+// Linux variant inlines its own path, so without this gate the helper is dead
+// code on Linux (caught by the `--all-targets` clippy gate).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 async fn run_dedicated_user_live_desktop_smoke() {
     if !live_smoke_enabled() {
         return;
