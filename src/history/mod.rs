@@ -1,25 +1,17 @@
-//! History and persistence layer.
+//! History and persistence layer (compatibility facade).
 //!
-//! Stores job history, conversations, and actions in PostgreSQL for:
-//! - Audit trail
-//! - Learning from past executions
-//! - Analytics and metrics
+//! The concrete PostgreSQL store now lives in `thinclaw-db`
+//! (`thinclaw_db::postgres::PgBackend`, wrapping `thinclaw_db::postgres_store::Store`),
+//! exposed at runtime as `Arc<dyn thinclaw_db::Database>`. This module is a thin
+//! re-export shim so `crate::history::...` import paths keep resolving to the
+//! canonical record/DTO types after the root `Store` duplicate was removed.
 
-#[cfg(feature = "postgres")]
-mod analytics;
-#[cfg(feature = "postgres")]
-mod experiments;
-mod store;
-
-#[cfg(feature = "postgres")]
-pub use analytics::{JobStats, ToolStats};
-#[cfg(feature = "postgres")]
-pub use store::Store;
-pub use store::{
+pub use thinclaw_history::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationScope,
     ConversationSummary, JobEventRecord, LearningArtifactVersion, LearningCandidate,
     LearningCodeProposal, LearningEvaluation, LearningEvent, LearningFeedbackRecord,
     LearningRollbackRecord, LinkedConversationRecall, LlmCallRecord, OutcomeContract,
     OutcomeContractQuery, OutcomeEvaluatorHealth, OutcomeObservation, OutcomePendingUser,
-    OutcomeSummaryStats, SandboxJobRecord, SandboxJobSummary, SessionSearchHit, SettingRow,
+    OutcomeSummaryStats, SessionSearchHit, SettingRow,
 };
+pub use thinclaw_types::{SandboxJobRecord, SandboxJobSummary};

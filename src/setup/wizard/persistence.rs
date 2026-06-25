@@ -17,7 +17,8 @@ impl SetupWizard {
         #[cfg(feature = "postgres")]
         let saved = if !saved {
             if let Some(ref pool) = self.db_pool {
-                let store = crate::history::Store::from_pool(pool.clone());
+                use crate::db::SettingsStore as _;
+                let store = crate::db::postgres::PgBackend::from_pool(pool.clone());
                 store
                     .set_all_settings("default", &db_map)
                     .await
@@ -212,7 +213,8 @@ impl SetupWizard {
         #[cfg(feature = "postgres")]
         let loaded = if !loaded {
             if let Some(ref pool) = self.db_pool {
-                let store = crate::history::Store::from_pool(pool.clone());
+                use crate::db::SettingsStore as _;
+                let store = crate::db::postgres::PgBackend::from_pool(pool.clone());
                 match store.get_all_settings("default").await {
                     Ok(db_map) if !db_map.is_empty() => {
                         let existing = Settings::from_db_map(&db_map);

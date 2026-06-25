@@ -38,7 +38,7 @@ as `thinclaw-acp` explicitly when you need them.
 |---------|---------|----------|
 | **edge** | `cargo build --release --no-default-features --features edge --bin thinclaw` | Small machines, VPS, SD cards, libSQL-only installs |
 | **light** (default) | `cargo build --release --bin thinclaw` | CLI agent, local gateway, API-only, cron agents |
-| **full** | `cargo build --release --features full --bin thinclaw` | Production runtime with tunnel, Docker sandbox, browser, Nostr |
+| **full** | `cargo build --release --features full --bin thinclaw` | Production runtime with tunnel, Docker sandbox, browser, Nostr, voice wake |
 | **desktop** | `cargo build --release --features desktop --bin thinclaw` | ThinClaw Desktop embedding |
 | **custom** | `cargo build --release --features light,browser --bin thinclaw` | Mix and match |
 
@@ -87,7 +87,12 @@ thinclaw
 Everything in `light` **plus**: ACP integration, REPL/TUI mode (interactive terminal
 with boot screen), tunnel providers (Tailscale/Cloudflare), Docker sandbox
 (container isolation for untrusted code), browser automation (Chromium-based),
-and Nostr protocol integration.
+Nostr protocol integration, and headless voice wake word detection (`voice`).
+
+The headless voice wake runtime is compiled into `full` but stays **off at
+runtime** until the operator sets `THINCLAW_VOICE_WAKE=1`. It is intended for
+headless/remote deployments only; in desktop mode ThinClaw Desktop owns the mic
+and runs its own browser-side wake path. See "Headless voice wake" below.
 
 Best for: Full production deployments with web UI and all non-desktop channel
 support. Users should normally install this from GitHub Releases rather than
@@ -108,6 +113,32 @@ PostgreSQL), HTML-to-Markdown, document extraction, and REPL mode.
 ```bash
 cargo build --release --features desktop --bin thinclaw
 ```
+
+## Headless voice wake
+
+The `voice` feature compiles a headless wake-word runtime (`cpal` audio capture).
+It is part of `full` and can also be combined with `light` (`--features
+light,voice`). It is **never** in `default`, `edge`, or `desktop` — the desktop
+app owns the microphone and runs its own browser-side wake path.
+
+Two switches must both be on for it to do anything:
+
+1. **Build time:** the `voice` cargo feature (in `full`, or add it explicitly).
+2. **Runtime:** set `THINCLAW_VOICE_WAKE=1` (also accepts `true`/`on`). Default
+   off — without it the runtime is never constructed.
+
+When enabled, the runtime starts during app build/startup, spawns a background
+audio-capture thread, and logs detection events. The default backend is the RMS
+**EnergyDetector**, which detects voice *activity* (that someone is speaking) but
+**not** a specific phrase — it works with no extra assets.
+
+A true "hey thinclaw" keyword wake word requires the optional **Sherpa-ONNX**
+backend, which shells out to an external `sherpa-onnx-keyword-spotter` binary and
+needs an ONNX keyword model plus a `keywords.txt` file. None of these are shipped
+with ThinClaw; you must install/fetch them yourself. Without them the Sherpa
+backend falls back to the EnergyDetector.
+
+On Linux, `voice` requires `libasound2-dev` (ALSA headers) at build time.
 
 ## Custom Combinations
 
@@ -240,7 +271,7 @@ That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
 edge     = libsql
 light    = edge + postgres + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones
 desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
-full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr
+full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr + voice
 ```
 
 ## `full` vs `--all-features`
@@ -251,7 +282,6 @@ users don't need:
 
 | Extra flag (not in `full`) | Why it's opt-in |
 |---|---|
-| `voice` | Adds `cpal` for audio capture; only for headless/remote mode. Requires ALSA headers on Linux. |
 | `bedrock` | Adds AWS SDK deps; only useful with an AWS account for Bedrock Titan embeddings. |
 | `bundled-wasm` | Embeds all WASM extensions into the binary (+6-13 MB); only for air-gapped deploys. |
 | `integration` | Gate for integration tests; not a runtime capability. |

@@ -1631,6 +1631,85 @@ impl AppBuilder {
             tools.count()
         );
 
+        // Headless voice wake word detection (WS-11).
+        //
+        // Opt-in twice: the `voice` cargo feature must be compiled in (it pulls
+        // cpal for audio capture) AND the operator must set THINCLAW_VOICE_WAKE=1
+        // at runtime. Default off — in desktop mode ThinClaw Desktop owns the mic
+        // and runs its own browser-side wake path, so this is for headless/remote
+        // deployments only.
+        //
+        // The default backend is the fully-implemented RMS EnergyDetector, which
+        // detects *that someone is speaking* (voice activity), not the literal
+        // "hey molty" phrase. A true keyword wake word requires the optional
+        // Sherpa-ONNX backend plus a shipped sherpa-onnx-keyword-spotter binary,
+        // an ONNX keyword model, and keywords.txt (none of which the repo ships).
+        // See docs/BUILD_PROFILES.md.
+        #[cfg(feature = "voice")]
+        {
+            let wake_enabled = std::env::var("THINCLAW_VOICE_WAKE")
+                .ok()
+                .map(|v| {
+                    let v = v.trim();
+                    v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+                })
+                .unwrap_or(false);
+
+            if wake_enabled {
+                let mut wake_runtime = crate::voice_wake::VoiceWakeRuntime::new(
+                    crate::voice_wake::VoiceWakeConfig::default(),
+                );
+
+                if let Some(mut events) = wake_runtime.take_events() {
+                    // Consumer task: translate wake events into agent-visible
+                    // signals. WakeWordDetected is the dispatch seam where a
+                    // talk-mode / STT capture of the follow-up utterance would be
+                    // triggered. Capturing + transcribing that utterance and
+                    // routing it into the dispatcher is deferred (see
+                    // tasks_deferred); for now we surface the event so the path is
+                    // reachable and observable.
+                    tokio::spawn(async move {
+                        while let Some(event) = events.recv().await {
+                            match event {
+                                crate::voice_wake::VoiceWakeEvent::WakeWordDetected {
+                                    confidence,
+                                    timestamp,
+                                } => {
+                                    // DISPATCH SEAM: trigger talk-mode/STT capture
+                                    // of the follow-up utterance here and feed the
+                                    // transcript into the dispatcher. Not yet wired
+                                    // end-to-end (deferred).
+                                    tracing::info!(
+                                        confidence,
+                                        timestamp = %timestamp,
+                                        "Voice wake word detected (STT capture-on-wake not yet wired)"
+                                    );
+                                }
+                                crate::voice_wake::VoiceWakeEvent::Error { message } => {
+                                    tracing::warn!(error = %message, "Voice wake error");
+                                }
+                                other => {
+                                    tracing::debug!(?other, "Voice wake event");
+                                }
+                            }
+                        }
+                        tracing::debug!("Voice wake event consumer exited");
+                    });
+                }
+
+                // start() spawns the detection loop in a detached tokio task that
+                // owns its own Arc<AtomicBool> and event sender clones, so the
+                // loop keeps running after `wake_runtime` is dropped at the end of
+                // this block. The consumer task above owns the only receiver.
+                match wake_runtime.start().await {
+                    Ok(()) => tracing::info!(
+                        "Voice wake runtime started (THINCLAW_VOICE_WAKE enabled, EnergyDetector backend)"
+                    ),
+                    Err(e) => tracing::warn!("Failed to start voice wake runtime: {}", e),
+                }
+            }
+        }
+
         tracing::info!(
             elapsed_ms = build_all_start.elapsed().as_millis(),
             "Startup phase: build_all total"

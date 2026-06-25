@@ -1666,7 +1666,8 @@ impl SetupWizard {
         // Load existing settings from DB, then restore connection fields that
         // may not be persisted in the settings map.
         if let Some(ref pool) = self.db_pool {
-            let store = crate::history::Store::from_pool(pool.clone());
+            use crate::db::SettingsStore as _;
+            let store = crate::db::postgres::PgBackend::from_pool(pool.clone());
             if let Ok(map) = store.get_all_settings("default").await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("postgres".to_string());

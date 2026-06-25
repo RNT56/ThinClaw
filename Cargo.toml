@@ -292,7 +292,9 @@ nostr = [
 # Core scheduling/workspace APIs always use chrono-tz; keep this as a
 # compatibility feature for existing build profiles and docs.
 timezones = []
-# Everything — full-featured agent with all capabilities
+# Everything — full-featured agent with all capabilities.
+# `voice` is opt-in elsewhere (headless wake word, needs a mic + libasound2-dev
+# on Linux) but is included here so the full profile actually builds it.
 full = [
     "light",
     "acp",
@@ -302,6 +304,7 @@ full = [
     "docker-sandbox",
     "browser",
     "nostr",
+    "voice",
 ]
 postgres = [
     "thinclaw-types/postgres",

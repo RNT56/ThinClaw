@@ -87,6 +87,17 @@ impl PgBackend {
         Ok(Self { store, repo })
     }
 
+    /// Create a backend from an existing connection pool.
+    ///
+    /// Useful for callers (e.g. the setup wizard) that already hold a
+    /// `deadpool_postgres::Pool` and want the unified `Database` surface
+    /// without reconnecting.
+    pub fn from_pool(pool: Pool) -> Self {
+        let store = Store::from_pool(pool.clone());
+        let repo = Repository::new(pool);
+        Self { store, repo }
+    }
+
     /// Get a clone of the connection pool.
     ///
     /// Useful for sharing with components that still need raw pool access.

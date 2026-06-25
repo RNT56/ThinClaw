@@ -106,4 +106,19 @@
 
 ---
 
+## Wave 4 — WS-11 voice_wake (now WIRED)
+
+### F-17 — CI ALSA for the `full` profile
+- `voice` is now in the `full` feature, so the Linux `full` build/check jobs need `libasound2-dev` + `pkg-config` (cpal). Update `.github/workflows/ci.yml` (the "Install Linux all-features packages" step ~:112) to also run for `matrix.name == 'full'`. macOS builds fine (CoreAudio). Out of the implementation lane (CI yaml).
+
+### F-18 — STT capture-on-wake glue
+- `VoiceWakeRuntime` is constructed + started under `#[cfg(feature="voice")]` + `THINCLAW_VOICE_WAKE`, and `WakeWordDetected` reaches a dispatch seam in `src/app.rs` that currently logs. Remaining: on wake, capture+transcribe the follow-up utterance (reuse `talk_mode.rs`/STT) and route the transcript into the agent dispatcher — needs a dispatcher/session handle threaded into the spawn block.
+
+### F-19 — voice config promotion + true keyword model
+- Gating is via `THINCLAW_VOICE_WAKE` env (no typed config). Optionally add a `VoiceConfig` to `thinclaw-config`. Also: a true "hey thinclaw" phrase (vs the default `EnergyDetector` speech-VAD) needs a shipped `sherpa-onnx-keyword-spotter` binary + ONNX model + keywords.txt, then switch `WakeBackend` to `SherpaOnnx`.
+
+> **Done this wave:** `history/store` consolidation (WIRE) — root `src/history/store` + `analytics.rs` + `experiments.rs` deleted, all 6 callers redirected onto `thinclaw-db` `PgBackend`, `src/history/mod.rs` now a thin DTO façade. One persistence implementation remains.
+
+---
+
 *Add follow-ups under the owning wave as they arise. Resolve or explicitly accept each before declaring a workstream done.*

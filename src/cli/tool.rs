@@ -584,7 +584,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
     let secrets_store: Arc<dyn SecretsStore + Send + Sync> = {
         #[cfg(feature = "postgres")]
         {
-            let store = crate::history::Store::new(&config.database).await?;
+            let store = crate::db::postgres::PgBackend::new(&config.database).await?;
             store.run_migrations().await?;
             Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)))
         }

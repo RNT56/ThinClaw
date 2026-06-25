@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use thinclaw::{
-    agent::HeartbeatRunner, config::Config, history::Store, llm::create_llm_provider,
-    workspace::Workspace,
+    agent::HeartbeatRunner, config::Config, db::Database as _, db::postgres::PgBackend,
+    llm::create_llm_provider, workspace::Workspace,
 };
 
 #[tokio::test]
@@ -44,7 +44,7 @@ async fn test_heartbeat_end_to_end() {
     );
 
     // 2. Connect to database
-    let store = Store::new(&config.database)
+    let store = PgBackend::new(&config.database)
         .await
         .expect("Failed to connect to database");
     store

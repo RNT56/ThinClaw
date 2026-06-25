@@ -14,6 +14,24 @@
 //! Without it, the detection loop runs as a polling placeholder.
 //! The `voice` feature is intended for headless/remote mode only;
 //! in desktop mode (Tauri), ThinClaw Desktop owns the microphone.
+//!
+//! **Wiring (WS-11):** [`VoiceWakeRuntime`] is started from
+//! `AppBuilder::build_all` (`src/app.rs`) when the `voice` feature is compiled
+//! in **and** the operator sets `THINCLAW_VOICE_WAKE=1` at runtime. Default off.
+//! The startup code calls [`VoiceWakeRuntime::take_events`], spawns a consumer
+//! task, and calls [`VoiceWakeRuntime::start`]. The consumer logs detections at
+//! the `WakeWordDetected` dispatch seam.
+//!
+//! **Wake phrase vs. voice activity:** the default [`WakeBackend::EnergyDetector`]
+//! detects *that someone is speaking*, not the literal "hey thinclaw"/"hey molty"
+//! phrase. A true keyword wake word requires [`WakeBackend::SherpaOnnx`], which
+//! shells out to an external `sherpa-onnx-keyword-spotter` binary and needs an
+//! ONNX keyword model plus a `keywords.txt` file — none of which the repo ships.
+//! The EnergyDetector works with no extra assets.
+//!
+//! **Deferred:** capturing and transcribing the follow-up utterance on wake
+//! (STT capture-on-wake via `talk_mode`) and routing it into the dispatcher is
+//! not yet wired; the consumer task only surfaces the event today.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -1253,7 +1253,7 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
 
     #[cfg(feature = "postgres")]
     {
-        let store = crate::history::Store::new(&config.database).await?;
+        let store = crate::db::postgres::PgBackend::new(&config.database).await?;
         store.run_migrations().await?;
         Ok(Arc::new(PostgresSecretsStore::new(
             store.pool(),

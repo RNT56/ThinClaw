@@ -38,7 +38,6 @@ pub struct Store {
 #[cfg(feature = "postgres")]
 impl Store {
     /// Wrap an existing pool (useful when the caller already has a connection).
-    #[allow(dead_code)]
     pub fn from_pool(pool: Pool) -> Self {
         Self { pool }
     }
