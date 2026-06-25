@@ -5,7 +5,7 @@
 
 ## Outcome
 
-**All functional remediation is complete.** Every confirmed bug fixed, every security hole closed, every "half-wired/aspirational" vision feature wired end-to-end, ~14K lines of dead/duplicate code removed (operator-approved, evidence-reviewed), and the dual persistence layer consolidated to one. The remaining work is the WS-10 **god-file decompositions** — pure behaviour-preserving reorganization — which are landing incrementally (the worst offender, `wasm/wrapper.rs`, is done).
+**The entire 13-workstream remediation is complete.** Every confirmed bug fixed, every security hole closed, every "half-wired/aspirational" vision feature wired end-to-end, ~14K lines of dead/duplicate code removed (operator-approved, evidence-reviewed), the dual persistence layer consolidated to one, and the WS-10 architecture overhaul finished: **10 god-files decomposed** (`wasm/wrapper.rs`, `api/experiments.rs`, `agent/thread_ops.rs`, `llm/runtime_manager.rs`, `extensions/manager.rs`, `workspace_core.rs`, the 3 onboarding files, and the 3 desktop files) plus the `thinclaw-media` crate migration finished. Every commit verified green before landing.
 
 ## Commits
 
@@ -23,6 +23,14 @@
 | `4f26f5f4` | **Wave 4** Erase ~8K lines of verified-dead code (10 dossier items) |
 | `43460933` | **WS-10** history/store consolidation + **WS-11** wire voice_wake |
 | `d0328176` | **WS-10** decompose `wasm/wrapper.rs` (5701L → 6 modules) |
+| `8222b581` | **WS-10** decompose `api/experiments.rs` (5919L → 9 modules) |
+| `8dae446f` | **WS-10** decompose `agent/thread_ops.rs` (3031L → 7 modules) |
+| `694c6a9f` | **WS-10** decompose `llm/runtime_manager.rs` (3210L → 11 modules) |
+| `48986ba0` | **WS-10** decompose `extensions/manager.rs` (3583L → 8 modules) |
+| `3e706a39` | **WS-10** decompose `workspace_core.rs` (2248L → 11 modules) |
+| `c1404519` | **WS-10** decompose onboarding (wizard + channels) |
+| `cc839765` | **WS-10** decompose desktop (rpc_dashboard + remote_proxy + sidecar) |
+| `71adfa30` | **WS-10** finish `thinclaw-media` crate migration |
 
 ## Headline fixes (security & correctness)
 
@@ -57,9 +65,18 @@
 - **history/store consolidation** — deleted the stalled-extraction duplicate; one Postgres store (`thinclaw-db`) remains; 6 callers redirected; root `history` is now a thin façade.
 - **`wasm/wrapper.rs` (5701L)** — decomposed into 6 focused modules; Telegram logic behind a `WasmChannelTransport` trait.
 
-## Remaining (WS-10 god-file decompositions — organizational, in progress)
+## WS-10 architecture overhaul (complete)
 
-`src/api/experiments.rs`, `src/agent/thread_ops.rs`, `src/llm/runtime_manager.rs`, `src/extensions/manager.rs`, `crates/thinclaw-workspace/src/workspace_core.rs`, the onboarding wizards, the desktop `rpc_dashboard.rs`/`remote_proxy.rs`/`sidecar.rs`, and the `src/media` migration. Each is behaviour-preserving and lands as its own verified commit.
+All god-file decompositions landed as behaviour-preserving directory-module splits with public paths preserved (façade `mod.rs` + cohesive submodules + `pub use`), each verified green:
+
+- `wasm/wrapper.rs` 5701L → 6 modules (Telegram logic behind a `WasmChannelTransport` trait)
+- `api/experiments.rs` 5919L → 9 modules · `agent/thread_ops.rs` 3031L → 7 · `llm/runtime_manager.rs` 3210L → 11
+- `extensions/manager.rs` 3583L → 8 · `workspace_core.rs` 2248L → 11
+- onboarding: `wizard/mod.rs` (→ flow/profile/verification/readiness/reconnect), `wizard/llm.rs` (→ providers/models/steps), `setup/channels.rs` (→ per-channel modules)
+- desktop: `rpc_dashboard.rs` → 9, `remote_proxy.rs` → 10, `sidecar.rs` → 5
+- `thinclaw-media` migration finished (extractors moved into the crate; `AudioExtractor`+`MediaPipeline` kept root-local to respect dependency direction)
+
+The biggest remaining file (`channels-src/telegram/src/lib.rs`, a packaged WASM channel) is out of the main workspace and tracked separately; within the workspace, no single-file god-file over ~2.4K lines remains.
 
 ## Deferred (tracked, non-blocking)
 
