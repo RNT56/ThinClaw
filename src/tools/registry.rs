@@ -9,7 +9,6 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
-use crate::safety::SafetyLayer;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::sandbox_jobs::SandboxChildRegistry;
 use crate::sandbox_types::ContainerJobManager;
@@ -1045,7 +1044,6 @@ impl ToolRegistry {
     pub async fn register_builder_tool(
         self: &Arc<Self>,
         llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
         config: Option<BuilderConfig>,
         base_dir: Option<std::path::PathBuf>,
         working_dir: Option<std::path::PathBuf>,
@@ -1064,9 +1062,9 @@ impl ToolRegistry {
             shell_sandbox_policy,
         );
 
-        // Create the builder (arg order: config, llm, safety, tools)
+        // Create the builder (arg order: config, llm, tools)
         let mut builder =
-            LlmSoftwareBuilder::new(config.unwrap_or_default(), llm, safety, Arc::clone(self));
+            LlmSoftwareBuilder::new(config.unwrap_or_default(), llm, Arc::clone(self));
         if let Some(tracker) = cost_tracker {
             builder = builder.with_cost_tracker(tracker);
         }

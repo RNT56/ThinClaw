@@ -938,7 +938,7 @@ async fn run_subagent_loop(
     .await;
     let model_name = llm.active_model_name();
     let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
-    let mut reasoning = Reasoning::new(llm, safety.clone())
+    let mut reasoning = Reasoning::new(llm)
         .with_system_prompt(combined_system_prompt)
         .with_model_name(model_name);
     // Wire cost tracker so sub-agent LLM calls appear in the Cost Dashboard

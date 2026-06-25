@@ -1280,8 +1280,7 @@ impl Agent {
                     )
                     .await;
 
-                let mut compactor =
-                    ContextCompactor::new(self.llm().clone(), self.safety().clone());
+                let mut compactor = ContextCompactor::new(self.llm().clone());
                 if let Some(ref tracker) = self.deps.cost_tracker {
                     compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
                 }
@@ -1775,7 +1774,7 @@ impl Agent {
                 crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
             );
 
-        let mut compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+        let mut compactor = ContextCompactor::new(self.llm().clone());
         if let Some(ref tracker) = self.deps.cost_tracker {
             compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
         }

@@ -29,7 +29,6 @@ use crate::history::{
     OutcomeObservation,
 };
 use crate::llm::{LlmProvider, Reasoning};
-use crate::safety::SafetyLayer;
 use crate::settings::LearningSettings;
 use crate::skills::SkillRegistry;
 use crate::workspace::Workspace;
@@ -38,22 +37,16 @@ use crate::workspace::paths;
 pub struct OutcomeService {
     store: Arc<dyn Database>,
     cheap_llm: Option<Arc<dyn LlmProvider>>,
-    safety: Arc<SafetyLayer>,
     workspace: Option<Arc<Workspace>>,
     skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
     routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
 }
 
 impl OutcomeService {
-    pub fn new(
-        store: Arc<dyn Database>,
-        cheap_llm: Option<Arc<dyn LlmProvider>>,
-        safety: Arc<SafetyLayer>,
-    ) -> Self {
+    pub fn new(store: Arc<dyn Database>, cheap_llm: Option<Arc<dyn LlmProvider>>) -> Self {
         Self {
             store,
             cheap_llm,
-            safety,
             workspace: None,
             skill_registry: None,
             routine_engine: None,
@@ -229,7 +222,7 @@ impl OutcomeService {
             return Ok(None);
         };
         let request = outcome_policy::llm_assisted_score_request(contract, observations);
-        let reasoning = Reasoning::new(llm, self.safety.clone());
+        let reasoning = Reasoning::new(llm);
         let (content, _) = reasoning
             .complete(request)
             .await
@@ -1255,14 +1248,7 @@ mod tests {
             .await
             .expect("seed USER.md");
 
-        let service = OutcomeService::new(
-            std::sync::Arc::clone(&db),
-            None,
-            std::sync::Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig::default(),
-            )),
-        )
-        .with_learning_context(
+        let service = OutcomeService::new(std::sync::Arc::clone(&db), None).with_learning_context(
             Some(workspace),
             None::<std::sync::Arc<tokio::sync::RwLock<crate::skills::SkillRegistry>>>,
             None::<std::sync::Arc<crate::agent::routine_engine::RoutineEngine>>,

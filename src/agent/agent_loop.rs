@@ -619,7 +619,6 @@ impl Agent {
             let mut b = LlmSoftwareBuilder::new(
                 BuilderConfig::default(),
                 self.deps.llm.clone(),
-                self.deps.safety.clone(),
                 self.deps.tools.clone(),
             );
             if let Some(tracker) = self.deps.cost_tracker.clone() {
@@ -965,18 +964,14 @@ impl Agent {
 
         let outcome_handle = self.store().map(|store| {
             let service = Arc::new(
-                OutcomeService::new(
-                    Arc::clone(store),
-                    self.deps.cheap_llm.clone(),
-                    self.deps.safety.clone(),
-                )
-                .with_learning_context(
-                    self.deps.workspace.clone(),
-                    self.deps.skill_registry.clone(),
-                    routine_handle
-                        .as_ref()
-                        .map(|(_, engine)| Arc::clone(engine)),
-                ),
+                OutcomeService::new(Arc::clone(store), self.deps.cheap_llm.clone())
+                    .with_learning_context(
+                        self.deps.workspace.clone(),
+                        self.deps.skill_registry.clone(),
+                        routine_handle
+                            .as_ref()
+                            .map(|(_, engine)| Arc::clone(engine)),
+                    ),
             );
             spawn_outcome_service(service)
         });

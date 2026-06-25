@@ -243,7 +243,7 @@ mod context_compactor {
     use thinclaw::agent::session::Thread;
     use uuid::Uuid;
 
-    use super::{StubLlm, permissive_safety};
+    use super::StubLlm;
 
     fn make_thread(n_turns: u32) -> Thread {
         let mut t = Thread::new(Uuid::new_v4());
@@ -256,8 +256,7 @@ mod context_compactor {
 
     #[tokio::test]
     async fn truncate_removes_correct_number_of_turns() {
-        let compactor =
-            ContextCompactor::new(Arc::new(StubLlm::new("x")), Arc::new(permissive_safety()));
+        let compactor = ContextCompactor::new(Arc::new(StubLlm::new("x")));
 
         let mut thread = make_thread(8);
         let result = compactor
@@ -277,8 +276,7 @@ mod context_compactor {
 
     #[tokio::test]
     async fn truncate_all_turns_when_keep_zero() {
-        let compactor =
-            ContextCompactor::new(Arc::new(StubLlm::new("x")), Arc::new(permissive_safety()));
+        let compactor = ContextCompactor::new(Arc::new(StubLlm::new("x")));
 
         let mut thread = make_thread(4);
         let result = compactor
@@ -296,8 +294,7 @@ mod context_compactor {
 
     #[tokio::test]
     async fn summarize_noop_when_turns_within_keep_recent() {
-        let compactor =
-            ContextCompactor::new(Arc::new(StubLlm::new("x")), Arc::new(permissive_safety()));
+        let compactor = ContextCompactor::new(Arc::new(StubLlm::new("x")));
 
         // Thread has exactly keep_recent turns – nothing should be removed.
         let mut thread = make_thread(3);
@@ -317,10 +314,7 @@ mod context_compactor {
     #[tokio::test]
     async fn summarize_calls_llm_and_trims_old_turns() {
         let summary_text = "• Key decision: use Rust";
-        let compactor = ContextCompactor::new(
-            Arc::new(StubLlm::new(summary_text)),
-            Arc::new(permissive_safety()),
-        );
+        let compactor = ContextCompactor::new(Arc::new(StubLlm::new(summary_text)));
 
         let mut thread = make_thread(5);
         let result = compactor
@@ -343,8 +337,7 @@ mod context_compactor {
 
     #[tokio::test]
     async fn tokens_decrease_after_compaction() {
-        let compactor =
-            ContextCompactor::new(Arc::new(StubLlm::new("ok")), Arc::new(permissive_safety()));
+        let compactor = ContextCompactor::new(Arc::new(StubLlm::new("ok")));
 
         let mut thread = make_thread(10);
         let result = compactor
@@ -367,8 +360,7 @@ mod context_compactor {
     #[tokio::test]
     async fn move_to_workspace_falls_back_to_truncate_without_workspace() {
         // MoveToWorkspace with workspace=None falls back to truncate of 5 recent turns.
-        let compactor =
-            ContextCompactor::new(Arc::new(StubLlm::new("ok")), Arc::new(permissive_safety()));
+        let compactor = ContextCompactor::new(Arc::new(StubLlm::new("ok")));
 
         let mut thread = make_thread(12);
         let result = compactor

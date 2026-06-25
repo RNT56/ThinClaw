@@ -5,7 +5,6 @@ use thinclaw::agent::routine::RunStatus;
 use thinclaw::api::learning as learning_api;
 use thinclaw::db::Database;
 use thinclaw::history::ConversationKind;
-use thinclaw::safety::SafetyLayer;
 use uuid::Uuid;
 
 use crate::db_contract::fixtures;
@@ -39,11 +38,7 @@ async fn enable_outcomes(db: &Arc<dyn Database>, user_id: &str) {
 }
 
 fn outcome_service(db: &Arc<dyn Database>) -> OutcomeService {
-    OutcomeService::new(
-        Arc::clone(db),
-        None,
-        Arc::new(SafetyLayer::new(&thinclaw::config::SafetyConfig::default())),
-    )
+    OutcomeService::new(Arc::clone(db), None)
 }
 
 #[tokio::test]

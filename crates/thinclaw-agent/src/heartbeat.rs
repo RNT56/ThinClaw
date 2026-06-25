@@ -4,11 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use thinclaw_channels_core::OutgoingResponse;
 use thinclaw_llm_core::{ChatMessage, CompletionRequest};
 use thinclaw_workspace::Workspace;
 use thinclaw_workspace::hygiene::HygieneConfig;
-use tokio::sync::mpsc;
 
 /// Configuration for the heartbeat runner.
 #[derive(Debug, Clone)]
@@ -89,105 +87,30 @@ pub trait HeartbeatOutcomeSummaryPort: Send + Sync {
 
 /// Heartbeat runner for proactive periodic execution.
 pub struct HeartbeatRunner {
-    config: HeartbeatConfig,
-    hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn HeartbeatLlmPort>,
-    response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    consecutive_failures: u32,
     outcome_summary: Option<Arc<dyn HeartbeatOutcomeSummaryPort>>,
 }
 
 impl HeartbeatRunner {
     /// Create a new heartbeat runner.
     pub fn new(
-        config: HeartbeatConfig,
-        hygiene_config: HygieneConfig,
+        _config: HeartbeatConfig,
+        _hygiene_config: HygieneConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn HeartbeatLlmPort>,
     ) -> Self {
         Self {
-            config,
-            hygiene_config,
             workspace,
             llm,
-            response_tx: None,
-            consecutive_failures: 0,
             outcome_summary: None,
         }
-    }
-
-    /// Set the response channel for notifications.
-    pub fn with_response_channel(mut self, tx: mpsc::Sender<OutgoingResponse>) -> Self {
-        self.response_tx = Some(tx);
-        self
     }
 
     /// Attach outcome-review context for standalone heartbeat mode.
     pub fn with_outcome_summary(mut self, summary: Arc<dyn HeartbeatOutcomeSummaryPort>) -> Self {
         self.outcome_summary = Some(summary);
         self
-    }
-
-    /// Run the heartbeat loop.
-    pub async fn run(&mut self) {
-        if !self.config.enabled {
-            tracing::info!("Heartbeat is disabled, not starting loop");
-            return;
-        }
-
-        tracing::info!(
-            "Starting heartbeat loop with interval {:?}",
-            self.config.interval
-        );
-
-        let mut interval = tokio::time::interval(self.config.interval);
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-
-            let hygiene_workspace = Arc::clone(&self.workspace);
-            let hygiene_config = self.hygiene_config.clone();
-            tokio::spawn(async move {
-                let report =
-                    thinclaw_workspace::hygiene::run_if_due(&hygiene_workspace, &hygiene_config)
-                        .await;
-                if report.had_work() {
-                    tracing::info!(
-                        daily_logs_deleted = report.daily_logs_deleted,
-                        "heartbeat: memory hygiene deleted stale documents"
-                    );
-                }
-            });
-
-            match self.check_heartbeat().await {
-                HeartbeatResult::Ok => {
-                    tracing::debug!("Heartbeat OK");
-                    self.consecutive_failures = 0;
-                }
-                HeartbeatResult::NeedsAttention(message) => {
-                    tracing::info!("Heartbeat needs attention: {}", message);
-                    self.consecutive_failures = 0;
-                    self.send_notification(&message).await;
-                }
-                HeartbeatResult::Skipped => {
-                    tracing::debug!("Heartbeat skipped");
-                }
-                HeartbeatResult::Failed(error) => {
-                    tracing::error!("Heartbeat failed: {}", error);
-                    self.consecutive_failures += 1;
-
-                    if self.consecutive_failures >= self.config.max_failures {
-                        tracing::error!(
-                            "Heartbeat disabled after {} consecutive failures",
-                            self.consecutive_failures
-                        );
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     /// Run a single heartbeat check.
@@ -280,26 +203,6 @@ impl HeartbeatRunner {
 
         HeartbeatResult::NeedsAttention(content.to_string())
     }
-
-    async fn send_notification(&self, message: &str) {
-        let Some(ref tx) = self.response_tx else {
-            tracing::debug!("No response channel configured for heartbeat notifications");
-            return;
-        };
-
-        let response = OutgoingResponse {
-            content: format!("Heartbeat Alert\n\n{}", message),
-            thread_id: None,
-            metadata: serde_json::json!({
-                "source": "heartbeat",
-            }),
-            attachments: Vec::new(),
-        };
-
-        if let Err(e) = tx.send(response).await {
-            tracing::error!("Failed to send heartbeat notification: {}", e);
-        }
-    }
 }
 
 /// Check if heartbeat content is effectively empty.
@@ -379,24 +282,6 @@ pub async fn build_daily_context(workspace: &Workspace) -> String {
     }
 
     daily_context
-}
-
-/// Spawn the heartbeat runner as a background task.
-pub fn spawn_heartbeat(
-    config: HeartbeatConfig,
-    hygiene_config: HygieneConfig,
-    workspace: Arc<Workspace>,
-    llm: Arc<dyn HeartbeatLlmPort>,
-    response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
-    if let Some(tx) = response_tx {
-        runner = runner.with_response_channel(tx);
-    }
-
-    tokio::spawn(async move {
-        runner.run().await;
-    })
 }
 
 #[cfg(test)]

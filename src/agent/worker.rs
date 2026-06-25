@@ -278,7 +278,7 @@ impl Worker {
         };
 
         // Create reasoning engine with identity
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let mut reasoning = Reasoning::new(self.llm().clone());
         if let Some(ref prompt) = identity_block {
             reasoning = reasoning.with_system_prompt(prompt.clone());
         }

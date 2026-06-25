@@ -404,10 +404,7 @@ pub(crate) async fn learning_outcomes_evaluate_now_handler(
         .store
         .as_ref()
         .ok_or_else(learning_web::learning_database_unavailable)?;
-    let safety = Arc::new(crate::safety::SafetyLayer::new(
-        &crate::config::SafetyConfig::default(),
-    ));
-    let service = OutcomeService::new(store.clone(), state.llm_provider.clone(), safety)
+    let service = OutcomeService::new(store.clone(), state.llm_provider.clone())
         .with_learning_context(
             state.workspace.clone(),
             state.skill_registry.clone(),

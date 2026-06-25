@@ -1699,7 +1699,7 @@ async fn async_main() -> anyhow::Result<()> {
             dyn thinclaw::tools::builtin::subagent::SubagentToolPort,
         > = executor.clone();
         components.tools.register_sync(std::sync::Arc::new(
-            thinclaw::tools::builtin::SpawnSubagentTool::new(std::sync::Arc::clone(&subagent_port)),
+            thinclaw::tools::builtin::SpawnSubagentTool::new(),
         ));
         components.tools.register_sync(std::sync::Arc::new(
             thinclaw::tools::builtin::ListSubagentsTool::new(std::sync::Arc::clone(&subagent_port)),

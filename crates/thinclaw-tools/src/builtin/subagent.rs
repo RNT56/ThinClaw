@@ -57,14 +57,21 @@ pub trait SubagentToolPort: Send + Sync {
 // ── SpawnSubagentTool ─────────────────────────────────────────────────
 
 /// Tool for spawning a sub-agent to handle a delegated task.
-pub struct SpawnSubagentTool {
-    #[allow(dead_code)]
-    executor: Arc<dyn SubagentToolPort>,
-}
+///
+/// Spawning is delegated to the dispatcher, which intercepts the emitted
+/// `{action:"spawn_subagent", request:...}` envelope and routes it through its
+/// own subagent executor. This tool therefore holds no executor of its own.
+pub struct SpawnSubagentTool;
 
 impl SpawnSubagentTool {
-    pub fn new(executor: Arc<dyn SubagentToolPort>) -> Self {
-        Self { executor }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SpawnSubagentTool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

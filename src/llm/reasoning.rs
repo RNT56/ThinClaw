@@ -18,7 +18,7 @@ use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ProviderTokenCapture, ToolCall,
     ToolCompletionRequest, ToolDefinition,
 };
-use crate::safety::{SafetyLayer, sanitize_prompt_bound_content};
+use crate::safety::sanitize_prompt_bound_content;
 
 // Response cleaning and tag stripping
 pub use super::reasoning_tags::{
@@ -489,8 +489,6 @@ fn compact_tool_card(tool: &ToolDefinition) -> String {
 /// Reasoning engine for the agent.
 pub struct Reasoning {
     llm: Arc<dyn LlmProvider>,
-    #[allow(dead_code)] // Will be used for sanitizing tool outputs
-    safety: Arc<SafetyLayer>,
     /// Optional workspace for loading identity/system prompts.
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
@@ -553,10 +551,9 @@ impl Reasoning {
     }
 
     /// Create a new reasoning engine.
-    pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
+    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
         Self {
             llm,
-            safety,
             workspace_system_prompt: None,
             skill_context: None,
             personality_overlay: None,
@@ -597,7 +594,6 @@ impl Reasoning {
         let model_name = llm.active_model_name();
         Self {
             llm,
-            safety: Arc::clone(&self.safety),
             workspace_system_prompt: self.workspace_system_prompt.clone(),
             skill_context: self.skill_context.clone(),
             personality_overlay: self.personality_overlay.clone(),
@@ -2200,22 +2196,9 @@ mod tests {
 
     #[tokio::test]
     async fn respond_with_tools_preserves_non_streaming_finish_reason() {
-        let reasoning = Reasoning::new(
-            Arc::new(FinishReasonTestLlm {
-                response: FinishReason::Length,
-            }),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(FinishReasonTestLlm {
+            response: FinishReason::Length,
+        }));
         let context = ReasoningContext::new()
             .with_messages(vec![ChatMessage::user("hello")])
             .with_tools(vec![ToolDefinition {
@@ -2234,22 +2217,9 @@ mod tests {
 
     #[tokio::test]
     async fn respond_with_tools_streaming_preserves_finish_reason() {
-        let reasoning = Reasoning::new(
-            Arc::new(FinishReasonTestLlm {
-                response: FinishReason::ContentFilter,
-            }),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(FinishReasonTestLlm {
+            response: FinishReason::ContentFilter,
+        }));
         let context = ReasoningContext::new().with_messages(vec![ChatMessage::user("hello")]);
         let mut streamed = String::new();
 
@@ -2264,20 +2234,7 @@ mod tests {
 
     #[test]
     fn conversation_prompt_includes_selective_transparency_guidance() {
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done")));
         let context = ReasoningContext::new().with_tools(vec![ToolDefinition {
             name: "emit_user_message".to_string(),
             description: "Send a progress message.".to_string(),
@@ -2294,20 +2251,7 @@ mod tests {
 
     #[test]
     fn conversation_prompt_includes_spawn_subagent_guidance_when_available() {
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done")));
         let context = ReasoningContext::new().with_tools(vec![ToolDefinition {
             name: "spawn_subagent".to_string(),
             description: "Delegate work to a focused sub-agent.".to_string(),
@@ -2322,20 +2266,7 @@ mod tests {
 
     #[test]
     fn conversation_prompt_includes_consult_advisor_guidance_when_available() {
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done")));
         let context = ReasoningContext::new().with_tools(vec![ToolDefinition {
             name: "consult_advisor".to_string(),
             description: "Consult the advisor lane.".to_string(),
@@ -2350,21 +2281,8 @@ mod tests {
 
     #[test]
     fn conversation_prompt_includes_model_guidance_for_gpt_family() {
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done").with_model_name("gpt-4o")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        )
-        .with_model_name("gpt-4o");
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done").with_model_name("gpt-4o")))
+            .with_model_name("gpt-4o");
 
         let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
@@ -2374,22 +2292,9 @@ mod tests {
 
     #[test]
     fn conversation_prompt_skips_model_guidance_when_disabled() {
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done").with_model_name("gpt-4o")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        )
-        .with_model_name("gpt-4o")
-        .with_model_guidance_enabled(false);
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done").with_model_name("gpt-4o")))
+            .with_model_name("gpt-4o")
+            .with_model_guidance_enabled(false);
 
         let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
@@ -2398,22 +2303,9 @@ mod tests {
 
     #[test]
     fn conversation_prompt_includes_personality_overlay_after_identity() {
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        )
-        .with_system_prompt("## Identity\n\nBase identity".to_string())
-        .with_personality_overlay("## Temporary Personality\n\nBe extra concise.".to_string());
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done")))
+            .with_system_prompt("## Identity\n\nBase identity".to_string())
+            .with_personality_overlay("## Temporary Personality\n\nBe extra concise.".to_string());
 
         let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
@@ -2424,20 +2316,7 @@ mod tests {
 
     #[test]
     fn conversation_prompt_matches_identity_tool_paths() {
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done")));
 
         let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
@@ -2462,20 +2341,7 @@ mod tests {
         )
         .expect("write home soul");
 
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done")));
 
         let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
         assert!(prompt.contains("## Soul"));
@@ -2494,24 +2360,11 @@ mod tests {
 
     #[test]
     fn conversation_prompt_uses_injected_channel_formatting_hints() {
-        let reasoning = Reasoning::new(
-            Arc::new(StubLlm::new("done")),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        )
-        .with_channel("custom_channel")
-        .with_channel_formatting_hints(
-            "- Custom channel uses plain text only.\n- Keep replies to one paragraph.",
-        );
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("done")))
+            .with_channel("custom_channel")
+            .with_channel_formatting_hints(
+                "- Custom channel uses plain text only.\n- Keep replies to one paragraph.",
+            );
 
         let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
@@ -2523,22 +2376,9 @@ mod tests {
     #[tokio::test]
     async fn respond_attaches_prompt_cache_hint_on_system_message_when_supported() {
         let last_request = Arc::new(tokio::sync::Mutex::new(None));
-        let reasoning = Reasoning::new(
-            Arc::new(PromptCachingCaptureLlm {
-                last_request: Arc::clone(&last_request),
-            }),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(PromptCachingCaptureLlm {
+            last_request: Arc::clone(&last_request),
+        }));
 
         let context = ReasoningContext::new().with_messages(vec![ChatMessage::user("hello")]);
         let _ = reasoning
@@ -2568,22 +2408,9 @@ mod tests {
     #[tokio::test]
     async fn respond_omits_prompt_cache_hint_when_provider_does_not_support_it() {
         let last_request = Arc::new(tokio::sync::Mutex::new(None));
-        let reasoning = Reasoning::new(
-            Arc::new(NonCachingCaptureLlm {
-                last_request: Arc::clone(&last_request),
-            }),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(Arc::new(NonCachingCaptureLlm {
+            last_request: Arc::clone(&last_request),
+        }));
 
         let context = ReasoningContext::new().with_messages(vec![ChatMessage::user("hello")]);
         let _ = reasoning
@@ -2607,22 +2434,9 @@ mod tests {
     #[tokio::test]
     async fn respond_prompt_keeps_channel_hints_model_guidance_and_cache_hint_together() {
         let last_request = Arc::new(tokio::sync::Mutex::new(None));
-        let reasoning = Reasoning::new(
-            Arc::new(PromptCachingCaptureLlm {
-                last_request: Arc::clone(&last_request),
-            }),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        )
+        let reasoning = Reasoning::new(Arc::new(PromptCachingCaptureLlm {
+            last_request: Arc::clone(&last_request),
+        }))
         .with_model_name("gpt-4o")
         .with_channel("telegram")
         .with_channel_formatting_hints("Use Telegram HTML tags only.");
@@ -2660,20 +2474,7 @@ mod tests {
             last_completion: Arc::new(tokio::sync::Mutex::new(None)),
             last_tool_completion: Arc::new(tokio::sync::Mutex::new(None)),
         });
-        let reasoning = Reasoning::new(
-            llm.clone(),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(llm.clone());
 
         let context = ReasoningContext::new()
             .with_messages(vec![ChatMessage::user("What time is it right now?")])
@@ -2719,20 +2520,7 @@ mod tests {
             last_completion: Arc::new(tokio::sync::Mutex::new(None)),
             last_tool_completion: Arc::new(tokio::sync::Mutex::new(None)),
         });
-        let reasoning = Reasoning::new(
-            llm.clone(),
-            Arc::new(crate::safety::SafetyLayer::new(
-                &crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                    redact_pii_in_prompts: true,
-                    smart_approval_mode: "off".to_string(),
-                    external_scanner_mode: "off".to_string(),
-                    external_scanner_path: None,
-                    external_scanner_require_verified: false,
-                },
-            )),
-        );
+        let reasoning = Reasoning::new(llm.clone());
 
         let context = ReasoningContext::new()
             .with_messages(vec![ChatMessage::user("What time is it right now?")])

@@ -25,7 +25,6 @@ pub mod nostr_runtime;
 pub mod pairing;
 pub mod reaction_machine;
 pub mod repl;
-pub mod self_message;
 pub mod setup;
 pub mod signal;
 pub mod status_view;

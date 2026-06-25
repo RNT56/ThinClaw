@@ -12,8 +12,7 @@ use crate::error::RepairError;
 use crate::tools::{BuildRequirement, Language, SoftwareBuilder, SoftwareType, ToolRegistry};
 
 pub use thinclaw_agent::self_repair::{
-    BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob, StuckJobContextSnapshot,
-    ToolRepairBuildResult,
+    BrokenTool, RepairResult, SelfRepair, StuckJob, StuckJobContextSnapshot, ToolRepairBuildResult,
 };
 use thinclaw_agent::self_repair::{
     BrokenToolStorePort, RepairContextPort, ToolRegistryProbePort, ToolRepairBuilderPort,

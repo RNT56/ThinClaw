@@ -1,11 +1,8 @@
 //! SSE connection manager for broadcasting events to browser tabs.
 
-use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
-use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::Stream;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
@@ -55,7 +52,7 @@ impl SseManager {
     /// Create a raw broadcast subscription for non-SSE consumers (e.g. WebSocket).
     ///
     /// Returns a stream of `SseEvent` values and increments/decrements the
-    /// connection counter on creation/drop, just like `subscribe()` does for SSE.
+    /// connection counter on creation/drop.
     ///
     /// Returns `None` if the maximum connection limit has been reached.
     pub fn subscribe_raw(&self) -> Option<impl Stream<Item = SseEvent> + Send + 'static + use<>> {
@@ -80,45 +77,6 @@ impl SseManager {
             inner: stream,
             counter,
         })
-    }
-
-    /// Create a new SSE stream for a client connection.
-    ///
-    /// Returns `None` if the maximum connection limit has been reached.
-    pub fn subscribe(
-        &self,
-    ) -> Option<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>>> {
-        // Atomically increment only if below the limit.
-        let counter = Arc::clone(&self.connection_count);
-        let max = self.max_connections;
-        counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                if current < max {
-                    Some(current + 1)
-                } else {
-                    None
-                }
-            })
-            .ok()?;
-        let rx = self.tx.subscribe();
-
-        let stream = BroadcastStream::new(rx)
-            .filter_map(|result| result.ok())
-            .map(|event| {
-                let data = serde_json::to_string(&event).unwrap_or_default();
-                Ok(Event::default().event(event.event_type()).data(data))
-            });
-
-        // Wrap in a stream that decrements on drop
-        let counted_stream = CountedStream {
-            inner: stream,
-            counter,
-        };
-
-        Some(
-            Sse::new(counted_stream)
-                .keep_alive(KeepAlive::new().interval(Duration::from_secs(30)).text("")),
-        )
     }
 }
 
@@ -251,6 +209,5 @@ mod tests {
 
         // Third should be rejected
         assert!(manager.subscribe_raw().is_none());
-        assert!(manager.subscribe().is_none());
     }
 }

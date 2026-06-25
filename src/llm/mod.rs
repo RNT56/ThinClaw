@@ -71,7 +71,7 @@ pub use runtime_manager::{
     derive_runtime_defaults, hydrate_runtime_credentials_from_secrets,
     normalize_providers_settings, validate_providers_settings,
 };
-pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
+pub use smart_routing::{SmartRoutingConfig, TaskComplexity};
 pub use usage_tracking::UsageTrackingProvider;
 
 #[cfg(test)]

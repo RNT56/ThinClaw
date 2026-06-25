@@ -609,7 +609,6 @@ impl AppBuilder {
             tools
                 .register_builder_tool(
                     llm.clone(),
-                    safety.clone(),
                     Some(self.config.builder.to_builder_config()),
                     builder_workspace.base_dir,
                     builder_workspace.working_dir,

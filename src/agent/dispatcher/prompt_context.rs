@@ -412,7 +412,7 @@ impl Agent {
         // self.llm().active_model_name() (which always returns the primary).
         let routed_model_name = routed_llm.active_model_name();
 
-        let mut reasoning = Reasoning::new(routed_llm, self.safety().clone())
+        let mut reasoning = Reasoning::new(routed_llm)
             .with_channel(message.channel.clone())
             .with_model_name(routed_model_name.clone())
             .with_cheap_model_name(

@@ -65,7 +65,6 @@ mod nostr;
 pub(crate) mod nostr_runtime;
 pub mod reaction_machine;
 mod repl;
-pub mod self_message;
 mod signal;
 pub mod status_view;
 mod tui_channel;
@@ -96,7 +95,6 @@ pub use nostr::{NostrChannel, runtime_config_from_resolved, runtime_config_from_
 #[cfg(feature = "nostr")]
 pub use nostr_runtime::NostrConfig;
 pub use repl::ReplChannel;
-pub use self_message::{SelfMessageConfig, TrustedMetadata};
 pub use signal::{SignalChannel, SignalConfig};
 pub use thinclaw_channels::{
     ApnsNativeClient, ApnsNativeConfig, BrowserPushNativeClient, BrowserPushNativeConfig,

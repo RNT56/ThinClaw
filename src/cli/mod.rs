@@ -29,7 +29,6 @@ mod mcp;
 pub mod memory;
 mod message;
 mod models;
-pub mod nodes;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
@@ -38,10 +37,8 @@ mod reset;
 mod secrets;
 #[cfg(feature = "repl")]
 mod service;
-pub mod session_export;
 pub mod sessions;
 pub mod status;
-pub mod subagent_spawn;
 mod tool;
 pub mod trajectory;
 mod update;
