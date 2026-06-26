@@ -20,6 +20,76 @@ pub struct McpOrchestratorConfig {
     pub builtin_skills_path: Option<std::path::PathBuf>,
 }
 
+/// Names of the host builtin functions this factory exposes to sandboxed Rhai
+/// skills. Kept in sync with the `register_fn` calls in [`create_sandbox`];
+/// used for best-effort `tools_used` detection when persisting a skill.
+const SANDBOX_BUILTIN_TOOLS: &[&str] = &[
+    "list_skills",
+    "run_skill",
+    "web_search",
+    "rag_search",
+    "read_file",
+    "calculator",
+    "calculator_with_vars",
+    "search_tools",
+    "save_skill",
+    "mcp_call",
+    "finance::get_stock_price",
+    "news::get_news",
+    "news::search_news",
+    "news::get_headlines",
+    "knowledge::rag_query",
+    "economics::get_economic_data",
+    "models::get_model_catalog",
+    "health::search_medical_research",
+    "ai_tools::summarize_text",
+];
+
+/// Best-effort detection of which host builtins a Rhai skill script calls.
+///
+/// This is a lightweight ident scan, not a Rhai parse: it looks for each known
+/// builtin name immediately followed by a `(`, ignoring surrounding whitespace.
+/// It can over-report if a builtin name appears inside a string/comment, but it
+/// never under-reports a genuine call, which is the useful direction for the
+/// persisted `SkillManifest.tools_used` metadata. Results are de-duplicated and
+/// returned in the stable order of [`SANDBOX_BUILTIN_TOOLS`].
+fn detect_tools_used(script: &str) -> Vec<String> {
+    SANDBOX_BUILTIN_TOOLS
+        .iter()
+        .filter(|name| script_calls_builtin(script, name))
+        .map(|name| name.to_string())
+        .collect()
+}
+
+/// Returns `true` if `script` appears to invoke `name` (the builtin name is
+/// followed, after optional whitespace, by an opening parenthesis).
+fn script_calls_builtin(script: &str, name: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = script[from..].find(name) {
+        let start = from + rel;
+        let after = start + name.len();
+        // Reject a match that is part of a longer identifier (e.g. `web_search`
+        // matching inside `web_search_v2`). Module-qualified names contain `:`,
+        // which is not an identifier char, so the preceding-char guard still
+        // holds for the leading segment.
+        let prev_ok = script[..start]
+            .chars()
+            .next_back()
+            .map(|c| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(true);
+        let next_is_call = script[after..]
+            .chars()
+            .find(|c| !c.is_whitespace())
+            .map(|c| c == '(')
+            .unwrap_or(false);
+        if prev_ok && next_is_call {
+            return true;
+        }
+        from = after;
+    }
+    false
+}
+
 /// Create a configured Sandbox instance with all host tools registered.
 ///
 /// This factory function is used by:
@@ -301,8 +371,13 @@ where
                         description: description.clone(), // User description
                         version: "1.0.0".to_string(),
                         author: Some("Agent".to_string()),
-                        tools_used: vec![], // TODO: Parse logic
-                        parameters: vec![], // TODO: Allow passing params
+                        // Best-effort scan of the script for host builtins it calls.
+                        tools_used: detect_tools_used(&script),
+                        // `save_skill(id, script, description)` has no parameter
+                        // input, so a skill cannot declare typed parameters at
+                        // save time. Persist an empty list; populating this would
+                        // require extending the builtin signature (out of scope).
+                        parameters: vec![],
                         script_file: format!("{}.rhai", id),
                     };
 
@@ -566,4 +641,42 @@ where
     }
 
     Some(sandbox)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_tools_used;
+
+    #[test]
+    fn detects_called_builtins() {
+        let script = r#"
+            let r = web_search("rust async");
+            let docs = rag_search(query);
+            let p = finance::get_stock_price("AAPL");
+        "#;
+        let tools = detect_tools_used(script);
+        assert!(tools.contains(&"web_search".to_string()));
+        assert!(tools.contains(&"rag_search".to_string()));
+        assert!(tools.contains(&"finance::get_stock_price".to_string()));
+        assert!(!tools.contains(&"read_file".to_string()));
+    }
+
+    #[test]
+    fn ignores_unmatched_and_partial_idents() {
+        // A reference without a following call, and a longer identifier that
+        // merely contains a builtin name, must not be reported.
+        let script = r#"
+            let calculator_total = 5;
+            print(calculator_total);
+            let web_search_disabled = true;
+        "#;
+        let tools = detect_tools_used(script);
+        assert!(!tools.contains(&"calculator".to_string()));
+        assert!(!tools.contains(&"web_search".to_string()));
+    }
+
+    #[test]
+    fn empty_script_has_no_tools() {
+        assert!(detect_tools_used("").is_empty());
+    }
 }

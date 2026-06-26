@@ -82,7 +82,7 @@ pub use self::webchat::{
 
 /// IC-007: Inject bridge configuration variables into the overlay.
 ///
-/// Called by the Tauri bridge to pass Scrappy UI configuration to ThinClaw's
+/// Called by the Tauri bridge to pass ThinClaw Desktop UI configuration to ThinClaw's
 /// config resolvers without unsafe `set_var`. Values in the bridge overlay
 /// take priority over secrets and real env vars.
 ///

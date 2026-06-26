@@ -494,6 +494,29 @@ pub fn run() {
             let file_store = file_store::FileStore::new(app_data_dir.clone());
             handle.manage(file_store);
 
+            // If the persisted mode is Cloud (and the provider + master key were
+            // restored by init_from_db above), re-enter cloud mode: spawn the
+            // upload worker, periodic sync engine, and read-path download
+            // fallback so a restart resumes syncing without a manual migration.
+            {
+                let cloud_state = handle.state::<cloud::CloudManager>();
+                if cloud_state.is_cloud_mode().await {
+                    let fs_state = handle.state::<file_store::FileStore>();
+                    match cloud::live_sync::start_live_sync(&fs_state, &cloud_state).await {
+                        Ok(handles) => {
+                            cloud_state.install_sync_handles(handles).await;
+                            println!("[main] Cloud mode restored: live sync started.");
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[main] Cloud mode persisted but live sync not started: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             // 2. Integrity Check
             println!("[main] Running Integrity Check...");
             let pool_state = handle.state::<sqlx::SqlitePool>();
@@ -643,6 +666,11 @@ pub fn run() {
                 api.prevent_close();
             }
             tauri::RunEvent::Exit => {
+                // Stop the cloud live-sync worker + engine so they drain cleanly
+                // instead of being orphaned on exit.
+                if let Some(cloud) = _app_handle.try_state::<cloud::CloudManager>() {
+                    tauri::async_runtime::block_on(cloud.stop_sync());
+                }
                 // Shutdown ThinClaw runtime gracefully
                 if let Some(state) =
                     _app_handle.try_state::<thinclaw::runtime_bridge::ThinClawRuntimeState>()

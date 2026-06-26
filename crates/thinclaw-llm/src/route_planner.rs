@@ -1,10 +1,13 @@
 //! Unified route planner for all routing modes.
 //!
-//! Replaces the dual-path routing logic (SmartRoutingProvider + RoutingPolicy)
-//! with a single `RoutePlanner::plan()` call that supports four strategies:
+//! `RoutePlanner` is the single routing engine. A single `RoutePlanner::plan()`
+//! call (consumed by the runtime route-resolution path) supports four
+//! strategies and owns CheapSplit cascade escalation directly — there is no
+//! separate routing decorator in the provider chain:
 //!
 //! - **PrimaryOnly** — all requests → primary model
-//! - **CheapSplit** — classify by complexity, preserve cascade escalation
+//! - **CheapSplit** — classify by complexity; the runtime runs the cheap lane and
+//!   inspect-and-escalates to primary on uncertain cheap responses (cascade)
 //! - **AdvisorExecutor** — executor runs everything, auto-escalates on risky and complex turns, and can consult the advisor on demand
 //! - **Policy** — delegated to `RoutingPolicy` rule engine
 //!

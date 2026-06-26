@@ -822,6 +822,15 @@ impl ConversationStore for LibSqlBackend {
             return Ok(Vec::new());
         }
 
+        // FTS5 `MATCH` parses its argument as a query expression, so raw user
+        // input containing `-`, `:`, `"`, etc. would be interpreted as operators
+        // and error (Postgres tolerates the same input via websearch_to_tsquery).
+        // Quote each token so the search stays at parity across backends.
+        let match_query = super::fts::sanitize_fts5_match(query);
+        if match_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -851,7 +860,7 @@ impl ConversationStore for LibSqlBackend {
                 ORDER BY score DESC, m.created_at DESC, m.rowid DESC
                 LIMIT ?6
                 "#,
-                params![query, user_id, actor_id, channel, thread_id, limit],
+                params![match_query, user_id, actor_id, channel, thread_id, limit],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;

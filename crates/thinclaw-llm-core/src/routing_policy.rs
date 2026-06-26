@@ -466,7 +466,7 @@ impl RoutingPolicy {
     /// Enable or disable smart routing.
     ///
     /// When disabled, `select_provider()` always returns the default provider,
-    /// ignoring all rules. This is the "Smart Routing" toggle in Scrappy UI.
+    /// ignoring all rules. This is the "Smart Routing" toggle in ThinClaw Desktop UI.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }

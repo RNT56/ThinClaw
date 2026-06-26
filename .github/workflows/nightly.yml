@@ -1,0 +1,129 @@
+name: Nightly
+# Runs the heavy, real-world `#[ignore]`d tests that PR/push CI deliberately
+# skips: the Docker worker E2Es, the live-network WASM channel smoke, and the
+# Postgres-backed heartbeat integration test. Kept in its own workflow (like
+# fuzz.yml) so the PR-path CI in ci.yml stays fast and is never affected.
+#
+# Prerequisites matrix (see docs/remediation/13-test-and-ci-infrastructure.md):
+#   - nightly-docker-e2e   : Docker daemon + locally-built `thinclaw-worker:latest`.
+#                            The Claude/Codex bridge smokes additionally need
+#                            ANTHROPIC_API_KEY / OPENAI_API_KEY and self-skip
+#                            (eprintln + early return) when those secrets are absent.
+#   - nightly-network-smoke: outbound network (hits https://api.telegram.org).
+#   - nightly-heartbeat     : a Postgres service + DATABASE_URL + an LLM key secret;
+#                            the whole job is gated on the LLM key being present.
+#
+# Intentionally NOT run here:
+#   - tests/desktop_autonomy_live_smoke.rs `*_live_desktop_smoke` (×6): need a real
+#     privileged desktop session that hosted runners cannot provide. They self-skip
+#     via `live_smoke_enabled()`, which would make this workflow green-by-no-op.
+#     Genuine desktop coverage lives in ci.yml's `linux-desktop-autonomy-smoke`.
+#   - `live_webui_provider_model_discovery_report` (src/channels/web/server.rs): a
+#     diagnostic needing live provider credentials for the configured providers.
+#   - the quarantined `autonomous_campaign_..._end_to_end` (src/api/experiments.rs):
+#     masks an unfixed worktree/Docker lifecycle race; gated on its tracking issue.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nightly-docker-e2e:
+    name: Nightly Docker E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-docker-e2e
+      - name: Build thinclaw-worker:latest image
+        run: docker build -f Dockerfile.worker -t thinclaw-worker:latest .
+      - name: Run Docker sandbox E2E tests
+        # Select specific targets (not a blanket `-- --ignored`) so live-desktop
+        # and quarantined tests are never invoked. The Claude/Codex bridge smokes
+        # self-skip when their auth secret is absent.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          cargo test --features full \
+            --test docker_sandbox_smoke \
+            --test repo_project_docker_e2e \
+            -- --ignored --nocapture --test-threads=1
+
+  nightly-network-smoke:
+    name: Nightly Network Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-network-smoke
+      - name: Run live-network WASM channel smoke
+        run: |
+          cargo test -p thinclaw-channels --lib \
+            -- --ignored --nocapture test_dedicated_runtime_real_http
+
+  nightly-heartbeat:
+    name: Nightly Heartbeat Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The heartbeat E2E needs both a database and an LLM key. `secrets` cannot be
+    # read in a job-level `if:`, so the LLM-key gate lives on the test step below:
+    # the job runs but the test step is skipped cleanly when no key is present.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: thinclaw
+          POSTGRES_PASSWORD: thinclaw
+          POSTGRES_DB: thinclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U thinclaw -d thinclaw_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_BACKEND: postgres
+      DATABASE_URL: postgres://thinclaw:thinclaw@localhost:5432/thinclaw_test
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-heartbeat
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Enable pgvector extension
+        run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: Run heartbeat integration test
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        run: |
+          cargo test --features postgres \
+            --test heartbeat_integration \
+            -- --ignored --nocapture --test-threads=1
+      - name: Skip notice (no LLM key)
+        if: ${{ env.ANTHROPIC_API_KEY == '' }}
+        run: echo "ANTHROPIC_API_KEY secret not set; skipping heartbeat integration test."

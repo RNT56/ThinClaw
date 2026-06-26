@@ -112,6 +112,12 @@ The research stack now uses the shared execution/runtime hardening path more con
 - local trial completion and remote lease `/complete` now flow through the same terminal finalization path for stage normalization, cost/runtime aggregation, canonical run-artifact append, and repeated-terminal rejection
 - campaign, trial, and job-adjacent research surfaces now expose runtime backend metadata more consistently, so `local_docker` and sandbox job executions are distinguishable in the UI and APIs without reverse-engineering the launch path
 
+## Operability: Retention, Durable Artifacts, And Cost Basis
+
+- `experiments.default_artifact_retention_days` is now enforced. When experiments are enabled, a dedicated daily reaper loop prunes `experiment_artifact_refs` whose `created_at` is older than the retention window and best-effort deletes the underlying file when it lives under the operator-controlled experiments artifact root. A retention value of `0` disables reaping.
+- Remote-runner artifacts are now durable. The runner attaches the artifact bytes inline (base64) on each lease `/artifact` post; the gateway host persists them through a host-side artifact store and records the artifact as `fetchable: true` with the durable host path, so results survive runner-pod teardown. The pod-local path is retained only as a breadcrumb. Oversized artifacts fall back to the breadcrumb-only behavior.
+- RunPod runner cost is an approximation. RunPod prices in account credits, and the platform surfaces an approximate USD figure under the assumption `1 credit ≈ 1 USD`. This is now flagged on the headline campaign `cost_summary` (`runner_cost_basis` with `estimated` / `native_currency` / `normalization`) and in the per-trial runner cost `details`, so an operator can see the runner USD figure is estimated rather than billed.
+
 ## Relationship To Other Surfaces
 
 - Use [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md) for durable memory, recall, learning, and prompt mutation

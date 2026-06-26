@@ -30,6 +30,7 @@ only to reduce root file count.
 | Crate | Owns |
 |---|---|
 | `thinclaw-types` | transport-neutral records, DTOs, small shared enums, and boundary data |
+| `thinclaw-runtime-contracts` | implementation-free shared runtime DTOs for ThinClaw clients and the Desktop host: asset, direct-runtime, model, provider (incl. `ApiStyle`/`ProviderEndpoint`), runtime, and secret contracts |
 | `thinclaw-safety` | safety primitives that do not depend on LLM/provider runtime |
 | `thinclaw-platform` | state paths, shell/platform helpers, host capability detection |
 | `thinclaw-branding` | shared skin definitions, terminal/web branding art, palette helpers, and skin loading |
@@ -38,8 +39,10 @@ only to reduce root file count.
 | `thinclaw-secrets` | secret types, crypto, memory store, keychain/store backends |
 | `thinclaw-context` | context helpers and context-facing data |
 | `thinclaw-history` | conversation, outcome, trajectory, and history records |
+| `thinclaw-identity` | conversation-scope and identity resolution DTOs: conversation kind/scope, resolved identity, linked-conversation recall, actor endpoint references, actor status, and endpoint approval status |
+| `thinclaw-soul` | canonical/local soul parsing and rendering, seeded-soul composition, pack name canonicalization, and pack asset markdown |
 | `thinclaw-experiments` | experiment records/DTOs, target uniqueness and metadata merge policy, opportunity derivation, lifecycle/status/path policies, lease status/completion policy, subagent planning DTOs, prompt-context helpers, and runner/LLM cost attribution policy |
-| `thinclaw-media` | media content, storage helpers, channel media limits, and document text extraction primitives |
+| `thinclaw-media` | media content, storage helpers, channel media limits, document text extraction primitives, the `MediaExtractor` trait/`MediaExtractError`, and the image/PDF/document extractors. The audio extractor and the `MediaPipeline` glue stay root-owned in `src/media` because they depend on root `crate::config` (would otherwise cycle via `media → config → channels → media`) |
 | `thinclaw-workspace` | workspace core, repository helpers, search/chunking, document helpers |
 | `thinclaw-db` | persistence traits, DB backends, migrations, DB contract-facing glue |
 | `thinclaw-llm-core` | provider traits, transport-neutral LLM DTOs, and root-independent routing policy construction/helpers |
@@ -51,6 +54,7 @@ only to reduce root file count.
 | `thinclaw-gateway` | gateway DTOs, auth helpers, OpenAI-compatible DTO/conversion/validation helpers, chat message-to-turn projection, settings import/redaction/update policies, routine webhook/preview policies, experiment lease-token/limit/status policies, provider credential validation/display/model-selection/routing policies, extension and channel setup-status projection policy, SSE/log/static-file primitives, status-to-SSE mapping, submission helpers, gateway service ports |
 | `thinclaw-agent` | extracted agent support types, session/task domain, session-search rendering/windowing behind a transcript-store port, trajectory record/logging types, agent environment/eval runner framework behind a concrete-agent port, context monitoring and compaction algorithms behind summarizer/archive ports, self-repair policy and repair loop behind context/store/builder ports, run artifact records plus run driver/harness behind runtime lookup and memory-sync ports, filesystem checkpoints, command routing and dispatcher policy/helper logic, workspace-level agent routing and agent registry logic behind persistence/seeding ports, prompt helpers, cost guard, routine records and LLM-facing routine tools behind store/engine/outcome ports, routine engine trigger/event policy, worker loop policy, subagent lifecycle policy, outcome evaluator policy, agent-loop submission/response policy, learning/routine/context ports, job monitor event forwarding, agent-owned ports |
 | `thinclaw-app` | root-independent startup/runtime policy, app assembly DTOs, setup/onboarding/profile/provider planning DTOs, bootstrap env planning, quiet startup spinner behavior |
+| `thinclaw-repo-projects` | repo-project supervisor domain types and state machines: project/task/run states and transitions, coding backend, merge method, GitHub auth mode, project policy, and merge-gate decision DTOs |
 
 ## Root-Owned Runtime Still In Root
 

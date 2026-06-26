@@ -93,7 +93,7 @@ pub struct AppComponents {
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
     /// Hardware bridge for sensor access (camera, mic, screen).
-    /// Present when running inside a host (Scrappy) that provides sensor capture.
+    /// Present when running inside a host (ThinClaw Desktop) that provides sensor capture.
     pub tool_bridge: Option<Arc<dyn ToolBridge>>,
     /// Session-level sensor approvals (cleared on restart).
     pub session_approvals: Arc<SessionApprovals>,
@@ -105,6 +105,9 @@ pub struct AppComponents {
     pub response_cache: Arc<tokio::sync::RwLock<CachedResponseStore>>,
     /// Live smart routing policy owned by the runtime manager.
     pub routing_policy: Arc<std::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>,
+    /// Observability backend selected by the operator (wizard/config). Defaults
+    /// to a no-op observer; `OBSERVABILITY_BACKEND=log` emits structured events.
+    pub observer: Arc<dyn crate::observability::Observer>,
 }
 
 /// Builder that orchestrates the 5 mechanical init phases.
@@ -118,7 +121,7 @@ pub struct AppBuilder {
     db: Option<Arc<dyn Database>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 
-    // Hardware bridge for sensor access (injected by Scrappy)
+    // Hardware bridge for sensor access (injected by ThinClaw Desktop)
     tool_bridge: Option<Arc<dyn ToolBridge>>,
 
     // Backend-specific handles needed by secrets store
@@ -159,7 +162,7 @@ impl AppBuilder {
         }
     }
 
-    /// Inject a pre-built secrets store (e.g. from Scrappy's Keychain backend).
+    /// Inject a pre-built secrets store (e.g. from ThinClaw Desktop's Keychain backend).
     ///
     /// When set, [`init_secrets()`] will use this store directly instead of
     /// creating one from the master key + database handles. Keys will still
@@ -173,7 +176,7 @@ impl AppBuilder {
     ///
     /// When set, `init_llm()` will create a multi-provider chain with
     /// failover and smart routing based on these settings.
-    /// In Scrappy mode, these come from the Cloud Intelligence UI.
+    /// In ThinClaw Desktop mode, these come from the Cloud Intelligence UI.
     /// In headless mode, they come from config.toml / DB settings.
     pub fn with_providers_settings(mut self, settings: crate::settings::ProvidersSettings) -> Self {
         self.providers_settings = Some(settings);
@@ -183,7 +186,7 @@ impl AppBuilder {
     /// Inject a hardware bridge for sensor access (camera, mic, screen).
     ///
     /// When set, `build_all()` will register bridged sensor tools in the
-    /// `ToolRegistry`. In desktop mode, Scrappy implements the `ToolBridge`
+    /// `ToolRegistry`. In desktop mode, ThinClaw Desktop implements the `ToolBridge`
     /// trait and passes it here at startup.
     pub fn with_tool_bridge(mut self, bridge: Arc<dyn ToolBridge>) -> Self {
         self.tool_bridge = Some(bridge);
@@ -203,6 +206,26 @@ impl AppBuilder {
     /// Inspect the initialized secrets store while using the builder incrementally.
     pub fn secrets_store(&self) -> Option<&Arc<dyn SecretsStore + Send + Sync>> {
         self.secrets_store.as_ref()
+    }
+
+    /// Construct a [`SandboxManager`](crate::sandbox::SandboxManager) for the
+    /// given config, attaching the encrypted secrets store as the credential
+    /// source for its network proxy when one is available.
+    ///
+    /// The sandbox network proxy is owned per-manager (shared across the jobs
+    /// that run through it), so the owning user is bound here as the canonical
+    /// `"default"` operator used elsewhere in startup. When no store is
+    /// configured the manager falls back to the process-env credential
+    /// resolver.
+    fn build_sandbox_manager(
+        &self,
+        config: crate::sandbox::SandboxConfig,
+    ) -> crate::sandbox::SandboxManager {
+        let manager = crate::sandbox::SandboxManager::new(config);
+        match self.secrets_store.as_ref() {
+            Some(store) => manager.with_credential_store(Arc::clone(store), "default"),
+            None => manager,
+        }
     }
 
     fn default_sandbox_workspace_dir() -> std::path::PathBuf {
@@ -329,7 +352,7 @@ impl AppBuilder {
 
         // Extract ProvidersSettings from DB settings if not already injected.
         // This enables headless deployments to configure multi-provider failover
-        // via config.toml or DB settings without needing Scrappy's UI.
+        // via config.toml or DB settings without needing ThinClaw Desktop's UI.
         if self.providers_settings.is_none() {
             match db.get_all_settings("default").await {
                 Ok(map) => {
@@ -376,7 +399,7 @@ impl AppBuilder {
     /// the store, injects any encrypted LLM API keys into the config overlay
     /// and re-resolves config.
     pub async fn init_secrets(&mut self) -> Result<(), anyhow::Error> {
-        // If a secrets store was pre-injected (e.g. Scrappy's Keychain backend),
+        // If a secrets store was pre-injected (e.g. ThinClaw Desktop's Keychain backend),
         // skip creation but still inject keys and re-resolve config.
         if self.secrets_store.is_some() {
             if let Some(ref secrets) = self.secrets_store {
@@ -586,16 +609,15 @@ impl AppBuilder {
             tools
                 .register_builder_tool(
                     llm.clone(),
-                    safety.clone(),
                     Some(self.config.builder.to_builder_config()),
                     builder_workspace.base_dir,
                     builder_workspace.working_dir,
                     (self.config.agent.workspace_mode == "sandboxed"
                         && self.config.sandbox.enabled)
                         .then(|| {
-                            Arc::new(crate::sandbox::SandboxManager::new(
-                                self.config.sandbox.to_sandbox_config(),
-                            ))
+                            Arc::new(
+                                self.build_sandbox_manager(self.config.sandbox.to_sandbox_config()),
+                            )
                         }),
                     Some(crate::sandbox::SandboxPolicy::WorkspaceWrite),
                     cost_tracker.clone(),
@@ -909,6 +931,13 @@ impl AppBuilder {
             ));
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::info!("Extension manager initialized with in-chat discovery tools");
+
+            // Native dynamic-library plugins are default-off and signature-gated.
+            // Register any signed manifests from operator-configured allowlist dirs
+            // (no-op unless `allow_native_plugins` is enabled; registration loads no
+            // code — the signature-checked dlopen only happens on explicit activation).
+            let _ = manager.register_native_plugins_from_allowlist().await;
+
             Some(manager)
         };
 
@@ -935,9 +964,7 @@ impl AppBuilder {
             );
             let sandbox =
                 matches!(tool_plan.workspace_mode, RuntimeWorkspaceMode::Sandboxed).then(|| {
-                    Arc::new(crate::sandbox::SandboxManager::new(
-                        self.config.sandbox.to_sandbox_config(),
-                    ))
+                    Arc::new(self.build_sandbox_manager(self.config.sandbox.to_sandbox_config()))
                 });
             let sandbox_policy = sandbox
                 .as_ref()
@@ -1027,9 +1054,8 @@ impl AppBuilder {
         if tool_plan.local_tools_enabled {
             let process_registry: crate::tools::builtin::SharedProcessRegistry =
                 Arc::new(tokio::sync::RwLock::new(Default::default()));
-            let sandbox_backend = Arc::new(crate::sandbox::SandboxManager::new(
-                self.config.sandbox.to_sandbox_config(),
-            ));
+            let sandbox_backend =
+                Arc::new(self.build_sandbox_manager(self.config.sandbox.to_sandbox_config()));
 
             match tool_plan.process_registration {
                 RuntimeExecRegistrationMode::LocalHost => {
@@ -1382,7 +1408,7 @@ impl AppBuilder {
         }
 
         // Register lifecycle hooks: bundled (AuditLogHook) + plugin + workspace.
-        // Without this, the HookRegistry remains empty in Scrappy/Tauri mode.
+        // Without this, the HookRegistry remains empty in ThinClaw Desktop/Tauri mode.
         let active_tool_names = tools.list().await;
         let hook_bootstrap = crate::hooks::bootstrap_hooks(
             &hooks,
@@ -1605,9 +1631,101 @@ impl AppBuilder {
             tools.count()
         );
 
+        // Headless voice wake word detection (WS-11).
+        //
+        // Opt-in twice: the `voice` cargo feature must be compiled in (it pulls
+        // cpal for audio capture) AND the operator must set THINCLAW_VOICE_WAKE=1
+        // at runtime. Default off — in desktop mode ThinClaw Desktop owns the mic
+        // and runs its own browser-side wake path, so this is for headless/remote
+        // deployments only.
+        //
+        // The default backend is the fully-implemented RMS EnergyDetector, which
+        // detects *that someone is speaking* (voice activity), not the literal
+        // "hey molty" phrase. A true keyword wake word requires the optional
+        // Sherpa-ONNX backend plus a shipped sherpa-onnx-keyword-spotter binary,
+        // an ONNX keyword model, and keywords.txt (none of which the repo ships).
+        // See docs/BUILD_PROFILES.md.
+        #[cfg(feature = "voice")]
+        {
+            let wake_enabled = std::env::var("THINCLAW_VOICE_WAKE")
+                .ok()
+                .map(|v| {
+                    let v = v.trim();
+                    v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+                })
+                .unwrap_or(false);
+
+            if wake_enabled {
+                let mut wake_runtime = crate::voice_wake::VoiceWakeRuntime::new(
+                    crate::voice_wake::VoiceWakeConfig::default(),
+                );
+
+                if let Some(mut events) = wake_runtime.take_events() {
+                    // Consumer task: translate wake events into agent-visible
+                    // signals. WakeWordDetected is the dispatch seam where a
+                    // talk-mode / STT capture of the follow-up utterance would be
+                    // triggered. Capturing + transcribing that utterance and
+                    // routing it into the dispatcher is deferred (see
+                    // tasks_deferred); for now we surface the event so the path is
+                    // reachable and observable.
+                    tokio::spawn(async move {
+                        while let Some(event) = events.recv().await {
+                            match event {
+                                crate::voice_wake::VoiceWakeEvent::WakeWordDetected {
+                                    confidence,
+                                    timestamp,
+                                } => {
+                                    // DISPATCH SEAM: trigger talk-mode/STT capture
+                                    // of the follow-up utterance here and feed the
+                                    // transcript into the dispatcher. Not yet wired
+                                    // end-to-end (deferred).
+                                    tracing::info!(
+                                        confidence,
+                                        timestamp = %timestamp,
+                                        "Voice wake word detected (STT capture-on-wake not yet wired)"
+                                    );
+                                }
+                                crate::voice_wake::VoiceWakeEvent::Error { message } => {
+                                    tracing::warn!(error = %message, "Voice wake error");
+                                }
+                                other => {
+                                    tracing::debug!(?other, "Voice wake event");
+                                }
+                            }
+                        }
+                        tracing::debug!("Voice wake event consumer exited");
+                    });
+                }
+
+                // start() spawns the detection loop in a detached tokio task that
+                // owns its own Arc<AtomicBool> and event sender clones, so the
+                // loop keeps running after `wake_runtime` is dropped at the end of
+                // this block. The consumer task above owns the only receiver.
+                match wake_runtime.start().await {
+                    Ok(()) => tracing::info!(
+                        "Voice wake runtime started (THINCLAW_VOICE_WAKE enabled, EnergyDetector backend)"
+                    ),
+                    Err(e) => tracing::warn!("Failed to start voice wake runtime: {}", e),
+                }
+            }
+        }
+
         tracing::info!(
             elapsed_ms = build_all_start.elapsed().as_millis(),
             "Startup phase: build_all total"
+        );
+
+        // Construct the operator-selected observability backend and record a
+        // startup event so the choice (wizard Step 18 / OBSERVABILITY_BACKEND)
+        // has an observable effect. NoopObserver discards it at zero cost.
+        let observer = crate::observability::create_observer(&self.config.observability);
+        observer.record_event(&crate::observability::ObserverEvent::AgentStart {
+            provider: self.config.llm.backend.to_string(),
+            model: llm.model_name().to_string(),
+        });
+        tracing::debug!(
+            backend = observer.name(),
+            "Observability backend initialized"
         );
 
         Ok(AppComponents {
@@ -1643,6 +1761,7 @@ impl AppBuilder {
                 CacheConfig::default(),
             ))),
             routing_policy: Arc::clone(&llm_runtime.routing_policy),
+            observer,
         })
     }
 }

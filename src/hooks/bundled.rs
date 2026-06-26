@@ -141,7 +141,7 @@ impl HookRegistrationSummary {
 ///
 /// This function is idempotent — hooks that are already registered are skipped.
 /// This is important because `bootstrap_hooks` may be called from both
-/// `AppBuilder::build_all()` (Tauri/Scrappy mode) and `main()` (CLI mode with
+/// `AppBuilder::build_all()` (Tauri/ThinClaw Desktop mode) and `main()` (CLI mode with
 /// WASM channel names that aren't available during `build_all`).
 pub async fn register_bundled_hooks(registry: &Arc<HookRegistry>) -> HookRegistrationSummary {
     let existing = registry.list().await;

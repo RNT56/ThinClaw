@@ -9,6 +9,17 @@ use tauri_plugin_shell::ShellExt;
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+/// Compute a normalized progress fraction `current / total`, guarding against a
+/// zero (or non-finite) denominator that would otherwise produce a `NaN`/`inf`
+/// value and render a garbage `%` label downstream. Returns a value clamped to
+/// `0.0..=1.0`; a zero/invalid total maps to `0.0`.
+fn progress_fraction(current: f32, total: f32) -> f32 {
+    if !total.is_finite() || total <= 0.0 || !current.is_finite() {
+        return 0.0;
+    }
+    (current / total).clamp(0.0, 1.0)
+}
+
 #[derive(serde::Deserialize, specta::Type)]
 pub struct ImageGenParams {
     pub prompt: String,
@@ -699,7 +710,9 @@ async fn run_inference(
                 if let Some(caps) = re.captures(&text) {
                     let current = caps[2].parse::<f32>().unwrap_or(0.0);
                     let total = caps[3].parse::<f32>().unwrap_or(1.0);
-                    let progress = current / total;
+                    // Guard the denominator: a `0/0` progress line would otherwise
+                    // yield NaN/inf and render a garbage `%` label (display-only bug).
+                    let progress = progress_fraction(current, total);
 
                     let stage = if total > 100.0 {
                         "Loading Weights"
@@ -900,4 +913,38 @@ pub async fn direct_media_generate_image(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_fraction;
+
+    #[test]
+    fn progress_fraction_zero_total_is_safe() {
+        // The divide-by-zero guard: a `0/0` progress line must not produce
+        // NaN/inf (which would render a garbage `%` label).
+        let p = progress_fraction(0.0, 0.0);
+        assert!(p.is_finite());
+        assert_eq!(p, 0.0);
+
+        let p = progress_fraction(28.0, 0.0);
+        assert!(p.is_finite());
+        assert_eq!(p, 0.0);
+    }
+
+    #[test]
+    fn progress_fraction_normal_values() {
+        assert!((progress_fraction(28.0, 795.0) - (28.0 / 795.0)).abs() < 1e-6);
+        assert_eq!(progress_fraction(0.0, 100.0), 0.0);
+        assert_eq!(progress_fraction(100.0, 100.0), 1.0);
+    }
+
+    #[test]
+    fn progress_fraction_clamps_out_of_range() {
+        // Defensive: current > total or negative inputs stay in [0, 1].
+        assert_eq!(progress_fraction(120.0, 100.0), 1.0);
+        assert_eq!(progress_fraction(-5.0, 100.0), 0.0);
+        assert_eq!(progress_fraction(f32::NAN, 100.0), 0.0);
+        assert_eq!(progress_fraction(10.0, f32::INFINITY), 0.0);
+    }
 }

@@ -456,6 +456,10 @@ impl ThinClawRuntimeState {
             // Clear active session tracking
             inner.active_sessions.write().await.clear();
 
+            // Clear the sub-agent (parent→child) registry so child-session
+            // metadata does not leak across engine restarts.
+            crate::thinclaw::commands::rpc_orchestration::sub_agent_registry::clear().await;
+
             // Emit disconnected event
             use tauri::Emitter;
             let disconnected = UiEvent::Disconnected {

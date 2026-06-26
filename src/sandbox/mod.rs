@@ -184,6 +184,19 @@ mod manager_stub {
             Self::new(SandboxConfig::default())
         }
 
+        /// API-compatible no-op with the docker-sandbox manager.
+        ///
+        /// Without the `docker-sandbox` feature there is no network proxy to
+        /// resolve credentials for, so the store is ignored. The signature is
+        /// kept identical so callers compile against either build.
+        pub fn with_credential_store(
+            self,
+            _store: std::sync::Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+            _user_id: impl Into<String>,
+        ) -> Self {
+            self
+        }
+
         pub async fn is_available(&self) -> bool {
             false
         }

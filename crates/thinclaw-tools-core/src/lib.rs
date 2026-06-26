@@ -18,4 +18,6 @@ pub use tool::{
     ToolError, ToolExecutionLane, ToolMetadata, ToolOutput, ToolProfile, ToolRateLimitConfig,
     ToolRouteIntent, ToolSchema, ToolSideEffectLevel, require_param, require_str,
 };
-pub use url_guard::{OutboundUrlGuardOptions, validate_outbound_url};
+pub use url_guard::{
+    GuardedUrl, OutboundUrlGuardOptions, validate_outbound_url, validate_outbound_url_pinned,
+};

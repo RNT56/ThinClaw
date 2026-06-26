@@ -10,7 +10,8 @@ use rust_decimal::Decimal;
 use serde_json::json;
 use sha2::Sha256;
 use thinclaw::agent::routine::{
-    RoutineAction, RoutineEvent, RoutineEventStatus, RunStatus, Trigger, content_hash,
+    RoutineAction, RoutineEvent, RoutineEventDecision, RoutineEventEvaluation, RoutineEventStatus,
+    RunStatus, Trigger, content_hash,
 };
 use thinclaw::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use thinclaw::channels::web::server::{GatewayState, start_server};
@@ -1556,6 +1557,118 @@ async fn pending_event_queue_is_drained_on_startup_ticker() {
 }
 
 #[tokio::test]
+async fn routine_event_recent_content_match_honors_window_and_hash() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+
+    let user = fixtures::user("routine_dedup_match_user");
+    let actor = fixtures::actor_name("routine_dedup_match");
+    let owner_ctx = routine_test_context(&user, &actor);
+
+    let (engine, _notify_rx) = build_routine_engine(
+        Arc::clone(&ctx.db),
+        &user,
+        Arc::new(TestLlm::reply("Dedup probe")),
+    );
+    let registry = build_registry(Arc::clone(&ctx.db), Arc::clone(&engine));
+
+    let created = execute_routine_tool(
+        &registry,
+        "routine_create",
+        json!({
+            "name": format!("dedup-match-{}", Uuid::new_v4().simple()),
+            "description": "Exercise content-hash dedup window query",
+            "trigger_type": "event",
+            "event_pattern": "deploy now",
+            "event_channel": "slack",
+            "prompt": "Handle the deploy event."
+        }),
+        &owner_ctx,
+    )
+    .await;
+    let routine_id = parse_uuid(&created, "id");
+
+    let fired_hash = content_hash("deploy now").to_string();
+    let event = RoutineEvent {
+        id: Uuid::new_v4(),
+        principal_id: user.clone(),
+        actor_id: actor.clone(),
+        channel: "slack".to_string(),
+        event_type: String::new(),
+        raw_sender_id: actor.clone(),
+        conversation_scope_id: Uuid::new_v4().to_string(),
+        stable_external_conversation_key: format!("test://slack/{user}/{actor}/dedup"),
+        content: "deploy now".to_string(),
+        content_hash: fired_hash.clone(),
+        metadata: json!({"source": "dedup_match_test"}),
+        idempotency_key: format!("dedup-match-{}", Uuid::new_v4().simple()),
+        status: RoutineEventStatus::Processed,
+        diagnostics: json!({"content_preview": "deploy now"}),
+        claimed_by: None,
+        claimed_at: None,
+        lease_expires_at: None,
+        processed_at: Some(Utc::now()),
+        error_message: None,
+        matched_routines: 1,
+        fired_routines: 1,
+        attempt_count: 1,
+        created_at: Utc::now(),
+    };
+    ctx.db
+        .create_routine_event(&event)
+        .await
+        .expect("event should insert");
+
+    let evaluation = RoutineEventEvaluation {
+        id: Uuid::new_v4(),
+        event_id: event.id,
+        routine_id,
+        decision: RoutineEventDecision::Fired,
+        reason: Some("fired".to_string()),
+        details: json!({}),
+        sequence_num: 0,
+        channel: "slack".to_string(),
+        content_preview: "deploy now".to_string(),
+        created_at: Utc::now(),
+    };
+    ctx.db
+        .upsert_routine_event_evaluation(&evaluation)
+        .await
+        .expect("evaluation should insert");
+
+    // Matching hash within the window → true.
+    let recent = Utc::now() - ChronoDuration::hours(1);
+    assert!(
+        ctx.db
+            .routine_event_recent_content_match(routine_id, &fired_hash, recent)
+            .await
+            .expect("content match query should succeed"),
+        "matching content within the window should be detected"
+    );
+
+    // Window starts after the fire → false.
+    let future = Utc::now() + ChronoDuration::hours(1);
+    assert!(
+        !ctx.db
+            .routine_event_recent_content_match(routine_id, &fired_hash, future)
+            .await
+            .expect("content match query should succeed"),
+        "a fire before the window start must not match"
+    );
+
+    // Different content hash → false.
+    let other_hash = content_hash("something else").to_string();
+    assert!(
+        !ctx.db
+            .routine_event_recent_content_match(routine_id, &other_hash, recent)
+            .await
+            .expect("content match query should succeed"),
+        "non-matching content hash must not match"
+    );
+}
+
+#[tokio::test]
 async fn toggle_and_delete_endpoints_refresh_event_cache() {
     let Some(ctx) = contract_db_or_skip().await else {
         return;
@@ -1728,7 +1841,10 @@ async fn webhook_routine_endpoint_runs_routine_and_enforces_signature() {
 
     let run = wait_for_terminal_run(&ctx.db, webhook_routine.id).await;
     assert_eq!(run.id, run_id);
-    assert_eq!(run.trigger_type, "manual");
+    // A webhook-triggered routine carries a payload, so the engine labels the run
+    // "webhook" (distinct from a payload-less "manual" fire) — see
+    // routine_engine::fire_manual_with_payload.
+    assert_eq!(run.trigger_type, "webhook");
     assert_eq!(run.status, RunStatus::Attention);
     assert_eq!(
         run.result_summary.as_deref(),

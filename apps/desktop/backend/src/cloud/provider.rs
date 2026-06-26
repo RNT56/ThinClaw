@@ -75,6 +75,19 @@ pub struct CloudEntry {
     pub checksum: Option<String>,
 }
 
+/// Convert an opendal metadata timestamp into epoch milliseconds.
+///
+/// opendal 0.55's `Metadata::last_modified()` returns `opendal::raw::Timestamp`
+/// (a `jiff::Timestamp` wrapper) rather than a chrono `DateTime`. It exposes a
+/// std `From<Timestamp> for SystemTime`, so we route through that and measure the
+/// offset from the Unix epoch. Times before the epoch (or unrepresentable) yield 0.
+pub(crate) fn opendal_timestamp_millis(ts: opendal::raw::Timestamp) -> i64 {
+    std::time::SystemTime::from(ts)
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Connection test result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudStatus {

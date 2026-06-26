@@ -584,7 +584,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
     let secrets_store: Arc<dyn SecretsStore + Send + Sync> = {
         #[cfg(feature = "postgres")]
         {
-            let store = crate::history::Store::new(&config.database).await?;
+            let store = crate::db::postgres::PgBackend::new(&config.database).await?;
             store.run_migrations().await?;
             Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)))
         }
@@ -737,8 +737,11 @@ async fn auth_tool_oauth(
 
     let listener = oauth_defaults::bind_callback_listener().await?;
     let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
+    // CSRF defense: generate a state nonce, send it on the authorization request,
+    // and require the loopback callback to echo it back unchanged.
+    let oauth_state = oauth_defaults::generate_oauth_state();
     let auth_request = flow
-        .prepare_authorization(auth, &redirect_uri, "local", None)
+        .prepare_authorization(auth, &redirect_uri, "local", Some(&oauth_state))
         .await?;
 
     println!("  Opening browser for {} login...", display_name);
@@ -757,8 +760,14 @@ async fn auth_tool_oauth(
 
     println!("  Waiting for authorization...");
 
-    let code =
-        oauth_defaults::wait_for_callback(listener, "/callback", "code", display_name).await?;
+    let code = oauth_defaults::wait_for_callback_with_state(
+        listener,
+        "/callback",
+        "code",
+        display_name,
+        Some(&oauth_state),
+    )
+    .await?;
 
     println!();
     println!("  Exchanging code for token...");

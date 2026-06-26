@@ -9,6 +9,7 @@
 mod agent_registry;
 mod conversations;
 mod experiments;
+mod fts;
 mod identity;
 mod jobs;
 mod repo_projects;

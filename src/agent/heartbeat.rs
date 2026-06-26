@@ -11,10 +11,8 @@ pub use thinclaw_agent::heartbeat::{
     HeartbeatConfig, HeartbeatResult, build_daily_context, is_effectively_empty,
 };
 
-use crate::channels::OutgoingResponse;
 use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, Reasoning};
-use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
 
@@ -31,20 +29,10 @@ impl HeartbeatRunner {
         hygiene_config: HygieneConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
     ) -> Self {
-        let llm = Arc::new(RootHeartbeatLlm::new(llm, safety));
+        let llm = Arc::new(RootHeartbeatLlm::new(llm));
         let inner = ExtractedHeartbeatRunner::new(config, hygiene_config, workspace, llm.clone());
         Self { inner, llm }
-    }
-
-    /// Set the response channel for notifications.
-    pub fn with_response_channel(
-        mut self,
-        tx: tokio::sync::mpsc::Sender<OutgoingResponse>,
-    ) -> Self {
-        self.inner = self.inner.with_response_channel(tx);
-        self
     }
 
     /// Attach a shared cost tracker so heartbeat LLM calls are recorded.
@@ -71,11 +59,6 @@ impl HeartbeatRunner {
         self
     }
 
-    /// Run the heartbeat loop.
-    pub async fn run(&mut self) {
-        self.inner.run().await;
-    }
-
     /// Run a single heartbeat check.
     pub async fn check_heartbeat(&self) -> HeartbeatResult {
         self.inner.check_heartbeat().await
@@ -84,15 +67,13 @@ impl HeartbeatRunner {
 
 struct RootHeartbeatLlm {
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     cost_tracker: Mutex<Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>>,
 }
 
 impl RootHeartbeatLlm {
-    fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
+    fn new(llm: Arc<dyn LlmProvider>) -> Self {
         Self {
             llm,
-            safety,
             cost_tracker: Mutex::new(None),
         }
     }
@@ -119,7 +100,7 @@ impl HeartbeatLlmPort for RootHeartbeatLlm {
     }
 
     async fn complete_heartbeat(&self, request: CompletionRequest) -> Result<String, String> {
-        let mut reasoning = Reasoning::new(Arc::clone(&self.llm), Arc::clone(&self.safety));
+        let mut reasoning = Reasoning::new(Arc::clone(&self.llm));
         let tracker = self
             .cost_tracker
             .lock()
@@ -148,27 +129,4 @@ impl HeartbeatOutcomeSummaryPort for RootHeartbeatOutcomeSummary {
             .await
             .map_err(|err| err.to_string())
     }
-}
-
-/// Spawn the heartbeat runner as a background task.
-pub fn spawn_heartbeat(
-    config: HeartbeatConfig,
-    hygiene_config: HygieneConfig,
-    workspace: Arc<Workspace>,
-    llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
-    response_tx: Option<tokio::sync::mpsc::Sender<OutgoingResponse>>,
-    cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
-) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
-    if let Some(tx) = response_tx {
-        runner = runner.with_response_channel(tx);
-    }
-    if let Some(tracker) = cost_tracker {
-        runner = runner.with_cost_tracker(tracker);
-    }
-
-    tokio::spawn(async move {
-        runner.run().await;
-    })
 }

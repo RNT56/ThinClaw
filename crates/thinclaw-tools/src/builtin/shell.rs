@@ -268,6 +268,49 @@ impl ShellTool {
         self
     }
 
+    /// Snapshot of the external command scanner's health for operator-facing
+    /// status output.
+    ///
+    /// The external scanner is defense-in-depth and defaults to `FailOpen`: when
+    /// no scanner is configured, or a configured scanner is unreachable in
+    /// `FailOpen` mode, commands are **not** blocked. Surfacing this state lets an
+    /// operator notice the degraded posture and deliberately choose `FailClosed`.
+    pub fn scanner_status(&self) -> serde_json::Value {
+        match &self.external_scanner {
+            None => serde_json::json!({
+                "configured": false,
+                "mode": ExternalScannerMode::Off.as_str(),
+                "available": false,
+                "fail_open": true,
+                "note": "No external command scanner configured; scanner-based blocking is inactive.",
+            }),
+            Some(scanner) => {
+                let health = scanner.health();
+                let fail_open = health.mode != ExternalScannerMode::FailClosed;
+                let note = if !health.available && fail_open {
+                    "Scanner is unavailable in fail-open mode; commands are NOT blocked by the scanner. \
+                     Set the scanner mode to fail_closed to require an explicit decision when degraded."
+                } else if !health.available {
+                    "Scanner is unavailable in fail-closed mode; affected commands require explicit approval."
+                } else {
+                    "Scanner is reachable."
+                };
+                serde_json::json!({
+                    "configured": true,
+                    "mode": health.mode.as_str(),
+                    "available": health.available,
+                    "fail_open": fail_open,
+                    "provenance_status": serde_json::to_value(health.provenance_status)
+                        .unwrap_or(serde_json::Value::Null),
+                    "source": health.source,
+                    "path": health.path.as_ref().map(|p| p.display().to_string()),
+                    "last_error": health.last_error,
+                    "note": note,
+                })
+            }
+        }
+    }
+
     /// Check if a command is blocked.
     fn is_blocked(&self, cmd: &str) -> Option<&'static str> {
         classify_hard_block(cmd).or_else(|| {
@@ -673,6 +716,7 @@ impl Tool for ShellTool {
             "runtime_mode": result.runtime.runtime_mode,
             "runtime_capabilities": result.runtime.runtime_capabilities,
             "network_isolation": result.runtime.network_isolation,
+            "shell_scanner": self.scanner_status(),
         });
 
         Ok(ToolOutput::success(result, duration))
@@ -1088,6 +1132,44 @@ mod tests {
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .contains("hello")
+        );
+
+        // The degraded fail-open scanner posture is surfaced in the output so an
+        // operator can notice it and choose fail_closed deliberately.
+        let scanner = result.result.get("shell_scanner").expect("scanner status");
+        assert_eq!(
+            scanner.get("configured").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            scanner.get("fail_open").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            scanner.get("available").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            scanner.get("mode").and_then(|v| v.as_str()),
+            Some(ExternalScannerMode::FailOpen.as_str())
+        );
+    }
+
+    #[test]
+    fn test_scanner_status_reports_no_scanner_as_fail_open() {
+        let tool = ShellTool::new();
+        let status = tool.scanner_status();
+        assert_eq!(
+            status.get("configured").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            status.get("fail_open").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            status.get("available").and_then(|v| v.as_bool()),
+            Some(false)
         );
     }
 

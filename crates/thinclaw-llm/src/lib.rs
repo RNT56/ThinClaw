@@ -3,6 +3,7 @@
 //! Provider-neutral traits and DTOs are already extracted in
 //! `thinclaw-llm-core`; provider implementations will move here next.
 
+pub mod cascade;
 pub mod circuit_breaker;
 pub mod cost_tracker;
 pub mod costs;
@@ -21,9 +22,7 @@ pub mod response_cache_ext;
 pub mod retry;
 pub mod rig_adapter;
 pub mod route_planner;
-pub mod smart_routing;
 pub mod usage_tracking;
 
 pub use rig_adapter::RigAdapter;
-pub use smart_routing::SmartRoutingProvider;
 pub use thinclaw_llm_core::*;

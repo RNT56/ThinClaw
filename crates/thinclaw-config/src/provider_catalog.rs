@@ -1,8 +1,10 @@
 //! Built-in provider endpoint catalog.
 //!
 //! Maps provider IDs to their API endpoint details, default models, and
-//! secret store key names. This catalog enables ThinClaw to work with 20+
-//! providers without requiring explicit base_url configuration.
+//! secret store key names. The catalog ships the built-in provider endpoints in
+//! `registry/providers.json` (the source of truth) so they work without
+//! explicit base_url configuration; ThinClaw also works with additional
+//! env-configured OpenAI-compatible backends that are not in the catalog.
 //!
 //! ## Loading order
 //!
@@ -14,7 +16,7 @@
 //!
 //! - Headless: user sets `providers.enabled = ["anthropic", "openai"]` in
 //!   `config.toml`, and API keys via `SecretsStore` or env vars.
-//! - Scrappy: the bridge writes the same settings from the UI config.
+//! - ThinClaw Desktop: the bridge writes the same settings from the UI config.
 //!
 //! The catalog is the single source of truth for provider endpoints across
 //! Direct Workbench, ThinClaw Agent Cockpit, and generated client contracts.

@@ -9,6 +9,7 @@ use thinclaw_media::document_extraction::extractors;
 use thinclaw_media::document_extraction::{MAX_DOCUMENT_SIZE, MAX_EXTRACTED_TEXT_LEN};
 use thinclaw_tools_core::{
     OutboundUrlGuardOptions, Tool, ToolDomain, ToolError, ToolOutput, validate_outbound_url,
+    validate_outbound_url_pinned,
 };
 use thinclaw_types::JobContext;
 
@@ -130,8 +131,16 @@ async fn fetch_document(url: &str) -> Result<(Vec<u8>, String), ToolError> {
         upgrade_http_to_https: false,
         allowlist: Vec::new(),
     };
-    let guarded_url = validate_outbound_url(url, &guard_options)?;
-    let client = reqwest::Client::builder()
+    let guarded = validate_outbound_url_pinned(url, &guard_options)?;
+    let guarded_url = guarded.url;
+    let pinned_addrs = guarded.pinned_addrs;
+
+    // Pin the connection to the addresses that passed SSRF validation so the
+    // host cannot rebind to a private IP between validation and connect time.
+    // For IP-literal hosts (empty pinned_addrs) no override is added and
+    // behavior is identical to before.
+    let host = guarded_url.host_str().unwrap_or_default().to_string();
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= 10 {
@@ -141,7 +150,14 @@ async fn fetch_document(url: &str) -> Result<(Vec<u8>, String), ToolError> {
             } else {
                 attempt.stop()
             }
-        }))
+        }));
+    if !pinned_addrs.is_empty() {
+        // reqwest ignores the port carried by the override addresses and uses
+        // the request URL's port, so the validated SocketAddrs can be passed
+        // as-is.
+        builder = builder.resolve_to_addrs(&host, &pinned_addrs);
+    }
+    let client = builder
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {e}")))?;
 

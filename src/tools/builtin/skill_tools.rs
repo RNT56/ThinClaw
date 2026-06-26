@@ -3565,8 +3565,11 @@ mod tests {
     use thinclaw_tools::builtin::{
         SkillAuditHostTool, SkillCheckHostTool, SkillInspectHostTool, SkillInstallHostTool,
         SkillListHostTool, SkillPromoteTrustHostTool, SkillPublishHostTool, SkillRemoveHostTool,
-        SkillSearchHostTool, SkillTapAddHostTool, SkillTapListHostTool, SkillTapRefreshHostTool,
-        SkillTapRemoveHostTool,
+        SkillSearchHostTool,
+    };
+    #[cfg(feature = "libsql")]
+    use thinclaw_tools::builtin::{
+        SkillTapAddHostTool, SkillTapListHostTool, SkillTapRefreshHostTool, SkillTapRemoveHostTool,
     };
 
     fn test_registry() -> Arc<tokio::sync::RwLock<SkillRegistry>> {
@@ -3586,6 +3589,7 @@ mod tests {
         Arc::new(QuarantineManager::new(path))
     }
 
+    #[cfg(feature = "libsql")]
     async fn install_publishable_test_skill(
         registry: &Arc<tokio::sync::RwLock<SkillRegistry>>,
         name: &str,

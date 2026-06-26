@@ -15,8 +15,8 @@ use crate::settings::Settings;
 use thinclaw_repo_projects::{
     CodingBackend, GitHubAuthMode, MergeGateDecision, ProjectPolicy, RepoProject, RepoProjectEvent,
     RepoProjectEventKind, RepoProjectRepo, RepoProjectState, RepoProjectTask, RepoProjectTaskState,
-    RepoWorkerRun, RepoWorkerRunState, branch_name_for_task, repo_local_path_fragment,
-    validate_project_state_transition, validate_task_state_transition,
+    RepoWorkerRun, RepoWorkerRunState, repo_local_path_fragment, validate_project_state_transition,
+    validate_task_state_transition,
 };
 
 const LOCAL_USER_ID: &str = "local_user";
@@ -269,6 +269,8 @@ pub async fn create_project(
         .unwrap_or("main")
         .to_string();
     let policy = default_policy_from_settings(store, user_id).await;
+    let installation_id =
+        default_installation_id_from_settings(store, user_id, policy.github_auth_mode).await;
     let now = Utc::now();
     let project_id = Uuid::new_v4();
     let repo_id = Uuid::new_v4();
@@ -303,7 +305,7 @@ pub async fn create_project(
         owner,
         repo: repo_name,
         github_repo_id: None,
-        installation_id: None,
+        installation_id,
         default_branch: default_branch.clone(),
         base_branch: Some(default_branch),
         enrolled: true,
@@ -532,40 +534,18 @@ pub async fn enqueue_task(
             ApiError::InvalidInput("Project has no enrolled repositories".to_string())
         })?;
 
-    let task_id = Uuid::new_v4();
-    let branch_name =
-        branch_name_for_task(&project.slug, task_id).map_err(ApiError::InvalidInput)?;
-    let now = Utc::now();
-    let task = RepoProjectTask {
-        id: task_id,
-        project_id: project.id,
-        repo_id: repo.id,
-        title: non_empty(input.title, "title")?,
-        body: input
+    let task = crate::repo_projects::build_queued_task(
+        &project,
+        repo,
+        non_empty(input.title, "title")?,
+        input
             .description
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
-        state: RepoProjectTaskState::Queued,
-        coding_backend: project.policy.default_coding_backend,
-        base_branch: repo
-            .base_branch
-            .clone()
-            .unwrap_or_else(|| repo.default_branch.clone()),
-        branch_name,
-        head_sha: None,
-        pull_request_number: None,
-        pull_request_url: None,
-        github_issue_number: None,
-        assigned_worker_id: None,
-        priority: priority_value(input.priority.as_deref()),
-        labels: input.labels,
-        metadata: serde_json::json!({}),
-        created_at: now,
-        updated_at: now,
-        queued_at: Some(now),
-        started_at: None,
-        completed_at: None,
-    };
+        priority_value(input.priority.as_deref()),
+        input.labels,
+    )
+    .map_err(ApiError::InvalidInput)?;
     validate_task_state_transition(RepoProjectTaskState::Queued, task.state)
         .map_err(|error| ApiError::InvalidInput(error.to_string()))?;
     store
@@ -990,6 +970,9 @@ pub async fn enroll_repo(
         .filter(|value| !value.is_empty())
         .unwrap_or("main")
         .to_string();
+    let installation_id =
+        default_installation_id_from_settings(store, user_id, project.policy.github_auth_mode)
+            .await;
     let now = Utc::now();
     let repo = RepoProjectRepo {
         id: Uuid::new_v4(),
@@ -997,7 +980,7 @@ pub async fn enroll_repo(
         owner: owner.clone(),
         repo: repo_name.clone(),
         github_repo_id: None,
-        installation_id: None,
+        installation_id,
         default_branch: default_branch.clone(),
         base_branch: Some(default_branch),
         enrolled: true,
@@ -1468,6 +1451,29 @@ async fn default_policy_from_settings(store: &Arc<dyn Database>, user_id: &str) 
             .max(1) as u32,
         ..ProjectPolicy::default()
     }
+}
+
+/// Resolve the configured GitHub App installation id (as the persisted `i64`)
+/// when the project will authenticate as a GitHub App. Returns `None` for the
+/// personal-access-token path or when no installation id is configured; in
+/// those cases the repo's `installation_id` stays `None` and the client
+/// provider falls back to the global default / token auth. A later webhook
+/// delivery (`find_project_id_for_repo`) backfills the precise per-repo
+/// installation id when one was not discoverable at enroll time.
+async fn default_installation_id_from_settings(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    auth_mode: GitHubAuthMode,
+) -> Option<i64> {
+    if !matches!(auth_mode, GitHubAuthMode::GitHubApp) {
+        return None;
+    }
+    let map = store.get_all_settings(user_id).await.ok()?;
+    let installation_id = Settings::from_db_map(&map)
+        .repo_projects
+        .github_app
+        .installation_id?;
+    i64::try_from(installation_id).ok()
 }
 
 fn project_view(project: &RepoProject, parts: &RepoProjectParts) -> RepoProjectView {

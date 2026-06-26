@@ -190,7 +190,11 @@ impl ChannelsConfig {
                         );
                     }
                     trimmed
-                }),
+                })
+                    // Treat an empty/whitespace-only token as absent so it can
+                    // never authenticate an empty `Bearer`. Mirrors the
+                    // GatewayAccess path (`src/platform/gateway_access.rs`).
+                    .filter(|token| !token.trim().is_empty()),
                 user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
                 actor_id: optional_env("GATEWAY_ACTOR_ID")?,
             })
@@ -992,6 +996,59 @@ mod tests {
         );
 
         clear_nostr_env();
+    }
+
+    /// Clear all env vars that influence gateway resolution so a configured
+    /// empty token in `settings` is the only source under test.
+    fn clear_gateway_env() {
+        // SAFETY: Only called while holding `lock_env()`.
+        unsafe {
+            std::env::remove_var("GATEWAY_ENABLED");
+            std::env::remove_var("GATEWAY_AUTH_TOKEN");
+            std::env::remove_var("GATEWAY_HOST");
+            std::env::remove_var("GATEWAY_PORT");
+            std::env::remove_var("GATEWAY_USER_ID");
+            std::env::remove_var("GATEWAY_ACTOR_ID");
+        }
+    }
+
+    #[test]
+    fn gateway_empty_auth_token_becomes_none() {
+        let _guard = crate::helpers::lock_env();
+        clear_gateway_env();
+
+        for empty in ["", "   ", "\t\n"] {
+            let mut settings = Settings::default();
+            settings.channels.gateway_enabled = Some(true);
+            settings.channels.gateway_auth_token = Some(empty.to_string());
+
+            let config =
+                ChannelsConfig::resolve(&settings).expect("channels resolution should succeed");
+            let gateway = config.gateway.expect("gateway should be enabled");
+            assert_eq!(
+                gateway.auth_token, None,
+                "empty/whitespace token {empty:?} must resolve to None, not Some"
+            );
+        }
+
+        clear_gateway_env();
+    }
+
+    #[test]
+    fn gateway_nonempty_auth_token_is_preserved_and_trimmed() {
+        let _guard = crate::helpers::lock_env();
+        clear_gateway_env();
+
+        let mut settings = Settings::default();
+        settings.channels.gateway_enabled = Some(true);
+        settings.channels.gateway_auth_token = Some("  real-token  ".to_string());
+
+        let config =
+            ChannelsConfig::resolve(&settings).expect("channels resolution should succeed");
+        let gateway = config.gateway.expect("gateway should be enabled");
+        assert_eq!(gateway.auth_token.as_deref(), Some("real-token"));
+
+        clear_gateway_env();
     }
 
     #[test]

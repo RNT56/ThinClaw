@@ -1,6 +1,6 @@
 # ThinClaw Desktop Runtime Boundaries
 
-Last updated: 2026-05-15
+Last updated: 2026-06-24
 
 ThinClaw Desktop intentionally contains two AI systems. They serve different
 jobs and must not be collapsed into one architecture without an explicit
@@ -134,6 +134,34 @@ These pieces may be shared, but only through explicit adapters:
 
 The shared pieces are platform services. They are not proof that Direct AI
 Workbench state and ThinClaw agent state are the same product model.
+
+### Why two MCP clients and two provider builders (intentional)
+
+A maintainer scanning the backend will find what looks like duplicate
+infrastructure: two MCP clients and two LLM provider builders. This duplication
+is a **deliberate consequence of the two-system design above, not drift**, and
+must not be "fixed" by collapsing the systems without the explicit migration
+plan this document already requires.
+
+| Concern | System A: Direct AI Workbench | System B: ThinClaw Agent Cockpit |
+| --- | --- | --- |
+| MCP client | `thinclaw_desktop_tools::McpClient`, wired in `backend/src/rig_lib/{tool_router.rs, tool_discovery.rs, sandbox_factory.rs}`. Talks to the Desktop's FastAPI MCP endpoint for direct-workbench tool/skill discovery. | `thinclaw_core`'s own MCP runtime, constructed via `backend/src/thinclaw/runtime_builder.rs`. Governed by ThinClaw policy, grants, and approval flow. |
+| Provider builder | `rig_lib::UnifiedProvider` (`backend/src/rig_lib/unified_provider.rs`), selected from Desktop config + keychain state, not agent routing. | `thinclaw_core`'s provider stack, selected through ThinClaw agent routing. |
+
+The reason they are not shared:
+
+- **Tool authority must not cross systems.** Direct workbench tool use is limited
+  to the tools explicitly wired for the current turn (no autonomous host
+  execution); ThinClaw tools are gated by ThinClaw policy/grants/approvals.
+  Sharing one MCP client would let one system inherit the other's tool authority,
+  which the Security boundary sections above forbid.
+- **Provider routing is owned per system.** Direct chat selects providers from
+  Desktop config/keychain; ThinClaw selects providers through agent routing.
+  A single provider builder would couple two independent selection models.
+
+If the two systems are ever unified, that is a separate, large, cross-crate
+initiative with its own migration plan — see "Rules For Future Work" rule 6.
+This note exists so the duplication is not re-filed as accidental drift.
 
 ## Non-Shared State
 

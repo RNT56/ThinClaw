@@ -118,7 +118,12 @@ mod tests {
         }
     }
 
+    // The `lock_env()` guard must stay held across `resolve().await` because the
+    // process environment it sets up must remain in place for the duration of the
+    // async resolution. The crate-wide mutex serializes env mutation across tests
+    // running in parallel, so the guard intentionally crosses the await point.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn env_source_requires_explicit_allowance() {
         let _guard = lock_env();
         clear_secrets_env();
@@ -139,7 +144,10 @@ mod tests {
         clear_secrets_env();
     }
 
+    // See `env_source_requires_explicit_allowance`: the env guard must remain held
+    // across the `resolve().await` so the configured environment survives the call.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn env_source_uses_allowed_key() {
         let _guard = lock_env();
         clear_secrets_env();
@@ -161,7 +169,10 @@ mod tests {
         clear_secrets_env();
     }
 
+    // See `env_source_requires_explicit_allowance`: the env guard must remain held
+    // across the `resolve().await` so the configured environment survives the call.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn short_master_key_is_rejected() {
         let _guard = lock_env();
         clear_secrets_env();

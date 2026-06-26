@@ -4,15 +4,22 @@ use crate::channels::IncomingMessage;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "libsql")]
 use tokio::sync::mpsc;
 
+#[cfg(feature = "libsql")]
 use crate::agent::routine::{Routine, RoutineAction, RoutineGuardrails, Trigger};
+#[cfg(feature = "libsql")]
 use crate::agent::routine_engine::RoutineEngine;
+#[cfg(feature = "libsql")]
 use crate::config::RoutineConfig;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+#[cfg(feature = "libsql")]
 use crate::testing::StubLlm;
+#[cfg(feature = "libsql")]
 use crate::workspace::Workspace;
 
+#[cfg(feature = "libsql")]
 #[derive(Debug)]
 struct TestMemoryProvider {
     name: &'static str,
@@ -22,6 +29,7 @@ struct TestMemoryProvider {
     health_status: ProviderHealthStatus,
 }
 
+#[cfg(feature = "libsql")]
 #[async_trait]
 impl MemoryProvider for TestMemoryProvider {
     fn name(&self) -> &'static str {
@@ -60,6 +68,7 @@ impl MemoryProvider for TestMemoryProvider {
     }
 }
 
+#[cfg(feature = "libsql")]
 fn provider_status(
     name: &str,
     readiness: ProviderReadiness,
@@ -371,6 +380,7 @@ fn configured_provider_cases() -> Vec<(
     ]
 }
 
+#[cfg(feature = "libsql")]
 fn generated_skill_test_content(skill_name: &str) -> String {
     synthesize_generated_skill_markdown(
         skill_name,
@@ -388,6 +398,7 @@ fn generated_skill_test_content(skill_name: &str) -> String {
     .expect("generated skill markdown should parse")
 }
 
+#[cfg(feature = "libsql")]
 fn generated_skill_candidate(
     user_id: &str,
     skill_name: &str,

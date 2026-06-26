@@ -1727,6 +1727,8 @@ mod tests {
     fn test_sandbox_schema_only_exposes_enabled_agent_modes() {
         let manager = Arc::new(ContextManager::new(5));
         let jm = Arc::new(ContainerJobManager::new(
+            // stub config has fewer fields under reduced profiles
+            #[allow(clippy::needless_update)]
             ContainerJobConfig {
                 claude_code_enabled: false,
                 codex_code_enabled: true,
@@ -1751,6 +1753,8 @@ mod tests {
     async fn test_execute_rejects_disabled_codex_mode() {
         let manager = Arc::new(ContextManager::new(5));
         let jm = Arc::new(ContainerJobManager::new(
+            // stub config has fewer fields under reduced profiles
+            #[allow(clippy::needless_update)]
             ContainerJobConfig {
                 claude_code_enabled: true,
                 codex_code_enabled: false,

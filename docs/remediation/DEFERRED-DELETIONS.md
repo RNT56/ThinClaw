@@ -1,0 +1,73 @@
+# Deferred Deletions Ledger
+
+> **✅ APPLIED 2026-06-25 (Wave 4 deletion batch).** All entries below (D-01–D-06 + the WS-11 erase list: `src/safety/*` orphans, dead CLI stubs, `self_message`, `qr_pairing`, `tailscale`, misc helpers + HTTPS cred mappings, `RepairTask`, heartbeat runner, `SmartRoutingProvider`, `InferenceRouter` chat, leaky `safety`/`executor` fields) were ERASED after operator sign-off and a per-item evidence review ([DELETION-DOSSIER.md](./DELETION-DOSSIER.md)). ~25 files / 7K+ lines removed; `cargo check` + `clippy --all-targets -D warnings` + tests (root lib 1329, desktop 322) all green. `voice_wake` was the one item KEPT — it is being WIRED, not deleted (operator chose "build the wake word"). The entries are retained below as the historical record.**
+
+
+> Per the execution directive **"wire now, batch deletions for review,"** no product code is deleted during the build waves. Every removal a fix would normally make is recorded here instead, and applied together in a single reviewable **Wave 4 deletion PR** after the operator signs off.
+>
+> Each entry: what, where, why it's safe to remove, what must be true first, and the owning workstream.
+
+## How to use this ledger
+- Implementation waves **add** the replacement/guard and leave the old code in place, recording it here.
+- Before Wave 4, the operator reviews this list and approves/rejects each deletion.
+- Wave 4 applies the approved deletions in one PR, re-running the full gate.
+
+---
+
+## Wave 0 (WS-01 / WS-02)
+
+### D-01 — Dead HTTPS credential default-mappings (sandbox proxy)
+- **What:** the three HTTPS entries in `default_credential_mappings()` — `OPENAI_API_KEY`→`api.openai.com` (bearer), `ANTHROPIC_API_KEY`→`api.anthropic.com` (x-api-key header), `NEARAI_API_KEY`→`api.near.ai` (bearer).
+- **Where:** `src/sandbox/config.rs:11-15` (and the mirror that delegates to it, `src/sandbox/mod.rs:123-124`).
+- **Why safe:** the proxy's in-band credential injection only fires on the plaintext-HTTP forward path; HTTPS is tunneled via `CONNECT`/`handle_connect`, which never injects. So these HTTPS mappings are unreachable dead defaults (audit Finding #7). HTTPS credentials are delivered out-of-band via the orchestrator `/worker/{id}/credentials` endpoint.
+- **Precondition:** confirm no deployment relies on these defaults via the (now store-backed) HTTP injection path; confirm the OOB endpoint covers the three providers.
+- **Owner:** WS-01 (recorded) → Wave 4 deletion. Decision register Decision-1 Option A.
+
+---
+
+## Notes on non-deletions (recorded so they are not mistaken for deferred deletions)
+- **WS-01 `file.rs` containment:** the planned cwd-containment-when-`None` was **not** shipped (it broke the deliberate trusted-operator "unrestricted when no base_dir" contract — `register_filesystem_tools` has an explicit no-base branch). Instead containment stays fail-closed only when a base is configured, and registration now `warn!`s when no base is set. This is a grounded override of the decision register's cwd-containment choice, not a deferred deletion. See the Wave 0 report.
+- **WS-02 `schema_divergence` strict mode:** new type/nullability/index comparisons are implemented but gated behind `SCHEMA_DIVERGENCE_STRICT=1` until a live-DB seeding pass records the genuinely-intended Postgres-vs-libSQL divergences (7 Postgres partial indexes libSQL lacks, etc.). Not a deletion; a seeding follow-up owned by WS-13.
+
+---
+
+## Wave 1 (WS-06 / WS-09)
+
+### D-02 — Orphaned standalone heartbeat runner
+- **What:** `HeartbeatRunner::run()` + `spawn_heartbeat(...)` on both the root wrapper (`src/agent/heartbeat.rs`, + the `src/agent/mod.rs:81` re-export) and the extracted crate (`crates/thinclaw-agent/src/heartbeat.rs`). When these go, the now-orphaned `consecutive_failures` field, `HeartbeatConfig.max_failures`/`interval`, and the private `send_notification` helper must be removed in the same commit.
+- **Why safe:** zero callers; superseded by the routine engine (documented at `src/agent/agent_loop.rs:725`). `check_heartbeat`/`new`/builders must STAY — they back the `/heartbeat` command (`commands.rs:248`).
+- **Precondition:** none beyond confirming the `/heartbeat` command path is untouched.
+- **Owner:** WS-09 (recorded) → Wave 4. Decision register WS-09 DP-5.
+
+---
+
+### D-03 — Orphaned `RepairTask` duplicate
+- **What:** `RepairTask` struct + impl at `crates/thinclaw-agent/src/self_repair.rs:324-388`, plus its `pub use ... RepairTask` re-export at `src/agent/self_repair.rs:15`.
+- **Why safe:** a drifted near-duplicate of the inline self-repair loop, which is now the canonical authority (wired with `with_builder` in Wave 1C). Zero non-test, non-definition callers (workspace grep). The `pub use` keeps it from tripping `dead_code` while it remains.
+- **Precondition:** remove the struct/impl AND drop it from the root `pub use` (a public-path change).
+- **Owner:** WS-05 (recorded) → Wave 4. Decision register WS-05 DP-4 / AUDIT §6.
+
+---
+
+## Wave 2 (WS-08 LLM)
+
+### D-04 — `SmartRoutingProvider` decorator
+- **What:** the `SmartRoutingProvider` routing decorator in `crates/thinclaw-llm` (and its internal `response_is_uncertain` copy), plus its `pub` re-exports (lib.rs:28, src/llm/mod.rs:73).
+- **Why safe:** `RoutePlanner` is the canonical hot-path router; after Wave 2, the fallback/kill-switch/override paths use the role-selected provider directly, so `SmartRoutingProvider::new` has zero callers. The cascade logic was extracted to the new `cascade.rs`. Left defined (so no `dead_code`) and recorded.
+- **Owner:** WS-08 → Wave 4. Decision register WS-08 DP-1.
+
+### D-05 — Dead leaky-abstraction fields
+- **What:** `Reasoning.safety` (`src/llm/reasoning.rs`, 28 `Reasoning::new` callers) and `SpawnSubagentTool.executor`.
+- **Why safe:** both unused. NOT removed because `reasoning.rs` is a WS-10 decomposition target and the constructor ripple would collide with that split.
+- **Owner:** WS-08 semantic removal, sequenced with WS-10 → Wave 4. Decision register WS-08 DP-3.
+
+## Wave 1 (WS-04 desktop)
+
+### D-06 — Dead InferenceRouter chat modality
+- **What:** the chat modality on `InferenceRouter` (`apps/desktop/backend/src/inference/router.rs`: `chat` field, `chat_backend()`, `set_chat_backend()`, the `Modality::Chat` arms in `clear_backend`/`active_backends`, and the `reconfigure()` chat-construction block), plus the entire `inference/chat/{mod,local,cloud}.rs` (`ChatBackend` trait + `LocalChatBackend`/`CloudChatBackend`) and the `pub mod chat;` decl. KEEP `available_backends_for(Chat)` and the `Modality::Chat` enum variant (both live — config/UI path).
+- **Why safe:** zero non-router callers of the chat backend (verified by grep). The live chat path is `chat.rs::resolve_provider` (reads `config.chat_backend`, builds `UnifiedProvider` directly), which never touches the router field.
+- **Owner:** WS-04 → Wave 4. Decision register WS-04 DP-2 (sign-off-gated).
+
+---
+
+*Add new entries under the owning wave as they arise.*

@@ -705,7 +705,7 @@ pub(crate) async fn build_inner(
     // never has spawn_subagent/list_subagents/cancel_subagent in
     // its tool definitions — it literally cannot invoke them.
     components.tools.register_sync(Arc::new(
-        thinclaw_core::tools::builtin::SpawnSubagentTool::new(subagent_executor.clone()),
+        thinclaw_core::tools::builtin::SpawnSubagentTool::new(),
     ));
     components.tools.register_sync(Arc::new(
         thinclaw_core::tools::builtin::ListSubagentsTool::new(subagent_executor.clone()),

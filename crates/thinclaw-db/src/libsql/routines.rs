@@ -967,6 +967,36 @@ impl RoutineStore for LibSqlBackend {
         }
     }
 
+    async fn routine_event_recent_content_match(
+        &self,
+        routine_id: Uuid,
+        content_hash: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) \
+                 FROM routine_event_evaluations e \
+                 JOIN routine_event_inbox i ON i.id = e.event_id \
+                 WHERE e.routine_id = ?1 \
+                   AND e.decision = 'fired' \
+                   AND i.content_hash = ?2 \
+                   AND e.created_at >= ?3",
+                params![routine_id.to_string(), content_hash, fmt_ts(&since)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(get_i64(&row, 0) > 0),
+            None => Ok(false),
+        }
+    }
+
     async fn enqueue_routine_trigger(&self, trigger: &RoutineTrigger) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
         let decision = trigger.decision.map(|value| value.to_string());

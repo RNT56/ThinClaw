@@ -5,7 +5,6 @@ use thinclaw::agent::routine::RunStatus;
 use thinclaw::api::learning as learning_api;
 use thinclaw::db::Database;
 use thinclaw::history::ConversationKind;
-use thinclaw::safety::SafetyLayer;
 use uuid::Uuid;
 
 use crate::db_contract::fixtures;
@@ -39,11 +38,7 @@ async fn enable_outcomes(db: &Arc<dyn Database>, user_id: &str) {
 }
 
 fn outcome_service(db: &Arc<dyn Database>) -> OutcomeService {
-    OutcomeService::new(
-        Arc::clone(db),
-        None,
-        Arc::new(SafetyLayer::new(&thinclaw::config::SafetyConfig::default())),
-    )
+    OutcomeService::new(Arc::clone(db), None)
 }
 
 #[tokio::test]
@@ -118,6 +113,74 @@ async fn conversation_message_flow_contract() {
         )
         .await
         .expect("update_conversation_identity should succeed");
+}
+
+/// Regression contract for FTS5 punctuation tolerance.
+///
+/// libSQL transcript search feeds the query into an FTS5 `MATCH`, which treats
+/// `-`, `:`, `"`, and bare-word `AND`/`OR`/`NOT` as operators. Postgres uses
+/// `websearch_to_tsquery`, which tolerates the same punctuation. The parity
+/// contract is that *both* backends accept the same raw user input without
+/// erroring. This test runs once per backend because CI invokes the
+/// `db_contract` target separately for `DATABASE_BACKEND=libsql` and
+/// `DATABASE_BACKEND=postgres`. Pre-fix the libSQL leg errors on these queries;
+/// post-fix it returns `Ok`. The Postgres leg passes throughout (proving parity).
+#[tokio::test]
+async fn conversation_search_tolerates_punctuation_contract() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+    let user = fixtures::user("conversation_punctuation_user");
+    let channel = "repl";
+
+    let conversation_id = ctx
+        .db
+        .create_conversation(channel, &user, Some("punctuation-thread"))
+        .await
+        .expect("create_conversation should succeed");
+
+    ctx.db
+        .add_conversation_message(
+            conversation_id,
+            "user",
+            "please re-enable the time:sensitive feature",
+        )
+        .await
+        .expect("add_conversation_message should succeed");
+
+    // Queries that would be interpreted as FTS5 syntax if bound raw to `MATCH`:
+    // a hyphenated token, a colon-delimited token, an unterminated double quote,
+    // and a bare-word boolean operator. None of these should error on either
+    // backend.
+    let punctuation_queries = ["re-enable", "time:sensitive", "\"quoted", "foo AND bar"];
+    for query in punctuation_queries {
+        ctx.db
+            .search_conversation_messages(&user, query, None, Some(channel), None, 10)
+            .await
+            .unwrap_or_else(|err| panic!("punctuation query {query:?} must not error, got: {err}"));
+    }
+
+    // The hyphen/colon tokens exist verbatim in the body, so after sanitization
+    // they tokenize into words that match the indexed content.
+    let hyphen_hits = ctx
+        .db
+        .search_conversation_messages(&user, "re-enable", None, Some(channel), None, 10)
+        .await
+        .expect("hyphen query must not error");
+    assert!(
+        !hyphen_hits.is_empty(),
+        "expected the hyphenated query to find the seeded message"
+    );
+
+    let colon_hits = ctx
+        .db
+        .search_conversation_messages(&user, "time:sensitive", None, Some(channel), None, 10)
+        .await
+        .expect("colon query must not error");
+    assert!(
+        !colon_hits.is_empty(),
+        "expected the colon-delimited query to find the seeded message"
+    );
 }
 
 #[tokio::test]

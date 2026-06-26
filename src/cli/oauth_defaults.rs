@@ -26,6 +26,8 @@
 
 use std::time::Duration;
 
+use rand::Rng;
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
@@ -116,7 +118,7 @@ pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
 ///
 /// Uses the same Google Desktop App credentials as `google_oauth_token`,
 /// but with scopes specific to Gmail access and pub/sub notifications.
-/// This is what `cloud_oauth_start("gmail")` dispatches to in Scrappy.
+/// This is what `cloud_oauth_start("gmail")` dispatches to in ThinClaw Desktop.
 pub struct GmailOAuthConfig;
 
 impl GmailOAuthConfig {
@@ -293,6 +295,32 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
     }
 }
 
+/// Generate a cryptographically random, URL-safe OAuth `state` value.
+///
+/// The `state` parameter is the CSRF defense for the authorization-code flow:
+/// it is sent on the authorization request and must be echoed back unchanged on
+/// the loopback callback. Callers should generate one with this helper, thread
+/// it into the authorization URL, and validate the callback with
+/// [`wait_for_callback_with_state`].
+///
+/// Returns 32 bytes of randomness rendered as 64 lowercase hex characters, which
+/// is comfortably above the entropy needed to make guessing infeasible while
+/// staying within typical provider `state` length limits.
+pub fn generate_oauth_state() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Returns `true` if `received` matches `expected` in constant time.
+///
+/// Uses a constant-time comparison so a timing side channel cannot be used to
+/// recover the expected `state` byte by byte. Mirrors the `ConstantTimeEq`
+/// usage in `src/orchestrator/auth.rs` and `src/hooks/webhook_signing.rs`.
+fn oauth_state_matches(expected: &str, received: &str) -> bool {
+    expected.as_bytes().ct_eq(received.as_bytes()).into()
+}
+
 /// Wait for an OAuth callback and extract a query parameter value.
 ///
 /// Listens for a GET request matching `path_prefix` (e.g., "/callback" or "/auth/callback"),
@@ -300,15 +328,41 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
 /// landing page using `display_name` (e.g., "Google", "Notion", "NEAR AI").
 ///
 /// Times out after 5 minutes.
+///
+/// This is the state-less variant kept for callers that do not yet thread an
+/// OAuth `state` nonce. New code should prefer [`wait_for_callback_with_state`]
+/// and pass the value returned by [`generate_oauth_state`] so the loopback
+/// callback is protected against CSRF / authorization-code injection.
 pub async fn wait_for_callback(
     listener: TcpListener,
     path_prefix: &str,
     param_name: &str,
     display_name: &str,
 ) -> Result<String, OAuthCallbackError> {
+    wait_for_callback_with_state(listener, path_prefix, param_name, display_name, None).await
+}
+
+/// Wait for an OAuth callback, optionally validating the `state` parameter.
+///
+/// Behaves like [`wait_for_callback`], but when `expected_state` is `Some`, the
+/// callback's `state` query parameter must be present and match `expected_state`
+/// (compared in constant time). A missing or mismatched `state` is rejected with
+/// [`OAuthCallbackError::Denied`] and the failure landing page, preventing an
+/// attacker from injecting their own authorization code into the loopback flow.
+///
+/// When `expected_state` is `None`, no `state` checking is performed (legacy
+/// behavior).
+pub async fn wait_for_callback_with_state(
+    listener: TcpListener,
+    path_prefix: &str,
+    param_name: &str,
+    display_name: &str,
+    expected_state: Option<&str>,
+) -> Result<String, OAuthCallbackError> {
     let path_prefix = path_prefix.to_string();
     let param_name = param_name.to_string();
     let display_name = display_name.to_string();
+    let expected_state = expected_state.map(str::to_string);
 
     tokio::time::timeout(Duration::from_secs(300), async move {
         loop {
@@ -330,41 +384,48 @@ pub async fn wait_for_callback(
             {
                 // Check for error first
                 if query.contains("error=") {
-                    let html = landing_html(&display_name, false);
-                    let response = format!(
-                        "HTTP/1.1 400 Bad Request\r\n\
-                         Content-Type: text/html; charset=utf-8\r\n\
-                         Connection: close\r\n\
-                         \r\n\
-                         {}",
-                        html
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ =
+                        write_landing(&mut socket, &display_name, false, "400 Bad Request").await;
                     return Err(OAuthCallbackError::Denied);
                 }
 
-                // Look for the target parameter
-                for param in query.split('&') {
-                    let parts: Vec<&str> = param.splitn(2, '=').collect();
-                    if parts.len() == 2 && parts[0] == param_name {
-                        let value = urlencoding::decode(parts[1])
-                            .unwrap_or_else(|_| parts[1].into())
+                // Parse all query parameters once so we can validate `state`
+                // independently of the target parameter's position.
+                let params: std::collections::HashMap<String, String> = query
+                    .split('&')
+                    .filter_map(|pair| {
+                        let mut it = pair.splitn(2, '=');
+                        let key = it.next()?;
+                        let raw_value = it.next().unwrap_or("");
+                        let value = urlencoding::decode(raw_value)
+                            .unwrap_or_else(|_| raw_value.into())
                             .into_owned();
+                        Some((key.to_string(), value))
+                    })
+                    .collect();
 
-                        let html = landing_html(&display_name, true);
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\n\
-                             Content-Type: text/html; charset=utf-8\r\n\
-                             Connection: close\r\n\
-                             \r\n\
-                             {}",
-                            html
+                // CSRF defense: when a state nonce is expected, the callback must
+                // echo it back unchanged. Reject missing or mismatched values.
+                if let Some(expected) = expected_state.as_deref() {
+                    let received_ok = params
+                        .get("state")
+                        .map(|received| oauth_state_matches(expected, received))
+                        .unwrap_or(false);
+                    if !received_ok {
+                        tracing::warn!(
+                            "[oauth] callback rejected: missing or mismatched state parameter"
                         );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                        let _ = socket.shutdown().await;
-
-                        return Ok(value);
+                        let _ = write_landing(&mut socket, &display_name, false, "400 Bad Request")
+                            .await;
+                        return Err(OAuthCallbackError::Denied);
                     }
+                }
+
+                // Look for the target parameter
+                if let Some(value) = params.get(&param_name) {
+                    let _ = write_landing(&mut socket, &display_name, true, "200 OK").await;
+                    let _ = socket.shutdown().await;
+                    return Ok(value.clone());
                 }
             }
 
@@ -375,6 +436,27 @@ pub async fn wait_for_callback(
     })
     .await
     .map_err(|_| OAuthCallbackError::Timeout)?
+}
+
+/// Write the branded OAuth landing page with the given HTTP status line.
+async fn write_landing<W>(
+    socket: &mut W,
+    display_name: &str,
+    success: bool,
+    status: &str,
+) -> std::io::Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let html = landing_html(display_name, success);
+    let response = format!(
+        "HTTP/1.1 {status}\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {html}"
+    );
+    socket.write_all(response.as_bytes()).await
 }
 
 /// Escape a string for safe interpolation into HTML content.
@@ -693,6 +775,105 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("pubsub"))
         );
+    }
+
+    #[test]
+    fn test_generate_oauth_state_is_random_and_url_safe() {
+        let a = super::generate_oauth_state();
+        let b = super::generate_oauth_state();
+        // 32 bytes -> 64 hex chars
+        assert_eq!(a.len(), 64);
+        assert_eq!(b.len(), 64);
+        // Overwhelmingly unlikely to collide
+        assert_ne!(a, b);
+        // Hex output needs no URL-encoding
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_oauth_state_matches_constant_time() {
+        let state = super::generate_oauth_state();
+        assert!(super::oauth_state_matches(&state, &state));
+        assert!(!super::oauth_state_matches(&state, "wrong"));
+        assert!(!super::oauth_state_matches(&state, ""));
+        // Same length, different content
+        let mut tampered = state.clone();
+        tampered.replace_range(0..1, if state.starts_with('a') { "b" } else { "a" });
+        assert!(!super::oauth_state_matches(&state, &tampered));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_callback_with_state_rejects_mismatch() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        // Bind an ephemeral loopback listener so the test never touches the
+        // fixed OAuth port or a real browser.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let expected = super::generate_oauth_state();
+        let server = tokio::spawn(async move {
+            super::wait_for_callback_with_state(
+                listener,
+                "/callback",
+                "code",
+                "Test",
+                Some(&expected),
+            )
+            .await
+        });
+
+        // Simulate the browser redirect with an attacker-controlled state value.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /callback?code=injected&state=attacker HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        // Drain the failure landing page so the server can finish writing.
+        let mut buf = Vec::new();
+        let _ = client.read_to_end(&mut buf).await;
+
+        let result = server.await.unwrap();
+        assert!(
+            matches!(result, Err(super::OAuthCallbackError::Denied)),
+            "mismatched state must be rejected, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_callback_with_state_accepts_match() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let expected = super::generate_oauth_state();
+        let expected_for_client = expected.clone();
+        let server = tokio::spawn(async move {
+            super::wait_for_callback_with_state(
+                listener,
+                "/callback",
+                "code",
+                "Test",
+                Some(&expected),
+            )
+            .await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET /callback?code=good-code&state={expected_for_client} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let _ = client.read_to_end(&mut buf).await;
+
+        let result = server.await.unwrap();
+        assert_eq!(result.unwrap(), "good-code");
     }
 
     #[test]

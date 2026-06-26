@@ -1,7 +1,7 @@
 //! Context compaction compatibility facade.
 //!
 //! The compaction algorithm lives in `thinclaw-agent`. Root keeps concrete
-//! adapters for LLM reasoning, cost tracking, safety, and workspace archival.
+//! adapters for LLM reasoning, cost tracking, and workspace archival.
 
 use std::sync::Arc;
 
@@ -12,7 +12,6 @@ use crate::agent::context_monitor::CompactionStrategy;
 use crate::agent::session::Thread;
 use crate::error::{Error, OrchestratorError};
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning, Role};
-use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
 
 pub use thinclaw_agent::compaction::{
@@ -22,16 +21,14 @@ pub use thinclaw_agent::compaction::{
 /// Compacts conversation context to stay within limits.
 pub struct ContextCompactor {
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     cost_tracker: Option<Arc<Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
 impl ContextCompactor {
     /// Create a new context compactor.
-    pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
+    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
         Self {
             llm,
-            safety,
             cost_tracker: None,
         }
     }
@@ -54,7 +51,6 @@ impl ContextCompactor {
     ) -> Result<CompactionResult, Error> {
         let summarizer = Arc::new(RootCompactionSummarizer {
             llm: Arc::clone(&self.llm),
-            safety: Arc::clone(&self.safety),
             cost_tracker: self.cost_tracker.clone(),
         });
         let compactor = thinclaw_agent::compaction::ContextCompactor::new(summarizer);
@@ -78,7 +74,6 @@ impl ContextCompactor {
 
 struct RootCompactionSummarizer {
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     cost_tracker: Option<Arc<Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
@@ -125,7 +120,7 @@ Be brief but capture all important details. Use bullet points."#,
         .with_max_tokens(1024)
         .with_temperature(0.3);
 
-        let mut reasoning = Reasoning::new(Arc::clone(&self.llm), Arc::clone(&self.safety));
+        let mut reasoning = Reasoning::new(Arc::clone(&self.llm));
         if let Some(ref tracker) = self.cost_tracker {
             reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
         }

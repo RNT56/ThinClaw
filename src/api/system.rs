@@ -69,7 +69,7 @@ pub fn list_models(
 
 /// Create a portable snapshot of ThinClaw's database.
 ///
-/// This is used by Scrappy's cloud migration engine to include
+/// This is used by ThinClaw Desktop's cloud migration engine to include
 /// thinclaw.db in cross-device sync. The snapshot is a self-contained
 /// SQLite file (WAL is flushed before copy).
 ///

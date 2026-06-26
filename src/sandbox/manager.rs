@@ -41,6 +41,7 @@ use crate::sandbox::config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 use crate::sandbox::container::{ContainerOutput, ContainerRunner, connect_docker};
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::{HttpProxy, NetworkProxyBuilder};
+use crate::secrets::SecretsStore;
 
 /// Output from sandbox execution.
 #[derive(Debug, Clone)]
@@ -86,6 +87,16 @@ pub struct SandboxManager {
     proxy: Arc<RwLock<Option<HttpProxy>>>,
     docker: Arc<RwLock<Option<Docker>>>,
     initialized: std::sync::atomic::AtomicBool,
+    /// Optional encrypted-store credential source and the owning user the proxy
+    /// resolves credentials for. When set, the network proxy resolves forwarded
+    /// credentials from the [`SecretsStore`] instead of process env.
+    ///
+    /// The proxy is owned per-manager (shared across the jobs that run through
+    /// it), so a single owning `user_id` is bound here at construction. On a
+    /// single-operator desktop deployment this is the `"default"` owner; a
+    /// future multi-tenant proxy would need per-request user context threaded
+    /// through `CredentialResolver::resolve` instead.
+    credential_store: Option<(Arc<dyn SecretsStore + Send + Sync>, String)>,
 }
 
 impl SandboxManager {
@@ -96,7 +107,25 @@ impl SandboxManager {
             proxy: Arc::new(RwLock::new(None)),
             docker: Arc::new(RwLock::new(None)),
             initialized: std::sync::atomic::AtomicBool::new(false),
+            credential_store: None,
         }
+    }
+
+    /// Attach an encrypted [`SecretsStore`]-backed credential source for the
+    /// network proxy, owned by `user_id`.
+    ///
+    /// When present, [`Self::initialize`] builds the proxy with
+    /// [`NetworkProxyBuilder::from_config_with_store`] so credentials forwarded
+    /// to allowlisted hosts are resolved from the encrypted store (audited
+    /// injection path) rather than the host process environment. Without a
+    /// store, the manager falls back to the env-backed resolver.
+    pub fn with_credential_store(
+        mut self,
+        store: Arc<dyn SecretsStore + Send + Sync>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.credential_store = Some((store, user_id.into()));
+        self
     }
 
     /// Create with default configuration.
@@ -160,11 +189,35 @@ impl SandboxManager {
 
         *self.docker.write().await = Some(docker);
 
-        // Start the network proxy if we're using a sandboxed policy
+        // Start the network proxy if we're using a sandboxed policy.
+        //
+        // Prefer the encrypted secrets store as the credential source when one
+        // was attached (`with_credential_store`); otherwise fall back to the
+        // process-env resolver. Resolving from the store keeps API credentials
+        // out of the sandbox manager's environment and routes access through the
+        // audited injection path.
         if self.config.policy.is_sandboxed() {
-            let proxy = NetworkProxyBuilder::from_config(&self.config)
-                .build_and_start(self.config.proxy_port)
-                .await?;
+            let builder = match self.credential_store.as_ref() {
+                Some((store, user_id)) => {
+                    tracing::debug!(
+                        owner = %user_id,
+                        "Sandbox network proxy using encrypted secrets store for credentials"
+                    );
+                    NetworkProxyBuilder::from_config_with_store(
+                        &self.config,
+                        Arc::clone(store),
+                        user_id.clone(),
+                    )
+                }
+                None => {
+                    tracing::debug!(
+                        "Sandbox network proxy using process-env credential resolver (no secrets store attached)"
+                    );
+                    NetworkProxyBuilder::from_config(&self.config)
+                }
+            };
+
+            let proxy = builder.build_and_start(self.config.proxy_port).await?;
 
             *self.proxy.write().await = Some(proxy);
         }
@@ -482,6 +535,36 @@ mod tests {
     fn test_builder_defaults() {
         let manager = SandboxManagerBuilder::new().build();
         assert!(manager.config.enabled); // Enabled by default (startup check disables if Docker unavailable)
+    }
+
+    #[test]
+    fn test_default_manager_has_no_credential_store() {
+        let manager = SandboxManager::new(SandboxConfig::default());
+        // Without a store attached the proxy falls back to the env resolver.
+        assert!(manager.credential_store.is_none());
+    }
+
+    #[test]
+    fn test_with_credential_store_records_owner() {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+
+        let crypto = Arc::new(
+            SecretsCrypto::new(secrecy::SecretString::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .expect("test crypto key is valid"),
+        );
+        let store: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let manager =
+            SandboxManager::new(SandboxConfig::default()).with_credential_store(store, "default");
+
+        let (_, owner) = manager
+            .credential_store
+            .as_ref()
+            .expect("credential store should be attached");
+        assert_eq!(owner, "default");
     }
 
     #[test]

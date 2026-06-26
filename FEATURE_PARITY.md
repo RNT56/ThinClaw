@@ -183,7 +183,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 | `plugins` | ✅ | ✅ | - | `PluginManifest` — persistent JSON manifest, install/remove/toggle |
 | `hooks` | ✅ | ✅ | P2 | Lifecycle hooks |
 | `cron` | ✅ | ✅ | - | `cron add/edit/remove/trigger/runs/lint` — edit supports `--model`, `--thinking-budget`, `--schedule`, `--prompt`, `--enabled`; lint validates expressions offline |
-| `webhooks` | ✅ | ✅ | - | `POST /hooks/routine/{id}` with HMAC-SHA256 secret validation |
+| `webhooks` | ✅ | ✅ | - | `POST /hooks/routine/{id}` with HMAC-SHA256 secret validation; the validated, size-capped body is forwarded into the triggered routine's prompt via `RoutineRun.trigger_detail` as a delimited untrusted-data block |
 | `message send` | ✅ | ✅ | P2 | `message.rs`: send to gateway with auth, auto-detect URL |
 | `browser` | ✅ | ✅ | P3 | Headless Chrome: open/screenshot/links/check ([`src/cli/browser.rs`](src/cli/browser.rs)) |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
@@ -214,7 +214,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 | Closed-loop learning orchestrator | ❌ | ✅ | Event→evaluation→candidate loop with dedupe/cooldown, safe-mode thresholds, Tier A auto-apply, Tier C approval-gated code proposals ([`src/agent/learning/mod.rs`](src/agent/learning/mod.rs), [`src/agent/thread_ops.rs`](src/agent/thread_ops.rs)) |
 | Learning tool suite | ❌ | ✅ | `session_search` (FTS + optional cheap-model transcript summaries with fallback), `prompt_manage`, `skill_manage`, `learning_status`, `learning_history`, `learning_feedback`, `learning_proposal_review` ([`src/tools/builtin/memory.rs`](src/tools/builtin/memory.rs), [`src/agent/session_search.rs`](src/agent/session_search.rs), [`src/tools/builtin/learning_tools.rs`](src/tools/builtin/learning_tools.rs)) |
 | Learning API + audit UI | ❌ | ✅ | `/api/learning/*` endpoints + dedicated Web Learning tab with proposals, feedback, rollbacks, and provider health ([`src/api/learning.rs`](src/api/learning.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html)) |
-| Optional research automation / experiments | ❌ | ✅ | Advanced opt-in `experiments.*` settings, `/api/experiments/*` gateway routes, CLI `thinclaw experiments ...`, routine action integration, Web Research tab, queued-campaign draining, autonomous planner/mutator/reviewer iteration, telemetry-derived opportunities, persisted target linking, normalized LLM-cost + runner-cost attribution, provider/budget detail in the Research WebUI, GPU Cloud setup cards, lease-scoped remote runner mode, local benchmark execution, and controller-managed RunPod/Vast/Lambda plus SSH/Slurm/Kubernetes launches are shipped, including a first-class Lambda launch form that builds `backend_config.launch_payload` server-side for turnkey controller launches; campaign, trial, and artifact reads are owner-scoped at the storage boundary ([`src/api/experiments.rs`](src/api/experiments.rs), [`src/experiments/mod.rs`](src/experiments/mod.rs), [`src/experiments/adapters.rs`](src/experiments/adapters.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html), [`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
+| Optional research automation / experiments | ❌ | ✅ | Advanced opt-in `experiments.*` settings, `/api/experiments/*` gateway routes, CLI `thinclaw experiments ...`, routine action integration, Web Research tab, queued-campaign draining, autonomous planner/mutator/reviewer iteration, telemetry-derived opportunities, persisted target linking, normalized LLM-cost + runner-cost attribution, provider/budget detail in the Research WebUI, GPU Cloud setup cards, lease-scoped remote runner mode, local benchmark execution, and controller-managed RunPod/Vast/Lambda plus SSH/Slurm/Kubernetes launches are shipped, including a first-class Lambda launch form that builds `backend_config.launch_payload` server-side for turnkey controller launches; campaign, trial, and artifact reads are owner-scoped at the storage boundary; `default_artifact_retention_days` is enforced by a daily reaper, remote-runner artifacts are uploaded to durable host storage (`fetchable: true`) so they survive pod teardown, and the RunPod credit≈USD cost approximation is surfaced on the campaign `cost_summary` ([`src/api/experiments.rs`](src/api/experiments.rs), [`src/experiments/mod.rs`](src/experiments/mod.rs), [`src/experiments/artifact_store.rs`](src/experiments/artifact_store.rs), [`src/experiments/adapters.rs`](src/experiments/adapters.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html), [`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
 | Optional external memory providers | ❌ | ✅ | Honcho + Zep adapters, local-first canonical memory, non-fatal provider fallback ([`src/agent/learning/providers/mod.rs`](src/agent/learning/providers/mod.rs)) |
 | Post-compaction read audit | ✅ | ✅ | `ReadAuditor` with scope-based rule scanning + token-budgeted appendix ([`src/context/read_audit.rs`](src/context/read_audit.rs)) |
 | Post-compaction context injection | ✅ | ✅ | Priority-based fragment assembly with token budgets ([`src/context/post_compaction.rs`](src/context/post_compaction.rs)) |
@@ -512,10 +512,11 @@ Historical Scrappy/OpenClaw component inventories were removed from this parity 
 | Plugin hooks | ✅ | ✅ | P3 | Registered from WASM `capabilities.json` |
 | Workspace hooks | ✅ | ✅ | P2 | `hooks/hooks.json` and `hooks/*.hook.json` |
 | Outbound webhooks | ✅ | ✅ | P2 | Fire-and-forget lifecycle event delivery |
-| Heartbeat system | ✅ | ✅ | - | Periodic execution with self-critique feedback loop: post-completion evaluator persists critique to `heartbeat.last_critique`, next heartbeat reads and avoids repeating mistakes. Configurable `max_iterations` (WebUI Settings → Heartbeat, default 10). Stuck heartbeats write targeted self-critique and notify the user via preferred channel. |
+| Heartbeat system | ✅ | ✅ | - | Periodic execution with self-critique feedback loop: post-completion evaluator persists critique to `heartbeat.last_critique`, next heartbeat reads and avoids repeating mistakes. Configurable `max_iterations` (WebUI Settings → Heartbeat, default 10). Stuck heartbeats write targeted self-critique and notify the user via preferred channel. Output routing honors `target` (`none` runs silently, `chat` delivers to the default surface, a channel name overrides delivery) and `include_reasoning` (retains the reasoning chain in the emitted summary). |
 | Notification routing | ✅ | ✅ | P1 | `NotificationSettings` (preferred_channel + recipient) in `Settings`. Per-channel broadcast validation guards. Wizard step 16 collects preferences. Heartbeat/routine notifications route to user-chosen channel. WebUI Settings tab exposes notification preferences. |
 | Wizard notification preferences | ❌ | ✅ | P1 | `step_notification_preferences` in wizard: auto-selects single channel, prompts for multi-channel, collects recipient (phone/chat ID/email). |
 | Gmail pub/sub | ✅ | ✅ | P3 | `GmailConfig` + `parse_pubsub_push()` + sender filtering ([`src/channels/gmail_wiring.rs`](src/channels/gmail_wiring.rs)) |
+| Repo project supervisor | ❌ | ✅ | P2 | GitHub App backed repository project automation; CLI + gateway wired, default off. Shared domain types in [`crates/thinclaw-repo-projects`](crates/thinclaw-repo-projects), root runtime in [`src/repo_projects`](src/repo_projects), CLI in [`src/cli/repo_projects.rs`](src/cli/repo_projects.rs). |
 
 ### Owner: ThinClaw Agent
 
@@ -598,9 +599,11 @@ This file keeps broad ThinClaw parity and shipped-runtime capability tracking on
 
 ---
 
-## 20. Shipped Built-in Tools (80 max; some conditional or feature-gated)
+## 20. Shipped Built-in Tools
 
-> **Updated:** 2026-05-14
+> Counts are intentionally omitted; the live tool registry is authoritative. See
+> [`src/tools/README.md`](src/tools/README.md) and `crates/thinclaw-tools-core`.
+> Some tools are conditional or feature-gated.
 
 ### 20.1 File & Code Operations (9 tools)
 

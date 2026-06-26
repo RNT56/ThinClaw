@@ -611,6 +611,22 @@ impl Agent {
         if let Some(ref store) = self.deps.store {
             repair = repair.with_store(Arc::clone(store));
         }
+        // Wire the software builder + tool registry so broken WASM tools are
+        // automatically rebuilt (returning Success/Retry) instead of always
+        // short-circuiting to ManualRequired. Bounded by `max_repair_attempts`.
+        {
+            use crate::tools::builder::{BuilderConfig, LlmSoftwareBuilder};
+            let mut b = LlmSoftwareBuilder::new(
+                BuilderConfig::default(),
+                self.deps.llm.clone(),
+                self.deps.tools.clone(),
+            );
+            if let Some(tracker) = self.deps.cost_tracker.clone() {
+                b = b.with_cost_tracker(tracker);
+            }
+            let builder = Arc::new(b) as Arc<dyn crate::tools::SoftwareBuilder>;
+            repair = repair.with_builder(builder, self.deps.tools.clone());
+        }
         let repair = Arc::new(repair);
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
@@ -948,18 +964,14 @@ impl Agent {
 
         let outcome_handle = self.store().map(|store| {
             let service = Arc::new(
-                OutcomeService::new(
-                    Arc::clone(store),
-                    self.deps.cheap_llm.clone(),
-                    self.deps.safety.clone(),
-                )
-                .with_learning_context(
-                    self.deps.workspace.clone(),
-                    self.deps.skill_registry.clone(),
-                    routine_handle
-                        .as_ref()
-                        .map(|(_, engine)| Arc::clone(engine)),
-                ),
+                OutcomeService::new(Arc::clone(store), self.deps.cheap_llm.clone())
+                    .with_learning_context(
+                        self.deps.workspace.clone(),
+                        self.deps.skill_registry.clone(),
+                        routine_handle
+                            .as_ref()
+                            .map(|(_, engine)| Arc::clone(engine)),
+                    ),
             );
             spawn_outcome_service(service)
         });
@@ -972,7 +984,17 @@ impl Agent {
             let repo_projects_config = resolve_repo_projects_config(store).await;
             if repo_projects_config.enabled {
                 let mut supervisor_db_store = DatabaseRepoSupervisorStore::new(Arc::clone(store))
-                    .with_sse(self.deps.sse_sender.clone());
+                    .with_sse(self.deps.sse_sender.clone())
+                    .with_limits(
+                        repo_projects_config.max_concurrent_projects,
+                        repo_projects_config.max_concurrent_tasks_per_project,
+                    );
+
+                // The autonomous LLM-backed task planner (T6) is wired here once
+                // an injectable subagent stack is available; until then projects
+                // that need planning fall back to an explicit AwaitingHuman
+                // status (see DatabaseRepoSupervisorStore::with_planner).
+                supervisor_db_store = supervisor_db_store.with_planner(None);
 
                 // Sandbox executor for coding-job dispatch + CI repair.
                 if self.deps.job_manager.is_some() {
@@ -1007,6 +1029,11 @@ impl Agent {
                     .await;
                     let provider: Arc<dyn RepoGitHubClientProvider> = Arc::new(provider);
                     let pipeline_config = PipelineConfig {
+                        max_merge_attempts: std::env::var("REPO_PROJECTS_MAX_MERGE_ATTEMPTS")
+                            .ok()
+                            .and_then(|value| value.trim().parse::<u32>().ok())
+                            .filter(|value| *value > 0)
+                            .unwrap_or(PipelineConfig::default().max_merge_attempts),
                         post_review_summary: std::env::var("REPO_PROJECTS_REVIEW_SUMMARY")
                             .map(|value| {
                                 matches!(

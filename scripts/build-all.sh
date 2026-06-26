@@ -84,6 +84,18 @@ else
 
     echo ""
     echo "Deployed WASM channels to ${DEPLOY_DIR}/"
+
+    # NOTE: this script does NOT build the tools-src/* WASM tool crates.
+    # They use a different toolchain and target than the channels above
+    # (`cargo component build` → wasm32-wasip1, deployed to ~/.thinclaw/tools/
+    # with a per-tool capabilities file), so they are not built here. Build a
+    # tool with its own build.sh, e.g.:
+    #   (cd tools-src/brave-search && ./build.sh)
+    # The tools-src/* crates are still build-checked in CI (the per-crate
+    # "Tool Crate" matrix in .github/workflows/ci.yml).
+    echo ""
+    echo "Skipping tools-src/* WASM tool crates (not built by this script)."
+    echo "Build a tool via its own build.sh, e.g.: (cd tools-src/brave-search && ./build.sh)"
 fi
 
 echo ""

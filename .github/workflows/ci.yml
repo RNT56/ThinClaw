@@ -31,6 +31,10 @@ jobs:
           toolchain: 1.92.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install Linux ALSA packages
+        # `--all-features` clippy below pulls `voice` -> cpal -> alsa-sys, which
+        # needs the system ALSA headers on Linux.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check crate boundaries
@@ -49,7 +53,7 @@ jobs:
             exit 1
           fi
       - name: Check lints (cargo clippy)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Guard Linux deploy port
         run: |
           if rg -n "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
@@ -118,7 +122,7 @@ jobs:
       - name: cargo check
         run: cargo check --workspace ${{ matrix.cargo-args }}
       - name: cargo clippy
-        run: cargo clippy --workspace ${{ matrix.cargo-args }} -- -D warnings
+        run: cargo clippy --workspace --all-targets ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
         run: cargo test --workspace --no-run ${{ matrix.cargo-args }}
 
@@ -128,6 +132,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+      - name: Free disk space for the Tauri release build
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker system prune -af || true
+          df -h
       - name: Install Linux Tauri packages
         run: |
           sudo apt-get update
@@ -737,6 +747,34 @@ jobs:
             manifest_path: channels-src/discord/Cargo.toml
           - name: whatsapp
             manifest_path: channels-src/whatsapp/Cargo.toml
+          # The webhook-family shims below `include!` the shared
+          # channels-src/shared_webhook_channel/src/impl.rs source (it is not a
+          # standalone crate, so it has no matrix leg of its own — it is build-
+          # checked transitively through every shim that includes it).
+          - name: dingtalk
+            manifest_path: channels-src/dingtalk/Cargo.toml
+          - name: feishu_lark
+            manifest_path: channels-src/feishu_lark/Cargo.toml
+          - name: google_chat
+            manifest_path: channels-src/google_chat/Cargo.toml
+          - name: line
+            manifest_path: channels-src/line/Cargo.toml
+          - name: matrix
+            manifest_path: channels-src/matrix/Cargo.toml
+          - name: mattermost
+            manifest_path: channels-src/mattermost/Cargo.toml
+          - name: ms_teams
+            manifest_path: channels-src/ms_teams/Cargo.toml
+          - name: qq
+            manifest_path: channels-src/qq/Cargo.toml
+          - name: twilio_sms
+            manifest_path: channels-src/twilio_sms/Cargo.toml
+          - name: twitch
+            manifest_path: channels-src/twitch/Cargo.toml
+          - name: wecom
+            manifest_path: channels-src/wecom/Cargo.toml
+          - name: weixin
+            manifest_path: channels-src/weixin/Cargo.toml
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -744,11 +782,16 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
           key: channel-crate-${{ matrix.name }}
       - name: Run channel crate tests
         run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+      - name: Build channel crate for wasm32-wasip2
+        # Channels ship as WASM components; a shim that stops compiling to WASM
+        # must fail CI even when its host-side unit tests still pass.
+        run: cargo build --manifest-path ${{ matrix.manifest_path }} --release --target wasm32-wasip2
 
   tool-crates:
     name: "Tool Crate: ${{ matrix.name }}"

@@ -8,7 +8,6 @@ use crate::secret_store::SecretStore;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::chat::ChatBackend;
 use super::diffusion::DiffusionBackend;
 use super::embedding::EmbeddingBackend;
 use super::stt::SttBackend;
@@ -42,7 +41,6 @@ impl ReconfigureResult {
 /// Managed as `app.manage(InferenceRouter::new(...))`.  Each modality has its
 /// own active backend that can be hot-swapped at runtime.
 pub struct InferenceRouter {
-    chat: RwLock<Option<Arc<dyn ChatBackend>>>,
     embedding: RwLock<Option<Arc<dyn EmbeddingBackend>>>,
     tts: RwLock<Option<Arc<dyn TtsBackend>>>,
     stt: RwLock<Option<Arc<dyn SttBackend>>>,
@@ -55,10 +53,9 @@ impl InferenceRouter {
     /// Create a new router.
     ///
     /// All backends start as `None`.  Call `reconfigure()` or
-    /// `set_chat_backend()` etc. to activate them.
+    /// `set_embedding_backend()` etc. to activate them.
     pub fn new(secret_store: Arc<SecretStore>) -> Self {
         Self {
-            chat: RwLock::new(None),
             embedding: RwLock::new(None),
             tts: RwLock::new(None),
             stt: RwLock::new(None),
@@ -82,11 +79,6 @@ impl InferenceRouter {
     // ─────────────────────────────────────────────────────────────────────
     // Accessors — return the active backend for each modality
     // ─────────────────────────────────────────────────────────────────────
-
-    /// Get the active chat backend.
-    pub async fn chat_backend(&self) -> Option<Arc<dyn ChatBackend>> {
-        self.chat.read().await.clone()
-    }
 
     /// Get the active embedding backend.
     pub async fn embedding_backend(&self) -> Option<Arc<dyn EmbeddingBackend>> {
@@ -117,11 +109,6 @@ impl InferenceRouter {
     // Setters — swap backends at runtime
     // ─────────────────────────────────────────────────────────────────────
 
-    /// Set the active chat backend.
-    pub async fn set_chat_backend(&self, backend: Arc<dyn ChatBackend>) {
-        *self.chat.write().await = Some(backend);
-    }
-
     /// Set the active embedding backend.
     pub async fn set_embedding_backend(&self, backend: Arc<dyn EmbeddingBackend>) {
         *self.embedding.write().await = Some(backend);
@@ -145,7 +132,9 @@ impl InferenceRouter {
     /// Clear a backend (set to None).
     pub async fn clear_backend(&self, modality: Modality) {
         match modality {
-            Modality::Chat => *self.chat.write().await = None,
+            // Chat is not router-managed; the active chat path reads
+            // `config.chat_backend` directly (see `chat::resolve_provider`).
+            Modality::Chat => {}
             Modality::Embedding => *self.embedding.write().await = None,
             Modality::Tts => *self.tts.write().await = None,
             Modality::Stt => *self.stt.write().await = None,
@@ -157,15 +146,62 @@ impl InferenceRouter {
     // Introspection
     // ─────────────────────────────────────────────────────────────────────
 
+    /// Synthesize the active chat-backend badge from config.
+    ///
+    /// Chat is not a router-managed modality — the live chat path
+    /// (`chat::resolve_provider`) builds its provider directly from
+    /// `config.chat_backend`. This derives the settings-UI "active" badge
+    /// from that same config field so the badge stays accurate.
+    fn active_chat_backend(&self, config: &UserConfig) -> Option<BackendInfo> {
+        let chat_id = config
+            .chat_backend
+            .as_deref()
+            .or(config.selected_chat_provider.as_deref())
+            .unwrap_or("local");
+
+        if chat_id == "local" {
+            return Some(BackendInfo {
+                id: "local".to_string(),
+                display_name: "Local (llama.cpp / MLX)".to_string(),
+                is_local: true,
+                model_id: config
+                    .inference_models
+                    .as_ref()
+                    .and_then(|m| m.get("chat"))
+                    .cloned(),
+                available: true,
+            });
+        }
+
+        let endpoint = thinclaw_config::provider_catalog::endpoint_for(chat_id)?;
+        let model_id = config
+            .inference_models
+            .as_ref()
+            .and_then(|m| m.get("chat"))
+            .cloned()
+            .unwrap_or_else(|| endpoint.default_model.to_string());
+
+        Some(BackendInfo {
+            id: chat_id.to_string(),
+            display_name: endpoint.display_name.to_string(),
+            is_local: false,
+            model_id: Some(model_id),
+            available: self.has_secret(&endpoint.secret_name),
+        })
+    }
+
     /// Get info about the currently active backend for each modality.
     /// Returns a list of (modality, info) pairs.  `info` is `None` if
     /// no backend is active for that modality.
-    pub async fn active_backends(&self) -> Vec<(Modality, Option<BackendInfo>)> {
+    ///
+    /// The chat badge is synthesized from `config` (see
+    /// [`Self::active_chat_backend`]) because chat is not router-managed.
+    pub async fn active_backends(
+        &self,
+        config: &UserConfig,
+    ) -> Vec<(Modality, Option<BackendInfo>)> {
         vec![
-            (
-                Modality::Chat,
-                self.chat.read().await.as_ref().map(|b| b.info()),
-            ),
+            (Modality::Chat, self.active_chat_backend(config)),
             (
                 Modality::Embedding,
                 self.embedding.read().await.as_ref().map(|b| b.info()),
@@ -277,45 +313,9 @@ impl InferenceRouter {
         };
 
         // ── Chat backend ────────────────────────────────────────────────
-        let chat_id = config
-            .chat_backend
-            .as_deref()
-            .or(config.selected_chat_provider.as_deref())
-            .unwrap_or("local");
-        tracing::info!("[inference_router] Chat backend: {}", chat_id);
-
-        if chat_id != "local" {
-            if let Some(ep) = thinclaw_config::provider_catalog::endpoint_for(chat_id) {
-                if let Some(api_key) = self.get_secret(&ep.secret_name) {
-                    let model_override = config
-                        .inference_models
-                        .as_ref()
-                        .and_then(|m| m.get("chat"))
-                        .cloned();
-                    let backend = super::chat::cloud::CloudChatBackend::from_endpoint(
-                        chat_id,
-                        ep,
-                        api_key,
-                        model_override,
-                        config.selected_model_context_size,
-                    );
-                    *self.chat.write().await = Some(Arc::new(backend));
-                    tracing::info!(
-                        "[inference_router] Activated cloud chat backend: {}",
-                        chat_id
-                    );
-                } else {
-                    tracing::warn!(
-                        "[inference_router] Chat backend '{}' selected but no API key found",
-                        chat_id
-                    );
-                }
-            }
-        } else {
-            // Local — clear any stale cloud backend and defer to sidecar
-            *self.chat.write().await = None;
-            tracing::info!("[inference_router] Chat = local (deferred until sidecar starts)");
-        }
+        // Chat is not router-managed: the live chat path
+        // (`chat::resolve_provider`) builds its provider directly from
+        // `config.chat_backend`. Nothing to construct here.
 
         // ── Embedding backend ───────────────────────────────────────────
         let embed_id = config.embedding_backend.as_deref().unwrap_or("local");

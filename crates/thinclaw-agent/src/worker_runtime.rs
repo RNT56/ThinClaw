@@ -107,6 +107,10 @@ pub struct WorkerLoopMetadata {
     pub is_heartbeat: bool,
     pub allowed_tools: Option<Vec<String>>,
     pub allowed_skills: Option<Vec<String>>,
+    /// When true, suppress user-visible output delivery (heartbeat `target=none`).
+    pub suppress_output: bool,
+    /// Channel override for output delivery (heartbeat `target=<channel>`).
+    pub notify_channel: Option<String>,
 }
 
 impl WorkerLoopMetadata {
@@ -124,6 +128,15 @@ impl WorkerLoopMetadata {
                 .unwrap_or(false),
             allowed_tools: metadata_string_list(metadata, "allowed_tools"),
             allowed_skills: metadata_string_list(metadata, "allowed_skills"),
+            suppress_output: metadata
+                .get("suppress_output")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            notify_channel: metadata
+                .get("notify_channel")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
         }
     }
 }

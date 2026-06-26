@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use thinclaw::{
-    agent::HeartbeatRunner, config::Config, history::Store, llm::create_llm_provider,
-    safety::SafetyLayer, workspace::Workspace,
+    agent::HeartbeatRunner, config::Config, db::Database as _, db::postgres::PgBackend,
+    llm::create_llm_provider, workspace::Workspace,
 };
 
 #[tokio::test]
@@ -44,7 +44,7 @@ async fn test_heartbeat_end_to_end() {
     );
 
     // 2. Connect to database
-    let store = Store::new(&config.database)
+    let store = PgBackend::new(&config.database)
         .await
         .expect("Failed to connect to database");
     store
@@ -88,8 +88,7 @@ async fn test_heartbeat_end_to_end() {
 
     let hb_config = thinclaw::agent::HeartbeatConfig::default();
     let hygiene_config = thinclaw::workspace::hygiene::HygieneConfig::default();
-    let safety = Arc::new(SafetyLayer::new(&config.safety));
-    let runner = HeartbeatRunner::new(hb_config, hygiene_config, workspace, llm, safety);
+    let runner = HeartbeatRunner::new(hb_config, hygiene_config, workspace, llm);
 
     let result = runner.check_heartbeat().await;
 

@@ -733,6 +733,11 @@ pub struct ExperimentRunnerArtifactUpload {
     pub fetchable: bool,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// Inline base64-encoded artifact bytes. When present, the gateway host
+    /// persists these to durable storage so the artifact survives runner-pod
+    /// teardown (the pod-local `uri_or_local_path` is only a breadcrumb).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
 }
 
 pub fn merge_json(base: &serde_json::Value, overlay: &serde_json::Value) -> serde_json::Value {
@@ -2656,6 +2661,11 @@ pub fn provider_hourly_rate_usd(
             ],
         )
         .map(|(credits_per_hour, source)| {
+            // RunPod prices in account credits, not USD. We surface the rate as an
+            // approximate USD figure under the assumption 1 credit ≈ 1 USD. This is
+            // an approximation, not a billed amount: the `native_currency` /
+            // `normalization` fields below carry the assumption forward so it reaches
+            // the operator-facing cost surfaces (see WS-07 / RESEARCH_AND_EXPERIMENTS.md).
             (
                 credits_per_hour,
                 source,

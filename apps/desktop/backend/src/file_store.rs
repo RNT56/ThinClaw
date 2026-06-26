@@ -10,7 +10,9 @@
 //! and reads will check local cache first, then download from cloud.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -64,6 +66,21 @@ struct FileStoreInner {
     mode: FileStoreMode,
     /// Channel for queuing cloud uploads (populated in cloud mode)
     upload_tx: Option<mpsc::Sender<UploadJob>>,
+    /// Cloud download fallback for read-path cache misses (populated in cloud mode)
+    download: Option<Arc<dyn CloudDownloader>>,
+}
+
+/// Pulls a file's plaintext bytes from the cloud provider on a cache miss.
+///
+/// The concrete implementation lives in `cloud::live_sync` so `file_store`
+/// does not depend on `opendal`/`encryption` types directly. It is responsible
+/// for `provider.get("{rel}.enc")` + `encryption::decrypt(rel, ..)` so the
+/// bytes returned here are already decrypted plaintext.
+#[async_trait]
+pub trait CloudDownloader: Send + Sync {
+    /// Download + decrypt the file at `rel_path` (the local-relative path,
+    /// not the `.enc` cloud key). Returns the plaintext bytes.
+    async fn download(&self, rel_path: &str) -> FileStoreResult<Vec<u8>>;
 }
 
 /// A file queued for background cloud upload.
@@ -93,6 +110,7 @@ impl FileStore {
                 root,
                 mode: FileStoreMode::Local,
                 upload_tx: None,
+                download: None,
             }),
         }
     }
@@ -113,6 +131,26 @@ impl FileStore {
         let mut inner = self.inner.write().await;
         inner.upload_tx = Some(tx);
         info!("[file_store] Upload channel connected");
+    }
+
+    /// Set the cloud download fallback for read-path cache misses.
+    ///
+    /// Call this when switching to cloud mode so that reads of files that are
+    /// not yet in the local cache transparently pull + decrypt from the cloud.
+    pub async fn set_downloader(&self, download: Arc<dyn CloudDownloader>) {
+        let mut inner = self.inner.write().await;
+        inner.download = Some(download);
+        info!("[file_store] Cloud downloader connected");
+    }
+
+    /// Tear down cloud wiring (upload channel + downloader) and return to local
+    /// pass-through. Used when migrating back to local mode or stopping sync.
+    pub async fn clear_cloud_wiring(&self) {
+        let mut inner = self.inner.write().await;
+        inner.mode = FileStoreMode::Local;
+        inner.upload_tx = None;
+        inner.download = None;
+        info!("[file_store] Cloud wiring cleared; reverted to local mode");
     }
 
     /// Get the current operating mode.
@@ -195,30 +233,54 @@ impl FileStore {
     /// In local mode: reads directly from disk.
     /// In cloud mode: reads from local cache, downloads if missing (TODO).
     pub async fn read(&self, relative_path: &str) -> FileStoreResult<Vec<u8>> {
-        let inner = self.inner.read().await;
-        let full_path = inner.root.join(relative_path);
+        let (full_path, mode, download) = {
+            let inner = self.inner.read().await;
+            (
+                inner.root.join(relative_path),
+                inner.mode.clone(),
+                inner.download.clone(),
+            )
+        };
 
         if full_path.exists() {
             let data = tokio::fs::read(&full_path).await?;
             return Ok(data);
         }
 
-        // In cloud mode, the file might exist in the cloud but not locally.
-        // The actual download is handled by the SyncEngine when it detects
-        // a missing local file. For now, return NotFound and let the caller
-        // trigger a sync if needed.
-        if inner.mode == FileStoreMode::Cloud {
-            debug!(
-                "[file_store] File not in local cache, cloud download needed: {}",
-                relative_path
-            );
+        // In cloud mode, the file may exist in the cloud but not in the local
+        // cache. Download + decrypt it, populate the cache, and return the bytes.
+        if mode == FileStoreMode::Cloud {
+            if let Some(download) = download {
+                debug!(
+                    "[file_store] Cache miss, downloading from cloud: {}",
+                    relative_path
+                );
+                let data = download.download(relative_path).await?;
+                Self::populate_cache(&full_path, &data).await?;
+                return Ok(data);
+            }
+
             return Err(FileStoreError::CloudDownloadFailed(format!(
-                "File not in local cache: {}. Sync may be in progress.",
+                "File not in local cache: {}. No cloud downloader configured.",
                 relative_path
             )));
         }
 
         Err(FileStoreError::NotFound(relative_path.to_string()))
+    }
+
+    /// Write downloaded cloud bytes into the local cache (best-effort parents).
+    async fn populate_cache(full_path: &Path, data: &[u8]) -> FileStoreResult<()> {
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(full_path, data).await?;
+        debug!(
+            "[file_store] Cached cloud download: {} ({} bytes)",
+            full_path.display(),
+            data.len()
+        );
+        Ok(())
     }
 
     /// Read a file given an absolute path.
@@ -240,20 +302,32 @@ impl FileStore {
     /// Returns the absolute local path. In local mode, just verifies existence.
     /// In cloud mode, downloads to local cache if missing.
     pub async fn ensure_local(&self, relative_path: &str) -> FileStoreResult<PathBuf> {
-        let inner = self.inner.read().await;
-        let full_path = inner.root.join(relative_path);
+        let (full_path, mode, download) = {
+            let inner = self.inner.read().await;
+            (
+                inner.root.join(relative_path),
+                inner.mode.clone(),
+                inner.download.clone(),
+            )
+        };
 
         if full_path.exists() {
             return Ok(full_path);
         }
 
-        if inner.mode == FileStoreMode::Cloud {
-            debug!(
-                "[file_store] ensure_local: file not cached locally, cloud download needed: {}",
-                relative_path
-            );
+        if mode == FileStoreMode::Cloud {
+            if let Some(download) = download {
+                debug!(
+                    "[file_store] ensure_local: cache miss, downloading from cloud: {}",
+                    relative_path
+                );
+                let data = download.download(relative_path).await?;
+                Self::populate_cache(&full_path, &data).await?;
+                return Ok(full_path);
+            }
+
             return Err(FileStoreError::CloudDownloadFailed(format!(
-                "File not in local cache: {}. Sync may be in progress.",
+                "File not in local cache: {}. No cloud downloader configured.",
                 relative_path
             )));
         }
@@ -418,5 +492,130 @@ impl FileStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Mock downloader that serves a fixed set of files and records which paths
+    /// were actually fetched (to prove cache hits don't hit the network).
+    struct MockDownloader {
+        files: std::collections::HashMap<String, Vec<u8>>,
+        fetched: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CloudDownloader for MockDownloader {
+        async fn download(&self, rel_path: &str) -> FileStoreResult<Vec<u8>> {
+            self.fetched.lock().unwrap().push(rel_path.to_string());
+            self.files
+                .get(rel_path)
+                .cloned()
+                .ok_or_else(|| FileStoreError::NotFound(rel_path.to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn local_mode_missing_file_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileStore::new(tmp.path().to_path_buf());
+
+        let result = store.read("documents/missing.txt").await;
+        assert!(matches!(result, Err(FileStoreError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn cloud_mode_cache_miss_downloads_and_populates_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileStore::new(tmp.path().to_path_buf());
+
+        let mut files = std::collections::HashMap::new();
+        files.insert("documents/report.txt".to_string(), b"cloud bytes".to_vec());
+        let downloader = Arc::new(MockDownloader {
+            files,
+            fetched: Mutex::new(Vec::new()),
+        });
+
+        store.set_mode(FileStoreMode::Cloud).await;
+        store.set_downloader(downloader.clone()).await;
+
+        // First read: cache miss → download + cache-fill.
+        let data = store.read("documents/report.txt").await.unwrap();
+        assert_eq!(data, b"cloud bytes");
+        assert_eq!(downloader.fetched.lock().unwrap().len(), 1);
+
+        // Local cache now holds the file.
+        let cached = tmp.path().join("documents/report.txt");
+        assert!(cached.exists());
+        assert_eq!(tokio::fs::read(&cached).await.unwrap(), b"cloud bytes");
+
+        // Second read: served from cache, no further downloads.
+        let data2 = store.read("documents/report.txt").await.unwrap();
+        assert_eq!(data2, b"cloud bytes");
+        assert_eq!(downloader.fetched.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cloud_mode_missing_in_cloud_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileStore::new(tmp.path().to_path_buf());
+        let downloader = Arc::new(MockDownloader {
+            files: std::collections::HashMap::new(),
+            fetched: Mutex::new(Vec::new()),
+        });
+
+        store.set_mode(FileStoreMode::Cloud).await;
+        store.set_downloader(downloader).await;
+
+        let result = store.read("documents/nope.txt").await;
+        assert!(matches!(result, Err(FileStoreError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn cloud_mode_without_downloader_reports_download_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileStore::new(tmp.path().to_path_buf());
+        store.set_mode(FileStoreMode::Cloud).await;
+
+        let result = store.read("documents/x.txt").await;
+        assert!(matches!(
+            result,
+            Err(FileStoreError::CloudDownloadFailed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ensure_local_downloads_into_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileStore::new(tmp.path().to_path_buf());
+
+        let mut files = std::collections::HashMap::new();
+        files.insert("images/p.png".to_string(), vec![1, 2, 3]);
+        let downloader = Arc::new(MockDownloader {
+            files,
+            fetched: Mutex::new(Vec::new()),
+        });
+        store.set_mode(FileStoreMode::Cloud).await;
+        store.set_downloader(downloader).await;
+
+        let path = store.ensure_local("images/p.png").await.unwrap();
+        assert!(path.exists());
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn clear_cloud_wiring_reverts_to_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileStore::new(tmp.path().to_path_buf());
+        store.set_mode(FileStoreMode::Cloud).await;
+
+        store.clear_cloud_wiring().await;
+        assert_eq!(store.mode().await, FileStoreMode::Local);
+        // A miss now reports NotFound (local pass-through), not download-failed.
+        let result = store.read("documents/x.txt").await;
+        assert!(matches!(result, Err(FileStoreError::NotFound(_))));
     }
 }

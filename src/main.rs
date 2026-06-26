@@ -1699,7 +1699,7 @@ async fn async_main() -> anyhow::Result<()> {
             dyn thinclaw::tools::builtin::subagent::SubagentToolPort,
         > = executor.clone();
         components.tools.register_sync(std::sync::Arc::new(
-            thinclaw::tools::builtin::SpawnSubagentTool::new(std::sync::Arc::clone(&subagent_port)),
+            thinclaw::tools::builtin::SpawnSubagentTool::new(),
         ));
         components.tools.register_sync(std::sync::Arc::new(
             thinclaw::tools::builtin::ListSubagentsTool::new(std::sync::Arc::clone(&subagent_port)),
@@ -1824,6 +1824,19 @@ async fn async_main() -> anyhow::Result<()> {
                 thinclaw::api::experiments::start_experiment_controller_loop(experiments_db).await;
             });
             tracing::info!("Experiment controller reconciler started (periodic cadence)");
+
+            let reaper_db = Arc::clone(&db);
+            let retention_days = config.experiments.default_artifact_retention_days;
+            tokio::spawn(async move {
+                thinclaw::api::experiments::start_experiment_artifact_reaper_loop(
+                    reaper_db,
+                    retention_days,
+                )
+                .await;
+            });
+            tracing::info!(
+                "Experiment artifact reaper started (daily cadence, retention {retention_days}d)"
+            );
         }
     } else {
         tracing::info!("Experiment controller not started because experiments are disabled.");

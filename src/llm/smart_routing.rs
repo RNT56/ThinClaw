@@ -1,1 +1,1 @@
-pub use thinclaw_llm::smart_routing::*;
+pub use thinclaw_llm_core::smart_routing::*;

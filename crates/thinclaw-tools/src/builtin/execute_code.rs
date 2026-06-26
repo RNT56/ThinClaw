@@ -912,7 +912,21 @@ impl Tool for ExecuteCodeTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+        // Host posture: only a real isolation boundary may relax approval to
+        // `UnlessAutoApproved`. When code runs on the bare host (the default
+        // `LocalHostExecutionBackend`, or any backend without isolation),
+        // execution can touch the operator's filesystem/network directly, so it
+        // must always require an explicit per-invocation decision. This mirrors
+        // the shell tool, which escalates dangerous commands to `Always`.
+        match self.backend.kind() {
+            // Docker provides container isolation; auto-approval policy applies.
+            ExecutionBackendKind::DockerSandbox => ApprovalRequirement::UnlessAutoApproved,
+            // Bare-host execution and remote-runner adapters (which do not
+            // advertise local isolation) demand explicit approval.
+            ExecutionBackendKind::LocalHost | ExecutionBackendKind::RemoteRunnerAdapter => {
+                ApprovalRequirement::Always
+            }
+        }
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -1538,6 +1552,74 @@ mod tests {
             || text.contains("node")
             || text.contains("npx")
             || text.contains("tsx")
+    }
+
+    /// Minimal backend used purely to exercise approval policy by backend kind.
+    /// Execution methods are never invoked by `requires_approval`.
+    struct KindOnlyBackend(ExecutionBackendKind);
+
+    #[async_trait]
+    impl LocalExecutionBackend for KindOnlyBackend {
+        fn kind(&self) -> ExecutionBackendKind {
+            self.0
+        }
+
+        async fn run_shell(
+            &self,
+            _request: crate::execution::CommandExecutionRequest,
+        ) -> Result<ExecutionResult, ToolError> {
+            unimplemented!("not used in approval-policy tests")
+        }
+
+        async fn start_process(
+            &self,
+            _request: crate::execution::ProcessStartRequest,
+        ) -> Result<crate::execution::StartedProcess, ToolError> {
+            unimplemented!("not used in approval-policy tests")
+        }
+
+        async fn run_script(
+            &self,
+            _request: ScriptExecutionRequest,
+        ) -> Result<ExecutionResult, ToolError> {
+            unimplemented!("not used in approval-policy tests")
+        }
+    }
+
+    #[test]
+    fn test_requires_approval_bare_host_forces_always() {
+        // Default backend is the bare host (LocalHostExecutionBackend).
+        let tool = ExecuteCodeTool::new();
+        assert_eq!(tool.backend.kind(), ExecutionBackendKind::LocalHost);
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Always,
+            "bare-host code execution must always require explicit approval"
+        );
+    }
+
+    #[test]
+    fn test_requires_approval_remote_runner_forces_always() {
+        let tool = ExecuteCodeTool::new().with_backend(Arc::new(KindOnlyBackend(
+            ExecutionBackendKind::RemoteRunnerAdapter,
+        )));
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Always,
+            "remote-runner execution without advertised isolation must require approval"
+        );
+    }
+
+    #[test]
+    fn test_requires_approval_docker_sandbox_allows_auto_approval() {
+        let tool = ExecuteCodeTool::new().with_backend(Arc::new(KindOnlyBackend(
+            ExecutionBackendKind::DockerSandbox,
+        )));
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved,
+            "container-isolated execution keeps the auto-approval policy"
+        );
     }
 
     #[test]

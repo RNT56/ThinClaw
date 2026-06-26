@@ -662,6 +662,16 @@ pub trait RoutineStore: Send + Sync {
         routine_id: Uuid,
         trigger_key: &str,
     ) -> Result<bool, DatabaseError>;
+    /// Returns true when this routine has already fired for an event whose
+    /// content hash matches `content_hash` since `since`. Backs the
+    /// `RoutineGuardrails.dedup_window` content dedup so semantically duplicate
+    /// distinct events within the window fire only once.
+    async fn routine_event_recent_content_match(
+        &self,
+        routine_id: Uuid,
+        content_hash: &str,
+        since: DateTime<Utc>,
+    ) -> Result<bool, DatabaseError>;
     async fn enqueue_routine_trigger(&self, trigger: &RoutineTrigger) -> Result<(), DatabaseError>;
     async fn claim_routine_triggers(
         &self,

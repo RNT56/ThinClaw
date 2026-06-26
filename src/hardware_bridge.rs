@@ -1,11 +1,11 @@
 //! Hardware Bridge — in-process sensor access for desktop mode.
 //!
-//! When ThinClaw runs as a library inside Scrappy (Tauri), sensor access
+//! When ThinClaw runs as a library inside ThinClaw Desktop (Tauri), sensor access
 //! (camera, microphone, screen) is handled by the host application rather
 //! than by ThinClaw directly.
 //!
 //! Instead of WebSocket RPC (the original design for remote orchestrators),
-//! the bridge uses a simple async Rust trait that Scrappy implements and
+//! the bridge uses a simple async Rust trait that ThinClaw Desktop implements and
 //! injects at startup. This is simpler and faster since ThinClaw is in-process.
 //!
 //! Architecture:
@@ -13,8 +13,8 @@
 //! LLM calls "capture_camera" tool
 //!   → BridgedTool::call()
 //!     → ToolBridge::request_sensor_access()
-//!       → Scrappy shows ApprovalCard (Approve/Deny/Allow Session)
-//!       → If approved: Scrappy captures via native API
+//!       → ThinClaw Desktop shows ApprovalCard (Approve/Deny/Allow Session)
+//!       → If approved: ThinClaw Desktop captures via native API
 //!       → Returns SensorResponse to ThinClaw
 //!     → BridgedTool returns result to LLM
 //! ```
@@ -114,7 +114,7 @@ impl SensorResponse {
     /// Create a denied response (user explicitly refused access).
     ///
     /// Structurally identical to [`error()`](Self::error) but uses
-    /// [`SensorResponseKind::Denied`] so the host application (Scrappy/Tauri)
+    /// [`SensorResponseKind::Denied`] so the host application (ThinClaw Desktop/Tauri)
     /// can show "permission denied" UI instead of a system error dialog.
     pub fn denied(message: impl Into<String>) -> Self {
         Self {
@@ -129,7 +129,7 @@ impl SensorResponse {
     /// Create an error response (system/hardware failure, not user denial).
     ///
     /// Structurally identical to [`denied()`](Self::denied) but uses
-    /// [`SensorResponseKind::Error`] so the host application (Scrappy/Tauri)
+    /// [`SensorResponseKind::Error`] so the host application (ThinClaw Desktop/Tauri)
     /// can show a system error dialog with retry options instead of a
     /// permission-denied message.
     pub fn error(message: impl Into<String>) -> Self {
@@ -149,10 +149,10 @@ impl SensorResponse {
     }
 }
 
-/// The bridge trait that Scrappy (or any host) implements to provide
+/// The bridge trait that ThinClaw Desktop (or any host) implements to provide
 /// hardware sensor access to ThinClaw.
 ///
-/// Scrappy implements this by:
+/// ThinClaw Desktop implements this by:
 /// 1. Showing its `ApprovalCard` component
 /// 2. If approved, capturing via the appropriate native API
 /// 3. Returning the sensor data
@@ -223,7 +223,7 @@ impl SessionApprovals {
 /// Implements the `Tool` trait by forwarding calls to the `ToolBridge` with
 /// a 30-second timeout and session approval caching.
 pub struct BridgedTool {
-    /// The bridge implementation (provided by Scrappy).
+    /// The bridge implementation (provided by ThinClaw Desktop).
     bridge: Arc<dyn ToolBridge>,
     /// Session approval cache.
     approvals: Arc<SessionApprovals>,

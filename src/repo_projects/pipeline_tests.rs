@@ -14,9 +14,9 @@ use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde_json::{Value, json};
 use thinclaw_repo_projects::{
-    CodingBackend, GitHubAuthMode, MergeMethod, ProjectPolicy, RepoProject, RepoProjectRepo,
-    RepoProjectRun, RepoProjectRunState, RepoProjectState, RepoProjectTask, RepoProjectTaskState,
-    RepoWorkerRun, RepoWorkerRunState,
+    CodingBackend, GitHubAuthMode, MergeMethod, ProjectPolicy, RepoProject, RepoProjectEventKind,
+    RepoProjectRepo, RepoProjectRun, RepoProjectRunState, RepoProjectState, RepoProjectTask,
+    RepoProjectTaskState, RepoWorkerRun, RepoWorkerRunState,
 };
 use uuid::Uuid;
 
@@ -25,8 +25,10 @@ use crate::testing::test_db;
 
 use super::github_provider::FixedTokenGitHubClientProvider;
 use super::pipeline::{GitHubPipeline, PipelineConfig, PipelineOutcome};
+use super::planner::{PlannedTask, RepoTaskPlanner};
 use super::supervisor::{
-    DatabaseRepoSupervisorStore, RepoSupervisorStore, RepoSupervisorWakeReason,
+    DatabaseRepoSupervisorStore, RepoSupervisorDecision, RepoSupervisorStore,
+    RepoSupervisorWakeReason,
 };
 
 const HEAD_SHA: &str = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
@@ -38,6 +40,11 @@ struct FakeGitHubState {
     merges: u32,
     comments: u32,
     deleted_branch: bool,
+    /// When true, the PUT /merge endpoint reports the call as accepted but not
+    /// merged (`merged: false`), simulating a structurally-unmergeable PR.
+    merge_refuses: bool,
+    /// Count of merge API calls that were attempted (regardless of outcome).
+    merge_calls: u32,
 }
 
 type SharedFake = Arc<Mutex<FakeGitHubState>>;
@@ -68,6 +75,14 @@ async fn fake_github(State(state): State<SharedFake>, method: Method, uri: Uri) 
         return json_ok(json!([]));
     }
     if method == Method::PUT && path.ends_with("/merge") {
+        fake.merge_calls += 1;
+        if fake.merge_refuses {
+            return json_ok(json!({
+                "sha": HEAD_SHA,
+                "merged": false,
+                "message": "Required status check \"build\" is expected."
+            }));
+        }
         fake.merges += 1;
         return json_ok(json!({
             "sha": MERGE_SHA,
@@ -631,5 +646,340 @@ async fn sync_worker_runs_skips_review_runs_and_keeps_task_in_review() {
         task.state,
         RepoProjectTaskState::WaitingReview,
         "a review run must not transition the task out of review"
+    );
+}
+
+// ── T1: bounded approved-merge retry ─────────────────────────────────────────
+
+#[tokio::test]
+async fn approved_merge_that_never_merges_is_bounded_and_blocks_for_human() {
+    let (db, _guard) = test_db().await;
+    let fake = SharedFake::default();
+    {
+        let mut state = fake.lock().unwrap();
+        state.ci_green = true;
+        state.merge_refuses = true; // GitHub accepts but never merges.
+    }
+    let base_url = spawn_fake_github(Arc::clone(&fake)).await;
+    // auto_merge on so the gate approves and perform_merge is reached.
+    let (project, repo, task_id) = seed(&db, true, RepoProjectTaskState::WaitingReview).await;
+    let mut seeded = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    seeded.pull_request_number = Some(42);
+    seeded.head_sha = Some(HEAD_SHA.to_string());
+    db.upsert_repo_project_task(&seeded).await.unwrap();
+
+    let pipeline = pipeline_with(
+        Arc::clone(&db),
+        &base_url,
+        PipelineConfig {
+            max_merge_attempts: 3,
+            ..PipelineConfig::default()
+        },
+    );
+
+    // First pass records the gate (gate_event_missing) — no merge attempt yet.
+    let mut task = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    pipeline
+        .advance_task(&project, &repo, &mut task)
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.lock().unwrap().merge_calls,
+        0,
+        "no merge attempt before the gate is recorded"
+    );
+
+    // Next passes: gate approved, merge attempted but refused. After
+    // max_merge_attempts the task is blocked and the outcome is AwaitingHuman.
+    let mut last_outcome = None;
+    for _ in 0..10 {
+        let mut task = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+        if task.state != RepoProjectTaskState::WaitingReview {
+            break;
+        }
+        last_outcome = Some(
+            pipeline
+                .advance_task(&project, &repo, &mut task)
+                .await
+                .unwrap(),
+        );
+    }
+
+    assert!(
+        matches!(last_outcome, Some(PipelineOutcome::AwaitingHuman { .. })),
+        "expected AwaitingHuman after exhausting merge attempts, got {last_outcome:?}"
+    );
+    let task = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    assert_eq!(
+        task.state,
+        RepoProjectTaskState::Blocked,
+        "task should be blocked after exhausting merge attempts"
+    );
+    assert_eq!(
+        fake.lock().unwrap().merge_calls,
+        3,
+        "merge attempted exactly max_merge_attempts times, no further hammering"
+    );
+    assert_eq!(fake.lock().unwrap().merges, 0, "never actually merged");
+}
+
+#[tokio::test]
+async fn merge_attempt_counter_resets_on_new_head_sha() {
+    let (db, _guard) = test_db().await;
+    let fake = SharedFake::default();
+    {
+        let mut state = fake.lock().unwrap();
+        state.ci_green = true;
+        state.merge_refuses = true;
+    }
+    let base_url = spawn_fake_github(Arc::clone(&fake)).await;
+    let (_project, repo, task_id) = seed(&db, true, RepoProjectTaskState::WaitingReview).await;
+    let mut seeded = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    seeded.pull_request_number = Some(42);
+    seeded.head_sha = Some(HEAD_SHA.to_string());
+    // Pre-seed two prior merge attempts against the current head SHA.
+    seeded.metadata = super::merge_metadata(
+        &seeded.metadata,
+        json!({ "merge_attempts": 2u64, "merge_attempts_sha": HEAD_SHA }),
+    );
+    db.upsert_repo_project_task(&seeded).await.unwrap();
+
+    let pipeline = pipeline_with(
+        Arc::clone(&db),
+        &base_url,
+        PipelineConfig {
+            max_merge_attempts: 3,
+            ..PipelineConfig::default()
+        },
+    );
+
+    // A different head SHA means a fresh merge target: the counter resets, so
+    // the next attempt is treated as attempt #1, not #3.
+    let other_sha = "ffffffffffffffffffffffffffffffffffffffff";
+    let mut task = db.get_repo_project_task(task_id).await.unwrap().unwrap();
+    let outcome = pipeline
+        .perform_merge(&repo, &mut task, 42, other_sha, MergeMethod::Squash)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            PipelineOutcome::MergeGateRecorded { approved: true }
+        ),
+        "a new head SHA resets the budget; expected another attempt, got {outcome:?}"
+    );
+    assert_eq!(task.state, RepoProjectTaskState::WaitingReview);
+    let attempts = task
+        .metadata
+        .get("merge_attempts")
+        .and_then(serde_json::Value::as_u64);
+    assert_eq!(attempts, Some(1), "counter reset to 1 for the new SHA");
+}
+
+// ── T5/T8: planner port + AwaitingHuman fallback ─────────────────────────────
+
+struct FakePlanner {
+    tasks: Vec<(String, Option<String>)>,
+}
+
+#[async_trait::async_trait]
+impl RepoTaskPlanner for FakePlanner {
+    async fn plan(
+        &self,
+        _project: &RepoProject,
+        repos: &[RepoProjectRepo],
+    ) -> Result<Vec<PlannedTask>, String> {
+        let repo_id = repos.first().map(|repo| repo.id).ok_or("no repos")?;
+        Ok(self
+            .tasks
+            .iter()
+            .map(|(title, body)| PlannedTask::new(repo_id, title.clone(), body.clone()))
+            .collect())
+    }
+}
+
+async fn seed_planning_project(db: &Arc<dyn Database>) -> (RepoProject, RepoProjectRepo) {
+    let mut project = sample_project(false);
+    project.state = RepoProjectState::Planning;
+    let repo = sample_repo(project.id);
+    db.create_repo_project(&project).await.unwrap();
+    db.upsert_repo_project_repo(&repo).await.unwrap();
+    (project, repo)
+}
+
+#[tokio::test]
+async fn planner_decomposes_planning_project_into_queued_tasks() {
+    let (db, _guard) = test_db().await;
+    let (project, _repo) = seed_planning_project(&db).await;
+
+    let planner: Arc<dyn RepoTaskPlanner> = Arc::new(FakePlanner {
+        tasks: vec![
+            ("First".to_string(), Some("body 1".to_string())),
+            ("Second".to_string(), None),
+            ("Third".to_string(), None),
+        ],
+    });
+    let store =
+        DatabaseRepoSupervisorStore::new(Arc::clone(&db)).with_planner(Some(Arc::clone(&planner)));
+
+    store
+        .reconcile_project(Some(project.id), RepoSupervisorWakeReason::Manual)
+        .await
+        .unwrap();
+
+    let tasks = db.list_repo_project_tasks(project.id).await.unwrap();
+    assert_eq!(tasks.len(), 3, "three tasks planned");
+    assert!(
+        tasks
+            .iter()
+            .all(|task| task.state == RepoProjectTaskState::Queued)
+    );
+    let updated = db.get_repo_project(project.id).await.unwrap().unwrap();
+    assert_eq!(
+        updated.state,
+        RepoProjectState::Active,
+        "project moves to Active once planned"
+    );
+
+    let events = db.list_repo_project_events(project.id, 100).await.unwrap();
+    let task_created = events
+        .iter()
+        .filter(|event| event.kind == RepoProjectEventKind::TaskCreated)
+        .count();
+    assert_eq!(task_created, 3, "a TaskCreated event per planned task");
+
+    // Idempotency: a second reconcile must not re-plan over the existing backlog.
+    store
+        .reconcile_project(Some(project.id), RepoSupervisorWakeReason::Manual)
+        .await
+        .unwrap();
+    let tasks_again = db.list_repo_project_tasks(project.id).await.unwrap();
+    assert_eq!(
+        tasks_again.len(),
+        3,
+        "no duplicate planning on re-reconcile"
+    );
+}
+
+#[tokio::test]
+async fn no_planner_moves_planning_project_to_awaiting_human() {
+    let (db, _guard) = test_db().await;
+    let (project, _repo) = seed_planning_project(&db).await;
+
+    let store = DatabaseRepoSupervisorStore::new(Arc::clone(&db)); // no planner
+
+    let decisions = store
+        .reconcile_project(Some(project.id), RepoSupervisorWakeReason::Manual)
+        .await
+        .unwrap();
+
+    let updated = db.get_repo_project(project.id).await.unwrap().unwrap();
+    assert_eq!(
+        updated.state,
+        RepoProjectState::AwaitingHuman,
+        "without a planner the project awaits a human plan"
+    );
+    assert!(
+        db.list_repo_project_tasks(project.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no tasks fabricated without a planner"
+    );
+    assert!(
+        decisions
+            .iter()
+            .any(|decision| matches!(decision, RepoSupervisorDecision::AwaitingHuman { .. })),
+        "AwaitingHuman decision surfaced, got {decisions:?}"
+    );
+
+    let events = db.list_repo_project_events(project.id, 100).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == RepoProjectEventKind::ProjectStateChanged),
+        "a ProjectStateChanged event is recorded"
+    );
+}
+
+// ── T4/T8: per-project concurrency cap ───────────────────────────────────────
+
+#[tokio::test]
+async fn dispatch_is_capped_by_effective_max_parallel_tasks() {
+    let (db, _guard) = test_db().await;
+
+    // max_parallel_tasks = 2, two tasks already Running, several Queued.
+    let mut project = sample_project(false);
+    project.policy.max_parallel_tasks = 2;
+    let repo = sample_repo(project.id);
+    db.create_repo_project(&project).await.unwrap();
+    db.upsert_repo_project_repo(&repo).await.unwrap();
+    for _ in 0..2 {
+        let mut running = sample_task(project.id, repo.id, RepoProjectTaskState::Running);
+        running.id = Uuid::new_v4();
+        db.upsert_repo_project_task(&running).await.unwrap();
+    }
+    for _ in 0..3 {
+        let mut queued = sample_task(project.id, repo.id, RepoProjectTaskState::Queued);
+        queued.id = Uuid::new_v4();
+        db.upsert_repo_project_task(&queued).await.unwrap();
+    }
+
+    // No executor wired: if the cap were ignored, dispatch would push an
+    // AwaitingHuman ("no executor") decision. With the cap honored (already at
+    // 2 running == cap 2), dispatch is skipped entirely.
+    let store = DatabaseRepoSupervisorStore::new(Arc::clone(&db))
+        .with_limits(4, 4)
+        .with_planner(None);
+    let decisions = store
+        .reconcile_project(Some(project.id), RepoSupervisorWakeReason::Manual)
+        .await
+        .unwrap();
+    assert!(
+        !decisions
+            .iter()
+            .any(|decision| matches!(decision, RepoSupervisorDecision::AwaitingHuman { .. })),
+        "at the cap, no dispatch is attempted, got {decisions:?}"
+    );
+
+    // The Running tasks are untouched and no Queued task was started.
+    let tasks = db.list_repo_project_tasks(project.id).await.unwrap();
+    let running = tasks
+        .iter()
+        .filter(|task| task.state == RepoProjectTaskState::Running)
+        .count();
+    assert_eq!(running, 2, "running count unchanged while at cap");
+}
+
+#[tokio::test]
+async fn global_ceiling_clamps_per_project_cap() {
+    let (db, _guard) = test_db().await;
+
+    // Per-project policy wants 5 parallel, but the global ceiling is 1.
+    let mut project = sample_project(false);
+    project.policy.max_parallel_tasks = 5;
+    let repo = sample_repo(project.id);
+    db.create_repo_project(&project).await.unwrap();
+    db.upsert_repo_project_repo(&repo).await.unwrap();
+    // One task already Running == clamped cap of 1.
+    let mut running = sample_task(project.id, repo.id, RepoProjectTaskState::Running);
+    running.id = Uuid::new_v4();
+    db.upsert_repo_project_task(&running).await.unwrap();
+    let mut queued = sample_task(project.id, repo.id, RepoProjectTaskState::Queued);
+    queued.id = Uuid::new_v4();
+    db.upsert_repo_project_task(&queued).await.unwrap();
+
+    let store = DatabaseRepoSupervisorStore::new(Arc::clone(&db))
+        .with_limits(4, 1) // global per-project ceiling of 1 clamps the policy's 5
+        .with_planner(None);
+    let decisions = store
+        .reconcile_project(Some(project.id), RepoSupervisorWakeReason::Manual)
+        .await
+        .unwrap();
+    assert!(
+        !decisions
+            .iter()
+            .any(|decision| matches!(decision, RepoSupervisorDecision::AwaitingHuman { .. })),
+        "clamped to 1 and already 1 running: no dispatch, got {decisions:?}"
     );
 }

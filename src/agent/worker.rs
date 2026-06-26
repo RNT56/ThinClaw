@@ -83,6 +83,18 @@ pub struct Worker {
     /// finalization SSE event. Updated by emit_user_message interception
     /// and the LLM's final text response.
     last_output: StdMutex<Option<String>>,
+    /// Output routing resolved from job metadata (heartbeat `target` knob).
+    /// Set once at the start of the execution loop.
+    output_routing: StdMutex<OutputRouting>,
+}
+
+/// Output delivery preferences for a worker run, resolved from job metadata.
+#[derive(Debug, Clone, Default)]
+struct OutputRouting {
+    /// When true, suppress user-visible output delivery (heartbeat `target=none`).
+    suppress_output: bool,
+    /// Channel override for output delivery (heartbeat `target=<channel>`).
+    notify_channel: Option<String>,
 }
 
 /// Result of a tool execution with metadata for context building.
@@ -97,6 +109,7 @@ impl Worker {
             job_id,
             deps,
             last_output: StdMutex::new(None),
+            output_routing: StdMutex::new(OutputRouting::default()),
         }
     }
 
@@ -105,6 +118,32 @@ impl Worker {
         if let Ok(mut guard) = self.last_output.lock() {
             *guard = Some(output.to_string());
         }
+    }
+
+    /// Record output routing preferences resolved from job metadata.
+    fn set_output_routing(&self, suppress_output: bool, notify_channel: Option<String>) {
+        if let Ok(mut guard) = self.output_routing.lock() {
+            *guard = OutputRouting {
+                suppress_output,
+                notify_channel,
+            };
+        }
+    }
+
+    /// Whether user-visible output should be suppressed for this run.
+    fn output_suppressed(&self) -> bool {
+        self.output_routing
+            .lock()
+            .map(|guard| guard.suppress_output)
+            .unwrap_or(false)
+    }
+
+    /// Channel override for output delivery, if configured.
+    fn output_notify_channel(&self) -> Option<String> {
+        self.output_routing
+            .lock()
+            .ok()
+            .and_then(|guard| guard.notify_channel.clone())
     }
 
     /// Take the stored output (if any) for finalization.
@@ -239,7 +278,7 @@ impl Worker {
         };
 
         // Create reasoning engine with identity
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let mut reasoning = Reasoning::new(self.llm().clone());
         if let Some(ref prompt) = identity_block {
             reasoning = reasoning.with_system_prompt(prompt.clone());
         }
@@ -341,6 +380,11 @@ impl Worker {
         let is_heartbeat = loop_metadata.is_heartbeat;
         let allowed_tools = loop_metadata.allowed_tools;
         let allowed_skills = loop_metadata.allowed_skills;
+        // Heartbeat output routing (target knob): `suppress_output` skips
+        // user-visible delivery (target=none); `notify_channel` overrides the
+        // delivery channel (target=<channel>). Stored on the worker so the
+        // emit_user_message interception can honor them.
+        self.set_output_routing(loop_metadata.suppress_output, loop_metadata.notify_channel);
         let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
 
         let mut iteration = 0;
@@ -965,17 +1009,39 @@ impl Worker {
                         .and_then(|v| v.as_str())
                         .unwrap_or("progress");
                     if !msg.is_empty() {
+                        // Always record the message for the finalization summary /
+                        // run record (audit visibility), independent of delivery.
                         self.set_last_output(msg);
-                        self.emit_sse(SseEvent::RoutineLifecycle {
-                            routine_name: self
+
+                        // Heartbeat `target=none`: run silently — record the
+                        // findings but skip user-visible SSE delivery.
+                        if self.output_suppressed() {
+                            tracing::debug!(
+                                job_id = %self.job_id,
+                                "Output delivery suppressed (target=none) — message recorded, not delivered"
+                            );
+                        } else {
+                            let routine_name = self
                                 .deps
                                 .routine_name
                                 .clone()
-                                .unwrap_or_else(|| "job".to_string()),
-                            event: "message".to_string(),
-                            run_id: self.deps.routine_run_id.clone(),
-                            result_summary: Some(format!("[{}] {}", msg_type, msg)),
-                        });
+                                .unwrap_or_else(|| "job".to_string());
+                            // Heartbeat `target=<channel>`: tag the delivered
+                            // message with the override channel so downstream
+                            // routing can honor it over NotifyConfig.channel.
+                            let result_summary = match self.output_notify_channel() {
+                                Some(channel) => {
+                                    format!("[{}] [channel:{}] {}", msg_type, channel, msg)
+                                }
+                                None => format!("[{}] {}", msg_type, msg),
+                            };
+                            self.emit_sse(SseEvent::RoutineLifecycle {
+                                routine_name,
+                                event: "message".to_string(),
+                                run_id: self.deps.routine_run_id.clone(),
+                                result_summary: Some(result_summary),
+                            });
+                        }
                     }
                 }
 
@@ -1513,9 +1579,11 @@ impl Worker {
 mod tests {
     use crate::llm::ToolSelection;
     use crate::util::llm_signals_completion;
+    #[cfg(feature = "libsql")]
     use chrono::Utc;
 
     use super::*;
+    #[cfg(feature = "libsql")]
     use crate::agent::routine::{
         NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
     };

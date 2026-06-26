@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::Config;
-use crate::secrets::{CreateSecretParams, SecretAccessContext, SecretsCrypto, SecretsStore};
+use crate::secrets::{CreateSecretParams, SecretsCrypto, SecretsStore};
 use crate::terminal_branding::TerminalBranding;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -261,7 +261,8 @@ pub(crate) async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore +
 
     #[cfg(feature = "postgres")]
     {
-        let store = crate::history::Store::new(&config.database).await?;
+        use crate::db::Database as _;
+        let store = crate::db::postgres::PgBackend::new(&config.database).await?;
         store.run_migrations().await?;
         Ok(Arc::new(crate::secrets::PostgresSecretsStore::new(
             store.pool(),
@@ -273,9 +274,4 @@ pub(crate) async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore +
     {
         anyhow::bail!("No database backend available for secrets.");
     }
-}
-
-#[allow(dead_code)]
-fn _secret_cli_access_context() -> SecretAccessContext {
-    SecretAccessContext::new("cli.secrets", "metadata")
 }

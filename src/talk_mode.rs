@@ -7,12 +7,12 @@
 //! - Audio capture: `rec` (SoX) / `ffmpeg` CLI, or `cpal` (via `voice` feature)
 //! - Transcription backends:
 //!   - **WhisperApi** — OpenAI cloud API (requires OPENAI_API_KEY)
-//!   - **WhisperHttp** — local whisper sidecar (Scrappy's MLX whisper or whisper.cpp).
+//!   - **WhisperHttp** — local whisper sidecar (ThinClaw Desktop's MLX whisper or whisper.cpp).
 //!     Default endpoint: `http://127.0.0.1:53757/v1/audio/transcriptions`
 //!   - **WhisperLocal** — whisper-rs via whisper.cpp (scaffold, requires model)
 //!   - **MacOsDictation** — system speech recognition (scaffold)
 //!
-//! In desktop mode (inside Scrappy), use `WhisperHttp` to call the local
+//! In desktop mode (inside ThinClaw Desktop), use `WhisperHttp` to call the local
 //! sidecar. In headless/cloud mode, use `WhisperApi`. The sidecar endpoint
 //! is OpenAI-compatible, so both backends use the same response format.
 
@@ -91,8 +91,8 @@ impl AudioFormat {
 pub enum TranscriptionBackend {
     /// OpenAI Whisper API (cloud).
     WhisperApi,
-    /// Local whisper sidecar via HTTP (Scrappy's MLX whisper or whisper.cpp).
-    /// Used in desktop mode when running inside Scrappy.
+    /// Local whisper sidecar via HTTP (ThinClaw Desktop's MLX whisper or whisper.cpp).
+    /// Used in desktop mode when running inside ThinClaw Desktop.
     WhisperHttp {
         /// Endpoint URL. Default: `http://127.0.0.1:53757/v1/audio/transcriptions`
         endpoint: String,
@@ -109,7 +109,7 @@ pub enum TranscriptionBackend {
 }
 
 impl TranscriptionBackend {
-    /// Create a WhisperHttp backend with the default Scrappy sidecar endpoint.
+    /// Create a WhisperHttp backend with the default ThinClaw Desktop sidecar endpoint.
     pub fn whisper_http_default() -> Self {
         Self::WhisperHttp {
             endpoint: "http://127.0.0.1:53757/v1/audio/transcriptions".to_string(),
@@ -603,7 +603,7 @@ async fn transcribe_whisper_api(
 
 /// Transcribe audio via a local whisper HTTP sidecar.
 ///
-/// Calls the OpenAI-compatible endpoint exposed by Scrappy's whisper
+/// Calls the OpenAI-compatible endpoint exposed by ThinClaw Desktop's whisper
 /// sidecar (MLX whisper or whisper.cpp). The endpoint format is:
 /// - MLX: `http://127.0.0.1:53757/v1/audio/transcriptions`
 /// - whisper.cpp: `http://127.0.0.1:53757/inference`

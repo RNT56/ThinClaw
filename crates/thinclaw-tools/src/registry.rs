@@ -273,6 +273,15 @@ impl ToolRegistry {
             ));
             self.register_sync(Arc::new(GrepTool::new().with_base_dir(base_dir)));
         } else {
+            // No workspace base configured: the filesystem tools run in
+            // unrestricted mode (no path containment). This is the deliberate
+            // trusted-local-operator contract, but surface it so an operator can
+            // see the agent has unsandboxed filesystem access.
+            tracing::warn!(
+                "Filesystem tools registered without a base directory: operating in \
+                 unrestricted mode (no path containment). Configure a workspace base \
+                 directory to sandbox file access."
+            );
             self.register_sync(Arc::new(
                 ReadFileTool::new().with_host(Arc::clone(&file_host)),
             ));

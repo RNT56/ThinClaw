@@ -67,15 +67,25 @@ pub struct WasmResourceLimiter {
     memory_used: u64,
     /// Maximum tables allowed.
     max_tables: u32,
-    /// Current table count.
-    #[allow(dead_code)] // Reserved for table limit enforcement
+    /// Number of distinct tables observed (counted on first growth).
     tables_created: u32,
     /// Maximum instances allowed.
     max_instances: u32,
-    /// Current instance count.
-    #[allow(dead_code)] // Reserved for instance limit enforcement
+    /// Number of instances observed.
+    ///
+    /// Instance creation is capped by wasmtime via [`ResourceLimiter::instances`]
+    /// (which returns `max_instances`), so this counter is informational and
+    /// kept for parity with `tables_created`.
     instances_created: u32,
+    /// Maximum number of elements permitted in any single table.
+    max_table_elements: usize,
 }
+
+/// Maximum number of elements permitted in a single WASM table.
+///
+/// Each element costs a pointer's worth of space; this ceiling bounds the
+/// per-table memory a guest can reserve through table growth.
+const DEFAULT_MAX_TABLE_ELEMENTS: usize = 10_000;
 
 impl WasmResourceLimiter {
     /// Create a new limiter with the given memory limit.
@@ -90,6 +100,7 @@ impl WasmResourceLimiter {
             tables_created: 0,
             max_instances: 10, // Component model needs multiple instances for WASI
             instances_created: 0,
+            max_table_elements: DEFAULT_MAX_TABLE_ELEMENTS,
         }
     }
 
@@ -101,6 +112,25 @@ impl WasmResourceLimiter {
     /// Get the memory limit.
     pub fn memory_limit(&self) -> u64 {
         self.memory_limit
+    }
+
+    /// Number of distinct tables this limiter has observed.
+    pub fn tables_created(&self) -> u32 {
+        self.tables_created
+    }
+
+    /// Configured maximum number of tables.
+    pub fn max_tables(&self) -> u32 {
+        self.max_tables
+    }
+
+    /// Number of instances observed by this limiter.
+    ///
+    /// Instance creation is enforced by wasmtime through
+    /// [`ResourceLimiter::instances`]; this accessor exposes the limiter's own
+    /// view for diagnostics.
+    pub fn instances_created(&self) -> u32 {
+        self.instances_created
     }
 }
 
@@ -139,11 +169,29 @@ impl ResourceLimiter for WasmResourceLimiter {
         desired: usize,
         _maximum: Option<usize>,
     ) -> anyhow::Result<bool> {
-        // Allow reasonable table growth
-        if desired > 10_000 {
+        // A table's first growth call starts from zero elements; treat that as a
+        // newly created table and enforce the configured table-count limit. This
+        // makes `max_tables` actually apply rather than being a declared-but-unused
+        // ceiling. (Wasmtime also caps creation via `tables()`, but counting here
+        // keeps the limiter's own accounting authoritative and observable.)
+        if current == 0 {
+            if self.tables_created >= self.max_tables {
+                tracing::warn!(
+                    tables_created = self.tables_created,
+                    max_tables = self.max_tables,
+                    "WASM table creation denied: exceeds table limit"
+                );
+                return Ok(false);
+            }
+            self.tables_created = self.tables_created.saturating_add(1);
+        }
+
+        // Enforce the per-table element ceiling.
+        if desired > self.max_table_elements {
             tracing::warn!(
                 current = current,
                 desired = desired,
+                max_table_elements = self.max_table_elements,
                 "WASM table growth denied: too large"
             );
             return Ok(false);
@@ -246,6 +294,39 @@ mod tests {
         // Growth beyond limit should be denied
         let result = limiter.memory_growing(0, 20 * 1024 * 1024, None).unwrap();
         assert!(!result);
+    }
+
+    #[test]
+    fn test_resource_limiter_enforces_table_count() {
+        let mut limiter = WasmResourceLimiter::new(10 * 1024 * 1024);
+        let max_tables = limiter.max_tables();
+        assert!(max_tables > 0);
+
+        // Each fresh table is counted on its first growth (current == 0).
+        for _ in 0..max_tables {
+            assert!(limiter.table_growing(0, 1, None).unwrap());
+        }
+        assert_eq!(limiter.tables_created(), max_tables);
+
+        // Creating one more table beyond the limit is denied.
+        assert!(!limiter.table_growing(0, 1, None).unwrap());
+    }
+
+    #[test]
+    fn test_resource_limiter_denies_oversized_table() {
+        let mut limiter = WasmResourceLimiter::new(10 * 1024 * 1024);
+        // An absurd element count is rejected even for the first table.
+        assert!(!limiter.table_growing(0, 1_000_000, None).unwrap());
+    }
+
+    #[test]
+    fn test_resource_limiter_allows_growth_of_existing_table() {
+        let mut limiter = WasmResourceLimiter::new(10 * 1024 * 1024);
+        // First growth creates the table.
+        assert!(limiter.table_growing(0, 1, None).unwrap());
+        // Growing the same table (current > 0) does not consume the table budget.
+        assert!(limiter.table_growing(1, 100, None).unwrap());
+        assert_eq!(limiter.tables_created(), 1);
     }
 
     #[test]

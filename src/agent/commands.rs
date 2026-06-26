@@ -239,7 +239,6 @@ impl Agent {
             hygiene_cfg,
             workspace.clone(),
             self.llm().clone(),
-            self.safety().clone(),
         );
         if let Some(ref tracker) = self.deps.cost_tracker {
             runner = runner.with_cost_tracker(std::sync::Arc::clone(tracker));
@@ -302,7 +301,7 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.3);
 
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let mut reasoning = Reasoning::new(self.llm().clone());
         if let Some(ref tracker) = self.deps.cost_tracker {
             reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
         }
@@ -354,7 +353,7 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.5);
 
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let mut reasoning = Reasoning::new(self.llm().clone());
         if let Some(ref tracker) = self.deps.cost_tracker {
             reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
         }

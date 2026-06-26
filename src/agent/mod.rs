@@ -78,7 +78,7 @@ pub use checkpoint::{CheckpointEntry, CheckpointManager};
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub use cron_stagger::{CronGate, FinishedRunPayload, StaggerConfig};
-pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat};
+pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner};
 pub use hook_dispatch::RootHookDispatchPort;
 pub use learning::{
     ArtifactVersion, ImprovementCandidate, ImprovementClass, LearningDecision, LearningEvent,
@@ -96,7 +96,7 @@ pub use run_artifact::{AgentRunArtifact, AgentRunArtifactLogger, AgentRunStatus}
 pub use run_driver::AgentRunDriver;
 pub use run_harness::AgentRunHarness;
 pub use scheduler::Scheduler;
-pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
+pub use self_repair::{BrokenTool, RepairResult, SelfRepair, StuckJob};
 pub use session::{
     PendingApproval, PendingAuth, PersistedSubagentState, Session, Thread, ThreadRuntimeState,
     ThreadRuntimeStateExt, ThreadState, Turn, TurnState,

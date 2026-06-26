@@ -40,7 +40,7 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
-    pub fn label(&self) -> &str {
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Healthy => "healthy",
             Self::Degraded { .. } => "degraded",

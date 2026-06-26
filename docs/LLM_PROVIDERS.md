@@ -524,6 +524,15 @@ These settings apply to **all providers**:
 | `LLM_FAILOVER_COOLDOWN_SECS` | `300` | Provider cooldown after failures |
 | `SMART_ROUTING_CASCADE` | `true` | Re-send uncertain cheap responses to primary |
 
+Routing is handled by a single engine, `RoutePlanner`. When CheapSplit routing
+is enabled, the planner classifies each turn and selects the cheap or primary
+lane; with `SMART_ROUTING_CASCADE=true`, a moderate-complexity turn routed to
+the cheap lane runs the cheap model first and, if the response looks uncertain
+(empty, very short, or an explicit inability signal), the runtime re-issues the
+request against the primary lane. Cascade is executed by the planner-driven
+runtime path itself — there is no separate routing decorator in the provider
+chain.
+
 ---
 
 ## Using the Setup Wizard

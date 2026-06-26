@@ -91,19 +91,22 @@ Default k=60. Results from both methods are combined, with documents appearing i
 Proactive periodic execution (default: 30 minutes):
 
 1. Reads `HEARTBEAT.md` checklist
-2. Runs agent turn with checklist prompt
-3. If findings, notifies via channel
-4. If nothing, agent replies "HEARTBEAT_OK" (no notification)
+2. Runs an agent turn with the checklist prompt
+3. Honors the heartbeat `target` knob: `none` runs silently (log only),
+   `chat` delivers to the default surface, and a channel name overrides the
+   delivery channel; `include_reasoning` retains the reasoning chain in the
+   emitted summary
+4. If nothing needs attention, the agent replies `HEARTBEAT_OK` (no delivery)
 
-```rust
-use crate::agent::{HeartbeatConfig, spawn_heartbeat};
+Heartbeat scheduling is owned by the **routine engine**, not a standalone
+loop. The agent loop registers a heartbeat routine at startup via
+`upsert_heartbeat_routine` (`src/agent/agent_loop.rs`), and the engine fires
+it on its cron schedule like any other routine. The interactive `/heartbeat`
+command runs a one-shot check through `HeartbeatRunner::check_heartbeat`.
 
-let config = HeartbeatConfig::default()
-    .with_interval(Duration::from_secs(60 * 30))
-    .with_notify("user_123", "telegram");
-
-spawn_heartbeat(config, workspace, llm, response_tx);
-```
+Heartbeat behavior is configured through `HeartbeatConfig`
+(`crates/thinclaw-config/src/heartbeat.rs`), which is resolved from settings
+and environment and threaded into the registered `RoutineAction::Heartbeat`.
 
 ## Chunking Strategy
 

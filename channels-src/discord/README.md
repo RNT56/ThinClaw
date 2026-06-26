@@ -102,10 +102,22 @@ To send embeds, include an `embeds` array in the `metadata_json` field of the ag
 
 ## Troubleshooting
 
-### "Invalid Signature"
+### "Invalid request signature" (HTTP 401)
 
-- Check that `discord_public_key` is set correctly in ThinClaw secrets.
-- This validation happens on the host before reaching the WASM.
+Discord signs every interaction webhook with Ed25519. The host verifies the
+`X-Signature-Ed25519` header (a hex signature over `X-Signature-Timestamp` ++
+the raw request body) against your application's public key
+(`discord_public_key`) **before** the request reaches the WASM channel. Requests
+that fail verification are rejected with `401` and never dispatched.
+
+If you see this error:
+
+- Check that `discord_public_key` is set correctly in ThinClaw secrets. It must
+  be the hex-encoded public key from the Discord Developer Portal (General
+  Information → Public Key), which decodes to 32 bytes.
+- Confirm the interaction is genuinely from Discord (Discord's own
+  "Interactions Endpoint URL" validation ping must succeed before the endpoint
+  can be saved).
 
 ### "401 Unauthorized"
 

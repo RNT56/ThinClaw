@@ -513,7 +513,7 @@ fn probe_pi_tailscale() -> LinuxProbe {
         LinuxProbe::skip(
             "pi_tailscale",
             "Pi Tailscale",
-            "Tailscale is optional but recommended for private Scrappy access to a Pi.",
+            "Tailscale is optional but recommended for private ThinClaw access to a Pi.",
         )
     }
 }

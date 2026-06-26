@@ -404,10 +404,7 @@ pub(crate) async fn learning_outcomes_evaluate_now_handler(
         .store
         .as_ref()
         .ok_or_else(learning_web::learning_database_unavailable)?;
-    let safety = Arc::new(crate::safety::SafetyLayer::new(
-        &crate::config::SafetyConfig::default(),
-    ));
-    let service = OutcomeService::new(store.clone(), state.llm_provider.clone(), safety)
+    let service = OutcomeService::new(store.clone(), state.llm_provider.clone())
         .with_learning_context(
             state.workspace.clone(),
             state.skill_registry.clone(),
@@ -457,10 +454,14 @@ pub(crate) async fn learning_rollback_submit_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "libsql")]
     use crate::history::{OutcomeContract, OutcomeObservation};
+    #[cfg(feature = "libsql")]
     use chrono::{Duration, Utc};
+    #[cfg(feature = "libsql")]
     use uuid::Uuid;
 
+    #[cfg(feature = "libsql")]
     fn test_request_identity(user_id: &str) -> GatewayRequestIdentity {
         GatewayRequestIdentity::new(
             user_id,
@@ -470,6 +471,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "libsql")]
     fn test_gateway_state(
         user_id: &str,
         store: Option<Arc<dyn crate::db::Database>>,
@@ -513,6 +515,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "libsql")]
     fn outcome_contract(user_id: &str) -> OutcomeContract {
         let now = Utc::now();
         OutcomeContract {
@@ -544,6 +547,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "libsql")]
     fn outcome_observation(contract_id: Uuid) -> OutcomeObservation {
         let now = Utc::now();
         OutcomeObservation {

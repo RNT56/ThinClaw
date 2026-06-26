@@ -27,7 +27,6 @@
 //! All API keys are read from `SecretStore` (live reads from keychain cache),
 //! never from `ThinClawConfig` (which is a stale snapshot).
 
-pub mod chat;
 pub mod diffusion;
 pub mod embedding;
 pub mod model_discovery;
@@ -233,8 +232,10 @@ pub struct ModalityBackends {
 #[specta::specta]
 pub async fn direct_inference_get_backends(
     router: tauri::State<'_, InferenceRouter>,
+    config_manager: tauri::State<'_, crate::config::ConfigManager>,
 ) -> Result<Vec<ModalityBackends>, String> {
-    let active_list = router.active_backends().await;
+    let config = config_manager.get_config();
+    let active_list = router.active_backends(&config).await;
     let mut result = Vec::with_capacity(5);
 
     for (modality, active) in &active_list {

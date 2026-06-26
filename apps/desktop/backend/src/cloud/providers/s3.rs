@@ -10,8 +10,8 @@ use std::collections::HashSet;
 use tracing::{debug, info};
 
 use super::super::provider::{
-    primary_object_root, should_read_legacy_object_root, CloudEntry, CloudError, CloudProvider,
-    CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
+    opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root, CloudEntry,
+    CloudError, CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
 };
 
 /// S3-compatible storage provider.
@@ -139,7 +139,10 @@ impl S3Provider {
             result.push(CloudEntry {
                 key: entry.path().to_string(),
                 size: meta.content_length(),
-                last_modified: 0, // TODO: extract from opendal metadata
+                last_modified: meta
+                    .last_modified()
+                    .map(opendal_timestamp_millis)
+                    .unwrap_or(0),
                 checksum: meta.etag().map(|s| s.to_string()),
             });
         }

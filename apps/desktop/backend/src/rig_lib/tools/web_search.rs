@@ -664,6 +664,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "live-network: hits duckduckgo.com and scrapes results; run with --ignored in the nightly suite"]
     async fn test_ddg_search_with_scraping() {
         let tool = DDGSearchTool {
             app: None,

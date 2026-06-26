@@ -239,34 +239,6 @@ pub fn print_boot_screen(info: &BootInfo) {
     println!();
 }
 
-#[allow(dead_code)]
-fn redact_gateway_url(url: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(url) else {
-        return url.to_string();
-    };
-
-    let mut pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .map(|(key, value)| {
-            if key.eq_ignore_ascii_case("token") {
-                (key.to_string(), "****".to_string())
-            } else {
-                (key.to_string(), value.to_string())
-            }
-        })
-        .collect();
-
-    if pairs.is_empty() {
-        return parsed.to_string();
-    }
-
-    parsed
-        .query_pairs_mut()
-        .clear()
-        .extend_pairs(pairs.drain(..));
-    parsed.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

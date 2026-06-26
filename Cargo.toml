@@ -292,7 +292,11 @@ nostr = [
 # Core scheduling/workspace APIs always use chrono-tz; keep this as a
 # compatibility feature for existing build profiles and docs.
 timezones = []
-# Everything — full-featured agent with all capabilities
+# Everything — full-featured agent with all capabilities.
+# NOTE: `voice` (headless wake word) is intentionally NOT in `full`. It pulls cpal →
+# the system ALSA lib (libasound2-dev) on Linux, which would force that system
+# dependency onto every `--features full` build, CI job, and release artifact. It
+# stays opt-in (`--features voice`) and is still exercised by `--all-features`.
 full = [
     "light",
     "acp",

@@ -2172,21 +2172,34 @@ fn send_message(
 /// Tries to split at paragraph boundaries (`\n\n`), then line boundaries (`\n`),
 /// then at the last space. Falls back to hard splitting at the char limit.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
+    if text.chars().count() <= max_len {
         return vec![text.to_string()];
+    }
+
+    // Compute the byte index at which the `max_chars`-th character begins.
+    //
+    // Slicing `&text[..byte_index]` is then guaranteed to land on a UTF-8
+    // char boundary, so a multibyte character that straddles `max_chars`
+    // cannot trigger a panic.
+    fn byte_index_for_char_limit(text: &str, max_chars: usize) -> usize {
+        text.char_indices()
+            .nth(max_chars)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len())
     }
 
     let mut chunks = Vec::new();
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        if remaining.len() <= max_len {
+        if remaining.chars().count() <= max_len {
             chunks.push(remaining.to_string());
             break;
         }
 
         // Find the best split point within max_len characters
-        let search_area = &remaining[..max_len];
+        let search_end = byte_index_for_char_limit(remaining, max_len);
+        let search_area = &remaining[..search_end];
 
         // Priority 1: split at a paragraph break (\n\n)
         let split_at = search_area
@@ -2196,20 +2209,14 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             .or_else(|| search_area.rfind('\n'))
             // Priority 3: split at a space
             .or_else(|| search_area.rfind(' '))
-            // Fallback: hard split at max_len (but on a char boundary)
-            .unwrap_or_else(|| {
-                // Find the last valid char boundary at or before max_len
-                let mut boundary = max_len;
-                while boundary > 0 && !remaining.is_char_boundary(boundary) {
-                    boundary -= 1;
-                }
-                boundary
-            });
+            // Fallback: hard split at the char-boundary byte index for max_len
+            .unwrap_or(search_end);
 
         if split_at == 0 {
-            // Safety valve: avoid infinite loop
-            chunks.push(remaining.to_string());
-            break;
+            // Safety valve: avoid infinite loop on a leading oversized token
+            chunks.push(search_area.to_string());
+            remaining = remaining[search_end..].trim_start();
+            continue;
         }
 
         chunks.push(remaining[..split_at].trim_end().to_string());
@@ -3353,6 +3360,23 @@ export!(TelegramChannel);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_split_message_is_unicode_safe() {
+        // A run of multibyte chars longer than the limit must not panic when
+        // the limit boundary falls inside a multibyte character.
+        let text = "🙂".repeat(5000);
+        let chunks = split_message(&text, TELEGRAM_MAX_MESSAGE_LENGTH);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.chars().count())
+                .sum::<usize>(),
+            5000
+        );
+    }
 
     #[test]
     fn test_transport_preference_aliases() {

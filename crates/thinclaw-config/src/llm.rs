@@ -322,7 +322,7 @@ impl LlmConfig {
         //
         // Model resolution priority for ALL backends:
         //   1. Provider-specific env var (OPENAI_MODEL, ANTHROPIC_MODEL, etc.)
-        //   2. settings.selected_model (set by Scrappy UI or setup wizard)
+        //   2. settings.selected_model (set by ThinClaw Desktop UI or setup wizard)
         //   3. Hardcoded default
 
         let openai = if backend == LlmBackend::OpenAi {

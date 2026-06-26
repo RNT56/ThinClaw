@@ -24,6 +24,7 @@ pub mod manager;
 pub mod manifest;
 pub mod manifest_validator;
 pub mod native;
+pub mod native_activation;
 pub mod registry;
 pub mod signing;
 
@@ -47,6 +48,15 @@ pub enum ExtensionKind {
     WasmTool,
     /// WASM channel module with hot-activation support.
     WasmChannel,
+    /// Native dynamic-library plugin (`dlopen`), signature-gated and default-off.
+    ///
+    /// Native plugins are an **operator-only**, opt-in capability. Unlike WASM
+    /// tools/channels they run **in-process with full host privileges** and are
+    /// NOT sandboxed. They are only ever loaded after the signature/ABI/allowlist/
+    /// SHA-256 gates in [`native::NativePluginRuntime::load`] pass, and only when
+    /// `extensions.allow_native_plugins` is explicitly enabled. They are not
+    /// surfaced to the agent-facing tool install surface.
+    NativePlugin,
 }
 
 impl std::fmt::Display for ExtensionKind {
@@ -55,6 +65,7 @@ impl std::fmt::Display for ExtensionKind {
             ExtensionKind::McpServer => write!(f, "mcp_server"),
             ExtensionKind::WasmTool => write!(f, "wasm_tool"),
             ExtensionKind::WasmChannel => write!(f, "wasm_channel"),
+            ExtensionKind::NativePlugin => write!(f, "native_plugin"),
         }
     }
 }
@@ -285,6 +296,15 @@ mod tests {
             ]
         );
         assert_eq!(setup.message.as_deref(), Some("awaiting_authorization"));
+    }
+
+    #[test]
+    fn extension_kind_native_plugin_round_trips_as_snake_case() {
+        let json = serde_json::to_string(&ExtensionKind::NativePlugin).expect("serialize");
+        assert_eq!(json, "\"native_plugin\"");
+        let parsed: ExtensionKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, ExtensionKind::NativePlugin);
+        assert_eq!(ExtensionKind::NativePlugin.to_string(), "native_plugin");
     }
 }
 
