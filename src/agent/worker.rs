@@ -1579,9 +1579,11 @@ impl Worker {
 mod tests {
     use crate::llm::ToolSelection;
     use crate::util::llm_signals_completion;
+    #[cfg(feature = "libsql")]
     use chrono::Utc;
 
     use super::*;
+    #[cfg(feature = "libsql")]
     use crate::agent::routine::{
         NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
     };

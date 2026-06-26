@@ -2089,31 +2089,40 @@ pub fn spawn_cron_ticker(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "libsql")]
     use std::sync::{Arc, Mutex};
 
+    #[cfg(feature = "libsql")]
     use async_trait::async_trait;
     use chrono::{Duration as ChronoDuration, Utc};
+    #[cfg(feature = "libsql")]
     use rust_decimal::Decimal;
+    #[cfg(feature = "libsql")]
     use tokio::sync::{mpsc, oneshot};
 
     use super::*;
     use crate::agent::routine::{
         NotifyConfig, RoutineEventDecision, RoutineEventStatus, RunStatus, content_hash,
     };
+    #[cfg(feature = "libsql")]
     use crate::error::LlmError;
+    #[cfg(feature = "libsql")]
     use crate::llm::{
         CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
+    #[cfg(feature = "libsql")]
     use crate::testing::StubLlm;
     #[cfg(feature = "libsql")]
     use crate::testing::test_db;
 
+    #[cfg(feature = "libsql")]
     struct BlockingLlm {
         started_tx: Mutex<Option<oneshot::Sender<()>>>,
         dropped_tx: Mutex<Option<oneshot::Sender<()>>>,
     }
 
+    #[cfg(feature = "libsql")]
     impl BlockingLlm {
         fn new(started_tx: oneshot::Sender<()>, dropped_tx: oneshot::Sender<()>) -> Self {
             Self {
@@ -2123,8 +2132,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "libsql")]
     struct DropSignal(Option<oneshot::Sender<()>>);
 
+    #[cfg(feature = "libsql")]
     impl Drop for DropSignal {
         fn drop(&mut self) {
             if let Some(tx) = self.0.take() {
@@ -2133,6 +2144,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "libsql")]
     #[async_trait]
     impl LlmProvider for BlockingLlm {
         fn model_name(&self) -> &str {

@@ -79,6 +79,7 @@ impl SessionSearchStore for RootSessionSearchStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "libsql")]
     use chrono::Utc;
 
     #[test]

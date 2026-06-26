@@ -454,10 +454,14 @@ pub(crate) async fn learning_rollback_submit_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "libsql")]
     use crate::history::{OutcomeContract, OutcomeObservation};
+    #[cfg(feature = "libsql")]
     use chrono::{Duration, Utc};
+    #[cfg(feature = "libsql")]
     use uuid::Uuid;
 
+    #[cfg(feature = "libsql")]
     fn test_request_identity(user_id: &str) -> GatewayRequestIdentity {
         GatewayRequestIdentity::new(
             user_id,
@@ -467,6 +471,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "libsql")]
     fn test_gateway_state(
         user_id: &str,
         store: Option<Arc<dyn crate::db::Database>>,
@@ -510,6 +515,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "libsql")]
     fn outcome_contract(user_id: &str) -> OutcomeContract {
         let now = Utc::now();
         OutcomeContract {
@@ -541,6 +547,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "libsql")]
     fn outcome_observation(contract_id: Uuid) -> OutcomeObservation {
         let now = Utc::now();
         OutcomeObservation {

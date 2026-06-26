@@ -27,7 +27,7 @@ impl MemoryProviderManager {
         Self { store, providers }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "libsql"))]
     pub(in crate::agent::learning) fn with_providers(
         store: Arc<dyn Database>,
         providers: Vec<Arc<dyn MemoryProvider>>,

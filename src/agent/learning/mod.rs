@@ -6,7 +6,7 @@
 //! - A local-first `LearningOrchestrator` that records evaluations,
 //!   creates candidates, applies low-risk mutations, and tracks code proposals.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "libsql"))]
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

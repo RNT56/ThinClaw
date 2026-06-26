@@ -1497,6 +1497,7 @@ pub async fn start_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "libsql")]
     use crate::db::ConversationStore;
 
     #[test]
