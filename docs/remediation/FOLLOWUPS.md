@@ -23,7 +23,7 @@ This pass closed the bulk of the ledger. Dispositions:
 | F-11 | ✅ Done | `observer` threaded through `AgentDeps` (7 sites incl. desktop embed); emits ToolCallStart/End, LlmResponse, TurnComplete (no-op safe). |
 | F-12 | ✅ Done (docs) | EXTENSION_SYSTEM (panic-isolation + in-process caveat), NETWORK_SECURITY (native-plugin trust boundary), FEATURE_PARITY row. Gateway exposure intentionally NOT added. |
 | F-13 | ⏸️ Deferred | Object-store backend needs the heavy `opendal` dependency; deferred to avoid risking the required `cargo deny check` gate without a dedicated dependency/license review. Port + reaper unchanged. |
-| F-14 | ✅ Done (taxonomy) | Worktree/branch `Internal`→`InvalidInput` normalized at the 7 sites. (`ApiError` has no `NotFound`/`Conflict`; broad 128-site audit remains, scoped separately.) |
+| F-14 | ✅ Done | Worktree/branch `Internal`→`InvalidInput` normalized (7 sites), **plus a bounded taxonomy audit of all ~128 `Internal` sites**: validation/invalid-input is already correctly `InvalidInput` (39 sites); every remaining `Internal` genuinely wraps a downstream DB/IO/git/exec/serialization fault (the correct classification). No further conversions warranted. (`ApiError` has no `NotFound`/`Conflict`; adding them would be a separate API change.) |
 | F-15 | ✅ Done | `save_skill(id, script, description, params_json)` overload populates `SkillManifest.parameters`; 3-arg form unchanged. |
 | F-16 | ✅ Already done | `test_ddg_search_with_scraping` `#[ignore]` + nightly `--ignored` job. |
 | F-17 | ✅ Resolved-by-reversal | `voice` is intentionally NOT in `full`; CI ALSA only on `all-features`. Ledger entry below is stale. |
