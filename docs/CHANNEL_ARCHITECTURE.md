@@ -139,6 +139,17 @@ Channel-specific formatting behavior belongs to the channel layer, not to generi
 
 Today the canonical lookup seam is `ChannelManager::formatting_hints_for()`. If you add or change channel-specific rendering behavior, update the owning native channel implementation or WASM manifest first so every surface sees the same guidance.
 
+### Channel maturity (`production_status`)
+
+Each channel manifest declares a typed `production_status` (`production` |
+`beta` | `experimental`, default `experimental`) so operators can tell which
+channels have native-grade inbound auth. The shared-webhook thin shims split
+into three signature-grade `production` channels (LINE, Twitch, Twilio) and nine
+`beta` channels whose inbound auth is a shared-secret `equals` compare rather
+than the platform's native HMAC / Ed25519 / signed-JWT scheme — each beta shim's
+`README.md` states the precise caveat. `tests/registry_channel_catalog.rs`
+enforces these dispositions; see `docs/remediation/WS-03-shim-classification.md`.
+
 ## Outbound Generated Media
 
 `OutgoingResponse.attachments` is the canonical transport for generated media

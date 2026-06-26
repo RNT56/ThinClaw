@@ -415,7 +415,9 @@ pub(super) async fn execute_local_trial(
     trial: &mut ExperimentTrial,
 ) -> ApiResult<ExperimentRunnerCompletion> {
     let worktree_root = campaign.worktree_path.as_deref().ok_or_else(|| {
-        ApiError::Internal(experiment_campaign_missing_worktree_path_field_message().to_string())
+        ApiError::InvalidInput(
+            experiment_campaign_missing_worktree_path_field_message().to_string(),
+        )
     })?;
     let worktree_root = tokio::fs::canonicalize(worktree_root)
         .await
@@ -462,7 +464,7 @@ pub(super) async fn execute_local_trial(
     }
 
     let env_grants = resolved_runner_env_grants(user_id, runner).await;
-    let backend = experiment_execution_backend(settings, runner);
+    let backend = experiment_execution_backend(settings, runner, user_id);
     let mut log = String::new();
     if let Some(prepare_command) = project.prepare_command.as_deref() {
         let output = run_experiment_shell_command(

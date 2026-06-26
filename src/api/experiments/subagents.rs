@@ -369,7 +369,7 @@ pub(super) async fn run_planner_subagent(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
-        ApiError::Internal(experiment_campaign_missing_worktree_path_message().to_string())
+        ApiError::InvalidInput(experiment_campaign_missing_worktree_path_message().to_string())
     })?;
     let task = format!(
         "You are planning the next experiment candidate.\n\
@@ -410,7 +410,7 @@ pub(super) async fn run_mutator_subagent(
     trial_id: Option<Uuid>,
 ) -> Result<ResearchSubagentOutput<MutatorResult>, ResearchSubagentInvocationError> {
     let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
-        ApiError::Internal(experiment_campaign_missing_worktree_path_message().to_string())
+        ApiError::InvalidInput(experiment_campaign_missing_worktree_path_message().to_string())
     })?;
     let allowed_paths = if planner.allowed_paths.is_empty() {
         project.mutable_paths.clone()
@@ -462,7 +462,7 @@ pub(super) async fn run_reviewer_subagent(
     trial_id: Option<Uuid>,
 ) -> Result<ResearchSubagentOutput<ReviewerDecision>, ResearchSubagentInvocationError> {
     let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
-        ApiError::Internal(experiment_campaign_missing_worktree_path_message().to_string())
+        ApiError::InvalidInput(experiment_campaign_missing_worktree_path_message().to_string())
     })?;
     let task = format!(
         "Review the prepared experiment candidate.\n\

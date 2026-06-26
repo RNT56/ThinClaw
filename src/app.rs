@@ -108,6 +108,12 @@ pub struct AppComponents {
     /// Observability backend selected by the operator (wizard/config). Defaults
     /// to a no-op observer; `OBSERVABILITY_BACKEND=log` emits structured events.
     pub observer: Arc<dyn crate::observability::Observer>,
+    /// Headless voice-wake runtime, constructed (not yet started) when the
+    /// `voice` feature is built and `THINCLAW_VOICE_WAKE` is set (F-18). The host
+    /// (`main.rs`) starts it and consumes wake events once the channel inject
+    /// sender exists, so a detected utterance can be transcribed and dispatched.
+    #[cfg(feature = "voice")]
+    pub voice_wake: Option<crate::voice_wake::VoiceWakeRuntime>,
 }
 
 /// Builder that orchestrates the 5 mechanical init phases.
@@ -1645,8 +1651,12 @@ impl AppBuilder {
         // Sherpa-ONNX backend plus a shipped sherpa-onnx-keyword-spotter binary,
         // an ONNX keyword model, and keywords.txt (none of which the repo ships).
         // See docs/BUILD_PROFILES.md.
+        // Construct the voice-wake runtime here (cheap) but start + consume it in
+        // the host (`main.rs`) once the channel inject sender exists, so a detected
+        // wake word can be transcribed and dispatched into the agent (F-18). Gated
+        // by `THINCLAW_VOICE_WAKE`; returns `None` when disabled.
         #[cfg(feature = "voice")]
-        {
+        let voice_wake = {
             let wake_enabled = std::env::var("THINCLAW_VOICE_WAKE")
                 .ok()
                 .map(|v| {
@@ -1656,59 +1666,13 @@ impl AppBuilder {
                 .unwrap_or(false);
 
             if wake_enabled {
-                let mut wake_runtime = crate::voice_wake::VoiceWakeRuntime::new(
-                    crate::voice_wake::VoiceWakeConfig::default(),
-                );
-
-                if let Some(mut events) = wake_runtime.take_events() {
-                    // Consumer task: translate wake events into agent-visible
-                    // signals. WakeWordDetected is the dispatch seam where a
-                    // talk-mode / STT capture of the follow-up utterance would be
-                    // triggered. Capturing + transcribing that utterance and
-                    // routing it into the dispatcher is deferred (see
-                    // tasks_deferred); for now we surface the event so the path is
-                    // reachable and observable.
-                    tokio::spawn(async move {
-                        while let Some(event) = events.recv().await {
-                            match event {
-                                crate::voice_wake::VoiceWakeEvent::WakeWordDetected {
-                                    confidence,
-                                    timestamp,
-                                } => {
-                                    // DISPATCH SEAM: trigger talk-mode/STT capture
-                                    // of the follow-up utterance here and feed the
-                                    // transcript into the dispatcher. Not yet wired
-                                    // end-to-end (deferred).
-                                    tracing::info!(
-                                        confidence,
-                                        timestamp = %timestamp,
-                                        "Voice wake word detected (STT capture-on-wake not yet wired)"
-                                    );
-                                }
-                                crate::voice_wake::VoiceWakeEvent::Error { message } => {
-                                    tracing::warn!(error = %message, "Voice wake error");
-                                }
-                                other => {
-                                    tracing::debug!(?other, "Voice wake event");
-                                }
-                            }
-                        }
-                        tracing::debug!("Voice wake event consumer exited");
-                    });
-                }
-
-                // start() spawns the detection loop in a detached tokio task that
-                // owns its own Arc<AtomicBool> and event sender clones, so the
-                // loop keeps running after `wake_runtime` is dropped at the end of
-                // this block. The consumer task above owns the only receiver.
-                match wake_runtime.start().await {
-                    Ok(()) => tracing::info!(
-                        "Voice wake runtime started (THINCLAW_VOICE_WAKE enabled, EnergyDetector backend)"
-                    ),
-                    Err(e) => tracing::warn!("Failed to start voice wake runtime: {}", e),
-                }
+                Some(crate::voice_wake::VoiceWakeRuntime::new(
+                    crate::voice_wake::VoiceWakeConfig::from_env(),
+                ))
+            } else {
+                None
             }
-        }
+        };
 
         tracing::info!(
             elapsed_ms = build_all_start.elapsed().as_millis(),
@@ -1762,6 +1726,8 @@ impl AppBuilder {
             ))),
             routing_policy: Arc::clone(&llm_runtime.routing_policy),
             observer,
+            #[cfg(feature = "voice")]
+            voice_wake,
         })
     }
 }

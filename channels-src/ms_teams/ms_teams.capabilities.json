@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "ms_teams",
+  "production_status": "beta",
   "description": "Microsoft Teams bot activity webhook channel",
   "formatting_hints": "Teams supports Markdown in bot activities. Keep replies structured and avoid unsupported HTML.",
   "setup": {

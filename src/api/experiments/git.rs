@@ -108,6 +108,7 @@ pub(super) fn experiment_sandbox_config(settings: &Settings) -> crate::sandbox::
 pub(super) fn experiment_execution_backend(
     settings: &Settings,
     runner: &ExperimentRunnerProfile,
+    user_id: &str,
 ) -> Arc<dyn ExecutionBackend> {
     match runner.backend {
         ExperimentRunnerBackend::LocalDocker => {
@@ -121,8 +122,18 @@ pub(super) fn experiment_execution_backend(
             {
                 sandbox_config.image = image.trim().to_string();
             }
+            // F-01: resolve allowlisted-host proxy credentials through the encrypted,
+            // audited `SecretsStore` (`get_for_injection`) when one has been registered
+            // for the experiments runtime (`register_experiment_secrets_store`, wired in
+            // `src/main.rs` when a secrets store is configured). Without a registered
+            // store the manager falls back to the env-backed resolver — correct degraded
+            // behavior for store-less deployments. `user_id` is the campaign owner.
+            let mut manager = crate::sandbox::SandboxManager::new(sandbox_config);
+            if let Some(store) = research_secrets_store() {
+                manager = manager.with_credential_store(store, user_id);
+            }
             DockerSandboxExecutionBackend::from_sandbox(
-                Arc::new(crate::sandbox::SandboxManager::new(sandbox_config)),
+                Arc::new(manager),
                 crate::sandbox::SandboxPolicy::WorkspaceWrite,
             )
         }

@@ -210,6 +210,12 @@ impl Agent {
                     )
                     .await;
 
+                let tool_started_at = std::time::Instant::now();
+                self.observer()
+                    .record_event(&crate::observability::ObserverEvent::ToolCallStart {
+                        tool: tc.name.clone(),
+                    });
+
                 let result = tokio::select! {
                     biased;
                     _ = self.wait_for_turn_cancellation(thread_id) => {
@@ -226,6 +232,13 @@ impl Agent {
                         }
                     } => result
                 };
+
+                self.observer()
+                    .record_event(&crate::observability::ObserverEvent::ToolCallEnd {
+                        tool: tc.name.clone(),
+                        duration: tool_started_at.elapsed(),
+                        success: result.is_ok(),
+                    });
 
                 let _ = self
                     .channels

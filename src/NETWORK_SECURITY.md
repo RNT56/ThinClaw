@@ -8,7 +8,7 @@ This document catalogs every network-facing surface in ThinClaw, its authenticat
 
 ## Threat Model
 
-ThinClaw operates across four trust boundaries:
+ThinClaw operates across five trust boundaries:
 
 | Boundary | Trust Level | Examples |
 |----------|------------|---------|
@@ -16,13 +16,15 @@ ThinClaw operates across four trust boundaries:
 | **Browser client** | Authenticated | Web UI connected via bearer token; subject to CORS, Origin validation, CSRF protections |
 | **Docker containers** | Untrusted (sandboxed) | Worker containers executing user jobs; isolated via per-job tokens, allowlisted egress, dropped capabilities |
 | **External services** | Untrusted | Webhook senders (Telegram, Slack); authenticated via shared secret |
+| **Native plugins** | Operator-trusted, **NOT sandboxed** | Dynamic libraries `dlopen`-ed in-process (default off). Run with full host privilege; controls are ed25519 signature + SHA-256 + operator allowlist + default-off + `catch_unwind` panic isolation — no memory/syscall/network isolation. Operator-only (not gateway-exposed). |
 
 **Key assumptions:**
 
 - The local machine is single-user. The web gateway and OAuth listener bind to loopback and do not defend against other local users.
 - Docker containers are adversarial. A compromised container should not be able to access other jobs, exfiltrate secrets, or reach the host network beyond the orchestrator API.
 - Webhook senders must prove knowledge of the shared secret. The secret is never transmitted in the clear by ThinClaw itself.
-- MCP server URLs are operator-configured and treated as trusted destinations (see [MCP Client](#mcp-client)).
+- MCP server URLs are operator-configured and treated as trusted destinations (see [MCP Client](#mcp-client)). The MCP HTTP/OAuth clients additionally pin DNS resolution to the validated address to close the rebind TOCTOU window for public hosts (local/loopback servers are exempt by design).
+- Native plugins are unsandboxed and run with full host privilege. They are default-off, signature-gated, allowlisted, and operator-only (no gateway install/activate surface); enable only code you fully trust. See `docs/EXTENSION_SYSTEM.md`.
 
 ---
 

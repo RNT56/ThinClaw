@@ -90,6 +90,59 @@ fn script_calls_builtin(script: &str, name: &str) -> bool {
     false
 }
 
+/// Persist a user skill manifest + script. Shared by both `save_skill` builtin
+/// overloads — the 3-arg form (no typed parameters) and the 4-arg form that
+/// accepts a JSON parameter list (F-15). Pure sync file I/O; callers wrap it in
+/// `tokio::task::block_in_place` because the builtins run inside the async runtime.
+fn persist_user_skill(
+    id: &str,
+    script: &str,
+    description: &str,
+    parameters: Vec<thinclaw_desktop_tools::skills::manifest::SkillParameter>,
+    user_skills_path: Option<std::path::PathBuf>,
+    builtin_skills_path: Option<std::path::PathBuf>,
+) -> String {
+    use thinclaw_desktop_tools::skills::manager::SkillManager;
+    use thinclaw_desktop_tools::skills::manifest::SkillManifest;
+
+    let id = id.trim();
+    let script = script.trim();
+    if id.is_empty() || script.is_empty() {
+        return "Error: ID and Script cannot be empty".to_string();
+    }
+    let Some(user_path) = user_skills_path else {
+        return "Error: User skills directory not configured".to_string();
+    };
+    let manifest = SkillManifest {
+        name: id.to_string(), // Using ID as name for simplicity
+        description: description.to_string(),
+        version: "1.0.0".to_string(),
+        author: Some("Agent".to_string()),
+        // Best-effort scan of the script for host builtins it calls.
+        tools_used: detect_tools_used(script),
+        parameters,
+        script_file: format!("{}.rhai", id),
+    };
+    let manager = SkillManager::new(user_path, builtin_skills_path);
+    match manager.save_skill(id, manifest, script) {
+        Ok(_) => format!("Skill '{}' saved successfully", id),
+        Err(e) => format!("Error saving skill: {}", e),
+    }
+}
+
+/// Parse the optional 4th `save_skill` argument — a JSON array of skill
+/// parameters — into typed [`SkillParameter`]s. A blank string yields an empty
+/// list so callers may pass `""` to mean "no declared parameters".
+fn parse_skill_parameters(
+    params_json: &str,
+) -> Result<Vec<thinclaw_desktop_tools::skills::manifest::SkillParameter>, String> {
+    let trimmed = params_json.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(trimmed).map_err(|e| e.to_string())
+}
+
 /// Create a configured Sandbox instance with all host tools registered.
 ///
 /// This factory function is used by:
@@ -340,57 +393,41 @@ where
             rhai::Dynamic::from(result)
         });
 
-    // -- save_skill(id, script, description) → persist skill --
+    // -- save_skill(id, script, description) → persist skill (no typed params) --
     let user_skills_path_save = mcp_config.user_skills_path.clone();
     let builtin_skills_path_save = mcp_config.builtin_skills_path.clone();
 
     sandbox.engine_mut().register_fn(
         "save_skill",
         move |id: String, script: String, description: String| -> String {
-            // Basic validation
-            let id = id.trim();
-            let script = script.trim();
-            if id.is_empty() || script.is_empty() {
-                return "Error: ID and Script cannot be empty".to_string();
-            }
-
             let upath = user_skills_path_save.clone();
             let bpath = builtin_skills_path_save.clone();
-            let id = id.to_string();
-            let script = script.to_string();
-            let description = description.clone();
+            tokio::task::block_in_place(|| {
+                persist_user_skill(&id, &script, &description, Vec::new(), upath, bpath)
+            })
+        },
+    );
 
-            let result = tokio::task::block_in_place(|| {
-                use thinclaw_desktop_tools::skills::manager::SkillManager;
-                use thinclaw_desktop_tools::skills::manifest::SkillManifest;
+    // -- save_skill(id, script, description, params_json) → persist skill with
+    //    typed parameters (F-15). `params_json` is a JSON array of
+    //    {name, description, param_type, required, default} objects; pass "" for
+    //    none. Backward-compatible: the 3-arg form above keeps working unchanged
+    //    (Rhai dispatches overloads by arity).
+    let user_skills_path_save_p = mcp_config.user_skills_path.clone();
+    let builtin_skills_path_save_p = mcp_config.builtin_skills_path.clone();
 
-                if let Some(up) = upath {
-                    // Construct manifest
-                    let manifest = SkillManifest {
-                        name: id.clone(),                 // Using ID as name for simplicity
-                        description: description.clone(), // User description
-                        version: "1.0.0".to_string(),
-                        author: Some("Agent".to_string()),
-                        // Best-effort scan of the script for host builtins it calls.
-                        tools_used: detect_tools_used(&script),
-                        // `save_skill(id, script, description)` has no parameter
-                        // input, so a skill cannot declare typed parameters at
-                        // save time. Persist an empty list; populating this would
-                        // require extending the builtin signature (out of scope).
-                        parameters: vec![],
-                        script_file: format!("{}.rhai", id),
-                    };
-
-                    let manager = SkillManager::new(up, bpath);
-                    match manager.save_skill(&id, manifest, &script) {
-                        Ok(_) => format!("Skill '{}' saved successfully", id),
-                        Err(e) => format!("Error saving skill: {}", e),
-                    }
-                } else {
-                    "Error: User skills directory not configured".to_string()
-                }
-            });
-            result
+    sandbox.engine_mut().register_fn(
+        "save_skill",
+        move |id: String, script: String, description: String, params_json: String| -> String {
+            let parameters = match parse_skill_parameters(&params_json) {
+                Ok(parameters) => parameters,
+                Err(e) => return format!("Error: invalid skill parameters JSON: {}", e),
+            };
+            let upath = user_skills_path_save_p.clone();
+            let bpath = builtin_skills_path_save_p.clone();
+            tokio::task::block_in_place(|| {
+                persist_user_skill(&id, &script, &description, parameters, upath, bpath)
+            })
         },
     );
 

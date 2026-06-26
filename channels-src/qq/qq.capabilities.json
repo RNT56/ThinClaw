@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "qq",
+  "production_status": "beta",
   "description": "QQ bot webhook channel",
   "formatting_hints": "QQ messages should be concise plain text unless a richer bot adapter is configured.",
   "setup": {

@@ -49,6 +49,24 @@ use crate::wasm::capabilities::{
     ToolCapabilities, ToolInvokeCapability, WorkspaceCapability,
 };
 
+/// Operator-facing maturity / auth-correctness disposition for a channel (F-10).
+///
+/// Defaults to `Experimental` so an unmarked channel is never silently treated as
+/// production-grade. `Beta` channels typically have weaker-than-native inbound
+/// auth (e.g. a shared-secret `equals` compare rather than the platform's native
+/// HMAC / Ed25519 / signed-JWT verification) and must say so in their README.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProductionStatus {
+    /// Native-grade auth and a faithful integration; safe to rely on.
+    Production,
+    /// Functional, but with a documented auth-correctness caveat.
+    Beta,
+    /// Unproven / unmarked.
+    #[default]
+    Experimental,
+}
+
 /// Root schema for a channel capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChannelCapabilitiesFile {
@@ -58,6 +76,10 @@ pub struct ChannelCapabilitiesFile {
 
     /// Channel name.
     pub name: String,
+
+    /// Operator-facing maturity disposition (F-10). Defaults to `experimental`.
+    #[serde(default)]
+    pub production_status: ProductionStatus,
 
     /// Channel description.
     #[serde(default)]

@@ -714,6 +714,7 @@ impl Orchestrator {
             // Skills — always available
             tools_desc.push_str("- run_skill(skill_id, args_json): Execute a skill/workflow by ID. Args must be a JSON string.\n");
             tools_desc.push_str("- save_skill(id, script, description): Save a new skill. Script must be valid Rhai code.\n");
+            tools_desc.push_str("- save_skill(id, script, description, params_json): Same, plus a JSON array of typed parameters [{name, description, param_type, required, default}].\n");
 
             // Calculator — always available (no permissions gate needed)
             tools_desc.push_str("- calculator(expression): Evaluate mathematical expressions with full precision and show work step-by-step. Supports arithmetic (+, -, *, /, ^, %), parentheses, functions (sqrt, abs, round, ceil, floor, log, ln, log2, sin, cos, tan, asin, acos, atan, min, max, pow, exp), constants (pi, e, tau). Supports inline variables: 'x = 3; y = 5; 2*x^2 + y'. Use for ANY numbers — currency conversions, percentages, tips, compound interest.\n");

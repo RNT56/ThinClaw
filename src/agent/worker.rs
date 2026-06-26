@@ -28,6 +28,7 @@ use crate::agent::routine::{
 };
 use crate::agent::routine_engine::persist_routine_runtime_update;
 use crate::agent::scheduler::WorkerMessage;
+use crate::channels::OutgoingResponse;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
@@ -73,6 +74,11 @@ pub struct WorkerDeps {
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<CostTracker>>>,
     /// Default tool profile for this worker lane.
     pub tool_profile: ToolProfile,
+    /// Optional notification sender (F-08). When set (routine/heartbeat workers),
+    /// a `target=<channel>` heartbeat broadcasts its output to that channel via
+    /// the agent-loop notification forwarder, in addition to the SSE summary.
+    /// `None` for non-routine workers, preserving prior behavior.
+    pub notify_tx: Option<tokio::sync::mpsc::Sender<OutgoingResponse>>,
 }
 
 /// Worker that executes a single job.
@@ -95,6 +101,9 @@ struct OutputRouting {
     suppress_output: bool,
     /// Channel override for output delivery (heartbeat `target=<channel>`).
     notify_channel: Option<String>,
+    /// Owner user id for the run, used as the `notify_user` when broadcasting a
+    /// `target=<channel>` heartbeat to a channel (F-08).
+    notify_user: Option<String>,
 }
 
 /// Result of a tool execution with metadata for context building.
@@ -121,11 +130,17 @@ impl Worker {
     }
 
     /// Record output routing preferences resolved from job metadata.
-    fn set_output_routing(&self, suppress_output: bool, notify_channel: Option<String>) {
+    fn set_output_routing(
+        &self,
+        suppress_output: bool,
+        notify_channel: Option<String>,
+        notify_user: Option<String>,
+    ) {
         if let Ok(mut guard) = self.output_routing.lock() {
             *guard = OutputRouting {
                 suppress_output,
                 notify_channel,
+                notify_user,
             };
         }
     }
@@ -144,6 +159,14 @@ impl Worker {
             .lock()
             .ok()
             .and_then(|guard| guard.notify_channel.clone())
+    }
+
+    /// Owner user id for `target=<channel>` heartbeat broadcasts (F-08).
+    fn output_notify_user(&self) -> Option<String> {
+        self.output_routing
+            .lock()
+            .ok()
+            .and_then(|guard| guard.notify_user.clone())
     }
 
     /// Take the stored output (if any) for finalization.
@@ -367,13 +390,12 @@ impl Worker {
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
         touch_worker_activity(activity_tx);
-        let capability_metadata = self
-            .context_manager()
-            .get_context(self.job_id)
-            .await
-            .ok()
-            .map(|ctx| ctx.metadata)
+        let job_context = self.context_manager().get_context(self.job_id).await.ok();
+        let capability_metadata = job_context
+            .as_ref()
+            .map(|ctx| ctx.metadata.clone())
             .unwrap_or(serde_json::Value::Null);
+        let owner_user_id = job_context.as_ref().map(|ctx| ctx.user_id.clone());
         let loop_metadata =
             WorkerLoopMetadata::from_metadata(&capability_metadata, DEFAULT_WORKER_ITERATIONS);
         let max_iterations = loop_metadata.max_iterations;
@@ -384,7 +406,11 @@ impl Worker {
         // user-visible delivery (target=none); `notify_channel` overrides the
         // delivery channel (target=<channel>). Stored on the worker so the
         // emit_user_message interception can honor them.
-        self.set_output_routing(loop_metadata.suppress_output, loop_metadata.notify_channel);
+        self.set_output_routing(
+            loop_metadata.suppress_output,
+            loop_metadata.notify_channel,
+            owner_user_id,
+        );
         let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
 
         let mut iteration = 0;
@@ -1041,6 +1067,31 @@ impl Worker {
                                 run_id: self.deps.routine_run_id.clone(),
                                 result_summary: Some(result_summary),
                             });
+
+                            // F-08: true channel broadcast. When this is a
+                            // routine/heartbeat worker (`notify_tx` present) with
+                            // `target=<channel>`, hand the message to the
+                            // agent-loop notification forwarder, which routes it
+                            // to the operator's channel (and mirrors to web). The
+                            // forwarder reads `notify_user`/`notify_channel` from
+                            // the response metadata.
+                            if let (Some(notify_tx), Some(channel)) =
+                                (self.deps.notify_tx.as_ref(), self.output_notify_channel())
+                            {
+                                let mut response = OutgoingResponse::text(msg);
+                                response.metadata = serde_json::json!({
+                                    "notify_user": self
+                                        .output_notify_user()
+                                        .unwrap_or_else(|| "default".to_string()),
+                                    "notify_channel": channel,
+                                });
+                                if let Err(e) = notify_tx.send(response).await {
+                                    tracing::warn!(
+                                        job_id = %self.job_id,
+                                        "Failed to forward heartbeat broadcast: {}", e
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -1716,6 +1767,7 @@ mod tests {
             workspace: None,
             cost_tracker: None,
             tool_profile: ToolProfile::Standard,
+            notify_tx: None,
         };
 
         Worker::new(job_id, deps)
@@ -2013,6 +2065,7 @@ mod tests {
             workspace: None,
             cost_tracker: None,
             tool_profile: ToolProfile::Restricted,
+            notify_tx: None,
         };
 
         let worker = Worker::new(job_id, deps);

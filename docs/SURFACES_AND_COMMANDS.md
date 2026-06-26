@@ -18,7 +18,7 @@ The following commands can be typed directly into the agent's chat input:
 - `/memory` — Query or manage the persistent workspace memory.
 - `/personality` (or `/vibe`) — Change the agent's behavior and instructions for the current session.
 - `/skills` — List or manage the agent's active skills.
-- `/heartbeat` — Trigger a proactive system check and background routine pass.
+- `/heartbeat` — Trigger a proactive system check and background routine pass. Heartbeat routines honor a `target` (`none` suppresses delivery; `<channel>` routes the summary to that channel — light-context heartbeats broadcast it via the channel forwarder) and an `include_reasoning` knob.
 - `/summarize` — Request a summary of the current session.
 - `/suggest` — Ask the agent to suggest next steps based on the current context.
 - `/rollback` — Undo the last agent action or conversational turn.

@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "wecom",
+  "production_status": "beta",
   "description": "WeCom/Enterprise WeChat webhook channel",
   "formatting_hints": "WeCom supports text and Markdown robot messages. Keep answers mobile-friendly.",
   "setup": {

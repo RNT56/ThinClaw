@@ -7,6 +7,9 @@ unmaintained = "workspace"
 yanked = "deny"
 # Documented, web-verified risk-acceptances for advisories with NO fix available
 # to us. Revisit whenever dependencies are bumped.
+# (RUSTSEC-2026-0187 lopdf nesting DoS is FIXED at the source — pdf-extract was
+# bumped to 0.12 → lopdf 0.42, which bounds parser recursion — so no ignore is
+# needed.)
 ignore = []
 
 [licenses]

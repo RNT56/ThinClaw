@@ -122,6 +122,21 @@ fn wave6_channel_setup_descriptors_match_auth_summary() {
         let caps = thinclaw::channels::wasm::ChannelCapabilitiesFile::from_json(&raw)
             .expect("capabilities file should parse through channel schema");
 
+        // F-10: every shim must carry an honest production_status. Only the three
+        // signature-grade shims (LINE HMAC, Twitch EventSub HMAC, Twilio request
+        // signature) are `production`; the nine shared-secret `equals` shims are
+        // `beta`. This prevents a weak-auth shim from silently shipping as if it
+        // were production-grade. See docs/remediation/WS-03-shim-classification.md.
+        use thinclaw::channels::wasm::ProductionStatus;
+        let expected_status = match *name {
+            "line" | "twitch" | "twilio_sms" => ProductionStatus::Production,
+            _ => ProductionStatus::Beta,
+        };
+        assert_eq!(
+            caps.production_status, expected_status,
+            "{name} production_status disposition (F-10)"
+        );
+
         assert!(
             !caps.setup.required_secrets.is_empty(),
             "{name} should declare setup secrets consumed by setup/auth surfaces"
