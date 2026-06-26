@@ -446,6 +446,11 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 
 ## 12. ThinClaw Desktop
 
+> ⚠️ **Experimental — not yet production-ready.** ThinClaw Desktop is under heavy
+> active development; a number of features/flows were originally built against an
+> earlier agent framework and are still being migrated to the current ThinClaw
+> runtime. Treat desktop-facing parity rows as in-progress.
+
 ThinClaw Desktop is the maintained macOS app in this repository. It uses Tauri v2 with a Rust backend and React frontend under `apps/desktop/`.
 
 The desktop app has two intentional runtime surfaces:

@@ -108,6 +108,11 @@ cargo run --features full
 
 ### `desktop`
 
+> ⚠️ **Experimental.** ThinClaw Desktop is under active development and not yet
+> production-ready — some features were built for an earlier agent framework and
+> are still being migrated. The `desktop` build profile itself is stable; the
+> caveat is about the desktop app surface, not the feature flag.
+
 Minimal footprint for ThinClaw Desktop embedding. Includes libSQL (no
 PostgreSQL), HTML-to-Markdown, document extraction, and REPL mode.
 

@@ -276,7 +276,7 @@ remaining the same agent underneath.
 | Native channels | Telegram, Signal, Discord, Slack, Matrix, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail, voice-call, APNs, browser-push | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
 | WASM channels and tools | Packaged, capability-scoped extension components | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
 | ComfyUI media generation | Prompt-to-image, workflow execution, and managed local/cloud ComfyUI setup | [docs/COMFYUI_MEDIA_GENERATION.md](docs/COMFYUI_MEDIA_GENERATION.md) |
-| ThinClaw Desktop | Desktop companion app embedding ThinClaw as a local or remote runtime | [apps/desktop/README.md](apps/desktop/README.md) |
+| ThinClaw Desktop ⚠️ *(experimental)* | Desktop companion app embedding ThinClaw as a local or remote runtime — under active development, not yet production-ready | [apps/desktop/README.md](apps/desktop/README.md) |
 | Reckless desktop autonomy | Operator-approved host-level desktop automation | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
 
 ## Core Capabilities
@@ -306,7 +306,7 @@ remaining the same agent underneath.
 | Docker | Compose or container deployment | [docs/deploy/docker.md](docs/deploy/docker.md) |
 | Remote access | Gateway, Tailscale, webhook tunnels | [docs/deploy/remote-access.md](docs/deploy/remote-access.md) |
 | Reckless desktop autonomy | Host-level desktop control with operator approval | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
-| ThinClaw Desktop | Local or remote ThinClaw runtime in the desktop companion app | [apps/desktop/README.md](apps/desktop/README.md) |
+| ThinClaw Desktop ⚠️ *(experimental)* | Local or remote ThinClaw runtime in the desktop companion app — under active development, not yet production-ready | [apps/desktop/README.md](apps/desktop/README.md) |
 
 The local gateway listens on port `3000` unless configured otherwise. For the full deployment decision tree, use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
