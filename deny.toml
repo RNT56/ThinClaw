@@ -7,17 +7,10 @@ unmaintained = "workspace"
 yanked = "deny"
 # Documented, web-verified risk-acceptances for advisories with NO fix available
 # to us. Revisit whenever dependencies are bumped.
-ignore = [
-    # RUSTSEC-2026-0187 — stack overflow (SIGABRT, not catch_unwind-able) in
-    # `lopdf` < 0.42.0 when parsing a deeply-nested untrusted PDF. Reached only
-    # transitively via `pdf-extract 0.7.12` → `lopdf 0.34.0` behind the optional
-    # `document-extraction` feature. No fix is available to us: `pdf-extract`
-    # pins `lopdf = "^0.34"`, and no released `pdf-extract` yet uses `lopdf
-    # >= 0.42`. Pre-existing (unrelated to this PR). Remove once `pdf-extract`
-    # ships a release on `lopdf >= 0.42`. DoS-only (no RCE); document extraction
-    # is opt-in and processes operator/agent-supplied input.
-    "RUSTSEC-2026-0187",
-]
+# (RUSTSEC-2026-0187 lopdf nesting DoS is FIXED at the source — pdf-extract was
+# bumped to 0.12 → lopdf 0.42, which bounds parser recursion — so no ignore is
+# needed.)
+ignore = []
 
 [licenses]
 version = 2
