@@ -5,6 +5,7 @@ import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { SpotlightBar } from "./components/chat/SpotlightBar";
 import * as thinclaw from "./lib/thinclaw";
 import { UpdateChecker } from "./components/UpdateChecker";
+import { ExperimentalBadge } from "./components/ExperimentalBadge";
 
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
@@ -111,7 +112,7 @@ function App() {
             )}
             <Toaster closeButton position="top-right" richColors expand={true} />
             <UpdateChecker />
-
+            <ExperimentalBadge />
           </ChatProvider>
         </ModelProvider>
       </ConfigProvider>

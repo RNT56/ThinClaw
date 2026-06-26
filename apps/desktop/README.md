@@ -4,6 +4,13 @@
 
 # ThinClaw Desktop: The ThinClaw Companion App
 
+> ⚠️ **Experimental — under active development.** ThinClaw Desktop is not yet
+> production-ready. It is the newest surface and is still being stabilized: a
+> number of features and flows were originally built against an earlier agent
+> framework and are still being migrated to the current ThinClaw runtime. Expect
+> rough edges, breaking changes, and partially-wired functionality. Use it for
+> evaluation and development; prefer the CLI / web gateway for production use.
+
 ThinClaw Desktop is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it intentionally contains two AI systems: the **Direct AI Workbench** for standard local/cloud chat, RAG, voice, and media generation, and the **ThinClaw Agent Cockpit** for autonomous ThinClaw runtime control.
 
 ![ThinClaw Desktop App Preview](assets/app-preview.png)
