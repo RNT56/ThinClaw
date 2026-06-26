@@ -676,6 +676,7 @@ pub(super) async fn make_test_agent_with_channel(
     channels.add(Box::new(recording_channel.clone())).await;
 
     let deps = AgentDeps {
+        observer: Arc::new(crate::observability::NoopObserver),
         store: None,
         llm: primary_llm,
         cheap_llm,

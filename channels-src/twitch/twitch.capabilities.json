@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "twitch",
+  "production_status": "production",
   "description": "Twitch EventSub/channel chat webhook channel",
   "formatting_hints": "Twitch chat is fast and short-form. Keep replies brief and plain text.",
   "setup": {

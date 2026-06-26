@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "google_chat",
+  "production_status": "beta",
   "description": "Google Chat app event channel",
   "formatting_hints": "Google Chat supports simple Markdown-like formatting. Keep replies concise and room-aware.",
   "setup": {

@@ -170,10 +170,12 @@ pub(super) async fn launch_campaign_baseline(
     mut campaign: ExperimentCampaign,
 ) -> ApiResult<ExperimentCampaignActionResponse> {
     let worktree_path = campaign.worktree_path.clone().ok_or_else(|| {
-        ApiError::Internal(experiment_campaign_missing_worktree_path_field_message().to_string())
+        ApiError::InvalidInput(
+            experiment_campaign_missing_worktree_path_field_message().to_string(),
+        )
     })?;
     let branch = campaign.experiment_branch.clone().ok_or_else(|| {
-        ApiError::Internal(
+        ApiError::InvalidInput(
             experiment_campaign_missing_experiment_branch_field_message().to_string(),
         )
     })?;

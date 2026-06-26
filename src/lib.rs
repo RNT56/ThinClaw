@@ -46,6 +46,16 @@
 
 #![allow(clippy::unwrap_used)]
 
+// A database backend is structurally required: the runtime cannot onboard, persist, or
+// store secrets without one (see `src/db/mod.rs`, `src/main.rs` onboarding guards). Rather
+// than let a zero-feature build fail with an opaque unresolved-import error, make the intent
+// explicit. The smallest supported profile is `edge` (= `libsql`); see docs/BUILD_PROFILES.md.
+#[cfg(not(any(feature = "postgres", feature = "libsql")))]
+compile_error!(
+    "thinclaw requires a database backend: enable the `postgres` or `libsql` feature \
+     (or a profile that includes one, e.g. `edge`, `desktop`, `light`, or `full`)."
+);
+
 pub mod agent;
 pub mod api;
 pub mod app;

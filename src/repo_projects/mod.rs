@@ -12,6 +12,7 @@ pub mod merge_gate;
 pub mod pipeline;
 pub mod planner;
 pub mod prompts;
+pub mod subagent_planner;
 pub mod supervisor;
 pub mod workspace;
 

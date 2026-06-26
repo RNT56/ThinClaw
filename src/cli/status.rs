@@ -158,6 +158,60 @@ pub async fn run_status_command(
         println!("disabled");
     }
 
+    // Shell scanner (defense-in-depth external command scanner; FailOpen by default).
+    // Surfaced so an operator notices a degraded/fail-open posture and can opt into
+    // fail_closed. Built from settings only — no DB or tool registry needed.
+    print!("{}", branding.muted("  Shell scanner "));
+    {
+        let opts = thinclaw_tools::builtin::ShellSafetyOptions {
+            smart_approval_mode: None,
+            external_scanner_mode: settings.safety.external_scanner_mode.parse().ok(),
+            external_scanner_path: settings.safety.external_scanner_path.clone(),
+            external_scanner_require_verified: Some(
+                settings.safety.external_scanner_require_verified,
+            ),
+        };
+        let scanner = thinclaw_tools::builtin::ShellTool::new()
+            .with_safety_options(&opts)
+            .scanner_status();
+        let mode = scanner
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("off");
+        if scanner
+            .get("configured")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let available = scanner
+                .get("available")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let fail_open = scanner
+                .get("fail_open")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            print!(
+                "mode: {}, {}",
+                mode,
+                if available {
+                    "reachable"
+                } else {
+                    "UNAVAILABLE"
+                }
+            );
+            if !available && fail_open {
+                print!(" (fail-open: commands NOT blocked)");
+            }
+            if let Some(err) = scanner.get("last_error").and_then(|v| v.as_str()) {
+                print!(" — {}", err);
+            }
+            println!();
+        } else {
+            println!("not configured (mode: {}; scanner blocking inactive)", mode);
+        }
+    }
+
     // MCP servers
     print!("{}", branding.muted("  MCP servers   "));
     match crate::tools::mcp::config::load_mcp_servers().await {

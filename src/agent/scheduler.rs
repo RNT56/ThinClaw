@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
 use crate::agent::worker::{Worker, WorkerDeps};
+use crate::channels::OutgoingResponse;
 use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -176,6 +177,7 @@ impl Scheduler {
         routine_id: Uuid,
         routine_name: String,
         routine_run_id: String,
+        notify_tx: Option<mpsc::Sender<OutgoingResponse>>,
     ) -> Result<Uuid, JobError> {
         let job_id = self
             .context_manager
@@ -197,7 +199,7 @@ impl Scheduler {
             })?;
         }
 
-        self.schedule_for_routine(job_id, routine_id, routine_name, routine_run_id)
+        self.schedule_for_routine(job_id, routine_id, routine_name, routine_run_id, notify_tx)
             .await?;
         Ok(job_id)
     }
@@ -217,6 +219,7 @@ impl Scheduler {
         routine_id: Uuid,
         routine_name: String,
         routine_run_id: String,
+        notify_tx: Option<mpsc::Sender<OutgoingResponse>>,
     ) -> Result<Uuid, JobError> {
         // Use the reserved slot (max_jobs + 1) in ContextManager
         let job_id = self
@@ -240,8 +243,14 @@ impl Scheduler {
         }
 
         // Use the reserved schedule path (max_parallel_jobs + 1)
-        self.schedule_reserved_for_routine(job_id, routine_id, routine_name, routine_run_id)
-            .await?;
+        self.schedule_reserved_for_routine(
+            job_id,
+            routine_id,
+            routine_name,
+            routine_run_id,
+            notify_tx,
+        )
+        .await?;
         Ok(job_id)
     }
 
@@ -252,6 +261,7 @@ impl Scheduler {
         routine_id: Uuid,
         routine_name: String,
         routine_run_id: String,
+        notify_tx: Option<mpsc::Sender<OutgoingResponse>>,
     ) -> Result<(), JobError> {
         {
             let mut jobs = self.jobs.write().await;
@@ -310,6 +320,7 @@ impl Scheduler {
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
                 tool_profile: self.config.worker_tool_profile,
+                notify_tx,
             };
             let worker = Worker::new(job_id, deps);
 
@@ -353,6 +364,7 @@ impl Scheduler {
         routine_id: Uuid,
         routine_name: String,
         routine_run_id: String,
+        notify_tx: Option<mpsc::Sender<OutgoingResponse>>,
     ) -> Result<(), JobError> {
         {
             let mut jobs = self.jobs.write().await;
@@ -411,6 +423,7 @@ impl Scheduler {
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
                 tool_profile: self.config.worker_tool_profile,
+                notify_tx,
             };
             let worker = Worker::new(job_id, deps);
 
@@ -511,6 +524,7 @@ impl Scheduler {
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
                 tool_profile: self.config.worker_tool_profile,
+                notify_tx: None,
             };
             let worker = Worker::new(job_id, deps);
 

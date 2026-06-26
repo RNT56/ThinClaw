@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "feishu_lark",
+  "production_status": "beta",
   "description": "Feishu/Lark event callback channel",
   "formatting_hints": "Feishu/Lark supports post and text messages. Keep replies concise and avoid unsupported raw HTML.",
   "setup": {

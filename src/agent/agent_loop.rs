@@ -125,6 +125,11 @@ pub struct AgentDeps {
     pub sandbox_children: Option<Arc<SandboxChildRegistry>>,
     /// Extracted agent-runtime ports backed by root adapters.
     pub runtime_ports: Option<Arc<RootAgentRuntimePorts>>,
+    /// Observability sink for per-turn / per-tool / per-LLM lifecycle events
+    /// (F-11). Defaults to `NoopObserver` (zero-cost) unless the operator selected
+    /// a backend via `OBSERVABILITY_BACKEND`; the dispatcher emits into it at the
+    /// LLM request/response, tool start/end, and turn-complete points.
+    pub observer: Arc<dyn crate::observability::Observer>,
 }
 
 /// The main agent that coordinates all components.
@@ -348,6 +353,12 @@ impl Agent {
 
     pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
         &self.deps.safety
+    }
+
+    /// Observability sink (F-11). `NoopObserver` by default, so callers may emit
+    /// unconditionally at zero cost when no backend is selected.
+    pub(super) fn observer(&self) -> &Arc<dyn crate::observability::Observer> {
+        &self.deps.observer
     }
 
     /// Get the tool registry (public for Tauri/API integration).
@@ -990,11 +1001,27 @@ impl Agent {
                         repo_projects_config.max_concurrent_tasks_per_project,
                     );
 
-                // The autonomous LLM-backed task planner (T6) is wired here once
-                // an injectable subagent stack is available; until then projects
-                // that need planning fall back to an explicit AwaitingHuman
+                // F-06: the autonomous LLM-backed task planner. Opt-in via
+                // `REPO_PROJECTS_AUTOPLAN` (default off — autonomy/egress change)
+                // and only when a subagent executor is available. Otherwise
+                // projects needing planning fall back to an explicit AwaitingHuman
                 // status (see DatabaseRepoSupervisorStore::with_planner).
-                supervisor_db_store = supervisor_db_store.with_planner(None);
+                let planner: Option<Arc<dyn crate::repo_projects::planner::RepoTaskPlanner>> =
+                    if std::env::var("REPO_PROJECTS_AUTOPLAN")
+                        .map(|v| matches!(v.as_str(), "1" | "true" | "on" | "yes"))
+                        .unwrap_or(false)
+                    {
+                        self.deps.subagent_executor.as_ref().map(|exec| {
+                            Arc::new(crate::repo_projects::subagent_planner::SubagentRepoTaskPlanner::new(
+                                Arc::clone(exec),
+                                "default",
+                            ))
+                                as Arc<dyn crate::repo_projects::planner::RepoTaskPlanner>
+                        })
+                    } else {
+                        None
+                    };
+                supervisor_db_store = supervisor_db_store.with_planner(planner);
 
                 // Sandbox executor for coding-job dispatch + CI repair.
                 if self.deps.job_manager.is_some() {

@@ -354,6 +354,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Auth plugins | ✅ | ❌ | No public auth-plugin trait surface is exposed in the current ThinClaw runtime |
 | Memory plugins | ✅ | ❌ | No public memory-plugin trait surface is exposed in the current ThinClaw runtime |
 | Tool plugins | ✅ | ✅ | WASM tools |
+| Native (dynamic-library) plugins | ✅ | ✅ | Wired but **default-off**, ed25519-signature + SHA-256 + operator-allowlist gated and `catch_unwind`-isolated before `dlopen`. Runs **in-process with full host privilege (NOT sandboxed)**; operator-only — deliberately not exposed via the web gateway ([`src/extensions/native_activation.rs`](src/extensions/native_activation.rs); see `docs/EXTENSION_SYSTEM.md`, `src/NETWORK_SECURITY.md`) |
 | Hook plugins | ✅ | ✅ | Declarative hooks from extension capabilities |
 | Provider plugins | ✅ | ❌ | No public provider-plugin trait surface is exposed in the current ThinClaw runtime |
 | Plugin CLI (`install`, `list`) | ✅ | ✅ | `registry list/install/install-defaults` subcommands ([`src/cli/registry.rs`](src/cli/registry.rs)) |

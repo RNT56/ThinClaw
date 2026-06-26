@@ -1688,6 +1688,7 @@ async fn execute_full_job(
             routine.id,
             routine.name.clone(),
             run.id.to_string(),
+            Some(ctx.notify_tx.clone()),
         )
         .await
         .map_err(|e| RoutineError::JobDispatchFailed {
@@ -1925,6 +1926,7 @@ async fn execute_heartbeat(
             routine.id,
             routine.name.clone(),
             run.id.to_string(),
+            Some(ctx.notify_tx.clone()),
         )
         .await
         .map_err(|e| RoutineError::JobDispatchFailed {

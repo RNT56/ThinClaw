@@ -812,6 +812,7 @@ pub(crate) async fn build_inner(
     let job_manager: Option<Arc<thinclaw_core::sandbox_types::ContainerJobManager>> = None;
 
     let agent_deps = AgentDeps {
+        observer: components.observer.clone(),
         store: components.db.clone(),
         llm: components.llm.clone(),
         cheap_llm: components.cheap_llm.clone(),

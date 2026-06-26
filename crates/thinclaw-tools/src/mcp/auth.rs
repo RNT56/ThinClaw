@@ -363,17 +363,19 @@ impl PkceChallenge {
 pub async fn discover_protected_resource(
     server_url: &str,
 ) -> Result<ProtectedResourceMetadata, AuthError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
-
     // Parse the server URL to extract the origin (scheme + host + port)
     // The .well-known endpoints are always at the root of the origin, not under any path
     let origin = origin_from_server_url(server_url)?;
 
     // Try the well-known endpoint at the origin root
     let well_known_url = format!("{}/.well-known/oauth-protected-resource", origin);
+
+    // F-02: pin the connection to the validated address for the discovery host.
+    let client = super::build_pinned(
+        reqwest::Client::builder().timeout(Duration::from_secs(10)),
+        &well_known_url,
+        reqwest::Client::new,
+    );
 
     let response = client
         .get(&well_known_url)
@@ -399,10 +401,13 @@ pub async fn discover_protected_resource(
 pub async fn discover_authorization_server(
     auth_server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    // F-02: pin to the validated address for the authorization-server host. Both
+    // metadata URLs below share this host, so one pin covers them.
+    let client = super::build_pinned(
+        reqwest::Client::builder().timeout(Duration::from_secs(10)),
+        auth_server_url,
+        reqwest::Client::new,
+    );
 
     let base_url = auth_server_url.trim_end_matches('/');
     let metadata_urls = [
@@ -486,10 +491,12 @@ pub async fn register_client(
     registration_endpoint: &str,
     redirect_uri: &str,
 ) -> Result<ClientRegistrationResponse, AuthError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    // F-02: pin the connection to the validated address for the registration host.
+    let client = super::build_pinned(
+        reqwest::Client::builder().timeout(Duration::from_secs(30)),
+        registration_endpoint,
+        reqwest::Client::new,
+    );
 
     let request = ClientRegistrationRequest {
         client_name: "ThinClaw".to_string(),
@@ -810,23 +817,15 @@ pub fn build_authorization_url(
 /// Compare two OAuth `state` values in constant time.
 ///
 /// Avoids leaking the expected `state` through a timing side channel when
-/// validating the loopback callback. Mirrors the constant-time `state`
-/// comparison used by the WASM tool OAuth flow in
-/// `crate::wasm::oauth` / `cli::oauth_defaults`.
+/// validating the loopback callback. Uses `subtle::ConstantTimeEq`, the same
+/// primitive as the WASM tool OAuth flow in `crate::wasm::oauth` and
+/// `cli::oauth_defaults`, rather than a hand-rolled comparator.
 fn oauth_state_matches(expected: &str, received: &str) -> bool {
-    let expected = expected.as_bytes();
-    let received = received.as_bytes();
-    // Fold the length check into the accumulator so the comparison runs over a
-    // fixed iteration count regardless of where (or whether) a mismatch occurs.
-    let mut diff = (expected.len() ^ received.len()) as u8;
-    for (i, &e) in expected.iter().enumerate() {
-        // `received.get(i)` keeps indexing in-bounds for shorter inputs while
-        // still contributing to `diff` via the length mismatch above. Iterating
-        // over the full `expected` slice keeps the comparison constant-time.
-        let r = received.get(i).copied().unwrap_or(0);
-        diff |= e ^ r;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    // `ct_eq` is constant-time only across equal-length inputs; the explicit
+    // length check guards the differing-length case (the byte comparison is
+    // skipped, but the lengths themselves are not secret).
+    expected.len() == received.len() && expected.as_bytes().ct_eq(received.as_bytes()).into()
 }
 
 /// Wait for the authorization callback and validate an optional state nonce.
@@ -921,10 +920,12 @@ pub async fn exchange_code_for_token(
     pkce: Option<&PkceChallenge>,
     resource: Option<&str>,
 ) -> Result<AccessToken, AuthError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    // F-02: pin the connection to the validated address for the token host.
+    let client = super::build_pinned(
+        reqwest::Client::builder().timeout(Duration::from_secs(30)),
+        token_url,
+        reqwest::Client::new,
+    );
 
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
@@ -1141,10 +1142,12 @@ pub async fn refresh_access_token(
         )
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    // F-02: pin the connection to the validated address for the token host.
+    let client = super::build_pinned(
+        reqwest::Client::builder().timeout(Duration::from_secs(30)),
+        &token_url,
+        reqwest::Client::new,
+    );
 
     let params = vec![
         ("grant_type", "refresh_token".to_string()),

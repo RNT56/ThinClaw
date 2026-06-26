@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "matrix",
+  "production_status": "beta",
   "description": "Matrix appservice/webhook channel for receiving and responding to room messages",
   "formatting_hints": "Matrix supports Markdown-style rich text in many clients. Keep replies concise and include room context when responding in busy rooms.",
   "setup": {

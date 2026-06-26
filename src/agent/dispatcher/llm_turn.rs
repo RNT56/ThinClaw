@@ -129,6 +129,8 @@ impl Agent {
         options: LlmTurnOptions,
     ) -> Result<LlmTurnResult, Error> {
         let request_model_name = reasoning.current_llm().active_model_name();
+        // F-11: time the reasoning turn for the LlmResponse observability event.
+        let llm_turn_started_at = std::time::Instant::now();
         let identity = message.resolved_identity();
         let model_override_scope_key =
             crate::tools::builtin::llm_tools::model_override_scope_key_from_metadata(
@@ -502,6 +504,21 @@ impl Agent {
             .routed_model_name
             .clone()
             .unwrap_or_else(|| active_model_name.clone());
+
+        // F-11: per-LLM-response + per-turn observability. The provider is not
+        // tracked at the dispatcher layer (the `LlmProvider` trait exposes only
+        // `model_name`), so the model carries the identifying info; `LLM_BACKEND`
+        // is a best-effort provider label. NoopObserver discards this at zero cost.
+        self.observer()
+            .record_event(&crate::observability::ObserverEvent::LlmResponse {
+                provider: std::env::var("LLM_BACKEND").unwrap_or_default(),
+                model: model_name.clone(),
+                duration: llm_turn_started_at.elapsed(),
+                success: true,
+                error_message: None,
+            });
+        self.observer()
+            .record_event(&crate::observability::ObserverEvent::TurnComplete);
 
         // ── Fire AfterLlmOutput hook ──────────────────────────────
         {

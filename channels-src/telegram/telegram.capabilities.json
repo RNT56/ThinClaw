@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "telegram",
+  "production_status": "production",
   "description": "Telegram Bot API channel for receiving and responding to Telegram messages",
   "formatting_hints": "Prefer Telegram HTML-style formatting for emphasis and links; standard Markdown is also supported as a fallback. Keep code blocks short, avoid markdown tables, and expect long replies to be split into multiple messages.",
   "setup": {
