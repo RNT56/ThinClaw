@@ -437,6 +437,19 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
     let flags = AppBuilderFlags { no_db: cli.no_db };
+    // `mut` only under `voice` so the host can take the constructed voice-wake
+    // runtime out of `components` (F-18); split to avoid an unused-mut warning on
+    // non-voice builds.
+    #[cfg(feature = "voice")]
+    let mut components = AppBuilder::new(
+        config,
+        flags,
+        toml_path.map(std::path::PathBuf::from),
+        Arc::clone(&log_broadcaster),
+    )
+    .build_all()
+    .await?;
+    #[cfg(not(feature = "voice"))]
     let components = AppBuilder::new(
         config,
         flags,
@@ -1137,6 +1150,64 @@ async fn async_main() -> anyhow::Result<()> {
     let shared_db = components.db.clone();
     let shared_secrets_store = components.secrets_store.clone();
     let inject_sender = channels.inject_sender();
+
+    // F-18: start the headless voice-wake runtime (constructed in build_all) and
+    // route detected utterances into the agent. On a wake word we capture +
+    // transcribe the follow-up utterance and inject it as an IncomingMessage on
+    // the synthetic "voice" channel, mirroring the sub-agent-result injection
+    // path below. Only active with the `voice` feature + `THINCLAW_VOICE_WAKE`.
+    #[cfg(feature = "voice")]
+    if let Some(mut wake_runtime) = components.voice_wake.take() {
+        if let Some(mut wake_events) = wake_runtime.take_events() {
+            let voice_inject = inject_sender.clone();
+            tokio::spawn(async move {
+                while let Some(event) = wake_events.recv().await {
+                    match event {
+                        thinclaw::voice_wake::VoiceWakeEvent::WakeWordDetected {
+                            confidence,
+                            timestamp,
+                        } => {
+                            tracing::info!(
+                                confidence,
+                                timestamp = %timestamp,
+                                "Voice wake word detected — capturing follow-up utterance"
+                            );
+                            match thinclaw::talk_mode::capture_and_transcribe(10, "en", None).await
+                            {
+                                Ok(transcript) if !transcript.trim().is_empty() => {
+                                    let injected = thinclaw::channels::IncomingMessage::new(
+                                        "voice", "default", transcript,
+                                    );
+                                    if voice_inject.send(injected).await.is_err() {
+                                        tracing::warn!(
+                                            "Voice wake inject channel closed; stopping consumer"
+                                        );
+                                        break;
+                                    }
+                                }
+                                Ok(_) => {
+                                    tracing::debug!("Voice wake captured an empty transcript")
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Voice wake transcription failed")
+                                }
+                            }
+                        }
+                        thinclaw::voice_wake::VoiceWakeEvent::Error { message } => {
+                            tracing::warn!(error = %message, "Voice wake error");
+                        }
+                        other => tracing::debug!(?other, "Voice wake event"),
+                    }
+                }
+                tracing::debug!("Voice wake event consumer exited");
+            });
+        }
+        match wake_runtime.start().await {
+            Ok(()) => tracing::info!("Voice wake runtime started (dispatch routing active)"),
+            Err(e) => tracing::warn!("Failed to start voice wake runtime: {}", e),
+        }
+    }
+
     #[cfg(feature = "docker-sandbox")]
     let shared_prompt_queue = if config.sandbox.enabled {
         Some(Arc::clone(&prompt_queue))

@@ -27,7 +27,7 @@ This pass closed the bulk of the ledger. Dispositions:
 | F-15 | ✅ Done | `save_skill(id, script, description, params_json)` overload populates `SkillManifest.parameters`; 3-arg form unchanged. |
 | F-16 | ✅ Already done | `test_ddg_search_with_scraping` `#[ignore]` + nightly `--ignored` job. |
 | F-17 | ✅ Resolved-by-reversal | `voice` is intentionally NOT in `full`; CI ALSA only on `all-features`. Ledger entry below is stale. |
-| F-18 | 🟡 Partial | Capture-on-wake glue wired (`capture_and_transcribe` extracted + called on wake); routing the transcript into the live dispatcher needs the post-`build_all` inject handle (final hop). |
+| F-18 | ✅ Done | Capture-on-wake wired **and routed into the agent**: the voice-wake runtime is constructed in `build_all` and started/consumed in `main.rs` (where `channels.inject_sender()` exists); a detected utterance is transcribed via `capture_and_transcribe` and injected as an `IncomingMessage` on the synthetic `voice` channel. (Voice *reply/TTS* output channel remains future work.) |
 | F-19 | ✅ Done | `VoiceWakeConfig::from_env()` typed env overlay replaces `::default()`. True keyword model stays documented future work. |
 | Baseline | ✅ Done | `compile_error!` DB-backend guard in `src/lib.rs` locks `edge`/libSQL as the minimum profile. (`schema_divergence` strict-mode seeding needs a live dual-DB run — left to WS-13.) |
 
