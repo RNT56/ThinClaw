@@ -691,6 +691,43 @@ impl std::fmt::Debug for TalkModeTool {
     }
 }
 
+/// Capture `duration_seconds` of microphone audio and transcribe it via the
+/// configured Whisper backend — the local sidecar (`WHISPER_HTTP_ENDPOINT`) when
+/// set, otherwise the OpenAI Whisper API (`OPENAI_API_KEY`). Shared one-shot
+/// helper used by both the `talk_mode` tool and the voice-wake capture-on-wake
+/// path (F-18). Returns the transcript text; the temp recording is removed.
+pub async fn capture_and_transcribe(
+    duration_seconds: u32,
+    language: &str,
+    device_name: Option<&str>,
+) -> Result<String, ToolError> {
+    let duration = duration_seconds.min(120);
+    let path = default_audio_recording_path("wav");
+    record_audio(&path, duration, 16000, device_name).await?;
+
+    let text = if let Some(whisper_url) =
+        crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
+            .ok()
+            .flatten()
+    {
+        let token = std::env::var("WHISPER_HTTP_TOKEN").ok();
+        transcribe_whisper_http(&path, &whisper_url, token.as_deref(), language).await?
+    } else {
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+            ToolError::ExecutionFailed(
+                "No OpenAI API key or WHISPER_HTTP_ENDPOINT found. \
+                 Set OPENAI_API_KEY for cloud Whisper or WHISPER_HTTP_ENDPOINT \
+                 for local sidecar transcription."
+                    .to_string(),
+            )
+        })?;
+        transcribe_whisper_api(&path, &api_key, language).await?
+    };
+
+    let _ = tokio::fs::remove_file(&path).await;
+    Ok(text)
+}
+
 #[async_trait]
 impl Tool for TalkModeTool {
     fn name(&self) -> &str {
@@ -747,37 +784,8 @@ impl Tool for TalkModeTool {
             .unwrap_or("en");
         let device_name = params.get("device_name").and_then(|v| v.as_str());
 
-        // Generate temp file path
-        let path = default_audio_recording_path("wav");
-
-        // Record audio
-        record_audio(&path, duration, 16000, device_name).await?;
-
-        // Transcribe using the configured backend
-        // IC-007: Use optional_env to see bridge-injected vars
-        let text = if let Some(whisper_url) =
-            crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
-                .ok()
-                .flatten()
-        {
-            // Desktop mode: use local whisper sidecar
-            let token = std::env::var("WHISPER_HTTP_TOKEN").ok();
-            transcribe_whisper_http(&path, &whisper_url, token.as_deref(), language).await?
-        } else {
-            // Cloud mode: use OpenAI Whisper API
-            let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-                ToolError::ExecutionFailed(
-                    "No OpenAI API key or WHISPER_HTTP_ENDPOINT found. \
-                     Set OPENAI_API_KEY for cloud Whisper or WHISPER_HTTP_ENDPOINT \
-                     for local sidecar transcription."
-                        .to_string(),
-                )
-            })?;
-            transcribe_whisper_api(&path, &api_key, language).await?
-        };
-
-        // Clean up audio file
-        let _ = tokio::fs::remove_file(&path).await;
+        // Record + transcribe via the shared one-shot helper (F-18).
+        let text = capture_and_transcribe(duration, language, device_name).await?;
 
         Ok(ToolOutput::success(
             serde_json::json!({

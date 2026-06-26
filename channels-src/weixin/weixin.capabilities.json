@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "weixin",
+  "production_status": "beta",
   "description": "Weixin/WeChat official account webhook channel",
   "formatting_hints": "Weixin replies should be short plain text unless richer message types are configured.",
   "setup": {

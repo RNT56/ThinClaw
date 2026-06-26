@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "dingtalk",
+  "production_status": "beta",
   "description": "DingTalk robot webhook channel",
   "formatting_hints": "DingTalk robot messages support Markdown. Keep replies structured and mobile-readable.",
   "setup": {

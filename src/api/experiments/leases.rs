@@ -285,7 +285,7 @@ pub(super) async fn create_lease(
     .await?;
     let resolved_env_grants = resolved_runner_env_grants(user_id, runner).await;
     let git_ref = campaign.experiment_branch.clone().ok_or_else(|| {
-        ApiError::Internal(experiment_campaign_missing_experiment_branch_message().to_string())
+        ApiError::InvalidInput(experiment_campaign_missing_experiment_branch_message().to_string())
     })?;
     let job = ExperimentRunnerJob {
         lease_id: Uuid::new_v4(),

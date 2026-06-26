@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "mattermost",
+  "production_status": "beta",
   "description": "Mattermost outgoing webhook channel for receiving and responding to posts",
   "formatting_hints": "Mattermost supports Markdown. Prefer compact sections and avoid raw HTML.",
   "setup": {

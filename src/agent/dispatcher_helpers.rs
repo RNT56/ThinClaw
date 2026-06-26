@@ -230,6 +230,7 @@ mod tests {
     /// Build a minimal `Agent` for unit testing (no DB, no workspace, no extensions).
     fn make_test_agent() -> Agent {
         let deps = AgentDeps {
+            observer: Arc::new(crate::observability::NoopObserver),
             store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,

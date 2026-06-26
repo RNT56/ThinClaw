@@ -810,6 +810,16 @@ function queueResearchRefresh() {
   }, 200);
 }
 
+// F-07: live repo-project supervisor updates. Debounced because a single state
+// transition can emit several SSE events in quick succession.
+let repoProjectsRefreshTimer = null;
+function queueRepoProjectsRefresh() {
+  clearTimeout(repoProjectsRefreshTimer);
+  repoProjectsRefreshTimer = setTimeout(() => {
+    if (currentTab === 'repo-projects') loadRepoProjectsDashboard();
+  }, 200);
+}
+
 // --- SSE ---
 
 function connectSSE() {
@@ -974,6 +984,15 @@ function connectSSE() {
   ['experiment_campaign_updated', 'experiment_trial_updated', 'experiment_runner_updated', 'experiment_opportunity_updated'].forEach((evtType) => {
     eventSource.addEventListener(evtType, () => {
       queueResearchRefresh();
+    });
+  });
+
+  // F-07: repo-project supervisor events. These are the actual SSE wire-event
+  // names emitted by the gateway (SseEvent::event_type), not the internal
+  // RepoProjectEventKind names. Live-refresh the dashboard when it is open.
+  ['repo_project_updated', 'repo_task_updated', 'repo_worker_run_updated', 'repo_project_event', 'repo_merge_gate_updated'].forEach((evtType) => {
+    eventSource.addEventListener(evtType, () => {
+      queueRepoProjectsRefresh();
     });
   });
 

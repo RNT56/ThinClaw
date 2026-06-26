@@ -352,6 +352,7 @@ impl TestHarnessBuilder {
         }));
 
         let deps = AgentDeps {
+            observer: Arc::new(crate::observability::NoopObserver),
             store: Some(Arc::clone(&db)),
             llm,
             cheap_llm: None,

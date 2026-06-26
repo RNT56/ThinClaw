@@ -118,13 +118,17 @@ cargo build --release --features desktop --bin thinclaw
 ## Headless voice wake
 
 The `voice` feature compiles a headless wake-word runtime (`cpal` audio capture).
-It is part of `full` and can also be combined with `light` (`--features
-light,voice`). It is **never** in `default`, `edge`, or `desktop` — the desktop
-app owns the microphone and runs its own browser-side wake path.
+It is **opt-in only** and intentionally **not** part of any aggregate profile
+(`default`, `edge`, `light`, `desktop`, or `full`): it pulls `cpal` → the system
+ALSA library (`libasound2-dev`) on Linux, which would force that dependency onto
+every aggregate build, CI job, and release artifact. Enable it explicitly
+(`--features voice`, or combined as `--features light,voice`); it is also
+exercised by `--all-features`. The desktop app owns the microphone and runs its
+own browser-side wake path, so it never needs this feature.
 
 Two switches must both be on for it to do anything:
 
-1. **Build time:** the `voice` cargo feature (`--features voice` or `--all-features`; not in `full`).
+1. **Build time:** the `voice` cargo feature (`--features voice` or `--all-features`; not in any aggregate profile).
 2. **Runtime:** set `THINCLAW_VOICE_WAKE=1` (also accepts `true`/`on`). Default
    off — without it the runtime is never constructed.
 

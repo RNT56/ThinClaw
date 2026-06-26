@@ -102,7 +102,7 @@ for configuration, local/cloud mode, and workflow security details.
 - `thinclaw pairing`: DM pairing logic to approve inbound requests from unknown senders on supported channels.
 - `thinclaw logs`: Query, tail, and filter system logs.
 - `thinclaw doctor`: Probe external dependencies and validate the current configuration. On Linux, add `--profile server`, `--profile remote`, `--profile pi-os-lite-64`, `--profile desktop-linux`, `--profile desktop-gnome`, or `--profile all-features`.
-- `thinclaw status`: Show system health and diagnostics. On Linux, the same `--profile` values summarize runtime readiness.
+- `thinclaw status`: Show system health and diagnostics — version, database, LLM/secrets/embeddings, channels, heartbeat, MCP servers, and the external **shell scanner** posture (mode / reachable / fail-open). On Linux, the same `--profile` values summarize runtime readiness.
 - `thinclaw service`: Manage the OS background service through launchd, systemd, or the Windows Service Control Manager.
   - `install`: Install ThinClaw as a system service.
   - `start`: Start the background service.

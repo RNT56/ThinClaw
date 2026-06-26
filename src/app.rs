@@ -1657,7 +1657,7 @@ impl AppBuilder {
 
             if wake_enabled {
                 let mut wake_runtime = crate::voice_wake::VoiceWakeRuntime::new(
-                    crate::voice_wake::VoiceWakeConfig::default(),
+                    crate::voice_wake::VoiceWakeConfig::from_env(),
                 );
 
                 if let Some(mut events) = wake_runtime.take_events() {
@@ -1675,15 +1675,38 @@ impl AppBuilder {
                                     confidence,
                                     timestamp,
                                 } => {
-                                    // DISPATCH SEAM: trigger talk-mode/STT capture
-                                    // of the follow-up utterance here and feed the
-                                    // transcript into the dispatcher. Not yet wired
-                                    // end-to-end (deferred).
+                                    // F-18: on wake, capture + transcribe the
+                                    // follow-up utterance via the shared STT helper.
                                     tracing::info!(
                                         confidence,
                                         timestamp = %timestamp,
-                                        "Voice wake word detected (STT capture-on-wake not yet wired)"
+                                        "Voice wake word detected — capturing follow-up utterance"
                                     );
+                                    match crate::talk_mode::capture_and_transcribe(10, "en", None)
+                                        .await
+                                    {
+                                        Ok(transcript) if !transcript.trim().is_empty() => {
+                                            // The capture-on-wake glue is wired. Routing
+                                            // the transcript into the live agent
+                                            // dispatcher needs a channel inject handle,
+                                            // which only exists after build_all() returns
+                                            // (see main.rs); that final hop is the
+                                            // remaining F-18 step.
+                                            tracing::info!(
+                                                transcript = %transcript,
+                                                "Voice wake captured utterance (dispatch routing pending)"
+                                            );
+                                        }
+                                        Ok(_) => {
+                                            tracing::debug!(
+                                                "Voice wake captured an empty transcript"
+                                            )
+                                        }
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            "Voice wake transcription failed"
+                                        ),
+                                    }
                                 }
                                 crate::voice_wake::VoiceWakeEvent::Error { message } => {
                                     tracing::warn!(error = %message, "Voice wake error");

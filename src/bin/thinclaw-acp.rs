@@ -136,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
 
     let restart_requested = Arc::new(AtomicBool::new(false));
     let deps = AgentDeps {
+        observer: components.observer.clone(),
         store: components.db,
         llm: components.llm,
         cheap_llm: components.cheap_llm,
@@ -209,6 +210,7 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
     let llm: Arc<dyn LlmProvider> = Arc::new(SmokeLlm);
     let restart_requested = Arc::new(AtomicBool::new(false));
     let deps = AgentDeps {
+        observer: Arc::new(thinclaw::observability::NoopObserver),
         store: None,
         llm: Arc::clone(&llm),
         cheap_llm: Some(llm),

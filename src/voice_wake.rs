@@ -67,6 +67,44 @@ impl Default for VoiceWakeConfig {
     }
 }
 
+impl VoiceWakeConfig {
+    /// Build the config from typed environment overrides, falling back to the
+    /// defaults for any unset/invalid value (F-19). This replaces the previous
+    /// `::default()`-only construction so operators can tune the wake word and
+    /// detector without a code change.
+    ///
+    /// The backend stays [`WakeBackend::EnergyDetector`] here; selecting the
+    /// Sherpa-ONNX keyword backend additionally requires a shipped model and is
+    /// documented future work (see `docs/BUILD_PROFILES.md`).
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+        if let Ok(word) = std::env::var("THINCLAW_VOICE_WAKE_WORD") {
+            let word = word.trim();
+            if !word.is_empty() {
+                cfg.wake_word = word.to_string();
+            }
+        }
+        if let Some(v) = parse_env_f32("THINCLAW_VOICE_WAKE_SENSITIVITY") {
+            cfg.sensitivity = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = parse_env_u32("THINCLAW_VOICE_WAKE_SAMPLE_RATE") {
+            cfg.sample_rate = v;
+        }
+        if let Some(v) = parse_env_f32("THINCLAW_VOICE_WAKE_ENERGY_THRESHOLD") {
+            cfg.energy_threshold = v;
+        }
+        cfg
+    }
+}
+
+fn parse_env_f32(key: &str) -> Option<f32> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+
+fn parse_env_u32(key: &str) -> Option<u32> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+
 /// Wake word detection backend.
 #[derive(Debug, Clone)]
 pub enum WakeBackend {

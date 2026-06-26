@@ -4,6 +4,33 @@
 >
 > Each entry: what's done, what remains, and what it takes.
 
+## Resolution status — `remediation/followups-execution` pass (2026-06-26)
+
+This pass closed the bulk of the ledger. Dispositions:
+
+| Item | Status | Notes |
+|---|---|---|
+| F-01 | ✅ Done | `experiment_execution_backend` now chains `with_credential_store` via the registered `research_secrets_store()` (env fallback when unset); takes the campaign owner `user_id`. |
+| F-02 | ✅ Done | MCP Streamable-HTTP client + all 5 OAuth clients pin DNS via a shared `mcp::build_pinned`/`pinned_addrs_for` helper. Best-effort: local/loopback MCP servers fall back to unpinned (no regression). |
+| F-03 | ✅ Done | `subtle` added to `thinclaw-tools`; `oauth_state_matches` uses `ConstantTimeEq`. |
+| F-04 | ✅ Done | `thinclaw status` prints a "Shell scanner" health line (mode/reachable/fail-open/last_error). |
+| F-05 | ✅ Accepted no-op | Unchanged (consistent with `file.rs`). |
+| F-06 | ✅ Done | `SubagentRepoTaskPlanner` (strict-JSON one-shot subagent) gated on `REPO_PROJECTS_AUTOPLAN`; AwaitingHuman fallbacks; parsing unit-tested. |
+| F-07 | ✅ Done | `app.js` consumes the 5 real repo-project SSE wire events → debounced dashboard refresh. |
+| F-08 | ✅ Done | `notify_tx` threaded WorkerDeps→scheduler→routine dispatch; `target=<channel>` heartbeats broadcast via the agent-loop forwarder. |
+| F-09 | 🟡 Partial | Drift-guard test added for the byte-identical github↔notion tools helpers. Full shared-`include!` extraction remains (Wave-3). |
+| F-10 | ✅ Done | Typed `production_status` added to the channel schema + 16 manifests (3 production / 9 beta) + per-shim READMEs + enforced catalog test. |
+| F-11 | ✅ Done | `observer` threaded through `AgentDeps` (7 sites incl. desktop embed); emits ToolCallStart/End, LlmResponse, TurnComplete (no-op safe). |
+| F-12 | ✅ Done (docs) | EXTENSION_SYSTEM (panic-isolation + in-process caveat), NETWORK_SECURITY (native-plugin trust boundary), FEATURE_PARITY row. Gateway exposure intentionally NOT added. |
+| F-13 | ⏸️ Deferred | Object-store backend needs the heavy `opendal` dependency; deferred to avoid risking the required `cargo deny check` gate without a dedicated dependency/license review. Port + reaper unchanged. |
+| F-14 | ✅ Done (taxonomy) | Worktree/branch `Internal`→`InvalidInput` normalized at the 7 sites. (`ApiError` has no `NotFound`/`Conflict`; broad 128-site audit remains, scoped separately.) |
+| F-15 | ✅ Done | `save_skill(id, script, description, params_json)` overload populates `SkillManifest.parameters`; 3-arg form unchanged. |
+| F-16 | ✅ Already done | `test_ddg_search_with_scraping` `#[ignore]` + nightly `--ignored` job. |
+| F-17 | ✅ Resolved-by-reversal | `voice` is intentionally NOT in `full`; CI ALSA only on `all-features`. Ledger entry below is stale. |
+| F-18 | 🟡 Partial | Capture-on-wake glue wired (`capture_and_transcribe` extracted + called on wake); routing the transcript into the live dispatcher needs the post-`build_all` inject handle (final hop). |
+| F-19 | ✅ Done | `VoiceWakeConfig::from_env()` typed env overlay replaces `::default()`. True keyword model stays documented future work. |
+| Baseline | ✅ Done | `compile_error!` DB-backend guard in `src/lib.rs` locks `edge`/libSQL as the minimum profile. (`schema_divergence` strict-mode seeding needs a live dual-DB run — left to WS-13.) |
+
 ## Wave 0 — WS-01 (security)
 
 ### F-01 — Sandbox credential resolver: one runtime path still env-backed

@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "line",
+  "production_status": "production",
   "description": "LINE Messaging API webhook channel",
   "formatting_hints": "LINE messages render best as short plain text. Avoid tables and long code blocks.",
   "setup": {

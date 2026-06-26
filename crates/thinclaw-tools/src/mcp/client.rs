@@ -462,6 +462,32 @@ impl McpInboundHandler for McpRuntimeState {
     }
 }
 
+/// Build the long-lived HTTP client for an MCP Streamable-HTTP server, pinning
+/// the connection to the socket addresses `server_url` resolved to at build time
+/// (F-02). This closes the DNS-rebinding TOCTOU window: once pinned, `reqwest`
+/// connects to the validated address(es) for the client's lifetime instead of
+/// re-resolving the hostname at connect time (when it could rebind to a private
+/// address such as the cloud metadata endpoint).
+///
+/// MCP servers are operator-configured and frequently **local** (`localhost` /
+/// private addresses), which the SSRF blocklist legitimately rejects. To avoid
+/// regressing those, pinning is best-effort: when validation fails (a local
+/// server) or there is nothing to pin (an IP-literal host), the unpinned client
+/// is returned and behavior is identical to before. The config-time policy
+/// (`McpServerConfig::validate`, honoring `allow_local_http`) remains the gate
+/// for *whether* a server URL is permitted; this only freezes resolution for the
+/// public hostnames where rebinding is a real threat. `require_https` is left
+/// off here so a public `http://` server is still pinnable; the HTTPS policy is
+/// enforced at config time.
+fn build_pinned_mcp_client(server_url: &str) -> reqwest::Client {
+    let base = || {
+        reqwest::Client::builder()
+            .build()
+            .expect("Failed to create HTTP client")
+    };
+    super::build_pinned(reqwest::Client::builder(), server_url, base)
+}
+
 /// MCP client for communicating with MCP servers.
 pub struct McpClient {
     /// Server URL (for HTTP transport).
@@ -572,11 +598,9 @@ impl McpClient {
         server_config: Option<McpServerConfig>,
     ) -> Self {
         Self {
+            http_client: build_pinned_mcp_client(&server_url),
             server_url,
             server_name,
-            http_client: reqwest::Client::builder()
-                .build()
-                .expect("Failed to create HTTP client"),
             stdio_transport,
             next_id: AtomicU64::new(1),
             runtime,

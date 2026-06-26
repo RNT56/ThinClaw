@@ -62,6 +62,9 @@ Native plugins are the exceptional unsafe path for integrations that cannot fit 
 - native artifacts can declare a `sha256`; when present it is checked before `libloading` opens the library.
 - the only supported ABI is C ABI JSON v1 via `thinclaw_native_plugin_invoke_v1`.
 - requests and responses cross the boundary as bounded JSON byte buffers.
+- each invocation is wrapped in `std::panic::catch_unwind`, so a panicking plugin is recorded as a failure rather than unwinding across the FFI boundary and aborting the host.
+
+> **Trust caveat — native plugins are NOT sandboxed.** Unlike WASM tools/channels and Docker workers, a native plugin runs **in-process with full host privilege** (it is `dlopen`-ed into the agent). The signature verification, default-off gate, and operator allowlist are the *only* controls — there is no memory/syscall/network isolation. Enable native plugins only for code you fully trust. Gateway-driven install/activate is deliberately **not** exposed (operator-only, local config); see `src/NETWORK_SECURITY.md`.
 
 Broad plugin manifests can contribute tools, channels, memory providers, context providers, and native plugins. Native contributions must declare `abi = "c_abi_json_v1"`, `abiVersion = 1`, an artifact id, and non-zero request/response byte limits.
 

@@ -1853,6 +1853,7 @@ async fn async_main() -> anyhow::Result<()> {
         .as_ref()
         .map(|state| Arc::clone(&state.repo_project_supervisor));
     let deps = AgentDeps {
+        observer: components.observer.clone(),
         store: components.db,
         llm: components.llm,
         cheap_llm: components.cheap_llm,

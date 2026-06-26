@@ -1,6 +1,7 @@
 {
   "type": "channel",
   "name": "twilio_sms",
+  "production_status": "production",
   "description": "Twilio SMS webhook channel for two-way SMS conversations",
   "formatting_hints": "SMS has strict length and formatting limits. Keep replies short and plain text.",
   "setup": {
