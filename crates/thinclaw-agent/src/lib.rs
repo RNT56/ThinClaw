@@ -3,6 +3,7 @@
 pub mod agent_loop;
 pub mod agent_registry;
 pub mod agent_router;
+pub mod agentic_flows;
 pub mod checkpoint;
 pub mod command_catalog;
 pub mod compaction;
