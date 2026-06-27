@@ -6,6 +6,7 @@
 //! - config (identity.json, keychain, workspace paths)
 //! - ui_types (UiEvent enum for frontend events)
 
+pub mod bridge; // TDO-001: RouteMode + BridgeError dual-mode contract primitives
 pub mod commands;
 pub mod config;
 pub mod deploy;
