@@ -5,7 +5,7 @@
 use tauri::State;
 
 use super::types::*;
-use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
+use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 fn extension_info_from_json(ext: &serde_json::Value) -> ExtensionInfoItem {
@@ -562,7 +562,7 @@ pub async fn thinclaw_extension_registry_search(
 pub async fn thinclaw_extension_reconnect(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy
             .post_json(
@@ -573,9 +573,11 @@ pub async fn thinclaw_extension_reconnect(
         return Ok(extension_action_from_json(raw));
     }
 
-    Err(RemoteGatewayProxy::unavailable(
+    Err(gated(
         "extension reconnect",
-        "local desktop mode does not expose a channel manager restart handle yet; activate the extension or restart the gateway",
+        "local desktop mode does not expose a channel manager restart handle yet",
+        "activate the extension or restart the gateway, or connect a remote gateway that supports reconnect",
+        RouteMode::RemoteOnly,
     ))
 }
 

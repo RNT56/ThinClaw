@@ -7,7 +7,7 @@ use tracing::info;
 
 use super::remote_provider_config::{apply_remote_cloud_config, apply_remote_selected_cloud_model};
 use super::ThinClawManager;
-use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
+use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 // ============================================================================
@@ -195,11 +195,13 @@ pub async fn thinclaw_set_autonomy_mode(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
-        return Err(RemoteGatewayProxy::unavailable(
+        return Err(gated(
             "autonomy mode mutation",
             "remote autonomy execution is controlled by the gateway host policy; desktop may only read remote autonomy status",
+            "change autonomy mode on the gateway host, or run the desktop in local mode",
+            RouteMode::LocalOnly,
         ));
     }
 

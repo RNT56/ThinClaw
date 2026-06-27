@@ -995,7 +995,13 @@ async thinclawSendMessage(sessionKey: string, text: string, deliver: boolean) : 
 /**
  * Subscribe to a session for live updates.
  *
- * **Intentional no-op**: ThinClaw sends events directly via TauriChannel.
+ * Activates the given `session_key` in the runtime's active-sessions map so
+ * that `TauriChannel` correctly routes subsequent SSE events to this session.
+ * For non-`agent:main` keys the session manager is also consulted to ensure
+ * the in-memory session record exists before any events can fire.
+ *
+ * Events themselves stream via the `thinclaw-event` Tauri channel; this
+ * command just registers intent so routing is correct from the first event.
  */
 async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
@@ -1208,7 +1214,7 @@ async thinclawSkillsStatus() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
+async thinclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_toggle", { key, enabled }) };
 } catch (e) {
@@ -1280,7 +1286,7 @@ async thinclawSkillPublish(name: string, targetRepo: string, dryRun: boolean | n
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, string>> {
+async thinclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_install_skill_repo", { repoUrl }) };
 } catch (e) {
@@ -1475,7 +1481,7 @@ async thinclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>>
  *
  * Persisted to identity.json and applied via env var for next engine start.
  */
-async thinclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_autonomy_mode", { enabled }) };
 } catch (e) {
@@ -1570,7 +1576,7 @@ async thinclawJobCancel(jobId: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobRestart(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobRestart(jobId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_restart", { jobId }) };
 } catch (e) {
@@ -1578,7 +1584,7 @@ async thinclawJobRestart(jobId: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobPrompt(jobId: string, content: string | null, done: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawJobPrompt(jobId: string, content: string | null, done: boolean | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_prompt", { jobId, content, done }) };
 } catch (e) {
@@ -1605,6 +1611,174 @@ async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<
 async thinclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_file_read", { jobId, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectsList() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectGet(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_get", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectCreate(input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_create", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectPlan(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_plan", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectStart(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_start", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectPause(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_pause", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectResume(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_resume", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectCancel(projectId: string, runId: string | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_cancel", { projectId, runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectApprove(projectId: string, input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_approve", { projectId, input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectEnqueue(projectId: string, item: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_enqueue", { projectId, item }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectEvents(projectId: string, limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_events", { projectId, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectMergeGates(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_merge_gates", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Report supervisor readiness: feature flag, credential mode, GitHub App
+ * config, derived install URL, and per-secret presence.
+ */
+async thinclawRepoProjectsReadiness() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_readiness") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enable + configure the supervisor (feature flag, GitHub App config, policy).
+ * Secret VALUES are never written here — only the names of secrets.
+ */
+async thinclawRepoProjectsSetup(input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_setup", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Securely store a GitHub credential (PAT or GitHub App PEM key) in the
+ * encrypted secrets store. The value never touches settings, events, or logs.
+ */
+async thinclawRepoProjectsSetCredential(name: string, valueSecret: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_set_credential", { name, valueSecret }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List the repositories the connected GitHub credential can act on — the
+ * connector repo picker. Each repo is marked with whether it is already
+ * under supervision.
+ */
+async thinclawRepoProjectsConnectableRepos() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_connectable_repos") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Bring selected repositories under supervision (a project per repo). Provide
+ * `repos: ["owner/repo", …]` or `all: true`.
+ */
+async thinclawRepoProjectsConnect(input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_connect", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enroll an additional repository into an existing project.
+ */
+async thinclawRepoProjectEnroll(projectId: string, input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_enroll", { projectId, input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1666,7 +1840,7 @@ async thinclawAutonomyRollback() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyRollouts() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyRollouts() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_rollouts") };
 } catch (e) {
@@ -1674,7 +1848,7 @@ async thinclawAutonomyRollouts() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyChecks() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyChecks() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_checks") };
 } catch (e) {
@@ -1682,7 +1856,7 @@ async thinclawAutonomyChecks() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyEvidence() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyEvidence() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_evidence") };
 } catch (e) {
@@ -2045,7 +2219,7 @@ async thinclawExtensionActivate(name: string) : Promise<Result<ExtensionActionRe
 /**
  * Reconnect an installed channel extension when the gateway supports it.
  */
-async thinclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_reconnect", { name }) };
 } catch (e) {
@@ -2674,7 +2848,7 @@ async thinclawLearningRecordRollback(artifactType: string, artifactName: string,
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningEvaluateOutcomes() : Promise<Result<JsonValue, string>> {
+async thinclawLearningEvaluateOutcomes() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_evaluate_outcomes") };
 } catch (e) {
@@ -2770,7 +2944,7 @@ async thinclawExperimentsCampaignAction(campaignId: string, action: string) : Pr
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_validate", { provider }) };
 } catch (e) {
@@ -2778,7 +2952,7 @@ async thinclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValu
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_launch_test", { provider }) };
 } catch (e) {
@@ -3289,6 +3463,21 @@ modelId: string | null;
  */
 available: boolean }
 /**
+ * A typed command outcome that distinguishes a *gated* capability (with its
+ * reason + remediation) from a genuine runtime error.
+ */
+export type BridgeError =
+/**
+ * The capability is intentionally unavailable in the current runtime mode.
+ */
+{ kind: "unavailable"; capability: string; reason: string; remediation: string | null; satisfied_by: RouteMode } |
+/**
+ * A genuine error (kept distinct from the gated state above).
+ * Struct variant (not a tuple) so the internally-tagged (`tag = "kind"`)
+ * representation stays valid for serde/specta export.
+ */
+{ kind: "runtime"; message: string }
+/**
  * Response cache statistics
  */
 export type CacheStats = { hits: number; misses: number; evictions: number; size_bytes: number; hit_rate: number }
@@ -3591,6 +3780,22 @@ export type PermissionStatus = { accessibility: boolean; screen_recording: boole
 export type Project = { id: string; name: string; description: string | null; created_at: number; updated_at: number; sort_order: number }
 export type ProviderDiscoveryResult = { provider: string; models: ModelDescriptor[]; fromCache: boolean; error?: string | null }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
+/**
+ * How a command behaves across the dual-mode runtime.
+ */
+export type RouteMode =
+/**
+ * Works in both embedded and remote-gateway mode.
+ */
+"local_and_remote" |
+/**
+ * Only meaningful against a remote gateway (e.g. sandbox job restart, GPU launch).
+ */
+"remote_only" |
+/**
+ * Only meaningful in embedded mode (e.g. local sidecar control).
+ */
+"local_only"
 /**
  * Request payload for provider route simulation.
  */

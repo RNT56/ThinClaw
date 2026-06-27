@@ -45,7 +45,9 @@ pub enum BridgeError {
         satisfied_by: RouteMode,
     },
     /// A genuine error (kept distinct from the gated state above).
-    Runtime(String),
+    /// Struct variant (not a tuple) so the internally-tagged (`tag = "kind"`)
+    /// representation stays valid for serde/specta export.
+    Runtime { message: String },
 }
 
 impl std::fmt::Display for BridgeError {
@@ -54,7 +56,7 @@ impl std::fmt::Display for BridgeError {
             BridgeError::Unavailable {
                 capability, reason, ..
             } => write!(f, "unavailable: {capability}: {reason}"),
-            BridgeError::Runtime(msg) => write!(f, "{msg}"),
+            BridgeError::Runtime { message } => write!(f, "{message}"),
         }
     }
 }
@@ -65,13 +67,15 @@ impl std::error::Error for BridgeError {}
 /// `Result<T, BridgeError>` mechanically: any string error becomes `Runtime`.
 impl From<String> for BridgeError {
     fn from(value: String) -> Self {
-        BridgeError::Runtime(value)
+        BridgeError::Runtime { message: value }
     }
 }
 
 impl From<&str> for BridgeError {
     fn from(value: &str) -> Self {
-        BridgeError::Runtime(value.to_string())
+        BridgeError::Runtime {
+            message: value.to_string(),
+        }
     }
 }
 
@@ -188,7 +192,22 @@ mod tests {
     #[test]
     fn string_error_maps_to_runtime() {
         let err: BridgeError = "boom".to_string().into();
-        assert_eq!(err, BridgeError::Runtime("boom".to_string()));
+        assert_eq!(
+            err,
+            BridgeError::Runtime {
+                message: "boom".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_error_serializes_with_kind_tag() {
+        // Regression guard: the internally-tagged enum must stay serde/specta
+        // exportable — a tuple variant here breaks `cargo run --example export_bindings`.
+        let err: BridgeError = "boom".to_string().into();
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["kind"], "runtime");
+        assert_eq!(json["message"], "boom");
     }
 
     // ---- route table tests (TDO-002) ----------------------------------------
