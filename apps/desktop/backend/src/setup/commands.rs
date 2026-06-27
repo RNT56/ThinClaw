@@ -279,6 +279,9 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_checkpoints_list,
         crate::thinclaw::commands::thinclaw_checkpoint_diff,
         crate::thinclaw::commands::thinclaw_checkpoint_restore,
+        // Trajectory viewer (TDO-106)
+        crate::thinclaw::commands::thinclaw_trajectory_stats,
+        crate::thinclaw::commands::thinclaw_trajectory_records,
         // Sprint 13 — New backend APIs
         crate::thinclaw::commands::thinclaw_cost_summary,
         crate::thinclaw::commands::thinclaw_cost_export_csv,

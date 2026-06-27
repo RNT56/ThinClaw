@@ -2512,6 +2512,28 @@ async thinclawCheckpointRestore(projectDir: string, commitHash: string, file: st
 }
 },
 /**
+ * Aggregate stats over the local trajectory archive (counts, span, outcomes).
+ */
+async thinclawTrajectoryStats() : Promise<Result<TrajectoryStatsItem, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The most recent trajectory turn records (default 100), as raw JSON values.
+ */
+async thinclawTrajectoryRecords(limit: number | null) : Promise<Result<JsonValue[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_records", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Get LLM cost summary.
  *
  * Returns total spend, daily/monthly breakdowns, per-model costs,
@@ -4017,6 +4039,11 @@ export type ToolInfoItem = { name: string; description: string; enabled: boolean
  * Tool list response
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
+/**
+ * Frontend-facing aggregate trajectory stats. Mirrors `TrajectoryStats` with
+ * paths/timestamps rendered as strings so the type is specta-exportable.
+ */
+export type TrajectoryStatsItem = { log_root: string; file_count: number; record_count: number; session_count: number; first_seen: string | null; last_seen: string | null; success_count: number; failure_count: number; neutral_count: number }
 /**
  * Stable UI event contract — what the ThinClaw chat UI consumes.
  *

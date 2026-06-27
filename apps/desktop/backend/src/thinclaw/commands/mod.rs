@@ -36,6 +36,7 @@ pub(crate) mod rpc_orchestration;
 pub(crate) mod rpc_repo_projects;
 pub(crate) mod rpc_routines;
 pub(crate) mod rpc_skills;
+pub(crate) mod rpc_trajectory;
 mod sessions;
 pub mod types;
 
@@ -52,6 +53,7 @@ pub use rpc_orchestration::*;
 pub use rpc_repo_projects::*;
 pub use rpc_routines::*;
 pub use rpc_skills::*;
+pub use rpc_trajectory::*;
 pub use sessions::*;
 pub use types::*;
 

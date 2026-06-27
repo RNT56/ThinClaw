@@ -1364,6 +1364,33 @@ export async function restoreCheckpoint(
     return invoke('thinclaw_checkpoint_restore', { projectDir, commitHash, file: file ?? null });
 }
 
+// ----------------------------------------------------------------------------
+// Trajectory viewer (TDO-106)
+// ----------------------------------------------------------------------------
+
+/** Aggregate stats over the local trajectory archive. */
+export interface TrajectoryStats {
+    log_root: string;
+    file_count: number;
+    record_count: number;
+    session_count: number;
+    first_seen: string | null;
+    last_seen: string | null;
+    success_count: number;
+    failure_count: number;
+    neutral_count: number;
+}
+
+/** Aggregate stats (counts, span, outcomes) over the local trajectory archive. */
+export async function getTrajectoryStats(): Promise<TrajectoryStats> {
+    return invoke('thinclaw_trajectory_stats');
+}
+
+/** The most recent trajectory turn records (default 100) as raw JSON. */
+export async function getTrajectoryRecords(limit?: number | null): Promise<ThinClawJson[]> {
+    return invoke('thinclaw_trajectory_records', { limit: limit ?? null });
+}
+
 // ============================================================================
 // Sprint 13 — New Backend APIs
 // ============================================================================
