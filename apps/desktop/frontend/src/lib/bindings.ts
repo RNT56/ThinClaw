@@ -2477,6 +2477,41 @@ async thinclawCompactSession(sessionKey: string) : Promise<Result<CompactSession
 }
 },
 /**
+ * List filesystem checkpoints (shadow-git snapshots) for a project directory,
+ * newest first as returned by the core.
+ */
+async thinclawCheckpointsList(projectDir: string) : Promise<Result<CheckpointEntryItem[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoints_list", { projectDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Diff the current project state against a checkpoint commit (unified diff text).
+ */
+async thinclawCheckpointDiff(projectDir: string, commitHash: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoint_diff", { projectDir, commitHash }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Restore a project (or a single `file`) to a checkpoint commit. The core
+ * creates a safety snapshot automatically before applying the restore.
+ */
+async thinclawCheckpointRestore(projectDir: string, commitHash: string, file: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoint_restore", { projectDir, commitHash, file }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Get LLM cost summary.
  *
  * Returns total spend, daily/monthly breakdowns, per-model costs,
@@ -3486,6 +3521,11 @@ export type CacheStats = { hits: number; misses: number; evictions: number; size
  */
 export type ChannelStatusEntry = { id: string; name: string; type: string; state: string; enabled: boolean; uptime_secs: number | null; messages_sent: number; messages_received: number; last_error: string | null; stream_mode: string }
 export type ChatServerConfig = { port: number; token: string; context_size: number; model_family: string }
+/**
+ * Frontend-facing checkpoint record. Mirrors `thinclaw_core` `CheckpointEntry`
+ * but renders the timestamp as an RFC3339 string so the type is specta-exportable.
+ */
+export type CheckpointEntryItem = { commit_hash: string; timestamp: string; summary: string }
 /**
  * Information about a child session spawned by a parent session.
  */

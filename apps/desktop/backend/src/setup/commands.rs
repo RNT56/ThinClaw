@@ -275,6 +275,10 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_pairing_list,
         crate::thinclaw::commands::thinclaw_pairing_approve,
         crate::thinclaw::commands::thinclaw_compact_session,
+        // Filesystem checkpoints / rollback (TDO-103)
+        crate::thinclaw::commands::thinclaw_checkpoints_list,
+        crate::thinclaw::commands::thinclaw_checkpoint_diff,
+        crate::thinclaw::commands::thinclaw_checkpoint_restore,
         // Sprint 13 — New backend APIs
         crate::thinclaw::commands::thinclaw_cost_summary,
         crate::thinclaw::commands::thinclaw_cost_export_csv,

@@ -1334,6 +1334,36 @@ export async function compactSession(sessionKey: string): Promise<CompactSession
     return invoke('thinclaw_compact_session', { sessionKey });
 }
 
+// ----------------------------------------------------------------------------
+// Filesystem checkpoints / rollback (TDO-103)
+// ----------------------------------------------------------------------------
+
+/** A shadow-git checkpoint snapshot of a project directory. */
+export interface CheckpointEntry {
+    commit_hash: string;
+    timestamp: string;
+    summary: string;
+}
+
+/** List filesystem checkpoints (newest first) for a project directory. */
+export async function listCheckpoints(projectDir: string): Promise<CheckpointEntry[]> {
+    return invoke('thinclaw_checkpoints_list', { projectDir });
+}
+
+/** Unified diff of the current project state vs a checkpoint commit. */
+export async function diffCheckpoint(projectDir: string, commitHash: string): Promise<string> {
+    return invoke('thinclaw_checkpoint_diff', { projectDir, commitHash });
+}
+
+/** Restore a project (or a single file) to a checkpoint commit. */
+export async function restoreCheckpoint(
+    projectDir: string,
+    commitHash: string,
+    file?: string | null,
+): Promise<void> {
+    return invoke('thinclaw_checkpoint_restore', { projectDir, commitHash, file: file ?? null });
+}
+
 // ============================================================================
 // Sprint 13 — New Backend APIs
 // ============================================================================
