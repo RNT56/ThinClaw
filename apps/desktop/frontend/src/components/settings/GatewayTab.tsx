@@ -523,7 +523,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Gateway Socket URL</label>
                                 <input
                                     type="text"
-                                    placeholder="ws://server-ip:18789"
+                                    placeholder="http://server-ip:18789"
                                     value={remoteUrlInput}
                                     onChange={(e) => setRemoteUrlInput(e.target.value)}
                                     onBlur={() => handleSaveGateway('remote', remoteUrlInput, remoteTokenInput)}

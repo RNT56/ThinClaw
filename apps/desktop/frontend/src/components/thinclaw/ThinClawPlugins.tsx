@@ -464,8 +464,15 @@ export function ThinClawPlugins() {
 
     const handleInstallFromHub = async (pluginId: string) => {
         try {
-            await thinclaw.installFromClawHub(pluginId);
-            toast.success(`Installed ${pluginId}`);
+            const result = await thinclaw.installFromClawHub(pluginId);
+            // Local install is prepare-only ("Ready to install ..."); surface the
+            // runtime's actual result instead of falsely reporting "Installed".
+            const message = result?.message?.trim() || `Prepared ${pluginId}`;
+            if (result?.success === false) {
+                toast.error(message);
+            } else {
+                toast.info(message);
+            }
             fetchExtensions();
         } catch (e) {
             toast.error(`Install failed: ${e}`);
