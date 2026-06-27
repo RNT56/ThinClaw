@@ -393,14 +393,18 @@ pub async fn thinclaw_learning_record_rollback(
 #[specta::specta]
 pub async fn thinclaw_learning_evaluate_outcomes(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json("/api/learning/outcomes/evaluate-now", &json!({}))
-            .await;
+            .await
+            .map_err(|e| e.into());
     }
-    Ok(unavailable(
+    Err(crate::thinclaw::bridge::gated(
+        "manual outcome evaluation",
         "Manual outcome evaluation requires the gateway outcome service; the Desktop local engine exposes outcome review state but not direct evaluator execution.",
+        "connect a remote gateway",
+        crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
 }
 
@@ -627,17 +631,21 @@ pub async fn thinclaw_experiments_campaign_action(
 pub async fn thinclaw_experiments_gpu_validate(
     ironclaw: State<'_, ThinClawRuntimeState>,
     provider: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
                 &format!("/api/experiments/providers/gpu-clouds/{provider}/validate"),
                 &json!({}),
             )
-            .await;
+            .await
+            .map_err(|e| e.into());
     }
-    Ok(unavailable(
+    Err(crate::thinclaw::bridge::gated(
+        "GPU credential validation",
         "GPU cloud credential validation is only available through a ThinClaw gateway because it requires the gateway secrets service.",
+        "connect a remote gateway",
+        crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
 }
 
@@ -646,16 +654,20 @@ pub async fn thinclaw_experiments_gpu_validate(
 pub async fn thinclaw_experiments_gpu_launch_test(
     ironclaw: State<'_, ThinClawRuntimeState>,
     provider: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
                 &format!("/api/experiments/providers/gpu-clouds/{provider}/launch-test"),
                 &json!({}),
             )
-            .await;
+            .await
+            .map_err(|e| e.into());
     }
-    Ok(unavailable(
+    Err(crate::thinclaw::bridge::gated(
+        "GPU launch test",
         "GPU cloud launch tests are only available through a ThinClaw gateway because Desktop local mode does not expose provider credentials for remote compute launch.",
+        "connect a remote gateway",
+        crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
 }
