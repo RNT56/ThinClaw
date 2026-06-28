@@ -1414,8 +1414,22 @@ export async function searchClawHub(query: string): Promise<{ entries: ClawHubEn
     return invoke('thinclaw_clawhub_search', { query });
 }
 
-/** Install a plugin from ClawHub. */
-export async function installFromClawHub(pluginId: string): Promise<void> {
+/** Result of a ClawHub install request. In local/embedded mode this is
+ *  prepare-only: the runtime stages the install and returns success=true with a
+ *  "Ready to install ..." message (it does not download/activate). Remote mode
+ *  proxies to the gateway install route. Callers should surface message/success
+ *  rather than assuming the plugin is fully installed. */
+export interface ClawHubInstallResult {
+    plugin_name?: string;
+    version?: string;
+    install_path?: string;
+    success?: boolean;
+    message?: string;
+}
+
+/** Request a ClawHub plugin install. Returns the runtime's result (see
+ *  {@link ClawHubInstallResult}) so callers can report the real outcome. */
+export async function installFromClawHub(pluginId: string): Promise<ClawHubInstallResult> {
     return invoke('thinclaw_clawhub_install', { pluginId });
 }
 
