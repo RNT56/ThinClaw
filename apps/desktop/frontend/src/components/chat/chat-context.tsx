@@ -103,11 +103,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     searchResults: null
                 });
 
-                // Save User Message
+                // Save User Message — but skip persisting an empty turn. Regenerate
+                // re-runs the last turn with content="" (the backend's regenerate signal,
+                // preserved in finalMessages below); without this guard every regenerate
+                // would write a stray empty "user" row into conversation history.
                 const storageDocs = attachedDocs;
                 const assets = messageAssets(images, storageDocs);
-                const resSave = await directCommands.directHistorySaveMessage(id, "user", content, images.length > 0 ? images : null, assets, storageDocs.length > 0 ? storageDocs : null, null);
-                if (resSave.status === "error") throw new Error(resSave.error || "Could not save user message");
+                const hasUserTurn = (typeof content === "string" && content.trim().length > 0) || images.length > 0 || storageDocs.length > 0;
+                if (hasUserTurn) {
+                    const resSave = await directCommands.directHistorySaveMessage(id, "user", content, images.length > 0 ? images : null, assets, storageDocs.length > 0 ? storageDocs : null, null);
+                    if (resSave.status === "error") throw new Error(resSave.error || "Could not save user message");
+                }
 
                 let finalMessages = [...history, { role: "user", content, images: images.length > 0 ? images : null, assets, attached_docs: storageDocs.length > 0 ? storageDocs : null }];
 

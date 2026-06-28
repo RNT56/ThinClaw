@@ -15,7 +15,6 @@ export function MemoryEditor() {
     const loadMemory = async () => {
         setIsLoading(true);
         try {
-            // @ts-ignore - command might not be in bindings types yet
             const res = await thinclawCommands.thinclawGetMemory();
             if (res.status === 'ok') {
                 setContent(res.data);
@@ -35,7 +34,6 @@ export function MemoryEditor() {
     const saveMemory = async () => {
         setIsSaving(true);
         try {
-            // @ts-ignore
             const res = await thinclawCommands.thinclawSaveMemory(content);
             if (res.status === 'ok') {
                 setIsDirty(false);
