@@ -141,7 +141,7 @@ Strangler migration (non-flag-day):
 2. Convert `thinclaw.ts` wrappers into thin re-exports: `export const getLearningStatus = (n:number) => commands.thinclawLearningStatus(n)`. Zero component churn.
 3. Split the re-export shim by domain into `lib/api/{sessions,memory,routines,learning,experiments,mcp,channels,…}.ts` (this is TDO-020 / WS-3).
 4. Codemod components from `thinclaw.foo()` → `api.foo()` per domain; delete each shim once unused.
-5. Retire root `src/tauri_commands.rs` facade (TDO-006): it has 1 real command and is an `openclaw_*` adapter relic; fold any remaining helper into the typed command modules.
+5. Retire root `src/tauri_commands.rs` facade (TDO-006): it has 1 real command and is a legacy adapter relic (it maps to the old pre-rename command names from the §17.4 integration contract); fold any remaining helper into the typed command modules.
 
 ## 7. Rollout sequence & risk
 
