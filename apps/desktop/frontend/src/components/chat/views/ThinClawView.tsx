@@ -23,6 +23,7 @@ import { ThinClawMemory } from '../../thinclaw/ThinClawMemory';
 import { FleetCommandCenter } from '../../thinclaw/fleet/FleetCommandCenter';
 import { ThinClawCostDashboard } from '../../thinclaw/ThinClawCostDashboard';
 import { ThinClawCacheStats } from '../../thinclaw/ThinClawCacheStats';
+import { ThinClawTrajectory } from '../../thinclaw/ThinClawTrajectory';
 import { ThinClawRouting } from '../../thinclaw/ThinClawRouting';
 import { ThinClawExperiments } from '../../thinclaw/ThinClawExperiments';
 import { ThinClawLearning } from '../../thinclaw/ThinClawLearning';
@@ -92,6 +93,7 @@ export function ThinClawView() {
             case 'pairing': return <ThinClawPairing />;
             case 'cost-dashboard': return <ThinClawCostDashboard />;
             case 'cache-stats': return <ThinClawCacheStats />;
+            case 'trajectory': return <ThinClawTrajectory />;
             case 'routing': return <ThinClawRouting />;
             case 'experiments': return <ThinClawExperiments />;
             case 'learning': return <ThinClawLearning />;

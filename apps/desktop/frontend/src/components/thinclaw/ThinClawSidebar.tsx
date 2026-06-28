@@ -13,7 +13,7 @@ import { ThinClawSession } from '../../lib/thinclaw';
 
 import { motion } from 'framer-motion';
 
-export type ThinClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'jobs' | 'repo-projects' | 'autonomy' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing' | 'experiments' | 'learning';
+export type ThinClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'jobs' | 'repo-projects' | 'autonomy' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing' | 'experiments' | 'learning' | 'trajectory';
 
 const containerVariants = {
     hidden: { opacity: 0 },
@@ -342,6 +342,7 @@ export function ThinClawSidebar({
                                 { id: 'brain', label: 'The Brain', icon: Brain },
                                 { id: 'memory', label: 'Temporal Memory', icon: History },
                                 { id: 'learning', label: 'Learning Review', icon: BrainCircuit },
+                                { id: 'trajectory', label: 'Trajectory', icon: Activity },
                                 { id: 'cost-dashboard', label: 'Cost Dashboard', icon: DollarSign },
                                 { id: 'cache-stats', label: 'Cache Stats', icon: Database },
                             ]
