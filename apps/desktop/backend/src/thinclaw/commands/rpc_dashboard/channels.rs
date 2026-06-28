@@ -380,6 +380,20 @@ pub async fn thinclaw_gmail_status(
                     }
                 }
             }
+            if label_filters.is_empty() {
+                if let Ok(Some(value)) = store
+                    .get_setting("local_user", "channels.gmail_label_filters")
+                    .await
+                {
+                    if let Some(raw) = value.as_str() {
+                        label_filters = raw
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                }
+            }
             if let Ok(Some(_)) = store.get_setting("local_user", "gmail_refresh_token").await {
                 oauth_configured = true;
             }
