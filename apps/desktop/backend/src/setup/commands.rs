@@ -240,6 +240,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         // New feature commands
         crate::thinclaw::commands::thinclaw_set_thinking,
         crate::thinclaw::commands::thinclaw_memory_search,
+        crate::thinclaw::commands::thinclaw_session_search,
         crate::thinclaw::commands::thinclaw_export_session,
         // Hooks & extensions management
         crate::thinclaw::commands::thinclaw_hooks_list,

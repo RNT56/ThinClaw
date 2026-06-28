@@ -1000,6 +1000,29 @@ export async function searchMemory(
     return invoke('thinclaw_memory_search', { query, limit: limit ?? null });
 }
 
+/** Rendered cross-session transcript search results. */
+export interface SessionSearchResult {
+    results: ThinClawJson[];
+    summarized: boolean;
+    fallback: boolean;
+}
+
+/**
+ * Search stored conversation transcripts across sessions (local/embedded mode).
+ * Optionally LLM-summarizes matching sessions.
+ */
+export async function searchSessions(
+    query: string,
+    limit?: number | null,
+    summarize?: boolean | null,
+): Promise<SessionSearchResult> {
+    return invoke('thinclaw_session_search', {
+        query,
+        limit: limit ?? null,
+        summarize: summarize ?? null,
+    });
+}
+
 export interface SessionExportResponse {
     transcript: string;
     session_key: string;
