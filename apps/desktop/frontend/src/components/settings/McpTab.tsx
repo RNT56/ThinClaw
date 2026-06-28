@@ -391,8 +391,7 @@ export function McpTab() {
 
         const start = Date.now();
         try {
-            // Use the rig_check_web_search as a proxy — or call the MCP tool list endpoint
-            // We call the backend's checkWebSearch which exercises the search pipeline
+            // Probe the configured MCP server by requesting its tool list.
             const toolListUrl = baseUrl.replace(/\/$/, '') + '/tools';
             const headers: Record<string, string> = { 'Content-Type': 'application/json' };
             if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
