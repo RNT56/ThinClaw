@@ -6,6 +6,8 @@ This document tracks both feature parity against OpenClaw (TypeScript reference 
 
 Desktop-oriented sections are maintained from ThinClaw Desktop contracts, local Tauri wiring, and the integration surfaces present in this repo. Detailed desktop runtime boundaries live under `apps/desktop/documentation/`.
 
+> **Desktop overhaul roadmap:** the end-to-end Desktop overhaul/upgrade/refinement plan (parity-first) is tracked in [`apps/desktop/documentation/OVERHAUL_PLAN.md`](apps/desktop/documentation/OVERHAUL_PLAN.md), with a tracker-ready epic/issue backlog in [`apps/desktop/documentation/OVERHAUL_BACKLOG.md`](apps/desktop/documentation/OVERHAUL_BACKLOG.md).
+
 **Key source cross-references:** [`src/service.rs`](src/service.rs) (launchd/systemd), [`src/tools/builtin/canvas.rs`](src/tools/builtin/canvas.rs) (A2UI canvas tool), [`src/channels/imessage.rs`](src/channels/imessage.rs) (iMessage channel), [`src/media/video.rs`](src/media/video.rs) (video pipeline), [`src/channels/signal.rs`](src/channels/signal.rs) (Signal), [`src/channels/discord.rs`](src/channels/discord.rs) (Discord), [`src/channels/nostr.rs`](src/channels/nostr.rs) (Nostr).
 
 **Legend:**

@@ -6,7 +6,7 @@ use tauri::State;
 use tracing::info;
 
 use super::ThinClawManager;
-use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
+use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 use thinclaw_core::tools::Tool;
 
@@ -56,11 +56,13 @@ pub async fn thinclaw_skills_toggle(
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: String,
     enabled: bool,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
-        return Err(RemoteGatewayProxy::unavailable(
+        return Err(gated(
             "skill enable/disable",
             "the gateway exposes skill install/remove/trust/reload but no enable toggle",
+            "toggle skills from the local (embedded) runtime",
+            RouteMode::LocalOnly,
         ));
     }
 
@@ -484,11 +486,13 @@ pub async fn thinclaw_install_skill_repo(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     repo_url: String,
-) -> Result<String, String> {
+) -> Result<String, BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
-        return Err(RemoteGatewayProxy::unavailable(
+        return Err(gated(
             "skill repository install",
             "the gateway install endpoint accepts catalog names, raw content, or direct SKILL.md URLs; cloning arbitrary git repositories is local-only",
+            "clone git skill repositories from the local (embedded) runtime",
+            RouteMode::LocalOnly,
         ));
     }
 
@@ -508,10 +512,7 @@ pub async fn thinclaw_install_skill_repo(
 
     let target_dir = skills_dir.join(repo_name);
     if target_dir.exists() {
-        return Err(format!(
-            "Skill repository already installed at {:?}",
-            target_dir
-        ));
+        return Err(format!("Skill repository already installed at {:?}", target_dir).into());
     }
 
     info!("Cloning skill repo {} into {:?}", repo_url, target_dir);
@@ -527,7 +528,7 @@ pub async fn thinclaw_install_skill_repo(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Git clone failed: {}", stderr));
+        return Err(format!("Git clone failed: {}", stderr).into());
     }
 
     Ok(format!("Successfully installed skills from {}", repo_name))

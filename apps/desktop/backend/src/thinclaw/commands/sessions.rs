@@ -578,16 +578,62 @@ pub async fn thinclaw_get_history(
 
 /// Subscribe to a session for live updates.
 ///
-/// **Intentional no-op**: ThinClaw sends events directly via TauriChannel.
+/// Activates the given `session_key` in the runtime's active-sessions map so
+/// that `TauriChannel` correctly routes subsequent SSE events to this session.
+/// For non-`agent:main` keys the session manager is also consulted to ensure
+/// the in-memory session record exists before any events can fire.
+///
+/// Events themselves stream via the `thinclaw-event` Tauri channel; this
+/// command just registers intent so routing is correct from the first event.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_subscribe_session(
-    _ironclaw: State<'_, ThinClawRuntimeState>,
-    _session_key: String,
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    session_key: String,
 ) -> Result<ThinClawRpcResponse, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    // The remote gateway pushes events over its own SSE connection; there is
+    // no per-session subscribe RPC to proxy.  Record the session key locally
+    // so any bridge-level routing also stays aligned.
+    if let Some(_proxy) = ironclaw.remote_proxy().await {
+        ironclaw.activate_session(&session_key).await.ok();
+        info!(
+            "[thinclaw-runtime] Subscribed (remote) session: {}",
+            session_key
+        );
+        return Ok(ThinClawRpcResponse {
+            ok: true,
+            message: Some("subscribed:remote".into()),
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
+    // 1. Register the session key in the active-sessions map so TauriChannel
+    //    can route events to the correct frontend subscriber.
+    ironclaw.activate_session(&session_key).await?;
+
+    // 2. Ensure the underlying session record exists in the session manager.
+    //    `agent:main` is the built-in assistant thread and is always present;
+    //    all other keys are user-created thread UUIDs that may not yet have an
+    //    in-memory entry if the agent restarted since they were persisted.
+    if session_key != "agent:main" {
+        if let Ok(agent) = ironclaw.agent().await {
+            // get_or_create_session is cheap when the session already exists.
+            agent
+                .session_manager()
+                .get_or_create_session("local_user")
+                .await;
+        }
+    }
+
+    info!(
+        "[thinclaw-runtime] Subscribed (local) session: {}",
+        session_key
+    );
+
     Ok(ThinClawRpcResponse {
         ok: true,
-        message: None,
+        message: Some(format!("subscribed:{}", session_key)),
     })
 }
 

@@ -244,14 +244,19 @@ pub async fn thinclaw_job_cancel(
 pub async fn thinclaw_job_restart(
     ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy.restart_job(&job_id).await;
+        return proxy
+            .restart_job(&job_id)
+            .await
+            .map_err(crate::thinclaw::bridge::BridgeError::from);
     }
 
-    Err(local_unavailable(
+    Err(crate::thinclaw::bridge::gated(
         "job restart",
         "only remote gateway sandbox jobs expose restartable stored job specs",
+        "connect a remote gateway",
+        crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
 }
 
@@ -262,16 +267,19 @@ pub async fn thinclaw_job_prompt(
     job_id: String,
     content: Option<String>,
     done: Option<bool>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .prompt_job(&job_id, content, done.unwrap_or(false))
-            .await;
+            .await
+            .map_err(crate::thinclaw::bridge::BridgeError::from);
     }
 
-    Err(local_unavailable(
+    Err(crate::thinclaw::bridge::gated(
         "job prompt",
         "only remote gateway interactive sandbox jobs accept follow-up prompts",
+        "connect a remote gateway",
+        crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
 }
 
@@ -454,61 +462,79 @@ pub async fn thinclaw_autonomy_rollback(
 #[specta::specta]
 pub async fn thinclaw_autonomy_rollouts(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy.get_autonomy_rollouts().await;
+        return proxy
+            .get_autonomy_rollouts()
+            .await
+            .map_err(crate::thinclaw::bridge::BridgeError::from);
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
-        return Err(autonomy_unavailable(
+        return Err(crate::thinclaw::bridge::gated(
+            "desktop autonomy execution",
             "desktop autonomy manager is not active",
+            "enable reckless desktop autonomy in host config and grant OS permissions",
+            crate::thinclaw::bridge::RouteMode::LocalAndRemote,
         ));
     };
     manager
         .rollout_summary()
         .await
         .and_then(|summary| serde_json::to_value(summary).map_err(|e| e.to_string()))
-        .map_err(autonomy_unavailable)
+        .map_err(crate::thinclaw::bridge::BridgeError::from)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_checks(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy.get_autonomy_checks().await;
+        return proxy
+            .get_autonomy_checks()
+            .await
+            .map_err(crate::thinclaw::bridge::BridgeError::from);
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
-        return Err(autonomy_unavailable(
+        return Err(crate::thinclaw::bridge::gated(
+            "desktop autonomy execution",
             "desktop autonomy manager is not active",
+            "enable reckless desktop autonomy in host config and grant OS permissions",
+            crate::thinclaw::bridge::RouteMode::LocalAndRemote,
         ));
     };
     manager
         .checks_summary()
         .await
         .and_then(|summary| serde_json::to_value(summary).map_err(|e| e.to_string()))
-        .map_err(autonomy_unavailable)
+        .map_err(crate::thinclaw::bridge::BridgeError::from)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_evidence(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy.get_autonomy_evidence().await;
+        return proxy
+            .get_autonomy_evidence()
+            .await
+            .map_err(crate::thinclaw::bridge::BridgeError::from);
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
-        return Err(autonomy_unavailable(
+        return Err(crate::thinclaw::bridge::gated(
+            "desktop autonomy execution",
             "desktop autonomy manager is not active",
+            "enable reckless desktop autonomy in host config and grant OS permissions",
+            crate::thinclaw::bridge::RouteMode::LocalAndRemote,
         ));
     };
     manager
         .evidence_summary()
         .await
         .and_then(|summary| serde_json::to_value(summary).map_err(|e| e.to_string()))
-        .map_err(autonomy_unavailable)
+        .map_err(crate::thinclaw::bridge::BridgeError::from)
 }
