@@ -2489,6 +2489,63 @@ async thinclawCompactSession(sessionKey: string) : Promise<Result<CompactSession
 }
 },
 /**
+ * List filesystem checkpoints (shadow-git snapshots) for a project directory,
+ * newest first as returned by the core.
+ */
+async thinclawCheckpointsList(projectDir: string) : Promise<Result<CheckpointEntryItem[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoints_list", { projectDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Diff the current project state against a checkpoint commit (unified diff text).
+ */
+async thinclawCheckpointDiff(projectDir: string, commitHash: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoint_diff", { projectDir, commitHash }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Restore a project (or a single `file`) to a checkpoint commit. The core
+ * creates a safety snapshot automatically before applying the restore.
+ */
+async thinclawCheckpointRestore(projectDir: string, commitHash: string, file: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoint_restore", { projectDir, commitHash, file }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Aggregate stats over the local trajectory archive (counts, span, outcomes).
+ */
+async thinclawTrajectoryStats() : Promise<Result<TrajectoryStatsItem, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The most recent trajectory turn records (default 100), as raw JSON values.
+ */
+async thinclawTrajectoryRecords(limit: number | null) : Promise<Result<JsonValue[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_records", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Get LLM cost summary.
  *
  * Returns total spend, daily/monthly breakdowns, per-model costs,
@@ -3499,6 +3556,11 @@ export type CacheStats = { hits: number; misses: number; evictions: number; size
 export type ChannelStatusEntry = { id: string; name: string; type: string; state: string; enabled: boolean; uptime_secs: number | null; messages_sent: number; messages_received: number; last_error: string | null; stream_mode: string }
 export type ChatServerConfig = { port: number; token: string; context_size: number; model_family: string }
 /**
+ * Frontend-facing checkpoint record. Mirrors `thinclaw_core` `CheckpointEntry`
+ * but renders the timestamp as an RFC3339 string so the type is specta-exportable.
+ */
+export type CheckpointEntryItem = { commit_hash: string; timestamp: string; summary: string }
+/**
  * Information about a child session spawned by a parent session.
  */
 export type ChildSessionInfo = {
@@ -4005,6 +4067,11 @@ export type ToolInfoItem = { name: string; description: string; enabled: boolean
  * Tool list response
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
+/**
+ * Frontend-facing aggregate trajectory stats. Mirrors `TrajectoryStats` with
+ * paths/timestamps rendered as strings so the type is specta-exportable.
+ */
+export type TrajectoryStatsItem = { log_root: string; file_count: number; record_count: number; session_count: number; first_seen: string | null; last_seen: string | null; success_count: number; failure_count: number; neutral_count: number }
 /**
  * Stable UI event contract — what the ThinClaw chat UI consumes.
  *

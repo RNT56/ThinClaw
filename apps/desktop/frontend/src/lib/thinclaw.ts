@@ -1357,6 +1357,63 @@ export async function compactSession(sessionKey: string): Promise<CompactSession
     return invoke('thinclaw_compact_session', { sessionKey });
 }
 
+// ----------------------------------------------------------------------------
+// Filesystem checkpoints / rollback (TDO-103)
+// ----------------------------------------------------------------------------
+
+/** A shadow-git checkpoint snapshot of a project directory. */
+export interface CheckpointEntry {
+    commit_hash: string;
+    timestamp: string;
+    summary: string;
+}
+
+/** List filesystem checkpoints (newest first) for a project directory. */
+export async function listCheckpoints(projectDir: string): Promise<CheckpointEntry[]> {
+    return invoke('thinclaw_checkpoints_list', { projectDir });
+}
+
+/** Unified diff of the current project state vs a checkpoint commit. */
+export async function diffCheckpoint(projectDir: string, commitHash: string): Promise<string> {
+    return invoke('thinclaw_checkpoint_diff', { projectDir, commitHash });
+}
+
+/** Restore a project (or a single file) to a checkpoint commit. */
+export async function restoreCheckpoint(
+    projectDir: string,
+    commitHash: string,
+    file?: string | null,
+): Promise<void> {
+    return invoke('thinclaw_checkpoint_restore', { projectDir, commitHash, file: file ?? null });
+}
+
+// ----------------------------------------------------------------------------
+// Trajectory viewer (TDO-106)
+// ----------------------------------------------------------------------------
+
+/** Aggregate stats over the local trajectory archive. */
+export interface TrajectoryStats {
+    log_root: string;
+    file_count: number;
+    record_count: number;
+    session_count: number;
+    first_seen: string | null;
+    last_seen: string | null;
+    success_count: number;
+    failure_count: number;
+    neutral_count: number;
+}
+
+/** Aggregate stats (counts, span, outcomes) over the local trajectory archive. */
+export async function getTrajectoryStats(): Promise<TrajectoryStats> {
+    return invoke('thinclaw_trajectory_stats');
+}
+
+/** The most recent trajectory turn records (default 100) as raw JSON. */
+export async function getTrajectoryRecords(limit?: number | null): Promise<ThinClawJson[]> {
+    return invoke('thinclaw_trajectory_records', { limit: limit ?? null });
+}
+
 // ============================================================================
 // Sprint 13 — New Backend APIs
 // ============================================================================
