@@ -2136,6 +2136,18 @@ async thinclawMemorySearch(query: string, limit: number | null) : Promise<Result
 }
 },
 /**
+ * Search stored conversation transcripts for `query` and render windowed
+ * excerpts; optionally summarize matching sessions.
+ */
+async thinclawSessionSearch(query: string, limit: number | null, summarize: boolean | null) : Promise<Result<SessionSearchResult, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_session_search", { query, limit, summarize }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Export a session's history in the requested format.
  *
  * Supported formats: `md` (default), `json`, `txt`, `csv`, `html`.
@@ -3950,6 +3962,22 @@ session_key: string;
  * Number of messages exported
  */
 message_count: number }
+/**
+ * Rendered cross-session search results.
+ */
+export type SessionSearchResult = {
+/**
+ * One rendered hit per result (raw JSON: session/thread id, excerpt, score, …).
+ */
+results: JsonValue[];
+/**
+ * Whether matching sessions were LLM-summarized.
+ */
+summarized: boolean;
+/**
+ * Whether the renderer fell back to raw excerpts (e.g. no summarizer).
+ */
+fallback: boolean }
 /**
  * SFTP provider configuration input from the frontend.
  */
