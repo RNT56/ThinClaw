@@ -4,7 +4,7 @@ import {
     Layout, Smartphone, Timer, Package, Cpu, Shield, Brain, History,
     ChevronDown, Server, Laptop, Trash2, Anchor, Plug, Settings2, Activity,
     Stethoscope, Wrench, KeyRound, DollarSign, Database, Zap, FileText, Star, GitBranch,
-    Play, ShieldCheck, FlaskConical, BrainCircuit
+    Play, ShieldCheck, FlaskConical, BrainCircuit, Search
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -13,7 +13,7 @@ import { ThinClawSession } from '../../lib/thinclaw';
 
 import { motion } from 'framer-motion';
 
-export type ThinClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'jobs' | 'repo-projects' | 'autonomy' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing' | 'experiments' | 'learning';
+export type ThinClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'jobs' | 'repo-projects' | 'autonomy' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing' | 'experiments' | 'learning' | 'trajectory' | 'rollback' | 'session-search';
 
 const containerVariants = {
     hidden: { opacity: 0 },
@@ -342,6 +342,9 @@ export function ThinClawSidebar({
                                 { id: 'brain', label: 'The Brain', icon: Brain },
                                 { id: 'memory', label: 'Temporal Memory', icon: History },
                                 { id: 'learning', label: 'Learning Review', icon: BrainCircuit },
+                                { id: 'trajectory', label: 'Trajectory', icon: Activity },
+                                { id: 'rollback', label: 'Rollback', icon: History },
+                                { id: 'session-search', label: 'Session Search', icon: Search },
                                 { id: 'cost-dashboard', label: 'Cost Dashboard', icon: DollarSign },
                                 { id: 'cache-stats', label: 'Cache Stats', icon: Database },
                             ]
