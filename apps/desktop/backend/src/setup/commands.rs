@@ -30,7 +30,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::tts::direct_media_tts_list_voices,
         crate::stt::direct_media_transcribe_audio,
         // ── Web & Image ─────────────────────────────────────────────────
-        crate::web_search::check_web_search,
         crate::image_gen::direct_media_generate_image,
         // ── RAG ─────────────────────────────────────────────────────────
         crate::rag::direct_rag_ingest_document,
@@ -88,7 +87,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::projects::get_project_documents,
         crate::projects::delete_document,
         // ── Rig Agent ───────────────────────────────────────────────────
-        crate::rig_lib::rig_check_web_search,
         crate::rig_lib::agent_chat,
         // ── ThinClaw Agent Cockpit ──────────────────────────────────────
         crate::thinclaw::commands::thinclaw_get_status,

@@ -102,12 +102,3 @@ pub async fn perform_web_search(query: &str) -> Result<(String, Vec<WebSearchRes
 
     Ok((final_context, results))
 }
-
-#[tauri::command]
-#[specta::specta]
-pub async fn check_web_search(query: String) -> Result<String, String> {
-    perform_web_search(&query)
-        .await
-        .map(|(ctx, _)| ctx)
-        .map_err(|e| e.to_string())
-}
