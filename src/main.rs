@@ -1516,117 +1516,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     // ── SIGHUP hot-reload handler (Unix only) ──────────────────────────
     #[cfg(unix)]
-    {
-        let sighup_webhook_server = webhook_server.clone();
-        let sighup_store: Option<Arc<dyn thinclaw::db::Database>> =
-            components.db.as_ref().map(Arc::clone);
-        let sighup_secrets = components.secrets_store.clone();
-        let sighup_owner_id = "default".to_string();
-
-        tokio::spawn(async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut sighup = match signal(SignalKind::hangup()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("Failed to register SIGHUP handler: {}", e);
-                    return;
-                }
-            };
-
-            loop {
-                sighup.recv().await;
-                tracing::info!("SIGHUP received — reloading HTTP webhook config");
-
-                // 1. Refresh secrets overlay (thread-safe, no unsafe set_var)
-                if let Some(ref secrets) = sighup_secrets {
-                    thinclaw::config::refresh_secrets(secrets.as_ref(), &sighup_owner_id).await;
-                }
-
-                // 2. Reload config from DB (or env fallback)
-                let new_config = match &sighup_store {
-                    Some(store) => {
-                        thinclaw::config::Config::from_db(store.as_ref(), &sighup_owner_id).await
-                    }
-                    None => thinclaw::config::Config::from_env().await,
-                };
-                let new_config = match new_config {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!("SIGHUP config reload failed: {}", e);
-                        continue;
-                    }
-                };
-
-                // 3. Check HTTP channel config
-                let new_http = match new_config.channels.http {
-                    Some(c) => c,
-                    None => {
-                        tracing::warn!("SIGHUP: HTTP channel no longer configured, skipping");
-                        continue;
-                    }
-                };
-
-                // 4. Two-phase listener swap if address changed
-                let new_addr: std::net::SocketAddr =
-                    match format!("{}:{}", new_http.host, new_http.port).parse() {
-                        Ok(a) => a,
-                        Err(e) => {
-                            tracing::error!("SIGHUP: invalid addr: {}", e);
-                            continue;
-                        }
-                    };
-
-                if let Some(ref ws_arc) = sighup_webhook_server {
-                    let (old_addr, router) = {
-                        let ws = ws_arc.lock().await;
-                        (ws.current_addr(), ws.merged_router_clone())
-                    };
-
-                    if old_addr != new_addr {
-                        tracing::info!(
-                            "SIGHUP: HTTP addr {} -> {}, restarting listener",
-                            old_addr,
-                            new_addr
-                        );
-                        if let Some(app) = router {
-                            // Phase 1: bind new listener outside the lock
-                            match tokio::net::TcpListener::bind(new_addr).await {
-                                Ok(listener) => {
-                                    // Phase 2: swap under lock
-                                    let (old_tx, old_handle) = {
-                                        let mut ws = ws_arc.lock().await;
-                                        ws.install_listener(new_addr, listener, app)
-                                    };
-                                    // Phase 3: shut down old listener outside lock
-                                    if let Some(tx) = old_tx {
-                                        let _ = tx.send(());
-                                    }
-                                    if let Some(handle) = old_handle {
-                                        let _ = handle.await;
-                                    }
-                                    tracing::info!(
-                                        "SIGHUP: webhook server restarted on {}",
-                                        new_addr
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!("SIGHUP: bind failed on {}: {}", new_addr, e);
-                                }
-                            }
-                        }
-                    } else {
-                        tracing::info!(
-                            "SIGHUP: HTTP addr unchanged ({}), config refreshed",
-                            old_addr
-                        );
-                    }
-                }
-            }
-        });
-        tracing::info!(
-            "SIGHUP hot-reload handler registered (send `kill -HUP` to reload HTTP webhook config)"
-        );
-    }
+    spawn_sighup_reload_handler(
+        webhook_server.clone(),
+        components.db.as_ref().map(Arc::clone),
+        components.secrets_store.clone(),
+        "default".to_string(),
+    );
 
     // ── WASM channel hot-reload watcher ─────────────────────────────────
     if let Some((loader, channels_dir, wasm_router)) = wasm_watcher_state {
