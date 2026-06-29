@@ -2622,6 +2622,23 @@ async thinclawChannelConfigSchemas() : Promise<Result<JsonValue, string>> {
 }
 },
 /**
+ * Apply configuration changes to a channel.
+ *
+ * Persists each field under `channels.{channel_id}_{field}` and forwards the
+ * values to the live channel's `update_runtime_config`. WASM channels apply the
+ * change live; native channels (Signal, Discord, …) use the default no-op and
+ * persist but require a channel restart to take effect (reported via the note).
+ * Embedded-only (D-3): a remote gateway owns its own channels.
+ */
+async thinclawChannelConfigSubmit(channelId: string, values: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_config_submit", { channelId, values }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Set the default agent profile.
  */
 async thinclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> {
