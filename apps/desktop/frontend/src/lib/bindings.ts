@@ -3029,6 +3029,36 @@ async thinclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonVa
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * List the agent-eval environments the desktop can describe.
+ *
+ * `agent_loop` is runnable against the embedded agent; the benchmark envs
+ * need case definitions and are CLI-only for now (reported as non-runnable).
+ */
+async thinclawExperimentsListEnvs() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_list_envs") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Run an agent-eval episode set against the embedded agent.
+ *
+ * Drives `AgentLoopEnv` for `n_episodes` (clamped 1..=20), each sending `prompt`
+ * as a single user message, capped at `max_steps` (clamped 1..=16). Episodes run
+ * in throwaway `agent-env:` sessions, so the user's threads are untouched.
+ * Local-only: the eval needs the embedded agent, so it is gated off in remote mode.
+ */
+async thinclawExperimentsRunEval(envId: string, prompt: string, nEpisodes: number, maxSteps: number) : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_run_eval", { envId, prompt, nEpisodes, maxSteps }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getPermissionStatus() : Promise<PermissionStatus> {
     return await TAURI_INVOKE("get_permission_status");
 },

@@ -129,6 +129,8 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("direct_runtime_start_chat_server", RouteMode::LocalOnly),
     ("direct_runtime_start_stt_server", RouteMode::LocalOnly),
     ("direct_runtime_stop_chat_server", RouteMode::LocalOnly),
+    // Agent-loop eval drives the embedded agent; no remote-gateway equivalent.
+    ("thinclaw_experiments_run_eval", RouteMode::LocalOnly),
     // ---- LocalAndRemote -----------------------------------------------------
     // These commands work in both modes; the dispatcher picks the right backend.
     ("thinclaw_cost_summary", RouteMode::LocalAndRemote),
