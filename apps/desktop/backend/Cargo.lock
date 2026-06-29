@@ -10409,7 +10409,6 @@ dependencies = [
  "thinclaw-llm-core",
  "thinclaw-safety",
  "thinclaw-settings",
- "thinclaw-tools",
  "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.17",

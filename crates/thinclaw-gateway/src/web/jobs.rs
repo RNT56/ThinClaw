@@ -2,7 +2,7 @@
 
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use thinclaw_tools::execution::{
+use thinclaw_tools_core::execution_descriptor::{
     ExecutionBackendKind, RuntimeDescriptor, local_job_runtime_descriptor,
     sandbox_job_runtime_descriptor,
 };
