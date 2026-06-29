@@ -4,6 +4,7 @@ import { ThinClawChatView } from '../../thinclaw/ThinClawChatView';
 import { ThinClawDashboard } from '../../thinclaw/ThinClawDashboard';
 import { ThinClawChannels } from '../../thinclaw/ThinClawChannels';
 import { ThinClawChannelStatus } from '../../thinclaw/ThinClawChannelStatus';
+import { ThinClawChannelConfig } from '../../thinclaw/ThinClawChannelConfig';
 import { ThinClawPresence } from '../../thinclaw/ThinClawPresence';
 import { ThinClawAutomations } from '../../thinclaw/ThinClawAutomations';
 import { ThinClawJobs } from '../../thinclaw/ThinClawJobs';
@@ -76,6 +77,7 @@ export function ThinClawView() {
             case 'fleet': return <FleetCommandCenter />;
             case 'channels': return <ThinClawChannels />;
             case 'channel-status': return <ThinClawChannelStatus />;
+            case 'channel-config': return <ThinClawChannelConfig />;
             case 'presence': return <ThinClawPresence />;
             case 'automations': return <ThinClawAutomations />;
             case 'jobs': return <ThinClawJobs />;
