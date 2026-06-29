@@ -1017,11 +1017,11 @@ async fn async_main() -> anyhow::Result<()> {
         let http_channel = HttpChannel::new(http_config.clone());
         webhook_routes.push(http_channel.routes());
         let (host, port) = http_channel.addr();
-        webhook_server_addr = Some(
-            format!("{}:{}", host, port)
-                .parse()
-                .expect("HttpConfig host:port must be a valid SocketAddr"),
-        );
+        webhook_server_addr = Some(format!("{}:{}", host, port).parse().map_err(|e| {
+            anyhow::anyhow!(
+                "HTTP channel bind address '{host}:{port}' is not a valid SocketAddr: {e}"
+            )
+        })?);
         channel_names.push("http".to_string());
         channels.add(Box::new(http_channel)).await;
         tracing::info!(
