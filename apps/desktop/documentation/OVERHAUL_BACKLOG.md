@@ -2,6 +2,30 @@
 
 > **Status:** draft v1 · **Created:** 2026-06-27 · Companion to [`OVERHAUL_PLAN.md`](OVERHAUL_PLAN.md).
 
+## Completion status (updated 2026-06-29)
+
+First parity batch landed/in-flight. ✅ = merged to `main`; 🟡 = implemented + verified,
+in-flight PR (auto-merge armed). Item-level state is tracked in the PRs, not per-row below.
+
+| TDO | Item | State | PR |
+|---|---|---|---|
+| TDO-001 | `RouteMode` enum + typed `BridgeError` + `gated()` helper | 🟡 | bridge foundation |
+| TDO-002 | Bridge linter (`ROUTE_TABLE` + `all_gated_commands_are_classified`) | 🟡 | #110 |
+| TDO-100 | Real per-thread compaction (`thinclaw_compact_session`) | ✅ | merged |
+| TDO-101/102 | Lifecycle events: compaction (#118) + advisor + self-repair → `UiEvent::AgentLifecycleEvent` | 🟡 | #118, #121 |
+| TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | #105/#108 |
+| TDO-104 | Undo/redo: `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons | 🟡 | #116, #120 |
+| TDO-105 | Session search command + Session Search panel | ✅ | #105/#108 |
+| TDO-106 | Trajectory: `stats`/`records` commands + Trajectory panel | ✅ | #105/#108 |
+| TDO-113 | Agent eval: `experiments_list_envs` + `experiments_run_eval` | 🟡 | #117 |
+| TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | 🟡 | #119, #122, #123 |
+
+**Deferred / cross-lane:** channel-config submit *form* is delivered as a new Lane-B panel (#123);
+remote-mode submit and live-reload for native channels remain future work; the eval runtime
+smoke-test needs a running engine. See [`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md).
+
+---
+
 Drop these into your tracker as **Epics** (workstreams/phases) and **Issues**. IDs are
 stable (`TDO-###`). Sizes: **S** ≈ ≤1d, **M** ≈ 2–4d, **L** ≈ 1–2wk, **XL** ≈ 3wk+.
 "Phase" = which release gate it blocks (P1 parity / P2 stabilize / P3 UX / ∞ continuous).
