@@ -138,7 +138,9 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const [modelsDir, setModelsDir] = useState<string | null>(null);
     const [downloadSpeed] = useState("");
     const [standardAssets, setStandardAssets] = useState<StandardAsset[]>([]);
-    const [models, setModels] = useState<ModelDefinition[]>(MODEL_LIBRARY);
+    // The curated MODEL_LIBRARY is the catalog source; it has no runtime updater
+    // (the former remote-catalog sync to localhost:8000 was dead and was removed).
+    const [models] = useState<ModelDefinition[]>(MODEL_LIBRARY);
     const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
     const [runtimeSnapshot, setRuntimeSnapshot] = useState<LocalRuntimeSnapshot | null>(null);
 
@@ -193,46 +195,6 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
             unlistenSetup.then(fn => fn());
         };
     }, [refreshRuntimeSnapshot]);
-
-    const syncRemoteCatalog = useCallback(async () => {
-        try {
-            // Check if server is available (currently hardcoded as per spec)
-            const health = await fetch("http://localhost:8000/api/v1/health").catch(() => null);
-            if (!health || !health.ok) {
-                // Fallback to local DB cache
-                const cached = await (commands as any).getRemoteModelCatalog();
-                if (cached?.status === "ok" && cached.data.length > 0) {
-                    setModels(cached.data.map((e: any) => e.metadata as ModelDefinition));
-                }
-                return;
-            }
-
-            const response = await fetch("http://localhost:8000/api/v1/models");
-            if (response.ok) {
-                const remoteModels: ModelDefinition[] = await response.json();
-                setModels(remoteModels);
-
-                // Persist to local DB for offline access
-                const entries = remoteModels.map(m => ({
-                    id: m.id,
-                    name: m.name,
-                    metadata: m,
-                    local_version: null,
-                    remote_version: (m as any).version || "1.0.0",
-                    last_checked_at: Math.floor(Date.now() / 1000),
-                    status: 'available'
-                }));
-
-                await (commands as any).updateRemoteModelCatalog(entries);
-            }
-        } catch (e) {
-            console.warn("Failed to sync remote model catalog:", e);
-        }
-    }, []);
-
-    useEffect(() => {
-        syncRemoteCatalog();
-    }, [syncRemoteCatalog]);
 
     const checkStandardAssets = useCallback(async () => {
         try {
