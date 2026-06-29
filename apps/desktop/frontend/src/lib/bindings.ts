@@ -3986,7 +3986,7 @@ export type SftpConfigInput = { endpoint: string; username: string | null;
  * Path to SSH private key (e.g. `~/.ssh/id_rsa`) or password
  */
 key_or_password: string | null; root: string | null }
-export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_running: boolean; image_running: boolean; summarizer_running: boolean }
+export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_configured: boolean; image_configured: boolean; summarizer_running: boolean }
 /**
  * Slack configuration input
  */
