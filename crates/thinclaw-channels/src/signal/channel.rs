@@ -1,10 +1,6 @@
-//! Signal channel via signal-cli daemon HTTP/JSON-RPC.
-//!
-//! Connects to a running `signal-cli daemon --http <host:port>`.
-//! Listens for messages via SSE at `/api/v1/events` and sends via
-//! JSON-RPC at `/api/v1/rpc`.
+//! The `SignalChannel` runtime: JSON-RPC client, auth/pairing, the `Channel`
+//! impl, and the reconnecting SSE listener.
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -13,116 +9,18 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use lru::LruCache;
 use reqwest::Client;
-use serde::Deserialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::attachments::{
+    cleanup_signal_temp_attachments, collect_signal_attachments, write_signal_temp_attachments,
+};
+use super::*;
 use crate::pairing::PairingStore;
 use thinclaw_channels_core::{
     Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
 };
-use thinclaw_media::MediaContent;
 use thinclaw_types::error::ChannelError;
-
-const GROUP_TARGET_PREFIX: &str = "group:";
-const SIGNAL_HEALTH_ENDPOINT: &str = "/api/v1/check";
-
-const MAX_SSE_BUFFER_SIZE: usize = 1024 * 1024;
-const MAX_SSE_EVENT_SIZE: usize = 256 * 1024;
-const MAX_HTTP_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
-const MAX_REPLY_TARGETS: usize = 10000;
-const MAX_ERROR_LOG_BODY: usize = 1024;
-
-const REPLY_TARGETS_CAP: NonZeroUsize =
-    NonZeroUsize::new(MAX_REPLY_TARGETS).expect("MAX_REPLY_TARGETS is non-zero");
-
-#[derive(Debug, Clone)]
-pub struct SignalConfig {
-    pub http_url: String,
-    pub account: String,
-    pub allow_from: Vec<String>,
-    pub allow_from_groups: Vec<String>,
-    pub dm_policy: String,
-    pub group_policy: String,
-    pub group_allow_from: Vec<String>,
-    pub ignore_attachments: bool,
-    pub ignore_stories: bool,
-}
-
-/// Recipient classification for outbound messages.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RecipientTarget {
-    Direct(String),
-    Group(String),
-}
-
-// ── signal-cli SSE event JSON shapes ────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct SseEnvelope {
-    #[serde(default)]
-    envelope: Option<Envelope>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Envelope {
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(rename = "sourceNumber", default)]
-    source_number: Option<String>,
-    #[serde(rename = "sourceName", default)]
-    source_name: Option<String>,
-    #[serde(rename = "sourceUuid", default)]
-    source_uuid: Option<String>,
-    #[serde(rename = "dataMessage", default)]
-    data_message: Option<DataMessage>,
-    #[serde(rename = "storyMessage", default)]
-    story_message: Option<serde_json::Value>,
-    #[serde(default)]
-    timestamp: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DataMessage {
-    #[serde(default)]
-    message: Option<String>,
-    #[serde(default)]
-    timestamp: Option<u64>,
-    #[serde(rename = "groupInfo", default)]
-    group_info: Option<GroupInfo>,
-    #[serde(default)]
-    attachments: Option<Vec<SignalAttachment>>,
-}
-
-/// Signal attachment from signal-cli SSE events.
-///
-/// signal-cli stores downloaded attachments locally. The `id` field is the
-/// local filename under `~/.local/share/signal-cli/attachments/`.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct SignalAttachment {
-    /// MIME type (e.g. "image/jpeg", "audio/aac").
-    #[serde(rename = "contentType", default)]
-    content_type: Option<String>,
-    /// Original filename.
-    #[serde(default)]
-    filename: Option<String>,
-    /// File size in bytes.
-    #[serde(default)]
-    size: Option<u64>,
-    /// Local attachment ID — the filename in signal-cli's attachment store.
-    #[serde(default)]
-    id: Option<String>,
-}
-
-/// Maximum single attachment size we'll read from disk (20 MB).
-const MAX_SIGNAL_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
-
-#[derive(Debug, Deserialize)]
-struct GroupInfo {
-    #[serde(rename = "groupId", default)]
-    group_id: Option<String>,
-}
 
 /// Signal channel using signal-cli daemon's native JSON-RPC + SSE API.
 pub struct SignalChannel {
@@ -1171,174 +1069,6 @@ impl SignalChannel {
     }
 }
 
-/// Read Signal attachments from signal-cli's local file store.
-///
-/// signal-cli stores downloaded attachments at:
-/// - Linux: `~/.local/share/signal-cli/attachments/<id>`
-/// - macOS: `~/Library/Application Support/signal-cli/attachments/<id>`
-fn collect_signal_attachments(attachments: &[SignalAttachment]) -> Vec<MediaContent> {
-    let mut result = Vec::new();
-
-    // Resolve signal-cli attachment directory
-    let attachment_dir = signal_attachment_dir();
-    let Some(attachment_dir) = attachment_dir else {
-        tracing::debug!("Signal: cannot resolve signal-cli attachment directory");
-        return result;
-    };
-
-    for att in attachments {
-        // Need an attachment ID to locate the file
-        let Some(ref att_id) = att.id else {
-            tracing::debug!("Signal: attachment has no id, skipping");
-            continue;
-        };
-
-        // Check size before reading
-        if let Some(size) = att.size
-            && size > MAX_SIGNAL_ATTACHMENT_SIZE
-        {
-            tracing::warn!(
-                id = %att_id,
-                size = size,
-                max = MAX_SIGNAL_ATTACHMENT_SIZE,
-                "Signal: skipping oversized attachment"
-            );
-            continue;
-        }
-
-        // Prevent path traversal via malicious attachment IDs.
-        // The att_id comes from signal-cli SSE (network input).
-        if att_id.contains('/')
-            || att_id.contains('\\')
-            || att_id.contains("..")
-            || att_id.is_empty()
-        {
-            tracing::warn!(
-                id = %att_id,
-                "Signal: rejecting attachment with suspicious path characters"
-            );
-            continue;
-        }
-
-        let path = attachment_dir.join(att_id);
-        if !path.exists() {
-            tracing::debug!(
-                id = %att_id,
-                path = %path.display(),
-                "Signal: attachment file not found on disk"
-            );
-            continue;
-        }
-
-        match std::fs::read(&path) {
-            Ok(data) => {
-                if data.len() as u64 > MAX_SIGNAL_ATTACHMENT_SIZE {
-                    tracing::warn!(
-                        id = %att_id,
-                        size = data.len(),
-                        "Signal: attachment file exceeds size limit"
-                    );
-                    continue;
-                }
-                let mime = att
-                    .content_type
-                    .as_deref()
-                    .unwrap_or("application/octet-stream");
-                let mut mc = MediaContent::new(data, mime);
-                if let Some(ref filename) = att.filename {
-                    mc = mc.with_filename(filename.clone());
-                }
-                tracing::debug!(
-                    id = %att_id,
-                    mime = %mime,
-                    size = mc.size(),
-                    "Signal: loaded attachment from disk"
-                );
-                result.push(mc);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    id = %att_id,
-                    error = %e,
-                    "Signal: failed to read attachment file"
-                );
-            }
-        }
-    }
-
-    result
-}
-
-async fn write_signal_temp_attachments(
-    attachments: &[MediaContent],
-) -> Result<Vec<std::path::PathBuf>, ChannelError> {
-    let mut paths = Vec::new();
-    for attachment in attachments {
-        let filename = attachment.filename.as_deref().unwrap_or("attachment");
-        let safe_name = filename.replace(['/', '\\', ':'], "_");
-        let path =
-            std::env::temp_dir().join(format!("thinclaw-signal-{}-{safe_name}", Uuid::new_v4()));
-        tokio::fs::write(&path, &attachment.data)
-            .await
-            .map_err(|e| ChannelError::SendFailed {
-                name: "signal".to_string(),
-                reason: format!("failed to write Signal attachment {}: {e}", path.display()),
-            })?;
-        paths.push(path);
-    }
-    Ok(paths)
-}
-
-async fn cleanup_signal_temp_attachments(paths: &[std::path::PathBuf]) {
-    for path in paths {
-        let _ = tokio::fs::remove_file(path).await;
-    }
-}
-
-/// Resolve the signal-cli attachment directory.
-fn signal_attachment_dir() -> Option<std::path::PathBuf> {
-    if let Some(override_dir) = std::env::var_os("SIGNAL_ATTACHMENTS_DIR")
-        && !override_dir.is_empty()
-    {
-        return Some(std::path::PathBuf::from(override_dir));
-    }
-
-    let home = dirs::home_dir()?;
-
-    // Linux: ~/.local/share/signal-cli/attachments
-    let linux_path = home.join(".local/share/signal-cli/attachments");
-    if linux_path.is_dir() {
-        return Some(linux_path);
-    }
-
-    // macOS: ~/Library/Application Support/signal-cli/attachments
-    let macos_path = home.join("Library/Application Support/signal-cli/attachments");
-    if macos_path.is_dir() {
-        return Some(macos_path);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let windows_paths = [
-            home.join("AppData/Roaming/signal-cli/attachments"),
-            home.join("AppData/Local/signal-cli/attachments"),
-            home.join("scoop/persist/signal-cli/attachments"),
-        ];
-        for candidate in windows_paths {
-            if candidate.is_dir() {
-                return Some(candidate);
-            }
-        }
-        Some(home.join("AppData/Roaming/signal-cli/attachments"))
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Fallback: try the Linux path anyway (it may be created later)
-        Some(linux_path)
-    }
-}
-
 /// Long-running SSE listener that reconnects with exponential backoff.
 async fn sse_listener(
     config: SignalConfig,
@@ -1590,9 +1320,11 @@ async fn sse_listener(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::signal::attachments::signal_attachment_dir;
+
     use std::sync::Mutex;
 
-    use super::*;
     use tempfile::tempdir;
 
     static SIGNAL_ATTACHMENTS_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -2273,17 +2005,17 @@ mod tests {
     #[test]
     fn sse_envelope_deserializes() {
         let json = r#"{
-            "envelope": {
-                "source": "+1111111111",
-                "sourceNumber": "+1111111111",
-                "sourceName": "Test User",
-                "timestamp": 1700000000000,
-                "dataMessage": {
-                    "message": "Hello Signal!",
-                    "timestamp": 1700000000000
+                "envelope": {
+                    "source": "+1111111111",
+                    "sourceNumber": "+1111111111",
+                    "sourceName": "Test User",
+                    "timestamp": 1700000000000,
+                    "dataMessage": {
+                        "message": "Hello Signal!",
+                        "timestamp": 1700000000000
+                    }
                 }
-            }
-        }"#;
+            }"#;
         let sse: SseEnvelope = serde_json::from_str(json).unwrap();
         let env = sse.envelope.unwrap();
         assert_eq!(env.source_number.as_deref(), Some("+1111111111"));
@@ -2295,16 +2027,16 @@ mod tests {
     #[test]
     fn sse_envelope_deserializes_group() {
         let json = r#"{
-            "envelope": {
-                "sourceNumber": "+2222222222",
-                "dataMessage": {
-                    "message": "Group msg",
-                    "groupInfo": {
-                        "groupId": "abc123"
+                "envelope": {
+                    "sourceNumber": "+2222222222",
+                    "dataMessage": {
+                        "message": "Group msg",
+                        "groupInfo": {
+                            "groupId": "abc123"
+                        }
                     }
                 }
-            }
-        }"#;
+            }"#;
         let sse: SseEnvelope = serde_json::from_str(json).unwrap();
         let env = sse.envelope.unwrap();
         let dm = env.data_message.unwrap();
@@ -2735,14 +2467,14 @@ mod tests {
     #[test]
     fn sse_envelope_with_story_message() {
         let json = r#"{
-            "envelope": {
-                "sourceNumber": "+1111111111",
-                "storyMessage": {"allowsReplies": true},
-                "dataMessage": {
-                    "message": "story text"
+                "envelope": {
+                    "sourceNumber": "+1111111111",
+                    "storyMessage": {"allowsReplies": true},
+                    "dataMessage": {
+                        "message": "story text"
+                    }
                 }
-            }
-        }"#;
+            }"#;
         let sse: SseEnvelope = serde_json::from_str(json).unwrap();
         let env = sse.envelope.unwrap();
         assert!(env.story_message.is_some());
@@ -2752,17 +2484,17 @@ mod tests {
     #[test]
     fn sse_envelope_with_attachments() {
         let json = r#"{
-            "envelope": {
-                "sourceNumber": "+1111111111",
-                "dataMessage": {
-                    "message": "See attached",
-                    "attachments": [
-                        {"contentType": "image/jpeg", "filename": "photo.jpg"},
-                        {"contentType": "application/pdf"}
-                    ]
+                "envelope": {
+                    "sourceNumber": "+1111111111",
+                    "dataMessage": {
+                        "message": "See attached",
+                        "attachments": [
+                            {"contentType": "image/jpeg", "filename": "photo.jpg"},
+                            {"contentType": "application/pdf"}
+                        ]
+                    }
                 }
-            }
-        }"#;
+            }"#;
         let sse: SseEnvelope = serde_json::from_str(json).unwrap();
         let dm = sse.envelope.unwrap().data_message.unwrap();
         let attachments = dm.attachments.unwrap();
