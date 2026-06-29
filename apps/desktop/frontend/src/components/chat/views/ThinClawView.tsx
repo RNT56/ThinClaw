@@ -25,6 +25,7 @@ import { ThinClawCostDashboard } from '../../thinclaw/ThinClawCostDashboard';
 import { ThinClawCacheStats } from '../../thinclaw/ThinClawCacheStats';
 import { ThinClawTrajectory } from '../../thinclaw/ThinClawTrajectory';
 import { ThinClawRollback } from '../../thinclaw/ThinClawRollback';
+import { ThinClawSessionSearch } from '../../thinclaw/ThinClawSessionSearch';
 import { ThinClawRouting } from '../../thinclaw/ThinClawRouting';
 import { ThinClawExperiments } from '../../thinclaw/ThinClawExperiments';
 import { ThinClawLearning } from '../../thinclaw/ThinClawLearning';
@@ -96,6 +97,7 @@ export function ThinClawView() {
             case 'cache-stats': return <ThinClawCacheStats />;
             case 'trajectory': return <ThinClawTrajectory />;
             case 'rollback': return <ThinClawRollback />;
+            case 'session-search': return <ThinClawSessionSearch />;
             case 'routing': return <ThinClawRouting />;
             case 'experiments': return <ThinClawExperiments />;
             case 'learning': return <ThinClawLearning />;
