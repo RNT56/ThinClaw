@@ -7741,6 +7741,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "serde",
  "serde_json",
  "thinclaw-identity",
  "thinclaw-tools-core",
