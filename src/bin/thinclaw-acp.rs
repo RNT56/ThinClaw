@@ -73,7 +73,11 @@ async fn main() -> anyhow::Result<()> {
     thinclaw::bootstrap::load_thinclaw_env();
 
     let log_broadcaster = Arc::new(LogBroadcaster::new());
-    let _log_level_handle = init_tracing(Arc::clone(&log_broadcaster), cli.debug);
+    let _log_level_handle = init_tracing(
+        Arc::clone(&log_broadcaster),
+        cli.debug,
+        Some(thinclaw::platform::state_paths().logs_dir),
+    );
 
     let mut config = Config::from_env_with_toml_options(cli.config.as_deref(), !cli.no_db).await?;
     apply_acp_runtime_config(
