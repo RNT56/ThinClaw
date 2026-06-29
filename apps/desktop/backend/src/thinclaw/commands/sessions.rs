@@ -94,6 +94,91 @@ pub async fn thinclaw_abort_chat(
     })
 }
 
+/// Undo the last turn in a thread.
+///
+/// Sends `/undo` through the normal message pipeline; the agent's
+/// `SubmissionParser` converts it to `Submission::Undo` and the dispatcher
+/// applies the per-thread undo. Works in both local and remote mode, mirroring
+/// `thinclaw_send_message`.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_undo(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    session_key: String,
+) -> Result<ThinClawRpcResponse, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.send_message(&session_key, "/undo").await?;
+        return Ok(ThinClawRpcResponse {
+            ok: true,
+            message: Some("sent:remote".into()),
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
+    ironclaw.wait_for_boot_inject().await;
+    ironclaw.set_session_context(&session_key).await?;
+
+    let agent = ironclaw.agent().await?;
+    let routine_engine = ironclaw.routine_engine().await;
+    let result = thinclaw_core::api::chat::send_message_full(
+        agent,
+        &session_key,
+        "/undo",
+        true,
+        routine_engine,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(ThinClawRpcResponse {
+        ok: true,
+        message: Some(format!("{}:{}", result.status, result.message_id)),
+    })
+}
+
+/// Redo a previously undone turn.
+///
+/// Sends `/redo` through the normal message pipeline; the agent's
+/// `SubmissionParser` converts it to `Submission::Redo`. Works in both local and
+/// remote mode, mirroring `thinclaw_send_message`.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_redo(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    session_key: String,
+) -> Result<ThinClawRpcResponse, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.send_message(&session_key, "/redo").await?;
+        return Ok(ThinClawRpcResponse {
+            ok: true,
+            message: Some("sent:remote".into()),
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
+    ironclaw.wait_for_boot_inject().await;
+    ironclaw.set_session_context(&session_key).await?;
+
+    let agent = ironclaw.agent().await?;
+    let routine_engine = ironclaw.routine_engine().await;
+    let result = thinclaw_core::api::chat::send_message_full(
+        agent,
+        &session_key,
+        "/redo",
+        true,
+        routine_engine,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(ThinClawRpcResponse {
+        ok: true,
+        message: Some(format!("{}:{}", result.status, result.message_id)),
+    })
+}
+
 /// Resolve a pending tool-execution approval (3-tier: Deny/AllowOnce/AllowSession).
 ///
 /// In remote mode, sends the approval decision to the remote gateway.
