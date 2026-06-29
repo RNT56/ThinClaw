@@ -193,6 +193,13 @@ jobs:
         run: npm run build
       - name: Backend cargo check
         run: cargo check --manifest-path apps/desktop/backend/Cargo.toml --locked
+      - name: Backend advisory audit
+        # Closes the supply-chain gap where the desktop workspace's deps were
+        # never scanned for RUSTSEC advisories / yanked crates. Advisories-only
+        # for now; full bans/licenses needs a desktop-specific deny.toml.
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny --manifest-path apps/desktop/backend/Cargo.toml check advisories
       - name: Backend tests
         working-directory: apps/desktop
         run: npm run test:backend
