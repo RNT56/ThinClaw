@@ -104,6 +104,23 @@ impl From<StatusUpdate> for TuiUpdate {
             StatusUpdate::ContextCompactionStarted { used, limit } => {
                 TuiUpdate::Status(format!("Compacting context ({used}/{limit} tokens)…"))
             }
+            StatusUpdate::AdvisorConsultationStarted { .. } => {
+                TuiUpdate::Status("Consulting the advisor lane…".to_string())
+            }
+            StatusUpdate::SelfRepairStarted {
+                repair_type,
+                target_id,
+                ..
+            } => TuiUpdate::Status(format!("Self-repair: {repair_type} {target_id}…")),
+            StatusUpdate::SelfRepairCompleted {
+                repair_type,
+                target_id,
+                success,
+                ..
+            } => TuiUpdate::Status(format!(
+                "Self-repair {}: {repair_type} {target_id}",
+                if success { "succeeded" } else { "failed" }
+            )),
             StatusUpdate::Error { message, .. } => TuiUpdate::Error(message),
             StatusUpdate::ApprovalNeeded {
                 tool_name,

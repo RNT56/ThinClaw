@@ -126,6 +126,33 @@ pub(super) fn status_to_wit(
             message: format!("Compacting context ({used}/{limit} tokens) and retrying"),
             metadata_json,
         },
+        StatusUpdate::AdvisorConsultationStarted { .. } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: "Consulting the advisor lane".to_string(),
+            metadata_json,
+        },
+        StatusUpdate::SelfRepairStarted {
+            repair_type,
+            target_id,
+            ..
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!("Self-repair: {repair_type} {target_id}"),
+            metadata_json,
+        },
+        StatusUpdate::SelfRepairCompleted {
+            repair_type,
+            target_id,
+            success,
+            ..
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!(
+                "Self-repair {}: {repair_type} {target_id}",
+                if *success { "succeeded" } else { "failed" }
+            ),
+            metadata_json,
+        },
         StatusUpdate::Usage {
             input_tokens,
             output_tokens,
