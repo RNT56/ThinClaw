@@ -99,11 +99,3 @@ export async function imagineDeleteImage(imageId: string): Promise<void> {
 export async function imagineGetStats(): Promise<ImagineStats> {
     return invoke<ImagineStats>('direct_imagine_get_stats');
 }
-
-/**
- * Convert a file path to a Tauri asset URL
- */
-export function getAssetUrl(filePath: string): string {
-    // Use Tauri's asset protocol to serve local files
-    return `asset://localhost/${encodeURIComponent(filePath)}`;
-}
