@@ -18,7 +18,7 @@ import { LiveAgentStatus } from './LiveAgentStatus';
 import { MemoryEditor } from './MemoryEditor';
 import SubAgentPanel, { useSubAgentCount } from './SubAgentPanel';
 import AutomationCard from './AutomationCard';
-import { Square } from 'lucide-react';
+import { Square, Undo2, Redo2 } from 'lucide-react';
 import { ThinClawModeBadge, useThinClawStatusSnapshot } from './ThinClawModeBadge';
 
 interface ThinClawChatViewProps {
@@ -1104,6 +1104,36 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                 <Square className="w-3 h-3 fill-current group-hover:scale-110 transition-transform" />
                                 Stop Run
                             </button>
+                        )}
+                        {gatewayRunning && (
+                            <>
+                                <button
+                                    onClick={async () => {
+                                        if (!effectiveSessionKey) return;
+                                        const r = await thinclawCommands.thinclawUndo(effectiveSessionKey);
+                                        if (r.status === 'ok') toast.success('Undo sent');
+                                        else toast.error(`Undo failed: ${r.error}`);
+                                    }}
+                                    disabled={!effectiveSessionKey}
+                                    title="Undo the last turn"
+                                    className="p-2 rounded-lg hover:bg-muted text-muted-foreground transition-colors disabled:opacity-50"
+                                >
+                                    <Undo2 className="w-4 h-4" />
+                                </button>
+                                <button
+                                    onClick={async () => {
+                                        if (!effectiveSessionKey) return;
+                                        const r = await thinclawCommands.thinclawRedo(effectiveSessionKey);
+                                        if (r.status === 'ok') toast.success('Redo sent');
+                                        else toast.error(`Redo failed: ${r.error}`);
+                                    }}
+                                    disabled={!effectiveSessionKey}
+                                    title="Redo the last undone turn"
+                                    className="p-2 rounded-lg hover:bg-muted text-muted-foreground transition-colors disabled:opacity-50"
+                                >
+                                    <Redo2 className="w-4 h-4" />
+                                </button>
+                            </>
                         )}
                         <button onClick={fetchHistory} disabled={isLoading} className="p-2 rounded-lg hover:bg-muted text-muted-foreground transition-colors">
                             <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
