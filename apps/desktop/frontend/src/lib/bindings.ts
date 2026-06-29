@@ -1023,6 +1023,37 @@ async thinclawAbortChat(sessionKey: string, runId: string | null) : Promise<Resu
 }
 },
 /**
+ * Undo the last turn in a thread.
+ *
+ * Sends `/undo` through the normal message pipeline; the agent's
+ * `SubmissionParser` converts it to `Submission::Undo` and the dispatcher
+ * applies the per-thread undo. Works in both local and remote mode, mirroring
+ * `thinclaw_send_message`.
+ */
+async thinclawUndo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_undo", { sessionKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Redo a previously undone turn.
+ *
+ * Sends `/redo` through the normal message pipeline; the agent's
+ * `SubmissionParser` converts it to `Submission::Redo`. Works in both local and
+ * remote mode, mirroring `thinclaw_send_message`.
+ */
+async thinclawRedo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_redo", { sessionKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Resolve a pending tool-execution approval (3-tier: Deny/AllowOnce/AllowSession).
  *
  * In remote mode, sends the approval decision to the remote gateway.
