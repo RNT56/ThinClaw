@@ -52,6 +52,10 @@ jobs:
             echo "Internal crates must not depend on package = \"thinclaw\"."
             exit 1
           fi
+          if rg -n 'thinclaw-agent' crates/thinclaw-db/Cargo.toml; then
+            echo "thinclaw-db must not depend on thinclaw-agent: persistence must not depend on the agent layer. Routine DTOs live in thinclaw-types (thinclaw_types::routine)."
+            exit 1
+          fi
       - name: Check lints (cargo clippy)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Guard Linux deploy port

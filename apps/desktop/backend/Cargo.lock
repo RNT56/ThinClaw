@@ -10269,7 +10269,6 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
- "thinclaw-agent",
  "thinclaw-config",
  "thinclaw-experiments",
  "thinclaw-history",
