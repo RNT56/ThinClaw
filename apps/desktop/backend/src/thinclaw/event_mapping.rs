@@ -345,6 +345,16 @@ pub fn status_to_ui_event(
                 model,
             })
         }
+
+        StatusUpdate::ContextCompactionStarted { used, limit } => {
+            Some(UiEvent::AgentLifecycleEvent {
+                session_key,
+                run_id,
+                phase: "context_compaction".to_string(),
+                label: "Context limit reached — compacting and retrying".to_string(),
+                detail: Some(format!("{used} tokens used vs {limit} limit")),
+            })
+        }
     }
 }
 

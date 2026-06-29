@@ -358,6 +358,10 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             message: msg,
             thread_id,
         },
+        StatusUpdate::ContextCompactionStarted { used, limit } => SseEvent::Status {
+            message: format!("Compacting context ({used}/{limit} tokens) and retrying"),
+            thread_id,
+        },
         StatusUpdate::Plan { entries } => SseEvent::PlanUpdate { entries, thread_id },
         StatusUpdate::Usage {
             input_tokens,

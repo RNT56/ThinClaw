@@ -121,6 +121,11 @@ pub(super) fn status_to_wit(
             ),
             metadata_json,
         },
+        StatusUpdate::ContextCompactionStarted { used, limit } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!("Compacting context ({used}/{limit} tokens) and retrying"),
+            metadata_json,
+        },
         StatusUpdate::Usage {
             input_tokens,
             output_tokens,

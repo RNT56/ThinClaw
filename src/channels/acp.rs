@@ -1783,6 +1783,7 @@ async fn status_to_acp_messages(
         | StatusUpdate::AuthRequired { .. }
         | StatusUpdate::AuthCompleted { .. }
         | StatusUpdate::CredentialPrompt { .. }
+        | StatusUpdate::ContextCompactionStarted { .. }
         | StatusUpdate::CanvasAction(_) => None,
     };
 

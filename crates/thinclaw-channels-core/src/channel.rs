@@ -414,6 +414,16 @@ pub enum StatusUpdate {
         /// Effective skill policy.
         skill_mode: String,
     },
+
+    /// Agent hit the model context-length limit and is compacting the
+    /// conversation before retrying the turn. Surfaced so operators can see
+    /// auto-compaction happening instead of an unexplained pause.
+    ContextCompactionStarted {
+        /// Tokens used that exceeded the limit.
+        used: u64,
+        /// The model's context-length limit.
+        limit: u64,
+    },
 }
 
 /// Trait for message channels.

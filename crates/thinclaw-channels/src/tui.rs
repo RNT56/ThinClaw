@@ -101,6 +101,9 @@ impl From<StatusUpdate> for TuiUpdate {
             } => TuiUpdate::Status(format!(
                 "Usage: {input_tokens} input / {output_tokens} output tokens"
             )),
+            StatusUpdate::ContextCompactionStarted { used, limit } => {
+                TuiUpdate::Status(format!("Compacting context ({used}/{limit} tokens)…"))
+            }
             StatusUpdate::Error { message, .. } => TuiUpdate::Error(message),
             StatusUpdate::ApprovalNeeded {
                 tool_name,

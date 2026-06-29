@@ -93,6 +93,21 @@ pub enum UiEvent {
         status: String,
     },
 
+    /// Agent lifecycle activity (context compaction, advisor consultation, …)
+    /// surfaced as a transient, human-readable status for the Event Inspector.
+    /// Distinct from `LifecycleUpdate` (run start/end) — these are mid-run
+    /// internal phases the agent passes through.
+    AgentLifecycleEvent {
+        session_key: String,
+        run_id: Option<String>,
+        /// Machine phase key, e.g. "context_compaction" | "advisor_consultation".
+        phase: String,
+        /// Human-readable label, e.g. "Compacting context and retrying".
+        label: String,
+        /// Optional extra detail (token counts, trigger reason, …).
+        detail: Option<String>,
+    },
+
     /// Structured plan/progress update from the ThinClaw agent loop.
     PlanUpdate {
         session_key: String,

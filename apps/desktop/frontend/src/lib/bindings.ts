@@ -4124,6 +4124,13 @@ export type UiEvent =
  */
 { kind: "LifecycleUpdate"; session_key: string; run_id: string; phase: string; status: string } |
 /**
+ * Agent lifecycle activity (context compaction, advisor consultation, …)
+ * surfaced as a transient, human-readable status for the Event Inspector.
+ * Distinct from `LifecycleUpdate` (run start/end) — these are mid-run
+ * internal phases the agent passes through.
+ */
+{ kind: "AgentLifecycleEvent"; session_key: string; run_id: string | null; phase: string; label: string; detail: string | null } |
+/**
  * Structured plan/progress update from the ThinClaw agent loop.
  */
 { kind: "PlanUpdate"; session_key: string; run_id: string | null; message_id: string; entries: JsonValue[] } |

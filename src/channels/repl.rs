@@ -670,6 +670,11 @@ impl Channel for ReplChannel {
                     eprintln!("  {bad}\u{2717} {} (failed){reset}", skin.tool_label(&name));
                 }
             }
+            StatusUpdate::ContextCompactionStarted { used, limit } => {
+                eprintln!(
+                    "  {muted}\u{2026} compacting context ({used}/{limit} tokens) and retrying{reset}"
+                );
+            }
             StatusUpdate::ToolResult {
                 name: _, preview, ..
             } => {
