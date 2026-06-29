@@ -53,7 +53,7 @@ jobs:
             exit 1
           fi
       - name: Check lints (cargo clippy)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Guard Linux deploy port
         run: |
           if rg -n "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
@@ -120,11 +120,11 @@ jobs:
           rustup target add wasm32-wasip2
           cargo install wasm-tools --locked
       - name: cargo check
-        run: cargo check --workspace ${{ matrix.cargo-args }}
+        run: cargo check --workspace --locked ${{ matrix.cargo-args }}
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets ${{ matrix.cargo-args }} -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
-        run: cargo test --workspace --no-run ${{ matrix.cargo-args }}
+        run: cargo test --workspace --no-run --locked ${{ matrix.cargo-args }}
 
   desktop-companion:
     name: Desktop Companion
