@@ -290,6 +290,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_channel_status_list,
         crate::thinclaw::commands::thinclaw_channel_config_schema,
         crate::thinclaw::commands::thinclaw_channel_config_schemas,
+        crate::thinclaw::commands::thinclaw_channel_config_submit,
         crate::thinclaw::commands::thinclaw_agents_set_default,
         crate::thinclaw::commands::thinclaw_clawhub_search,
         crate::thinclaw::commands::thinclaw_clawhub_install,
