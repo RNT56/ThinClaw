@@ -1784,6 +1784,9 @@ async fn status_to_acp_messages(
         | StatusUpdate::AuthCompleted { .. }
         | StatusUpdate::CredentialPrompt { .. }
         | StatusUpdate::ContextCompactionStarted { .. }
+        | StatusUpdate::AdvisorConsultationStarted { .. }
+        | StatusUpdate::SelfRepairStarted { .. }
+        | StatusUpdate::SelfRepairCompleted { .. }
         | StatusUpdate::CanvasAction(_) => None,
     };
 

@@ -675,6 +675,25 @@ impl Channel for ReplChannel {
                     "  {muted}\u{2026} compacting context ({used}/{limit} tokens) and retrying{reset}"
                 );
             }
+            StatusUpdate::AdvisorConsultationStarted { .. } => {
+                eprintln!("  {muted}\u{2026} consulting the advisor lane{reset}");
+            }
+            StatusUpdate::SelfRepairStarted {
+                repair_type,
+                target_id,
+                ..
+            } => {
+                eprintln!("  {muted}\u{2026} self-repair: {repair_type} {target_id}{reset}");
+            }
+            StatusUpdate::SelfRepairCompleted {
+                repair_type,
+                target_id,
+                success,
+                ..
+            } => {
+                let outcome = if success { "succeeded" } else { "failed" };
+                eprintln!("  {muted}self-repair {outcome}: {repair_type} {target_id}{reset}");
+            }
             StatusUpdate::ToolResult {
                 name: _, preview, ..
             } => {
