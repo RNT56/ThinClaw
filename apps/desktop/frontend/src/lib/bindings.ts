@@ -2600,6 +2600,28 @@ async thinclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], string>
 }
 },
 /**
+ * Return the configuration schema for a single channel, if it exposes one.
+ */
+async thinclawChannelConfigSchema(channelId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_config_schema", { channelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return configuration schemas for every channel that exposes one.
+ */
+async thinclawChannelConfigSchemas() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_config_schemas") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Set the default agent profile.
  */
 async thinclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> {

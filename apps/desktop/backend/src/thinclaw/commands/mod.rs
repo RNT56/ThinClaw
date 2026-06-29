@@ -26,6 +26,7 @@ mod gateway;
 mod keys;
 mod remote_provider_config;
 mod rpc;
+pub(crate) mod rpc_channel_config;
 pub(crate) mod rpc_checkpoints;
 pub(crate) mod rpc_config;
 pub(crate) mod rpc_dashboard;
@@ -44,6 +45,7 @@ pub mod types;
 // Re-export all public command functions
 pub use gateway::*;
 pub use keys::*;
+pub use rpc_channel_config::*;
 pub use rpc_checkpoints::*;
 pub use rpc_config::*;
 pub use rpc_dashboard::*;

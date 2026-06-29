@@ -14,8 +14,8 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::status_view::{ChannelStatusEntry, ChannelViewState};
 use thinclaw_channels_core::{
-    Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
-    StreamMode,
+    Channel, ConfigSchema, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse,
+    StatusUpdate, StreamMode,
 };
 use thinclaw_types::error::ChannelError;
 
@@ -653,6 +653,25 @@ impl ChannelManager {
         channels
             .get(channel_name)
             .and_then(|channel| channel.formatting_hints())
+    }
+
+    /// Return the configuration schema a channel exposes, if any.
+    pub async fn config_schema_for(&self, channel_name: &str) -> Option<ConfigSchema> {
+        let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
+        channels
+            .get(channel_name)
+            .and_then(|channel| channel.config_schema())
+    }
+
+    /// Return the configuration schemas for every registered channel that
+    /// exposes one. Used by operator surfaces to render config forms.
+    pub async fn config_schemas(&self) -> Vec<ConfigSchema> {
+        let channels = self.channels.read().await;
+        channels
+            .values()
+            .filter_map(|channel| channel.config_schema())
+            .collect()
     }
 
     /// Return channel-specific diagnostics when the implementation exposes them.

@@ -3,6 +3,6 @@
 pub mod channel;
 
 pub use channel::{
-    Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
-    StreamMode,
+    Channel, ConfigField, ConfigOption, ConfigSchema, DraftReplyState, IncomingMessage,
+    MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
 };
