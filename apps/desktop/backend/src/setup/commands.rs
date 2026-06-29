@@ -125,6 +125,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_send_message,
         crate::thinclaw::commands::thinclaw_subscribe_session,
         crate::thinclaw::commands::thinclaw_abort_chat,
+        crate::thinclaw::commands::thinclaw_undo,
+        crate::thinclaw::commands::thinclaw_redo,
         crate::thinclaw::commands::thinclaw_resolve_approval,
         crate::thinclaw::commands::thinclaw_get_diagnostics,
         crate::thinclaw::commands::thinclaw_clear_memory,
