@@ -787,11 +787,11 @@ jobs:
         with:
           key: channel-crate-${{ matrix.name }}
       - name: Run channel crate tests
-        run: cargo test --locked --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+        run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
       - name: Build channel crate for wasm32-wasip2
         # Channels ship as WASM components; a shim that stops compiling to WASM
         # must fail CI even when its host-side unit tests still pass.
-        run: cargo build --locked --manifest-path ${{ matrix.manifest_path }} --release --target wasm32-wasip2
+        run: cargo build --manifest-path ${{ matrix.manifest_path }} --release --target wasm32-wasip2
 
   tool-crates:
     name: "Tool Crate: ${{ matrix.name }}"
@@ -835,7 +835,7 @@ jobs:
         with:
           key: tool-crate-${{ matrix.name }}
       - name: Run tool crate tests
-        run: cargo test --locked --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+        run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
 
   tests:
     name: Run Tests
