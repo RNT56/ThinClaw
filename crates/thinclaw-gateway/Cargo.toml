@@ -7,14 +7,14 @@ publish = false
 
 [dependencies]
 axum = "0.8"
-async-trait = "0.1"
+async-trait = { workspace = true }
 base64 = "0.22"
 blake3 = "1"
-chrono = { version = "0.4", features = ["serde"] }
-futures = "0.3"
+chrono = { workspace = true }
+futures = { workspace = true }
 hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.10"
 subtle = "2"
 thinclaw-channels-core = { version = "0.1.0", path = "../thinclaw-channels-core" }
@@ -27,9 +27,9 @@ thinclaw-settings = { version = "0.1.0", path = "../thinclaw-settings" }
 thinclaw-tools = { version = "0.1.0", path = "../thinclaw-tools" }
 thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
-thiserror = "2"
+thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde"] }
