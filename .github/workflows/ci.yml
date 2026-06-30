@@ -53,7 +53,7 @@ jobs:
             exit 1
           fi
       - name: Check lints (cargo clippy)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Guard Linux deploy port
         run: |
           if rg -n "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
@@ -120,11 +120,11 @@ jobs:
           rustup target add wasm32-wasip2
           cargo install wasm-tools --locked
       - name: cargo check
-        run: cargo check --workspace ${{ matrix.cargo-args }}
+        run: cargo check --locked --workspace ${{ matrix.cargo-args }}
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets ${{ matrix.cargo-args }} -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
-        run: cargo test --workspace --no-run ${{ matrix.cargo-args }}
+        run: cargo test --locked --workspace --no-run ${{ matrix.cargo-args }}
 
   desktop-companion:
     name: Desktop Companion
@@ -173,9 +173,9 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
       - name: Runtime contracts tests
-        run: cargo test -p thinclaw-runtime-contracts
+        run: cargo test --locked -p thinclaw-runtime-contracts
       - name: Provider catalog tests
-        run: cargo test -p thinclaw-config provider_catalog
+        run: cargo test --locked -p thinclaw-config provider_catalog
       - name: Contract drift check
         working-directory: apps/desktop
         run: npm run contracts:check
@@ -244,7 +244,7 @@ jobs:
         with:
           key: linux-host-smoke
       - name: Host runtime smoke
-        run: cargo test --features full --bin thinclaw --test host_runtime_smoke -- --nocapture --test-threads=1
+        run: cargo test --locked --features full --bin thinclaw --test host_runtime_smoke -- --nocapture --test-threads=1
 
   acp-acceptance:
     name: ACP Acceptance
@@ -260,11 +260,11 @@ jobs:
         with:
           key: acp-acceptance
       - name: Check ACP binary
-        run: cargo check --features acp --bin thinclaw-acp
+        run: cargo check --locked --features acp --bin thinclaw-acp
       - name: Run ACP unit acceptance tests
-        run: cargo test --features acp --lib acp -- --nocapture
+        run: cargo test --locked --features acp --lib acp -- --nocapture
       - name: Run ACP stdio transcript smoke
-        run: cargo test --features acp --test acp_stdio_smoke -- --nocapture
+        run: cargo test --locked --features acp --test acp_stdio_smoke -- --nocapture
 
   linux-arm64-host-smoke:
     name: Linux ARM64 Host Runtime Smoke
@@ -285,9 +285,9 @@ jobs:
           uname -a
           test "$(uname -m)" = "aarch64"
       - name: cargo check
-        run: cargo check --workspace --features full
+        run: cargo check --locked --workspace --features full
       - name: Build ARM64 release artifact
-        run: cargo build --release --features full --bin thinclaw
+        run: cargo build --locked --release --features full --bin thinclaw
       - name: Pi OS Lite ARM64 artifact doctor
         env:
           THINCLAW_RUNTIME_PROFILE: pi-os-lite-64
@@ -367,15 +367,15 @@ jobs:
           cat "$tmp/stderr.log" >&2
           exit 1
       - name: Compile host runtime smoke
-        run: cargo test --release --features full --bin thinclaw --test host_runtime_smoke --no-run
+        run: cargo test --locked --release --features full --bin thinclaw --test host_runtime_smoke --no-run
       - name: Host runtime smoke
-        run: cargo test --release --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+        run: cargo test --locked --release --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
       - name: Pi OS Lite headless runtime smoke
         env:
           THINCLAW_RUNTIME_PROFILE: pi-os-lite-64
           THINCLAW_HEADLESS: "true"
           DESKTOP_AUTONOMY_ENABLED: "false"
-        run: cargo test --release --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+        run: cargo test --locked --release --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
 
   linux-desktop-autonomy-smoke:
     name: "Linux Desktop Autonomy Smoke (${{ matrix.session }})"
@@ -434,11 +434,11 @@ jobs:
         with:
           key: macos-host-regression
       - name: cargo check
-        run: cargo check --workspace --features full
+        run: cargo check --locked --workspace --features full
       - name: Compile tests (no run)
-        run: cargo test --workspace --no-run --features full
+        run: cargo test --locked --workspace --no-run --features full
       - name: Host runtime smoke
-        run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+        run: cargo test --locked --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
 
   linux-deploy-smoke:
     name: Linux Docker Deploy Smoke
@@ -455,7 +455,7 @@ jobs:
         with:
           key: linux-deploy-smoke
       - name: Build thinclaw binary
-        run: cargo build --release --features full --bin thinclaw
+        run: cargo build --locked --release --features full --bin thinclaw
       - name: Copy binary into build context
         run: cp target/release/thinclaw ./thinclaw
       - name: Build Docker image
@@ -569,7 +569,7 @@ jobs:
         run: |
           docker buildx imagetools inspect debian:bookworm-slim | grep -q 'linux/arm64'
       - name: Build thinclaw binary for Docker smoke
-        run: cargo build --release --features light --bin thinclaw
+        run: cargo build --locked --release --features light --bin thinclaw
       - name: Copy binary into build context
         run: cp target/release/thinclaw ./thinclaw
       - name: Validate local Docker build
@@ -599,9 +599,9 @@ jobs:
         with:
           key: windows-${{ matrix.name }}
       - name: cargo check
-        run: cargo check --workspace ${{ matrix.cargo-args }}
+        run: cargo check --locked --workspace ${{ matrix.cargo-args }}
       - name: Compile tests (no run)
-        run: cargo test --workspace --no-run ${{ matrix.cargo-args }}
+        run: cargo test --locked --workspace --no-run ${{ matrix.cargo-args }}
 
   windows-smoke:
     name: Windows Smoke
@@ -621,31 +621,31 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
-          cargo test --features full --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+          cargo test --locked --features full --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
           if ($LASTEXITCODE -eq 0) {
             exit 0
           }
           Write-Warning "Host runtime smoke failed with exit code $LASTEXITCODE; retrying once to isolate Windows runner flakiness."
-          cargo test --features full --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+          cargo test --locked --features full --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
           exit $LASTEXITCODE
       - name: Shell launcher smoke
         timeout-minutes: 20
-        run: cargo test -p thinclaw-platform launcher_has_expected_prefix_args -- --nocapture
+        run: cargo test --locked -p thinclaw-platform launcher_has_expected_prefix_args -- --nocapture
       - name: State-path smoke
         timeout-minutes: 10
-        run: cargo test -p thinclaw-platform state_paths_share_same_root -- --nocapture
+        run: cargo test --locked -p thinclaw-platform state_paths_share_same_root -- --nocapture
       - name: Windows path-escape smoke
         timeout-minutes: 10
-        run: cargo test -p thinclaw-tools detect_path_escape_understands_windows_absolute_paths -- --nocapture
+        run: cargo test --locked -p thinclaw-tools detect_path_escape_understands_windows_absolute_paths -- --nocapture
       - name: Service adapter smoke
         timeout-minutes: 20
-        run: cargo test --lib --features full run_checked_succeeds_on_zero_exit -- --nocapture
+        run: cargo test --locked --lib --features full run_checked_succeeds_on_zero_exit -- --nocapture
       - name: Interpreter selection smoke
         timeout-minutes: 10
-        run: cargo test -p thinclaw-tools test_interpreter_for -- --nocapture
+        run: cargo test --locked -p thinclaw-tools test_interpreter_for -- --nocapture
       - name: Signal attachment override smoke
         timeout-minutes: 10
-        run: cargo test -p thinclaw-channels signal_attachment_dir_prefers_override_env -- --nocapture
+        run: cargo test --locked -p thinclaw-channels signal_attachment_dir_prefers_override_env -- --nocapture
 
   db-contract-libsql:
     name: DB Contract (libSQL)
@@ -661,7 +661,7 @@ jobs:
       - name: Run libSQL contract tests
         env:
           DATABASE_BACKEND: libsql
-        run: cargo test --test db_contract --no-default-features --features libsql -- --nocapture
+        run: cargo test --locked --test db_contract --no-default-features --features libsql -- --nocapture
 
   db-contract-postgres:
     name: DB Contract (Postgres)
@@ -696,7 +696,7 @@ jobs:
       - name: Enable pgvector extension
         run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
       - name: Run postgres contract tests
-        run: cargo test --test db_contract --no-default-features --features postgres -- --nocapture --test-threads=1
+        run: cargo test --locked --test db_contract --no-default-features --features postgres -- --nocapture --test-threads=1
 
   schema-divergence:
     name: Schema Divergence
@@ -730,7 +730,7 @@ jobs:
       - name: Enable pgvector extension
         run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
       - name: Run schema divergence test
-        run: cargo test --test schema_divergence --no-default-features --features "postgres libsql" -- --nocapture --test-threads=1
+        run: cargo test --locked --test schema_divergence --no-default-features --features "postgres libsql" -- --nocapture --test-threads=1
 
   channel-crates:
     name: "Channel Crate: ${{ matrix.name }}"
@@ -787,11 +787,11 @@ jobs:
         with:
           key: channel-crate-${{ matrix.name }}
       - name: Run channel crate tests
-        run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+        run: cargo test --locked --manifest-path ${{ matrix.manifest_path }} -- --nocapture
       - name: Build channel crate for wasm32-wasip2
         # Channels ship as WASM components; a shim that stops compiling to WASM
         # must fail CI even when its host-side unit tests still pass.
-        run: cargo build --manifest-path ${{ matrix.manifest_path }} --release --target wasm32-wasip2
+        run: cargo build --locked --manifest-path ${{ matrix.manifest_path }} --release --target wasm32-wasip2
 
   tool-crates:
     name: "Tool Crate: ${{ matrix.name }}"
@@ -835,7 +835,7 @@ jobs:
         with:
           key: tool-crate-${{ matrix.name }}
       - name: Run tool crate tests
-        run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+        run: cargo test --locked --manifest-path ${{ matrix.manifest_path }} -- --nocapture
 
   tests:
     name: Run Tests
