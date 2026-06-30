@@ -52,6 +52,8 @@ jobs:
             echo "Internal crates must not depend on package = \"thinclaw\"."
             exit 1
           fi
+      - name: Check file sizes (god-file guard)
+        run: scripts/ci/check-file-sizes.sh
       - name: Check lints (cargo clippy)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Guard Linux deploy port
