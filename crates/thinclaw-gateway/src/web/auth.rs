@@ -130,6 +130,19 @@ pub async fn auth_middleware(
             if let Some(token) = pair.strip_prefix("token=")
                 && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
             {
+                // RFC 6750 §2.3: tokens in URLs can leak via access logs, proxies,
+                // and Referer headers. This path exists only for SSE EventSource
+                // clients that cannot set an Authorization header; warn once so the
+                // operator is aware of the log-exposure trade-off.
+                static QUERY_AUTH_WARNED: std::sync::Once = std::sync::Once::new();
+                QUERY_AUTH_WARNED.call_once(|| {
+                    tracing::warn!(
+                        "gateway accepted bearer auth via `?token=` query parameter \
+                         (SSE EventSource fallback); per RFC 6750 §2.3 tokens in URLs \
+                         can leak through logs/proxies/Referer — prefer the \
+                         Authorization header where the client supports it"
+                    );
+                });
                 let identity =
                     fallback_request_identity(&auth, GatewayAuthSource::BearerQuery).await;
                 request.extensions_mut().insert(identity);
