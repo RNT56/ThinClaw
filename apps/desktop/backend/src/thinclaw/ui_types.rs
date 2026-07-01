@@ -10,6 +10,153 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Tool-execution status carried by [`UiEvent::ToolUpdate`].
+///
+/// The wire strings are preserved exactly (`started` | `stream` | `ok` |
+/// `error`) so existing frontend runtime checks keep working, while the
+/// exported TypeScript type becomes an exhaustive string-literal union.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    /// Tool call has started executing.
+    Started,
+    /// Intermediate streamed tool result.
+    Stream,
+    /// Tool completed successfully.
+    Ok,
+    /// Tool failed.
+    Error,
+}
+
+/// Run lifecycle status carried by [`UiEvent::RunStatus`].
+///
+/// Historically a free-form string (`StatusUpdate::Status(text)` and the
+/// gateway `status` message forward arbitrary human-readable text). The known
+/// terminal/active states are modelled as named variants with their exact wire
+/// strings preserved; any other value round-trips losslessly through
+/// [`RunStatus::Other`]. The exported TypeScript type is therefore a union of
+/// the known literals plus `string`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(untagged, rename_all = "snake_case")]
+pub enum RunStatus {
+    /// One of the recognised run states.
+    Known(RunStatusKnown),
+    /// Any other free-form status string (preserved verbatim).
+    Other(String),
+}
+
+/// The recognised, closed set of [`RunStatus`] values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatusKnown {
+    Started,
+    InFlight,
+    Ok,
+    Error,
+    Aborted,
+    Done,
+    Interrupted,
+    Rejected,
+}
+
+impl RunStatus {
+    /// Build from a free-form wire string, mapping recognised values to a
+    /// [`RunStatusKnown`] variant and preserving anything else verbatim.
+    pub fn from_wire(value: impl Into<String>) -> Self {
+        let value = value.into();
+        match value.as_str() {
+            "started" => Self::Known(RunStatusKnown::Started),
+            "in_flight" => Self::Known(RunStatusKnown::InFlight),
+            "ok" => Self::Known(RunStatusKnown::Ok),
+            "error" => Self::Known(RunStatusKnown::Error),
+            "aborted" => Self::Known(RunStatusKnown::Aborted),
+            "done" => Self::Known(RunStatusKnown::Done),
+            "interrupted" => Self::Known(RunStatusKnown::Interrupted),
+            "rejected" => Self::Known(RunStatusKnown::Rejected),
+            _ => Self::Other(value),
+        }
+    }
+}
+
+/// Sub-agent progress status carried by [`UiEvent::SubAgentUpdate`].
+///
+/// Known lifecycle states use their exact wire strings; the running-with-
+/// category form (`running:<category>`) and any operator-supplied status from
+/// the `thinclaw_update_sub_agent_status` RPC round-trip losslessly through
+/// [`SubAgentStatus::Other`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(untagged, rename_all = "snake_case")]
+pub enum SubAgentStatus {
+    /// One of the recognised sub-agent states.
+    Known(SubAgentStatusKnown),
+    /// Any other status string, e.g. `running:thinking` (preserved verbatim).
+    Other(String),
+}
+
+/// The recognised, closed set of [`SubAgentStatus`] values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SubAgentStatusKnown {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl SubAgentStatus {
+    /// Build from a free-form wire string, mapping recognised values to a
+    /// [`SubAgentStatusKnown`] variant and preserving anything else (such as
+    /// the `running:<category>` form) verbatim.
+    pub fn from_wire(value: impl Into<String>) -> Self {
+        let value = value.into();
+        match value.as_str() {
+            "running" => Self::Known(SubAgentStatusKnown::Running),
+            "completed" => Self::Known(SubAgentStatusKnown::Completed),
+            "failed" => Self::Known(SubAgentStatusKnown::Failed),
+            _ => Self::Other(value),
+        }
+    }
+}
+
+/// Mid-loop agent message classification carried by [`UiEvent::AgentMessage`].
+///
+/// Matches the `emit_user_message` tool schema (`progress` | `interim_result`
+/// | `question` | `warning`). The tool default is `progress`, but the value is
+/// not strictly clamped upstream, so any other classification round-trips
+/// through [`MessageType::Other`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(untagged, rename_all = "snake_case")]
+pub enum MessageType {
+    /// One of the recognised message classifications.
+    Known(MessageTypeKnown),
+    /// Any other classification string (preserved verbatim).
+    Other(String),
+}
+
+/// The recognised, closed set of [`MessageType`] values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageTypeKnown {
+    Progress,
+    InterimResult,
+    Question,
+    Warning,
+}
+
+impl MessageType {
+    /// Build from a free-form wire string, mapping recognised values to a
+    /// [`MessageTypeKnown`] variant and preserving anything else verbatim.
+    pub fn from_wire(value: impl Into<String>) -> Self {
+        let value = value.into();
+        match value.as_str() {
+            "progress" => Self::Known(MessageTypeKnown::Progress),
+            "interim_result" => Self::Known(MessageTypeKnown::InterimResult),
+            "question" => Self::Known(MessageTypeKnown::Question),
+            "warning" => Self::Known(MessageTypeKnown::Warning),
+            _ => Self::Other(value),
+        }
+    }
+}
+
 /// Stable UI event contract — what the ThinClaw chat UI consumes.
 ///
 /// Tagged with `#[serde(tag = "kind")]` so JSON looks like:
@@ -72,7 +219,8 @@ pub enum UiEvent {
         session_key: String,
         run_id: Option<String>,
         tool_name: String,
-        status: String, // started|stream|ok|error
+        /// started | stream | ok | error
+        status: ToolStatus,
         input: Value,
         output: Value,
     },
@@ -81,7 +229,8 @@ pub enum UiEvent {
     RunStatus {
         session_key: String,
         run_id: Option<String>,
-        status: String, // started|in_flight|ok|error|aborted
+        /// started | in_flight | ok | error | aborted | done | … | free-form
+        status: RunStatus,
         error: Option<String>,
     },
 
@@ -187,7 +336,8 @@ pub enum UiEvent {
         parent_session: String,
         child_session: String,
         task: String,
-        status: String,        // "running" | "completed" | "failed"
+        /// "running" | "completed" | "failed" | "running:<category>" | free-form
+        status: SubAgentStatus,
         progress: Option<f32>, // 0.0–1.0
         result_preview: Option<String>,
     },
@@ -213,7 +363,8 @@ pub enum UiEvent {
         run_id: Option<String>,
         message_id: String,
         content: String,
-        message_type: String, // "progress" | "warning" | "question" | "interim_result"
+        /// "progress" | "warning" | "question" | "interim_result" | free-form
+        message_type: MessageType,
     },
 
     /// Factory reset completed — frontend must clear all cached state
@@ -302,4 +453,75 @@ pub struct UiUsage {
     pub output_tokens: u64,
     #[specta(type = f64)]
     pub total_tokens: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json(value: &impl Serialize) -> String {
+        serde_json::to_value(value).unwrap().to_string()
+    }
+
+    #[test]
+    fn tool_status_preserves_wire_strings() {
+        assert_eq!(json(&ToolStatus::Started), "\"started\"");
+        assert_eq!(json(&ToolStatus::Stream), "\"stream\"");
+        assert_eq!(json(&ToolStatus::Ok), "\"ok\"");
+        assert_eq!(json(&ToolStatus::Error), "\"error\"");
+
+        // Round-trip from the wire strings the frontend still relies on.
+        let parsed: ToolStatus = serde_json::from_str("\"ok\"").unwrap();
+        assert_eq!(parsed, ToolStatus::Ok);
+    }
+
+    #[test]
+    fn run_status_maps_known_and_preserves_unknown() {
+        assert_eq!(
+            RunStatus::from_wire("in_flight"),
+            RunStatus::Known(RunStatusKnown::InFlight)
+        );
+        assert_eq!(json(&RunStatus::from_wire("done")), "\"done\"");
+
+        // Free-form status text (e.g. "Compacting context…") is preserved.
+        let freeform = RunStatus::from_wire("Compacting context and retrying");
+        assert_eq!(
+            freeform,
+            RunStatus::Other("Compacting context and retrying".to_string())
+        );
+        assert_eq!(json(&freeform), "\"Compacting context and retrying\"");
+
+        // Untagged deserialization recovers the same value.
+        let round: RunStatus = serde_json::from_str("\"done\"").unwrap();
+        assert_eq!(round, RunStatus::Known(RunStatusKnown::Done));
+        let round_other: RunStatus = serde_json::from_str("\"paused\"").unwrap();
+        assert_eq!(round_other, RunStatus::Other("paused".to_string()));
+    }
+
+    #[test]
+    fn sub_agent_status_preserves_running_category_form() {
+        assert_eq!(
+            SubAgentStatus::from_wire("completed"),
+            SubAgentStatus::Known(SubAgentStatusKnown::Completed)
+        );
+        let category = SubAgentStatus::Other("running:thinking".to_string());
+        assert_eq!(json(&category), "\"running:thinking\"");
+        assert_eq!(
+            SubAgentStatus::from_wire("running:thinking"),
+            SubAgentStatus::Other("running:thinking".to_string())
+        );
+    }
+
+    #[test]
+    fn message_type_maps_known_and_preserves_unknown() {
+        assert_eq!(
+            MessageType::from_wire("interim_result"),
+            MessageType::Known(MessageTypeKnown::InterimResult)
+        );
+        assert_eq!(json(&MessageType::from_wire("progress")), "\"progress\"");
+        assert_eq!(
+            MessageType::from_wire("custom"),
+            MessageType::Other("custom".to_string())
+        );
+    }
 }

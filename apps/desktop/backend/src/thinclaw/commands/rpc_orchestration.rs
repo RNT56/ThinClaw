@@ -206,7 +206,7 @@ pub async fn thinclaw_spawn_session(
             parent_session: parent.clone(),
             child_session: child_key.clone(),
             task: task.clone(),
-            status: "running".to_string(),
+            status: crate::thinclaw::ui_types::SubAgentStatus::from_wire("running"),
             progress: Some(0.0),
             result_preview: None,
         };
@@ -288,7 +288,7 @@ pub async fn thinclaw_spawn_session(
                 parent_session: parent.clone(),
                 child_session: child_bg.clone(),
                 task: task_label,
-                status: status.to_string(),
+                status: crate::thinclaw::ui_types::SubAgentStatus::from_wire(status),
                 progress: Some(if run_ok { 1.0 } else { 0.0 }),
                 result_preview: preview.clone(),
             };
@@ -402,7 +402,7 @@ pub async fn thinclaw_update_sub_agent_status(
             parent_session: parent_key,
             child_session: child_session.clone(),
             task,
-            status: status.clone(),
+            status: crate::thinclaw::ui_types::SubAgentStatus::from_wire(status.clone()),
             progress: if status == "completed" {
                 Some(1.0)
             } else {
