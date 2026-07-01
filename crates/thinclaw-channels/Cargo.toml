@@ -19,7 +19,7 @@ fs4 = "0.6"
 hmac = "0.12"
 hex = "0.4"
 jsonwebtoken = "9"
-rand = "0.8"
+rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 regex = "1"
 secrecy = { version = "0.10", features = ["serde"] }

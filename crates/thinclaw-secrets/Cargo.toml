@@ -12,7 +12,7 @@ chrono = { workspace = true }
 deadpool-postgres = { version = "0.14", optional = true }
 hkdf = "0.12"
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
-rand = "0.8"
+rand = "0.10"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { workspace = true }
 sha2 = "0.10"
