@@ -76,8 +76,10 @@ pub struct SidecarStatus {
     pub(super) chat_running: bool,
     pub(super) embedding_running: bool,
     pub(super) stt_running: bool,
-    pub(super) tts_running: bool,
-    pub(super) image_running: bool,
+    // image/tts are per-invocation CLI tools with no persistent process, so
+    // "running" was a misnomer — these report whether a model is configured.
+    pub(super) tts_configured: bool,
+    pub(super) image_configured: bool,
     pub(super) summarizer_running: bool,
 }
 

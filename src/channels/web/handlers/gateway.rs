@@ -14,12 +14,30 @@ use thinclaw_gateway::web::status::{
     build_native_lifecycle_setup_status as gateway_build_native_lifecycle_setup_status,
     build_nostr_setup_status as gateway_build_nostr_setup_status, cost_tracker_unavailable_status,
     format_budget_limit_cents, format_daily_cost, gateway_restart_accepted_response,
-    gateway_restart_already_in_progress_response, gateway_status_response, health_response,
-    model_usage_entry, unavailable_cache_stats_response,
+    gateway_restart_already_in_progress_response, gateway_status_response, model_usage_entry,
+    readiness_response, unavailable_cache_stats_response,
 };
 
-pub(crate) async fn health_handler() -> Json<HealthResponse> {
-    Json(health_response())
+/// Readiness probe for `/api/health`.
+///
+/// Returns `503` (so load balancers route away from a broken instance) unless
+/// the database is reachable within 2s *and* at least one LLM provider is
+/// configured. A deployment with no persistence configured (`store == None`) is
+/// treated as DB-ready. The pure decision lives in
+/// `thinclaw_gateway::web::status::readiness_response` (unit-tested there).
+pub(crate) async fn health_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> (StatusCode, Json<HealthResponse>) {
+    let db_ready = match state.store.as_ref() {
+        None => true,
+        Some(db) => matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), db.health_check()).await,
+            Ok(Ok(()))
+        ),
+    };
+    let provider_configured = state.llm_provider.is_some();
+    let (code, body) = readiness_response(db_ready, provider_configured);
+    (code, Json(body))
 }
 
 pub(crate) async fn gateway_restart_handler(

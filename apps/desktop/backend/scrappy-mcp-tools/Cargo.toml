@@ -3,6 +3,8 @@ name = "thinclaw-desktop-tools"
 version = "0.1.0"
 edition = "2021"
 description = "MCP tool bindings, sandboxed code execution, and progressive discovery for ThinClaw Desktop"
+license = "GPL-3.0-only"
+publish = false
 
 [dependencies]
 # MCP Client

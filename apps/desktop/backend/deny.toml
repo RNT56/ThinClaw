@@ -1,0 +1,56 @@
+# Dependency auditing for the desktop companion (separate workspace).
+# Run: cargo deny --manifest-path apps/desktop/backend/Cargo.toml check
+# CI: .github/workflows/ci.yml (desktop-companion job)
+#
+# The desktop app and its tool crate are GPL-3.0-only first-party code; license
+# checks for them are skipped via `private.ignore` rather than allow-listing GPL
+# (which would also wave through any third-party copyleft dependency). The allow
+# list mirrors the root deny.toml plus NCSA, required by the libfuzzer-sys
+# fuzzing dependency (OSI-approved, FSF-Free, permissive).
+
+[advisories]
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    "Zlib",
+    "MPL-2.0",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "NCSA",
+]
+# First-party GPL-3.0-only crates (thinclaw-desktop, thinclaw-desktop-tools) are
+# publish = false, so this skips their license check without allow-listing GPL.
+private = { ignore = true }
+unused-allowed-license = "allow"
+
+[bans]
+# The Tauri/desktop stack carries many transitive duplicate versions that are not
+# ours to dedup; warn (like the root workspace) rather than fail CI on them.
+multiple-versions = "warn"
+wildcards = "deny"
+# The desktop's first-party path deps (e.g. thinclaw-desktop-tools) are unpublished
+# and carry no version, which reads as a wildcard. Allow that for path deps only;
+# crates.io wildcards are still denied.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

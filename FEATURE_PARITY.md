@@ -72,7 +72,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | launchd/systemd integration | ✅ | ✅ | Full `service.rs` (401 LOC, [`src/service.rs`](src/service.rs)) — install/start/stop/status/uninstall; macOS launchd plist + Linux systemd unit generation |
 | Bonjour/mDNS discovery | ✅ | ✅ | `MdnsConfig` + `DiscoveryTracker` ([`src/config/mdns_discovery.rs`](src/config/mdns_discovery.rs)) |
 | Tailscale integration | ✅ | ✅ | Full tunnel module (`tunnel/tailscale.rs`) with serve + funnel |
-| Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status |
+| Health check endpoints | ✅ | ✅ | `/api/health` is a real readiness probe (DB ping with 2s timeout + ≥1 LLM provider configured → `503` otherwise, so load balancers route away from not-ready instances) plus `/api/gateway/status` |
 | `doctor` diagnostics | ✅ | ✅ | `cli/doctor.rs` — DB, binary, LLM, and Tailscale checks |
 | Agent event broadcast | ✅ | ✅ | SSE broadcast manager + routine engine lifecycle events (Status, JobStarted, JobResult) |
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor`: periodic checks, failure tracking, auto-restart with cooldown |

@@ -293,10 +293,10 @@ fn sidecar_active_capabilities(sidecar: &crate::sidecar::SidecarManager) -> Vec<
     if sidecar.is_stt_active() {
         push_capability(&mut capabilities, RuntimeCapability::Stt);
     }
-    if sidecar.is_tts_active() {
+    if sidecar.is_tts_configured() {
         push_capability(&mut capabilities, RuntimeCapability::Tts);
     }
-    if sidecar.is_image_active() {
+    if sidecar.is_image_configured() {
         push_capability(&mut capabilities, RuntimeCapability::Diffusion);
     }
     capabilities

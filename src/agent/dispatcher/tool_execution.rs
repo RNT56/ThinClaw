@@ -90,8 +90,33 @@ impl Agent {
             Arc<dyn crate::tools::Tool>,
         )> = None;
 
+        // T9: tool-policy deny-list enforcement. The desktop (and any operator
+        // surface) writes a `disabled_tools` list to settings; load it once and
+        // reject matching tool calls in preflight — the same path hook rejections
+        // use — instead of letting the setting be silently ignored.
+        let disabled_tools: std::collections::HashSet<String> = match self.store() {
+            Some(store) => store
+                .get_setting("local_user", "disabled_tools")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            None => std::collections::HashSet::new(),
+        };
+
         for (idx, original_tc) in tool_calls.iter().enumerate() {
             let mut tc = original_tc.clone();
+
+            // T9: reject tools disabled by operator tool policy, before any
+            // hook or approval step.
+            if disabled_tools.contains(&tc.name) {
+                let reason = format!("Tool '{}' is disabled by tool policy", tc.name);
+                preflight.push((tc, PreflightOutcome::Rejected(reason)));
+                continue;
+            }
 
             // Hook: BeforeToolCall (runs before approval so hooks can
             // modify parameters — approval is checked on final params)
