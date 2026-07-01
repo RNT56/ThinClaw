@@ -427,8 +427,11 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
-    let log_level_handle =
-        thinclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster), cli.debug);
+    let log_level_handle = thinclaw::channels::web::log_layer::init_tracing(
+        Arc::clone(&log_broadcaster),
+        cli.debug,
+        Some(thinclaw::platform::state_paths().logs_dir),
+    );
 
     tracing::info!("Starting ThinClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
