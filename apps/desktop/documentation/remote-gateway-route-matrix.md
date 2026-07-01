@@ -5,7 +5,14 @@ Absolute-completion checkpoint for ThinClaw Desktop remote mode. Desktop IPC nam
 HTTP gateway. Unsupported operations must return an `unavailable:` error with a
 concrete reason.
 
-Last updated: 2026-06-29
+Last updated: 2026-07-01
+
+Per-command route modes are code-authoritative: every registered command is
+classified in `ROUTE_TABLE` (`thinclaw/bridge.rs`) as `LocalAndRemote`,
+`RemoteOnly`, or `LocalOnly`, and the `all_registered_commands_are_classified`
+test fails the build if a newly-added command is left unclassified. The
+surface-level table below is the human-readable summary; the code is the source
+of truth for any individual command.
 
 | Surface | Desktop command/proxy coverage | Remote endpoint | Status |
 | --- | --- | --- | --- |
