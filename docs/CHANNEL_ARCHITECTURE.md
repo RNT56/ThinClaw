@@ -115,6 +115,27 @@ For example:
 - Slack should be documented as a WASM channel package in ThinClaw.
 - Discord needs both paths documented clearly: native Gateway and packaged interactions.
 
+## Status Forwarding To WASM Channels
+
+The host forwards agent activity to WASM channels through the `on-status`
+callback in `wit/channel.wit`, carrying a `status-update` record whose
+`status-type` enum classifies the event and whose `message` / `metadata-json`
+fields carry the human-readable detail and structured data. WIT enum variants
+carry no payload, so payload-bearing host events (subagent lifecycle, credential
+prompts, canvas actions, etc.) map to a dedicated `status-type` for
+classification while their detail continues to travel through `message` /
+`metadata-json`.
+
+The `status-type` enum now covers every host `StatusUpdate` variant (lifecycle
+start/end, sub-agent spawn/progress/complete, credential prompts, usage, plan,
+canvas, agent messages, error, context compaction, advisor consultation, and
+self-repair) instead of collapsing them to the generic `status` variant. This
+lets packaged channels react to lifecycle, sub-agent, and credential events
+directly rather than string-matching the message body. The channel WIT contract
+carries a `near:agent@x.y.z` package version (mirrored by `CHANNEL_WIT_VERSION`
+in the host runtime) so host and packaged artifacts can negotiate additive
+changes; bump the minor version when adding `status-type` variants.
+
 ## Code Ownership
 
 `thinclaw-channels` owns root-independent channel primitives: channel manager,

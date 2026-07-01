@@ -38,7 +38,11 @@
 // - Workspace writes are prefixed with channels/<name>/ to prevent escape
 // - Message emission is rate-limited
 
-package near:agent;
+// Channel interface version. Bumped when the channel WIT contract changes in a
+// backward-compatible, additive way (e.g. new `status-type` variants) so the
+// host and packaged artifacts can negotiate capabilities. Keep in sync with
+// `CHANNEL_WIT_VERSION` in the host runtime.
+package near:agent@0.2.0;
 
 /// Host-provided capabilities for sandboxed channels.
 ///
@@ -272,6 +276,12 @@ interface channel {
     // ==================== Status Types ====================
 
     /// Types of status updates the agent can send to channels.
+    ///
+    /// Payload-carrying host events (e.g. subagent lifecycle, credential
+    /// prompts) map to a dedicated variant here for classification, while the
+    /// human-readable detail and any structured data continue to travel through
+    /// the `status-update` record's `message` / `metadata-json` fields — WIT
+    /// enum variants intentionally carry no payload.
     enum status-type {
         /// Agent is thinking/processing a response.
         thinking,
@@ -295,6 +305,38 @@ interface channel {
         auth-required,
         /// Authentication flow completed.
         auth-completed,
+        /// A streaming text chunk from the model turn.
+        stream-chunk,
+        /// A structured plan update the client may render.
+        plan,
+        /// LLM token/cost usage for the most recent model turn.
+        usage,
+        /// The agent requested a credential from the operator (no secret value).
+        credential-prompt,
+        /// A turn-level error surfaced to the UI.
+        error,
+        /// A canvas / A2UI action (show, update, or dismiss a UI panel).
+        canvas-action,
+        /// An agent-initiated persistent message for the user.
+        agent-message,
+        /// Run lifecycle start (a run was accepted, before any LLM call).
+        lifecycle-start,
+        /// Run lifecycle end (final response produced, or run terminated).
+        lifecycle-end,
+        /// A sub-agent was spawned by the main agent.
+        subagent-spawned,
+        /// A running sub-agent reported progress.
+        subagent-progress,
+        /// A sub-agent completed, failed, or was cancelled.
+        subagent-completed,
+        /// The agent hit the context limit and is compacting before retrying.
+        context-compaction-started,
+        /// The agent is consulting the advisor lane (MoA / second opinion).
+        advisor-consultation-started,
+        /// The self-repair loop started repairing a stuck job or broken tool.
+        self-repair-started,
+        /// The self-repair loop finished a repair attempt.
+        self-repair-completed,
     }
 
     /// A status update from the agent.
