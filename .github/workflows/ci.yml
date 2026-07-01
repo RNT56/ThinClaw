@@ -197,6 +197,14 @@ jobs:
         run: npm run build
       - name: Backend cargo check
         run: cargo check --manifest-path apps/desktop/backend/Cargo.toml --locked
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Backend dependency policy (licenses + bans + sources)
+        # Advisories are checked separately and tracked as pre-existing debt
+        # (yanked core2/kuchikikiki + 2 unsound RUSTSECs); this gate enforces the
+        # license allowlist, source allowlist, and ban policy for the desktop tree.
+        working-directory: apps/desktop/backend
+        run: cargo deny check licenses bans sources
       - name: Backend tests
         working-directory: apps/desktop
         run: npm run test:backend
