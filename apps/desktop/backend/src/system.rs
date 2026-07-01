@@ -46,19 +46,23 @@ pub fn get_system_specs() -> SystemSpecs {
 
     let platform = System::name().unwrap_or("Unknown".to_string());
 
-    // Get cumulative memory of app + sidecars
-    let my_pid = sysinfo::get_current_pid().unwrap();
+    // Get cumulative memory of app + sidecars. `get_current_pid()` can fail on
+    // unsupported platforms; degrade to reporting 0 app memory rather than
+    // panicking the Tauri command (which would surface as a hard error in the UI).
+    let my_pid = sysinfo::get_current_pid().ok();
     sys.refresh_processes(ProcessesToUpdate::All, true);
 
     let mut total_app_memory = 0.0;
-    if let Some(process) = sys.process(my_pid) {
-        total_app_memory += process.memory() as f64;
-    }
+    if let Some(my_pid) = my_pid {
+        if let Some(process) = sys.process(my_pid) {
+            total_app_memory += process.memory() as f64;
+        }
 
-    // Include child processes (sidecars)
-    for p in sys.processes().values() {
-        if p.parent() == Some(my_pid) {
-            total_app_memory += p.memory() as f64;
+        // Include child processes (sidecars)
+        for p in sys.processes().values() {
+            if p.parent() == Some(my_pid) {
+                total_app_memory += p.memory() as f64;
+            }
         }
     }
 

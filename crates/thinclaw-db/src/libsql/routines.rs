@@ -12,11 +12,11 @@ use super::{
     row_to_routine_libsql, row_to_routine_run_libsql, row_to_routine_trigger_libsql,
 };
 use crate::RoutineStore;
-use thinclaw_agent::routine::{
+use thinclaw_types::error::DatabaseError;
+use thinclaw_types::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
     RoutineTriggerDecision, RunStatus,
 };
-use thinclaw_types::error::DatabaseError;
 
 const EVENT_CACHE_VERSION_USER: &str = "system";
 const EVENT_CACHE_VERSION_KEY: &str = "routine.event_cache_version";
@@ -666,7 +666,7 @@ impl RoutineStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
             let mut refreshed = row_to_routine_event_libsql(&row)?;
-            refreshed.status = thinclaw_agent::routine::RoutineEventStatus::Processing;
+            refreshed.status = thinclaw_types::routine::RoutineEventStatus::Processing;
             refreshed.claimed_by = Some(worker_id.to_string());
             refreshed.claimed_at = Some(now);
             refreshed.lease_expires_at = Some(now + lease_duration);
@@ -1118,7 +1118,7 @@ impl RoutineStore for LibSqlBackend {
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
                 let mut refreshed = trigger.clone();
-                refreshed.status = thinclaw_agent::routine::RoutineTriggerStatus::Processing;
+                refreshed.status = thinclaw_types::routine::RoutineTriggerStatus::Processing;
                 refreshed.claimed_by = Some(worker_id.to_string());
                 refreshed.claimed_at = Some(now);
                 refreshed.lease_expires_at = Some(now + lease_duration);
