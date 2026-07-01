@@ -36,7 +36,7 @@ impl SetupWizard {
         self.settings.user_timezone = Some(crate::timezone::detect_system_timezone().to_string());
         self.settings.webchat_theme = "system".to_string();
         self.settings.webchat_show_branding = false;
-        self.settings.observability_backend = "none".to_string();
+        self.settings.observability_backend = "log".to_string();
         self.settings.routines_enabled = true;
         self.settings.skills_enabled = true;
         self.settings.heartbeat.enabled = false;

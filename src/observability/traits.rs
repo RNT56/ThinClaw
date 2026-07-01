@@ -140,4 +140,62 @@ mod tests {
         let _ = ObserverMetric::ActiveJobs(3);
         let _ = ObserverMetric::QueueDepth(10);
     }
+
+    /// Guardrail (backlog B2): every `ObserverEvent` variant must have a real
+    /// production emit site, not merely a definition. We scan the crate's `src/`
+    /// tree for `ObserverEvent::<Variant>` references, excluding the observability
+    /// module itself — which holds the enum definition, the observer impls that
+    /// *match* on variants, and this test. Any remaining reference is an emit call,
+    /// so a missing variant here means we defined an event nobody ever records.
+    #[test]
+    fn all_event_variants_have_production_emit_sites() {
+        use std::path::{Path, PathBuf};
+
+        const VARIANTS: &[&str] = &[
+            "AgentStart",
+            "LlmRequest",
+            "LlmResponse",
+            "ToolCallStart",
+            "ToolCallEnd",
+            "TurnComplete",
+            "ChannelMessage",
+            "HeartbeatTick",
+            "AgentEnd",
+            "Error",
+        ];
+
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let observability_dir = src_root.join("observability");
+
+        let mut haystack = String::new();
+        let mut stack: Vec<PathBuf> = vec![src_root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src dir") {
+                let path = entry.expect("dir entry").path();
+                // Skip the observability module (definition + observer impls + this test).
+                if path.starts_with(&observability_dir) {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    haystack.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+                    haystack.push('\n');
+                }
+            }
+        }
+
+        let missing: Vec<&str> = VARIANTS
+            .iter()
+            .copied()
+            .filter(|v| !haystack.contains(&format!("ObserverEvent::{}", v)))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "ObserverEvent variants with no production emit site outside src/observability/: {:?}. \
+             Every variant must be recorded somewhere (backlog B2).",
+            missing
+        );
+    }
 }

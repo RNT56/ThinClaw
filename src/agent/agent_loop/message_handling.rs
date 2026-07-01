@@ -7,6 +7,12 @@ impl Agent {
         &self,
         message: &IncomingMessage,
     ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
+        self.observer()
+            .record_event(&crate::observability::ObserverEvent::ChannelMessage {
+                channel: message.channel.clone(),
+                direction: "inbound".to_string(),
+            });
+
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
 

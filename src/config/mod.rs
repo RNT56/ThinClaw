@@ -297,7 +297,7 @@ impl Config {
                 backend: helpers::optional_env("OBSERVABILITY_BACKEND")
                     .ok()
                     .flatten()
-                    .unwrap_or_else(|| "none".to_string()),
+                    .unwrap_or_else(|| "log".to_string()),
             },
         })
     }
