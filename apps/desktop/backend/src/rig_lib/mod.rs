@@ -11,22 +11,7 @@ pub mod unified_provider;
 
 pub use agent::RigManager;
 
-use crate::rig_lib::tools::web_search::{DDGSearchTool, SearchArgs};
-use rig::tool::Tool;
 use tauri::command;
-
-#[command]
-#[specta::specta]
-pub async fn rig_check_web_search(query: String) -> Result<String, String> {
-    let tool = DDGSearchTool {
-        app: None,
-        max_total_chars: 4000,
-        summarizer: None,
-        conversation_id: None,
-    };
-    let args = SearchArgs { query };
-    tool.call(args).await.map_err(|e| e.to_string())
-}
 
 // use crate::rig_lib::llama_provider::LlamaProvider;
 

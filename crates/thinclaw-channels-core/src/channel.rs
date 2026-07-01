@@ -414,6 +414,45 @@ pub enum StatusUpdate {
         /// Effective skill policy.
         skill_mode: String,
     },
+
+    /// Agent hit the model context-length limit and is compacting the
+    /// conversation before retrying the turn. Surfaced so operators can see
+    /// auto-compaction happening instead of an unexplained pause.
+    ContextCompactionStarted {
+        /// Tokens used that exceeded the limit.
+        used: u64,
+        /// The model's context-length limit.
+        limit: u64,
+    },
+
+    /// Agent is consulting the advisor lane (MoA / second-opinion governance)
+    /// via the `consult_advisor` tool.
+    AdvisorConsultationStarted {
+        /// What triggered the consultation (tool name / brief reason).
+        reason: String,
+    },
+
+    /// Agent's self-repair loop started repairing a stuck job or broken tool.
+    SelfRepairStarted {
+        /// "stuck_job" | "broken_tool".
+        repair_type: String,
+        /// The job id or tool name being repaired.
+        target_id: String,
+        /// Why the repair was triggered.
+        reason: String,
+    },
+
+    /// Agent's self-repair loop finished a repair attempt.
+    SelfRepairCompleted {
+        /// "stuck_job" | "broken_tool".
+        repair_type: String,
+        /// The job id or tool name that was repaired.
+        target_id: String,
+        /// Whether recovery succeeded.
+        success: bool,
+        /// Outcome summary.
+        summary: String,
+    },
 }
 
 /// A single field in a channel configuration form.

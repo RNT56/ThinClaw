@@ -41,6 +41,29 @@ Desktop talks to a remote ThinClaw gateway through `RemoteGatewayProxy`.
 - Remote events must be re-emitted to the frontend as the same `thinclaw-event` `UiEvent` schema used by local mode.
 - Unsupported remote endpoints must return a typed unavailable response or a clear error reason. They must not silently no-op.
 
+## Command Routing & Gating (TDO-001/002)
+
+Dual-mode availability is expressed with typed primitives in
+`apps/desktop/backend/src/thinclaw/bridge.rs` so the frontend can tell "gated, here's why"
+from "failed":
+
+- **`RouteMode`** — `LocalAndRemote` (works in both modes), `RemoteOnly` (needs a live gateway,
+  e.g. sandbox job/GPU flows), `LocalOnly` (only meaningful embedded, e.g. sidecar control,
+  channel-config submit, agent-loop eval).
+- **`BridgeError`** — an internally-tagged enum (`kind`): `Unavailable { capability, reason,
+  remediation, satisfied_by }` for a gated capability (the frontend renders a CTA), and
+  `Runtime { message }` for a genuine error. `From<String>`/`From<&str>` let existing
+  `?`/`map_err` sites migrate mechanically.
+- **`gated(capability, reason, remediation, satisfied_by)`** — the helper that builds an
+  `Unavailable`; it replaced the ad-hoc `local_unavailable`/`unavailable(...)` JSON helpers.
+- **`ROUTE_TABLE`** — a `&[(&str, RouteMode)]` registry mapping command names to their mode.
+  It is the bridge linter's ground truth: the test suite asserts every command that calls
+  `gated()` is classified, and every `ROUTE_TABLE` command is registered in the binding surface.
+  The table is additive — commands are enrolled as they are audited.
+
+When adding or gating a command, call `gated(...)` for the unavailable path and add the
+command to `ROUTE_TABLE`, then update [`remote-gateway-route-matrix.md`](remote-gateway-route-matrix.md).
+
 ## Event Contract
 
 `UiEvent` is the single desktop event schema. Local and remote modes must converge on this shape before crossing the frontend boundary.

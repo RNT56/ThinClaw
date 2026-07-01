@@ -322,7 +322,11 @@ pub fn run() {
         GLOBAL_LOG_BROADCASTER
             .set(std::sync::Arc::clone(&broadcaster))
             .ok();
-        thinclaw_core::channels::web::log_layer::init_tracing(broadcaster, cfg!(debug_assertions));
+        thinclaw_core::channels::web::log_layer::init_tracing(
+            broadcaster,
+            cfg!(debug_assertions),
+            Some(thinclaw_core::platform::state_paths().logs_dir),
+        );
     });
 
     let specta_builder = setup::commands::specta_builder();

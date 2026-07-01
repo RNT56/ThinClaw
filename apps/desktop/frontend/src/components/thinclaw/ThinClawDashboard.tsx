@@ -5,8 +5,6 @@ import {
     Shield,
     Zap,
     MessageSquare,
-    Layout,
-    Cpu,
     Globe,
     Lock,
     RefreshCw,
@@ -19,6 +17,7 @@ import {
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
+import { getVersion } from '@tauri-apps/api/app';
 
 interface StatCardProps {
     title: string;
@@ -55,17 +54,13 @@ function StatCard({ title, value, icon: Icon, status = 'info', description, clas
 
 export function ThinClawDashboard() {
     const [status, setStatus] = useState<thinclaw.ThinClawStatus | null>(null);
-    const [presence, setPresence] = useState<any>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [appVersion, setAppVersion] = useState<string | null>(null);
 
     const fetchData = async () => {
         try {
-            const [s, p] = await Promise.all([
-                thinclaw.getThinClawStatus(),
-                thinclaw.getThinClawSystemPresence().catch(() => null)
-            ]);
+            const s = await thinclaw.getThinClawStatus();
             setStatus(s);
-            setPresence(p);
         } catch (e) {
             console.error('Failed to fetch dashboard data:', e);
         } finally {
@@ -79,6 +74,10 @@ export function ThinClawDashboard() {
         return () => clearInterval(interval);
     }, []);
 
+    useEffect(() => {
+        getVersion().then(setAppVersion).catch(() => {});
+    }, []);
+
     if (isLoading && !status) {
         return (
             <div className="flex-1 flex items-center justify-center p-8">
@@ -89,9 +88,6 @@ export function ThinClawDashboard() {
             </div>
         );
     }
-
-    const instancesCount = Array.isArray(presence?.instances) ? presence.instances.length : 0;
-    const nodesCount = Array.isArray(presence?.nodes) ? presence.nodes.length : 0;
 
     return (
         <motion.div
@@ -145,20 +141,6 @@ export function ThinClawDashboard() {
                     icon={Zap}
                     status={status?.engine_connected ? 'success' : 'error'}
                     description={status?.engine_connected ? 'Linked to Control Plane' : 'Link interrupted'}
-                />
-                <StatCard
-                    title="Active Instances"
-                    value={instancesCount}
-                    icon={Layout}
-                    status={instancesCount > 0 ? 'success' : 'info'}
-                    description="Connected UI clients"
-                />
-                <StatCard
-                    title="Connected Nodes"
-                    value={nodesCount}
-                    icon={Cpu}
-                    status={nodesCount > 0 ? 'success' : 'info'}
-                    description="Managed edge devices"
                 />
             </div>
 
@@ -264,12 +246,8 @@ export function ThinClawDashboard() {
                             Software Version
                         </h3>
                         <div className="flex items-center justify-between">
-                            <span className="text-xs text-muted-foreground">ThinClaw Core</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-mono">0.4.2-stable</span>
-                        </div>
-                        <div className="flex items-center justify-between mt-2">
-                            <span className="text-xs text-muted-foreground">UI Version</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-muted-foreground font-mono">0.1.0-alpha</span>
+                            <span className="text-xs text-muted-foreground">Desktop</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-mono">{appVersion ? `v${appVersion}` : '—'}</span>
                         </div>
                     </div>
                 </div>

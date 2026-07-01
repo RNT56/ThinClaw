@@ -30,7 +30,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::tts::direct_media_tts_list_voices,
         crate::stt::direct_media_transcribe_audio,
         // ── Web & Image ─────────────────────────────────────────────────
-        crate::web_search::check_web_search,
         crate::image_gen::direct_media_generate_image,
         // ── RAG ─────────────────────────────────────────────────────────
         crate::rag::direct_rag_ingest_document,
@@ -88,7 +87,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::projects::get_project_documents,
         crate::projects::delete_document,
         // ── Rig Agent ───────────────────────────────────────────────────
-        crate::rig_lib::rig_check_web_search,
         crate::rig_lib::agent_chat,
         // ── ThinClaw Agent Cockpit ──────────────────────────────────────
         crate::thinclaw::commands::thinclaw_get_status,
@@ -339,6 +337,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_experiments_campaign_action,
         crate::thinclaw::commands::thinclaw_experiments_gpu_validate,
         crate::thinclaw::commands::thinclaw_experiments_gpu_launch_test,
+        crate::thinclaw::commands::thinclaw_experiments_list_envs,
+        crate::thinclaw::commands::thinclaw_experiments_run_eval,
         // ── Permissions ─────────────────────────────────────────────────
         crate::permissions::get_permission_status,
         crate::permissions::request_permission,

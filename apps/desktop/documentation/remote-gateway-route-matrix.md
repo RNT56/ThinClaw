@@ -5,7 +5,7 @@ Absolute-completion checkpoint for ThinClaw Desktop remote mode. Desktop IPC nam
 HTTP gateway. Unsupported operations must return an `unavailable:` error with a
 concrete reason.
 
-Last updated: 2026-05-15
+Last updated: 2026-06-29
 
 | Surface | Desktop command/proxy coverage | Remote endpoint | Status |
 | --- | --- | --- | --- |
@@ -34,6 +34,9 @@ Last updated: 2026-05-15
 | Autonomy | `thinclaw_autonomy_status`, `thinclaw_autonomy_bootstrap`, `thinclaw_autonomy_pause`, `thinclaw_autonomy_resume`, `thinclaw_autonomy_permissions`, `thinclaw_autonomy_rollback`, `thinclaw_autonomy_rollouts`, `thinclaw_autonomy_checks`, `thinclaw_autonomy_evidence` | `/api/autonomy/*` | wired for status/review surfaces; host-executing mutation remains gated by remote or local host policy |
 | Experiments | experiment IPC wrappers and proxy helpers | `/api/experiments/*` | wired for status/review/action surfaces exposed by the gateway |
 | Learning | learning IPC wrappers and proxy helpers | `/api/learning/*` | wired for status/history/candidates/review surfaces exposed by the gateway |
+| Session search | `thinclaw_session_search` | none | unavailable: LocalOnly — full-text search runs over the embedded session store |
+| Agent eval | `thinclaw_experiments_list_envs`, `thinclaw_experiments_run_eval` | none | unavailable: `run_eval` LocalOnly — drives the embedded agent in throwaway sessions |
+| Channel config | `thinclaw_channel_config_schema`, `thinclaw_channel_config_schemas`, `thinclaw_channel_config_submit` | none | unavailable: LocalOnly — schema read + submit operate on the embedded channel manager |
 
 Known intentional gaps are external host-policy gates, not silent desktop no-ops.
 The backend fixture suite currently exercises the chat/session/memory/log/cache/hook

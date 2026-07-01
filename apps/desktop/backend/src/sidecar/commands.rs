@@ -360,8 +360,8 @@ pub fn direct_runtime_get_sidecar_status(state: State<'_, SidecarManager>) -> Si
         chat_running: chat,
         embedding_running: embed,
         stt_running: stt,
-        tts_running: tts,
-        image_running: image,
+        tts_configured: tts,
+        image_configured: image,
         summarizer_running: summ,
     }
 }
