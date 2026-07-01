@@ -26,24 +26,32 @@ pub async fn perform_web_search(query: &str) -> Result<(String, Vec<WebSearchRes
     let html = resp.text().await.map_err(|e| e.to_string())?;
 
     let document = Html::parse_document(&html);
-    let result_selector = Selector::parse(".result").unwrap();
-    let title_selector = Selector::parse(".result__title").unwrap();
-    let snippet_selector = Selector::parse(".result__snippet").unwrap();
-
-    let link_selector = Selector::parse(".result__a").unwrap();
+    // Compile the (constant) CSS selectors once, not on every search call.
+    static RESULT_SEL: std::sync::OnceLock<Selector> = std::sync::OnceLock::new();
+    static TITLE_SEL: std::sync::OnceLock<Selector> = std::sync::OnceLock::new();
+    static SNIPPET_SEL: std::sync::OnceLock<Selector> = std::sync::OnceLock::new();
+    static LINK_SEL: std::sync::OnceLock<Selector> = std::sync::OnceLock::new();
+    let result_selector =
+        RESULT_SEL.get_or_init(|| Selector::parse(".result").expect("valid static selector"));
+    let title_selector =
+        TITLE_SEL.get_or_init(|| Selector::parse(".result__title").expect("valid static selector"));
+    let snippet_selector = SNIPPET_SEL
+        .get_or_init(|| Selector::parse(".result__snippet").expect("valid static selector"));
+    let link_selector =
+        LINK_SEL.get_or_init(|| Selector::parse(".result__a").expect("valid static selector"));
 
     let mut results = Vec::new();
     let mut context_strings = Vec::new();
 
-    for (i, element) in document.select(&result_selector).take(5).enumerate() {
+    for (i, element) in document.select(result_selector).take(5).enumerate() {
         let title = element
-            .select(&title_selector)
+            .select(title_selector)
             .next()
             .map(|e| e.text().collect::<String>())
             .unwrap_or_default();
 
         let link = element
-            .select(&link_selector)
+            .select(link_selector)
             .next()
             .and_then(|e| e.value().attr("href"))
             .map(|href| {
@@ -58,7 +66,7 @@ pub async fn perform_web_search(query: &str) -> Result<(String, Vec<WebSearchRes
             .unwrap_or_default();
 
         let snippet = element
-            .select(&snippet_selector)
+            .select(snippet_selector)
             .next()
             .map(|e| e.text().collect::<String>())
             .unwrap_or_default();
