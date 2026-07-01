@@ -46,7 +46,26 @@ function formatDate(value?: string | null) {
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-function reasonFromError(err: unknown) {
+function reasonFromError(err: unknown): string {
+    // Typed bridge gate (BridgeError): render the reason (+ remediation) instead of
+    // "[object Object]". Covers the RemoteOnly job commands (files list/read/restart/
+    // prompt) which return BridgeError::Unavailable when running in embedded mode.
+    if (err && typeof err === 'object' && 'kind' in err) {
+        const be = err as {
+            kind?: string;
+            message?: string;
+            capability?: string;
+            reason?: string;
+            remediation?: string | null;
+        };
+        if (be.kind === 'unavailable') {
+            const head = [be.capability, be.reason].filter(Boolean).join(': ');
+            return be.remediation ? `${head} — ${be.remediation}` : head || 'Unavailable';
+        }
+        if (be.kind === 'runtime' && be.message) {
+            return be.message;
+        }
+    }
     return err instanceof Error ? err.message : String(err);
 }
 
