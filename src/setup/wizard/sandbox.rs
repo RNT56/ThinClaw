@@ -209,11 +209,15 @@ impl SetupWizard {
 
             // Check if the image already exists
             let image_name = &self.settings.sandbox.image;
-            let image_exists = std::process::Command::new("docker")
+            // Async process spawn so a slow `docker` call never blocks the tokio
+            // runtime (a multi-minute `docker build` below would otherwise freeze
+            // every other async task, including the UI runtime in the Tauri path).
+            let image_exists = tokio::process::Command::new("docker")
                 .args(["image", "inspect", image_name])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
+                .await
                 .map(|s| s.success())
                 .unwrap_or(false);
 
@@ -237,13 +241,14 @@ impl SetupWizard {
                     let repo_root =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-                    let status = std::process::Command::new("docker")
+                    let status = tokio::process::Command::new("docker")
                         .args(["build", "-f", "Dockerfile.worker", "-t", image_name, "."])
                         .current_dir(&repo_root)
                         .stdin(std::process::Stdio::inherit())
                         .stdout(std::process::Stdio::inherit())
                         .stderr(std::process::Stdio::inherit())
-                        .status();
+                        .status()
+                        .await;
 
                     match status {
                         Ok(s) if s.success() => {
