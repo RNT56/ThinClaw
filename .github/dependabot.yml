@@ -1,0 +1,54 @@
+# Automated dependency updates (refactor backlog D5 — dependency-update automation).
+#
+# Covers the two cargo workspaces that carry the bulk of the dependency surface
+# (the root workspace and the desktop companion backend), the desktop frontend's
+# npm tree, and the CI workflow actions. Minor/patch bumps are grouped into a
+# single PR per ecosystem each week to keep review volume low; majors arrive as
+# individual PRs so breaking changes get focused attention.
+#
+# The standalone WASM channel/tool crates under channels-src/ and tools-src/ are
+# intentionally left out for now — they are low-churn build artifacts and would
+# add a lot of weekly noise; add entries here if any of them starts drifting.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: "/apps/desktop/backend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      desktop-backend-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: "/apps/desktop"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
