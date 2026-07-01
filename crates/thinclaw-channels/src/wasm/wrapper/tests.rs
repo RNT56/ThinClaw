@@ -757,7 +757,10 @@ fn test_status_to_wit_subagent_spawned_uses_structured_payload() {
         &metadata,
     );
 
-    assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
+    assert!(matches!(
+        wit.status,
+        super::wit_channel::StatusType::SubagentSpawned
+    ));
     assert!(wit.message.starts_with("[subagent:spawned:agent-1] "));
 
     let payload = wit
@@ -785,7 +788,10 @@ fn test_status_to_wit_subagent_progress_uses_structured_payload() {
         &metadata,
     );
 
-    assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
+    assert!(matches!(
+        wit.status,
+        super::wit_channel::StatusType::SubagentProgress
+    ));
     assert!(wit.message.starts_with("[subagent:progress:agent-1:tool] "));
 
     let payload = wit
@@ -824,7 +830,10 @@ fn test_status_to_wit_subagent_completed_uses_structured_payload() {
         &metadata,
     );
 
-    assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
+    assert!(matches!(
+        wit.status,
+        super::wit_channel::StatusType::SubagentCompleted
+    ));
     assert!(wit.message.starts_with("[subagent:completed:agent-1] "));
 
     let payload = wit
@@ -1170,6 +1179,22 @@ fn test_clone_wit_status_update_all_variants() {
         wit_channel::StatusType::JobStarted,
         wit_channel::StatusType::AuthRequired,
         wit_channel::StatusType::AuthCompleted,
+        wit_channel::StatusType::StreamChunk,
+        wit_channel::StatusType::Plan,
+        wit_channel::StatusType::Usage,
+        wit_channel::StatusType::CredentialPrompt,
+        wit_channel::StatusType::Error,
+        wit_channel::StatusType::CanvasAction,
+        wit_channel::StatusType::AgentMessage,
+        wit_channel::StatusType::LifecycleStart,
+        wit_channel::StatusType::LifecycleEnd,
+        wit_channel::StatusType::SubagentSpawned,
+        wit_channel::StatusType::SubagentProgress,
+        wit_channel::StatusType::SubagentCompleted,
+        wit_channel::StatusType::ContextCompactionStarted,
+        wit_channel::StatusType::AdvisorConsultationStarted,
+        wit_channel::StatusType::SelfRepairStarted,
+        wit_channel::StatusType::SelfRepairCompleted,
     ];
 
     for status in variants {

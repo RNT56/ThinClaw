@@ -120,12 +120,31 @@ pub(crate) fn get_updates_url(offset: i64, timeout_secs: u32) -> String {
 
 pub(crate) fn classify_status_update(update: &StatusUpdate) -> Option<TelegramStatusAction> {
     match update.status {
-        StatusType::Thinking => Some(TelegramStatusAction::Typing),
-        StatusType::Done | StatusType::Interrupted => None,
+        // Show a typing indicator while the agent is producing text.
+        StatusType::Thinking | StatusType::StreamChunk | StatusType::LifecycleStart => {
+            Some(TelegramStatusAction::Typing)
+        }
+        // Turn-ending / ephemeral bookkeeping events carry no visible notice.
+        StatusType::Done
+        | StatusType::Interrupted
+        | StatusType::LifecycleEnd
+        | StatusType::Usage
+        | StatusType::Plan => None,
         // Telegram doesn't have a rich activity rail like the WebUI, so
         // surface concise visible notices for tool lifecycle events.
         StatusType::ToolStarted | StatusType::ToolCompleted | StatusType::ToolResult => {
             status_message_for_user(update).map(TelegramStatusAction::Notify)
+        }
+        // Sub-agent lifecycle now arrives with dedicated status types; the
+        // structured payload still travels in `message`, so keep parsing it.
+        StatusType::SubagentSpawned
+        | StatusType::SubagentProgress
+        | StatusType::SubagentCompleted => {
+            if let Some(event) = parse_subagent_event(&update.message) {
+                Some(TelegramStatusAction::Subagent(event))
+            } else {
+                status_message_for_user(update).map(TelegramStatusAction::Notify)
+            }
         }
         StatusType::Status => {
             if let Some(event) = parse_subagent_event(&update.message) {
@@ -145,7 +164,15 @@ pub(crate) fn classify_status_update(update: &StatusUpdate) -> Option<TelegramSt
         StatusType::ApprovalNeeded
         | StatusType::JobStarted
         | StatusType::AuthRequired
-        | StatusType::AuthCompleted => {
+        | StatusType::AuthCompleted
+        | StatusType::CredentialPrompt
+        | StatusType::Error
+        | StatusType::CanvasAction
+        | StatusType::AgentMessage
+        | StatusType::ContextCompactionStarted
+        | StatusType::AdvisorConsultationStarted
+        | StatusType::SelfRepairStarted
+        | StatusType::SelfRepairCompleted => {
             status_message_for_user(update).map(TelegramStatusAction::Notify)
         }
     }

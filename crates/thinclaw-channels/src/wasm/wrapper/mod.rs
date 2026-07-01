@@ -78,6 +78,12 @@ mod tests;
 
 pub use conversions::HttpResponse;
 
+/// Version of the channel WIT contract (`near:agent` package in
+/// `wit/channel.wit`) used for host/artifact capability negotiation. Bumped on
+/// additive contract changes such as new `status-type` variants. Must stay in
+/// sync with the `@x.y.z` version on the WIT package declaration.
+pub const CHANNEL_WIT_VERSION: &str = "0.2.0";
+
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
     path: "../../wit/channel.wit",
