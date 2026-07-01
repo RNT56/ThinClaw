@@ -4590,6 +4590,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "10.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "js-sys",
+ "pem",
+ "serde",
+ "serde_json",
+ "signature",
+ "simple_asn1",
+ "zeroize",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10000,7 +10017,7 @@ dependencies = [
  "hyper-util",
  "iana-time-zone",
  "jsonschema",
- "jsonwebtoken",
+ "jsonwebtoken 10.4.0",
  "libloading 0.8.9",
  "libsql",
  "lru",
@@ -10161,7 +10178,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.12.1",
- "jsonwebtoken",
+ "jsonwebtoken 9.3.1",
  "lru",
  "rand 0.8.6",
  "regex",
