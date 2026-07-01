@@ -1427,10 +1427,24 @@ pub mod in_memory {
         SecretAccessContext, SecretError, SecretRef,
     };
 
+    /// An in-memory record of a credential-injection access, mirroring the
+    /// `secret_usage_log` audit that the Postgres/libsql stores persist. The
+    /// no-DB `InMemorySecretsStore` previously dropped this audit silently.
+    #[derive(Debug, Clone)]
+    pub struct SecretAccessAuditEntry {
+        pub secret_id: Uuid,
+        pub user_id: String,
+        pub context: SecretAccessContext,
+        pub success: bool,
+        pub error_message: Option<String>,
+        pub accessed_at: chrono::DateTime<Utc>,
+    }
+
     pub struct InMemorySecretsStore {
         secrets: RwLock<HashMap<(String, String), Secret>>,
         crypto: RwLock<Arc<SecretsCrypto>>,
         key_version: RwLock<i32>,
+        access_log: RwLock<Vec<SecretAccessAuditEntry>>,
     }
 
     impl InMemorySecretsStore {
@@ -1439,7 +1453,31 @@ pub mod in_memory {
                 secrets: RwLock::new(HashMap::new()),
                 crypto: RwLock::new(crypto),
                 key_version: RwLock::new(CURRENT_KEY_VERSION),
+                access_log: RwLock::new(Vec::new()),
             }
+        }
+
+        async fn push_access_audit(
+            &self,
+            secret_id: Uuid,
+            user_id: &str,
+            context: &SecretAccessContext,
+            success: bool,
+            error_message: Option<String>,
+        ) {
+            self.access_log.write().await.push(SecretAccessAuditEntry {
+                secret_id,
+                user_id: user_id.to_string(),
+                context: context.clone(),
+                success,
+                error_message,
+                accessed_at: Utc::now(),
+            });
+        }
+
+        /// Snapshot of the in-memory credential-access audit log.
+        pub async fn access_audit_log(&self) -> Vec<SecretAccessAuditEntry> {
+            self.access_log.read().await.clone()
         }
     }
 
@@ -1522,17 +1560,55 @@ pub mod in_memory {
             &self,
             user_id: &str,
             name: &str,
-            _context: SecretAccessContext,
+            context: SecretAccessContext,
         ) -> Result<DecryptedSecret, SecretError> {
-            let secret = self.get(user_id, name).await?;
-            super::ensure_current_secret(&secret)?;
+            let secret = match self.get(user_id, name).await {
+                Ok(secret) => secret,
+                Err(error) => {
+                    self.push_access_audit(
+                        Uuid::nil(),
+                        user_id,
+                        &context,
+                        false,
+                        Some(error.to_string()),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = super::ensure_current_secret(&secret) {
+                self.push_access_audit(
+                    secret.id,
+                    user_id,
+                    &context,
+                    false,
+                    Some(error.to_string()),
+                )
+                .await;
+                return Err(error);
+            }
             let crypto = self.crypto.read().await.clone();
-            let decrypted = crypto.decrypt_with_aad(
+            let decrypted = match crypto.decrypt_with_aad(
                 &secret.encrypted_value,
                 &secret.key_salt,
                 &super::secret_aad(&secret),
-            )?;
+            ) {
+                Ok(decrypted) => decrypted,
+                Err(error) => {
+                    self.push_access_audit(
+                        secret.id,
+                        user_id,
+                        &context,
+                        false,
+                        Some(error.to_string()),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
             self.record_usage(secret.id).await?;
+            self.push_access_audit(secret.id, user_id, &context, true, None)
+                .await;
             Ok(decrypted)
         }
 
@@ -1666,7 +1742,7 @@ mod tests {
     use crate::crypto::SecretsCrypto;
     use crate::store::SecretsStore;
     use crate::store::in_memory::InMemorySecretsStore;
-    use crate::types::CreateSecretParams;
+    use crate::types::{CreateSecretParams, SecretAccessContext};
 
     fn test_store() -> InMemorySecretsStore {
         let key = "0123456789abcdef0123456789abcdef";
@@ -1683,6 +1759,46 @@ mod tests {
 
         let decrypted = store.get_decrypted("user1", "api_key").await.unwrap();
         assert_eq!(decrypted.expose(), "sk-test-12345");
+    }
+
+    #[tokio::test]
+    async fn test_get_for_injection_records_access_audit() {
+        let store = test_store();
+        store
+            .create("user1", CreateSecretParams::new("api_key", "sk-test-12345"))
+            .await
+            .unwrap();
+
+        // Successful injection is audited.
+        let decrypted = store
+            .get_for_injection(
+                "user1",
+                "api_key",
+                SecretAccessContext::new("provider_vault", "llm_call"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decrypted.expose(), "sk-test-12345");
+
+        // A missing secret is audited as a failure rather than dropped silently.
+        assert!(
+            store
+                .get_for_injection(
+                    "user1",
+                    "does_not_exist",
+                    SecretAccessContext::new("provider_vault", "llm_call"),
+                )
+                .await
+                .is_err()
+        );
+
+        let log = store.access_audit_log().await;
+        assert_eq!(log.len(), 2);
+        assert!(log[0].success);
+        assert_eq!(log[0].user_id, "user1");
+        assert_eq!(log[0].context.caller, "provider_vault");
+        assert!(!log[1].success);
+        assert!(log[1].error_message.is_some());
     }
 
     #[tokio::test]

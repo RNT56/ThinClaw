@@ -529,16 +529,9 @@ pub struct McpRuntimeHealth {
     pub connected: bool,
 }
 
-/// Persisted per-server logging preference.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum McpLoggingLevel {
-    Debug,
-    Info,
-    #[default]
-    Warning,
-    Error,
-}
+/// Persisted per-server logging preference (moved to `thinclaw-tools-core` so
+/// light consumers can use it without the heavyweight tool runtime).
+pub use thinclaw_tools_core::mcp_logging::McpLoggingLevel;
 
 /// Error type for MCP configuration operations.
 #[derive(Debug, thiserror::Error)]
