@@ -3889,6 +3889,27 @@ snippet: string;
  */
 score: number }
 /**
+ * Mid-loop agent message classification carried by [`UiEvent::AgentMessage`].
+ *
+ * Matches the `emit_user_message` tool schema (`progress` | `interim_result`
+ * | `question` | `warning`). The tool default is `progress`, but the value is
+ * not strictly clamped upstream, so any other classification round-trips
+ * through [`MessageType::Other`].
+ */
+export type MessageType =
+/**
+ * One of the recognised message classifications.
+ */
+MessageTypeKnown |
+/**
+ * Any other classification string (preserved verbatim).
+ */
+string
+/**
+ * The recognised, closed set of [`MessageType`] values.
+ */
+export type MessageTypeKnown = "progress" | "interim_result" | "question" | "warning"
+/**
  * Which AI modality a backend serves.
  */
 export type Modality = "chat" | "embedding" | "tts" | "stt" | "diffusion"
@@ -4023,6 +4044,29 @@ export type RoutingRulesResponse = { rules: RoutingRule[]; smart_routing_enabled
  * Full routing policy status for the routing UI dashboard.
  */
 export type RoutingStatusResponse = { enabled: boolean; default_provider: string; routing_mode: string; primary_model: string | null; preferred_cheap_provider: string | null; cheap_model: string | null; primary_pool_order: string[]; cheap_pool_order: string[]; fallback_chain: string[]; advisor_ready: boolean; advisor_disabled_reason: string | null; executor_target: string | null; advisor_target: string | null; diagnostics: string[]; runtime_revision: number | null; llm_select_state: string; rule_count: number; rules: RoutingRuleSummary[]; latency_data: LatencyEntry[] }
+/**
+ * Run lifecycle status carried by [`UiEvent::RunStatus`].
+ *
+ * Historically a free-form string (`StatusUpdate::Status(text)` and the
+ * gateway `status` message forward arbitrary human-readable text). The known
+ * terminal/active states are modelled as named variants with their exact wire
+ * strings preserved; any other value round-trips losslessly through
+ * [`RunStatus::Other`]. The exported TypeScript type is therefore a union of
+ * the known literals plus `string`.
+ */
+export type RunStatus =
+/**
+ * One of the recognised run states.
+ */
+RunStatusKnown |
+/**
+ * Any other free-form status string (preserved verbatim).
+ */
+string
+/**
+ * The recognised, closed set of [`RunStatus`] values.
+ */
+export type RunStatusKnown = "started" | "in_flight" | "ok" | "error" | "aborted" | "done" | "interrupted" | "rejected"
 export type RuntimeCapability = "chat" | "embedding" | "tts" | "stt" | "diffusion"
 export type RuntimeExposurePolicy = "direct_only" | "shared_when_enabled" | "network_exposed"
 export type RuntimeReadiness = "ready" | "starting" | "setup_required" | "unavailable"
@@ -4097,6 +4141,27 @@ export type StandardAsset = { name: string; category: string; filename: string; 
  */
 export type StorageCategory = { id: string; label: string; size_bytes: number }
 export type StreamChunk = { content: string; done: boolean; usage: DirectTokenUsage | null; context_update: DirectChatMessage[] | null }
+/**
+ * Sub-agent progress status carried by [`UiEvent::SubAgentUpdate`].
+ *
+ * Known lifecycle states use their exact wire strings; the running-with-
+ * category form (`running:<category>`) and any operator-supplied status from
+ * the `thinclaw_update_sub_agent_status` RPC round-trip losslessly through
+ * [`SubAgentStatus::Other`].
+ */
+export type SubAgentStatus =
+/**
+ * One of the recognised sub-agent states.
+ */
+SubAgentStatusKnown |
+/**
+ * Any other status string, e.g. `running:thinking` (preserved verbatim).
+ */
+string
+/**
+ * The recognised, closed set of [`SubAgentStatus`] values.
+ */
+export type SubAgentStatusKnown = "running" | "completed" | "failed"
 export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string; app_memory: number; memory_bandwidth_gbps: number }
 export type TAURI_CHANNEL<TSend> = import("@tauri-apps/api/core").Channel<TSend>
 /**
@@ -4148,6 +4213,30 @@ export type ThinkingConfig = { enabled: boolean; budget_tokens: number | null }
  */
 export type ToolInfoItem = { name: string; description: string; enabled: boolean; source: string }
 /**
+ * Tool-execution status carried by [`UiEvent::ToolUpdate`].
+ *
+ * The wire strings are preserved exactly (`started` | `stream` | `ok` |
+ * `error`) so existing frontend runtime checks keep working, while the
+ * exported TypeScript type becomes an exhaustive string-literal union.
+ */
+export type ToolStatus =
+/**
+ * Tool call has started executing.
+ */
+"started" |
+/**
+ * Intermediate streamed tool result.
+ */
+"stream" |
+/**
+ * Tool completed successfully.
+ */
+"ok" |
+/**
+ * Tool failed.
+ */
+"error"
+/**
  * Tool list response
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
@@ -4198,11 +4287,11 @@ export type UiEvent =
 /**
  * Tool execution update
  */
-{ kind: "ToolUpdate"; session_key: string; run_id: string | null; tool_name: string; status: string; input: JsonValue; output: JsonValue } |
+{ kind: "ToolUpdate"; session_key: string; run_id: string | null; tool_name: string; status: ToolStatus; input: JsonValue; output: JsonValue } |
 /**
  * Run status change
  */
-{ kind: "RunStatus"; session_key: string; run_id: string | null; status: string; error: string | null } |
+{ kind: "RunStatus"; session_key: string; run_id: string | null; status: RunStatus; error: string | null } |
 /**
  * Explicit run lifecycle transition.
  */
@@ -4255,7 +4344,7 @@ export type UiEvent =
  * changes state. The frontend can use this to show a progress panel
  * in the parent session's chat view.
  */
-{ kind: "SubAgentUpdate"; parent_session: string; child_session: string; task: string; status: string; progress: number | null; result_preview: string | null } |
+{ kind: "SubAgentUpdate"; parent_session: string; child_session: string; task: string; status: SubAgentStatus; progress: number | null; result_preview: string | null } |
 /**
  * Sandbox/job lifecycle update.
  */
@@ -4267,7 +4356,7 @@ export type UiEvent =
  * (the agentic loop continues), so the processing indicator should
  * stay active. These are NOT ephemeral status text.
  */
-{ kind: "AgentMessage"; session_key: string; run_id: string | null; message_id: string; content: string; message_type: string } |
+{ kind: "AgentMessage"; session_key: string; run_id: string | null; message_id: string; content: string; message_type: MessageType } |
 /**
  * Factory reset completed — frontend must clear all cached state
  */
