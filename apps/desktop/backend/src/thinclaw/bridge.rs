@@ -130,6 +130,8 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("direct_runtime_start_chat_server", RouteMode::LocalOnly),
     ("direct_runtime_start_stt_server", RouteMode::LocalOnly),
     ("direct_runtime_stop_chat_server", RouteMode::LocalOnly),
+    // Channel config submit applies to the embedded channel manager.
+    ("thinclaw_channel_config_submit", RouteMode::LocalOnly),
     ("thinclaw_checkpoint_diff", RouteMode::LocalOnly),
     ("thinclaw_checkpoint_restore", RouteMode::LocalOnly),
     ("thinclaw_checkpoints_list", RouteMode::LocalOnly),

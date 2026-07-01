@@ -382,6 +382,42 @@ impl Channel for DiscordChannel {
         )
     }
 
+    fn config_schema(&self) -> Option<thinclaw_channels_core::ConfigSchema> {
+        use thinclaw_channels_core::{ConfigField, ConfigSchema};
+        Some(ConfigSchema {
+            channel_id: "discord".to_string(),
+            channel_name: "Discord".to_string(),
+            fields: vec![
+                ConfigField {
+                    id: "allow_from".to_string(),
+                    label: "Allowed user IDs".to_string(),
+                    field_type: "textarea".to_string(),
+                    required: false,
+                    help_text: Some(
+                        "One Discord user ID per line. Empty allows all users.".to_string(),
+                    ),
+                    default_value: None,
+                    options: None,
+                },
+                ConfigField {
+                    id: "guild_id".to_string(),
+                    label: "Guild ID".to_string(),
+                    field_type: "text".to_string(),
+                    required: false,
+                    help_text: Some(
+                        "Restrict the bot to a single guild (server). Empty allows all guilds."
+                            .to_string(),
+                    ),
+                    default_value: None,
+                    options: None,
+                },
+            ],
+            help: Some(
+                "Configure which Discord users and guild the agent responds to.".to_string(),
+            ),
+        })
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
 

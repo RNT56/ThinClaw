@@ -12,5 +12,6 @@ thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -455,6 +455,45 @@ pub enum StatusUpdate {
     },
 }
 
+/// A single field in a channel configuration form.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConfigField {
+    /// Stable field id within the channel (e.g. "allow_from").
+    pub id: String,
+    /// Human-readable label.
+    pub label: String,
+    /// Input kind: "text" | "password" | "number" | "checkbox" | "select" | "textarea".
+    pub field_type: String,
+    /// Whether the field must be non-empty.
+    pub required: bool,
+    /// Optional help/placeholder text.
+    pub help_text: Option<String>,
+    /// Optional default value (JSON).
+    pub default_value: Option<serde_json::Value>,
+    /// For "select" fields: the allowed options.
+    pub options: Option<Vec<ConfigOption>>,
+}
+
+/// A selectable option for a "select" [`ConfigField`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConfigOption {
+    pub value: String,
+    pub label: String,
+}
+
+/// A channel's runtime configuration schema, used to render a settings form.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConfigSchema {
+    /// Channel id this schema belongs to (e.g. "signal").
+    pub channel_id: String,
+    /// Human-readable channel name.
+    pub channel_name: String,
+    /// Ordered configuration fields.
+    pub fields: Vec<ConfigField>,
+    /// Optional help text describing the form.
+    pub help: Option<String>,
+}
+
 /// Trait for message channels.
 ///
 /// Channels receive messages from external sources and convert them to
@@ -548,6 +587,15 @@ pub trait Channel: Send + Sync {
     /// Channels that render markdown, HTML, or plain text differently can
     /// override this to help prompt assembly tailor its response style.
     fn formatting_hints(&self) -> Option<String> {
+        None
+    }
+
+    /// Return this channel's runtime configuration schema, if it exposes one.
+    ///
+    /// Channels with operator-tunable settings (allowed senders, content
+    /// filters, …) override this so a UI can render a configuration form.
+    /// Mirrors [`Channel::formatting_hints`]. Default: no schema.
+    fn config_schema(&self) -> Option<ConfigSchema> {
         None
     }
 

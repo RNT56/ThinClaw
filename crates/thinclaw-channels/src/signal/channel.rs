@@ -773,6 +773,51 @@ impl SignalChannel {
 
 #[async_trait]
 impl Channel for SignalChannel {
+    fn config_schema(&self) -> Option<thinclaw_channels_core::ConfigSchema> {
+        use thinclaw_channels_core::{ConfigField, ConfigSchema};
+        Some(ConfigSchema {
+            channel_id: "signal".to_string(),
+            channel_name: "Signal".to_string(),
+            fields: vec![
+                ConfigField {
+                    id: "allow_from".to_string(),
+                    label: "Allowed senders".to_string(),
+                    field_type: "textarea".to_string(),
+                    required: false,
+                    help_text: Some(
+                        "One sender per line (phone number or UUID). Empty allows all senders."
+                            .to_string(),
+                    ),
+                    default_value: None,
+                    options: None,
+                },
+                ConfigField {
+                    id: "ignore_attachments".to_string(),
+                    label: "Ignore attachments".to_string(),
+                    field_type: "checkbox".to_string(),
+                    required: false,
+                    help_text: Some("Skip downloading attached files.".to_string()),
+                    default_value: Some(serde_json::Value::Bool(false)),
+                    options: None,
+                },
+                ConfigField {
+                    id: "ignore_stories".to_string(),
+                    label: "Ignore stories".to_string(),
+                    field_type: "checkbox".to_string(),
+                    required: false,
+                    help_text: Some("Ignore Signal stories.".to_string()),
+                    default_value: Some(serde_json::Value::Bool(false)),
+                    options: None,
+                },
+            ],
+            help: Some(
+                "Configure which Signal senders the agent responds to and how it handles \
+                 attachments and stories."
+                    .to_string(),
+            ),
+        })
+    }
+
     fn name(&self) -> &str {
         "signal"
     }
