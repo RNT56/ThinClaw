@@ -223,6 +223,18 @@ impl Agent {
         if !parallel_safe {
             // Single tool (or none): execute inline
             for (pf_idx, tc) in &runnable {
+                if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AdvisorConsultationStarted {
+                                reason: tc.name.clone(),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
                 let _ = self
                     .channels
                     .send_status(
@@ -296,6 +308,17 @@ impl Agent {
                             StatusUpdate::ToolStarted {
                                 name: tc.name.clone(),
                                 parameters: Some(tc.arguments.clone()),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AdvisorConsultationStarted {
+                                reason: tc.name.clone(),
                             },
                             &message.metadata,
                         )

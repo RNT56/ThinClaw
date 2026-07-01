@@ -649,6 +649,17 @@ impl Agent {
                 let stuck_jobs = repair.detect_stuck_jobs().await;
                 for job in stuck_jobs {
                     tracing::info!("Attempting to repair stuck job {}", job.job_id);
+                    let _ = repair_channels
+                        .send_status(
+                            "web",
+                            StatusUpdate::SelfRepairStarted {
+                                repair_type: "stuck_job".to_string(),
+                                target_id: job.job_id.to_string(),
+                                reason: format!("stuck for {}s", job.stuck_duration.as_secs()),
+                            },
+                            &serde_json::json!({ "session_key": "agent:main" }),
+                        )
+                        .await;
                     let result = repair.repair_stuck_job(&job).await;
                     let notification = match &result {
                         Ok(RepairResult::Success { message }) => {
@@ -686,6 +697,25 @@ impl Agent {
                         }
                     };
 
+                    let _ = repair_channels
+                        .send_status(
+                            "web",
+                            StatusUpdate::SelfRepairCompleted {
+                                repair_type: "stuck_job".to_string(),
+                                target_id: job.job_id.to_string(),
+                                success: matches!(result, Ok(RepairResult::Success { .. })),
+                                summary: match &result {
+                                    Ok(RepairResult::Success { message })
+                                    | Ok(RepairResult::Failed { message })
+                                    | Ok(RepairResult::ManualRequired { message })
+                                    | Ok(RepairResult::Retry { message }) => message.clone(),
+                                    Err(e) => e.to_string(),
+                                },
+                            },
+                            &serde_json::json!({ "session_key": "agent:main" }),
+                        )
+                        .await;
+
                     if let Some(msg) = notification {
                         let response = OutgoingResponse::text(format!("Self-Repair: {}", msg));
                         let _ = repair_channels.broadcast("web", "default", response).await;
@@ -696,7 +726,37 @@ impl Agent {
                 let broken_tools = repair.detect_broken_tools().await;
                 for tool in broken_tools {
                     tracing::info!("Attempting to repair broken tool: {}", tool.name);
-                    match repair.repair_broken_tool(&tool).await {
+                    let _ = repair_channels
+                        .send_status(
+                            "web",
+                            StatusUpdate::SelfRepairStarted {
+                                repair_type: "broken_tool".to_string(),
+                                target_id: tool.name.clone(),
+                                reason: "tool failure threshold exceeded".to_string(),
+                            },
+                            &serde_json::json!({ "session_key": "agent:main" }),
+                        )
+                        .await;
+                    let tool_result = repair.repair_broken_tool(&tool).await;
+                    let _ = repair_channels
+                        .send_status(
+                            "web",
+                            StatusUpdate::SelfRepairCompleted {
+                                repair_type: "broken_tool".to_string(),
+                                target_id: tool.name.clone(),
+                                success: matches!(tool_result, Ok(RepairResult::Success { .. })),
+                                summary: match &tool_result {
+                                    Ok(RepairResult::Success { message })
+                                    | Ok(RepairResult::Failed { message })
+                                    | Ok(RepairResult::ManualRequired { message })
+                                    | Ok(RepairResult::Retry { message }) => message.clone(),
+                                    Err(e) => e.to_string(),
+                                },
+                            },
+                            &serde_json::json!({ "session_key": "agent:main" }),
+                        )
+                        .await;
+                    match tool_result {
                         Ok(RepairResult::Success { message }) => {
                             let response = OutgoingResponse::text(format!(
                                 "Self-Repair: Tool '{}' repaired: {}",
