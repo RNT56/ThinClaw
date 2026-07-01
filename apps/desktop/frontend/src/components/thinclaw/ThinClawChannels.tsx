@@ -58,12 +58,15 @@ const CHANNEL_DESCRIPTIONS: Record<string, string> = {
     bluebubbles: 'Cross-platform iMessage bridge via BlueBubbles server. Supports media, read receipts, and group chats.',
 };
 
-const STREAM_MODES = ['', 'full', 'typing_only', 'disabled'];
+// Runtime stream-mode vocabulary (channels-core StreamMode::from_str_value):
+// '' = None (send the full reply), 'edit' = live message edits, 'status' =
+// typing-indicator, 'chunks' = event-chunked. Only telegram + discord honor it.
+const STREAM_MODES = ['', 'edit', 'status', 'chunks'];
 const STREAM_MODE_LABELS: Record<string, string> = {
-    '': 'Default',
-    'full': 'Full Streaming',
-    'typing_only': 'Typing Only',
-    'disabled': 'Disabled',
+    '': 'Off (full reply)',
+    'edit': 'Live Edit',
+    'status': 'Typing Indicator',
+    'chunks': 'Chunked',
 };
 
 // ── Channel Card  ────────────────────────────────────────────────
@@ -317,9 +320,10 @@ export function ThinClawChannels() {
     };
 
     const handleStreamModeChange = async (channelId: string, mode: string) => {
-        const envKey = `${channelId.toUpperCase()}_STREAM_MODE`;
+        // Runtime reads the namespaced per-channel key (telegram/discord only).
+        const settingKey = `channels.${channelId}_stream_mode`;
         try {
-            await thinclaw.setSetting(envKey, mode);
+            await thinclaw.setSetting(settingKey, mode);
             // Update local state
             setChannels(prev => prev.map(ch =>
                 ch.id === channelId ? { ...ch, stream_mode: mode } : ch
@@ -330,7 +334,7 @@ export function ThinClawChannels() {
         }
     };
 
-    const streamChannels = ['discord', 'telegram', 'slack'];
+    const streamChannels = ['discord', 'telegram'];
     const activeChannels = channels.filter(ch => ch.enabled);
     const inactiveChannels = channels.filter(ch => !ch.enabled);
 

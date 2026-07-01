@@ -384,24 +384,39 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
             const res = await directCommands.directMediaTtsSynthesize(sanitizedContent, null);
             if (res.status === 'error') {
                 toast.error('TTS failed', { description: res.error });
+                setIsSpeaking(false);
                 return;
             }
-            // Decode base64 PCM → Float32 audio and play via Web Audio API
+            // Decode base64 audio and play via Web Audio API. Cloud providers
+            // (OpenAI/ElevenLabs) return container-encoded audio (MP3); local Piper
+            // and Gemini return raw s16le PCM @22050. Try the container decoder
+            // first and fall back to the raw-PCM path so both formats play.
             const binary = atob(res.data.audioBytes);
             const bytes = new Uint8Array(binary.length);
             for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-            const int16 = new Int16Array(bytes.buffer);
-            const float32 = new Float32Array(int16.length);
-            for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
 
             const ctx = new AudioContext({ sampleRate: 22050 });
-            const buffer = ctx.createBuffer(1, float32.length, 22050);
-            buffer.copyToChannel(float32, 0);
-            const source = ctx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(ctx.destination);
-            source.onended = () => { setIsSpeaking(false); ctx.close(); };
-            source.start();
+            const play = (buffer: AudioBuffer) => {
+                const source = ctx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(ctx.destination);
+                source.onended = () => { setIsSpeaking(false); ctx.close(); };
+                source.start();
+            };
+
+            try {
+                // decodeAudioData detaches the buffer, so hand it a copy and keep
+                // the original bytes for the raw-PCM fallback below.
+                const decoded = await ctx.decodeAudioData(bytes.buffer.slice(0));
+                play(decoded);
+            } catch {
+                const int16 = new Int16Array(bytes.buffer);
+                const float32 = new Float32Array(int16.length);
+                for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+                const buffer = ctx.createBuffer(1, float32.length, 22050);
+                buffer.copyToChannel(float32, 0);
+                play(buffer);
+            }
         } catch (e) {
             toast.error('TTS error', { description: String(e) });
             setIsSpeaking(false);

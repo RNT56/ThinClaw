@@ -2,10 +2,12 @@
 
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use thinclaw_tools::mcp::{
-    GetPromptResult, McpLoggingLevel, McpPendingInteraction, McpPrompt, McpPromptMessage,
-    McpResource, McpResourceContents, McpResourceTemplate, McpTool,
+use thinclaw_tools_core::mcp::{
+    GetPromptResult, McpPrompt, McpPromptMessage, McpResource, McpResourceContents,
+    McpResourceTemplate, McpTool,
 };
+use thinclaw_tools_core::mcp_interaction::McpPendingInteraction;
+use thinclaw_tools_core::mcp_logging::McpLoggingLevel;
 
 use super::types::ActionResponse;
 

@@ -5,6 +5,7 @@ pub mod error;
 pub mod job;
 pub mod media;
 pub mod repair;
+pub mod routine;
 pub mod sandbox;
 pub mod setup;
 pub mod subagent;

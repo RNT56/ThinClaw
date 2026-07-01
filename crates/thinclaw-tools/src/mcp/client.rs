@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock, oneshot};
 
 use thinclaw_secrets::{SecretAccessContext, SecretError, SecretsStore};
@@ -52,26 +51,9 @@ struct McpRuntimeState {
     interaction_request_ids: Mutex<HashMap<u64, String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpInteractionKind {
-    Sampling,
-    Elicitation,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpPendingInteraction {
-    pub id: String,
-    pub server_name: String,
-    pub method: String,
-    pub kind: McpInteractionKind,
-    pub title: String,
-    pub description: String,
-    pub params: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<serde_json::Value>,
-    pub created_at: String,
-}
+// MCP interaction DTOs moved to `thinclaw-tools-core` so light consumers can use
+// them without the heavyweight tool runtime; re-exported for path stability.
+pub use thinclaw_tools_core::mcp_interaction::{McpInteractionKind, McpPendingInteraction};
 
 enum PendingInteractionResolution {
     Approved(serde_json::Value),

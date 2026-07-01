@@ -5,6 +5,7 @@ description = "ThinClaw desktop companion app"
 authors = ["RNT56"]
 license = "GPL-3.0-only"
 edition = "2021"
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

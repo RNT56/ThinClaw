@@ -46,7 +46,9 @@ fn sanitize_system_prompt_for_local(content: &str) -> String {
     //    Models like Gemma use <start_of_turn>/<end_of_turn> as special tokens,
     //    so seeing other <...> patterns in content can cause premature EOS.
     //    We preserve the text content but remove the angle brackets.
-    let tag_re = regex::Regex::new(r"<(/?\w[\w_-]*)>").unwrap();
+    static TAG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let tag_re = TAG_RE
+        .get_or_init(|| regex::Regex::new(r"<(/?\w[\w_-]*)>").expect("valid static tag regex"));
     result = tag_re.replace_all(&result, "`$1`").to_string();
 
     // 2. Simplify negative instructions that cause small models to "shut down".
@@ -62,9 +64,13 @@ fn sanitize_system_prompt_for_local(content: &str) -> String {
     );
 
     // 3. Clean up double spaces and excessive punctuation from replacements
-    let multi_space_re = regex::Regex::new(r"  +").unwrap();
+    static MULTI_SPACE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let multi_space_re =
+        MULTI_SPACE_RE.get_or_init(|| regex::Regex::new(r"  +").expect("valid static space regex"));
     result = multi_space_re.replace_all(&result, " ").to_string();
-    let multi_period_re = regex::Regex::new(r"\.(\s*\.)+").unwrap();
+    static MULTI_PERIOD_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let multi_period_re = MULTI_PERIOD_RE
+        .get_or_init(|| regex::Regex::new(r"\.(\s*\.)+").expect("valid static period regex"));
     result = multi_period_re.replace_all(&result, ".").to_string();
 
     result.trim().to_string()

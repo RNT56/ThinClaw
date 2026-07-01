@@ -279,12 +279,16 @@ impl DockerChromiumConfig {
                 )));
             }
 
-            // Try a TCP connection to the debug port.
-            match std::net::TcpStream::connect_timeout(
-                &addr.parse().expect("valid socket addr"),
+            // Try a TCP connection to the debug port — async + bounded so we
+            // never block a tokio worker thread (a blocking connect_timeout here
+            // would steal a worker for up to a second per poll).
+            match tokio::time::timeout(
                 Duration::from_secs(1),
-            ) {
-                Ok(_) => {
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
                     tracing::debug!(
                         elapsed = ?start.elapsed(),
                         "Chrome in Docker is ready (port {} open)",
@@ -292,7 +296,8 @@ impl DockerChromiumConfig {
                     );
                     return Ok(());
                 }
-                Err(_) => {
+                // Connection refused (Ok(Err)) or timed out (Err): not ready yet.
+                Ok(Err(_)) | Err(_) => {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }
