@@ -133,6 +133,8 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_checkpoint_diff", RouteMode::LocalOnly),
     ("thinclaw_checkpoint_restore", RouteMode::LocalOnly),
     ("thinclaw_checkpoints_list", RouteMode::LocalOnly),
+    // Agent-loop eval drives the embedded agent; no remote-gateway equivalent.
+    ("thinclaw_experiments_run_eval", RouteMode::LocalOnly),
     ("thinclaw_install_skill_repo", RouteMode::LocalOnly),
     ("thinclaw_session_search", RouteMode::LocalOnly),
     ("thinclaw_set_autonomy_mode", RouteMode::LocalOnly),

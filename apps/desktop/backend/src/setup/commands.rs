@@ -334,6 +334,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_experiments_campaign_action,
         crate::thinclaw::commands::thinclaw_experiments_gpu_validate,
         crate::thinclaw::commands::thinclaw_experiments_gpu_launch_test,
+        crate::thinclaw::commands::thinclaw_experiments_list_envs,
+        crate::thinclaw::commands::thinclaw_experiments_run_eval,
         // ── Permissions ─────────────────────────────────────────────────
         crate::permissions::get_permission_status,
         crate::permissions::request_permission,
