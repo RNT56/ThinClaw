@@ -946,6 +946,8 @@ impl Channel for ReplChannel {
                     );
                 }
             }
+            // Future variants render nothing in the REPL by default (non_exhaustive).
+            _ => {}
         }
         Ok(())
     }
