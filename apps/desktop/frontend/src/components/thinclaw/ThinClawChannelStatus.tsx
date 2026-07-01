@@ -35,12 +35,15 @@ const STATE_STYLES: Record<string, { bg: string; text: string; dot: string }> = 
     Error: { bg: 'bg-red-500/10', text: 'text-red-500', dot: 'bg-red-500' },
 };
 
-const STREAM_MODES = ['', 'full', 'typing_only', 'disabled'];
+// Runtime stream-mode vocabulary (channels-core StreamMode::from_str_value):
+// '' = None (send the full reply), 'edit' = live message edits, 'status' =
+// typing-indicator, 'chunks' = event-chunked. Only telegram + discord honor it.
+const STREAM_MODES = ['', 'edit', 'status', 'chunks'];
 const STREAM_MODE_LABELS: Record<string, string> = {
-    '': 'Default',
-    'full': 'Full Streaming',
-    'typing_only': 'Typing Only',
-    'disabled': 'Disabled',
+    '': 'Off (full reply)',
+    'edit': 'Live Edit',
+    'status': 'Typing Indicator',
+    'chunks': 'Chunked',
 };
 
 // ── Status Card ────────────────────────────────────────────────
@@ -57,7 +60,7 @@ function ChannelStatusCard({
 }) {
     const Icon = CHANNEL_ICONS[entry.id] || Wifi;
     const stateStyle = STATE_STYLES[entry.state] || STATE_STYLES.Disconnected;
-    const hasStreamMode = ['discord', 'telegram', 'slack'].includes(entry.id);
+    const hasStreamMode = ['discord', 'telegram'].includes(entry.id);
 
     return (
         <motion.div
@@ -240,9 +243,10 @@ export function ThinClawChannelStatus() {
     }, [fetchData]);
 
     const handleStreamModeChange = async (channelId: string, mode: string) => {
-        const envKey = `${channelId.toUpperCase()}_STREAM_MODE`;
+        // Runtime reads the namespaced per-channel key (telegram/discord only).
+        const settingKey = `channels.${channelId}_stream_mode`;
         try {
-            await thinclaw.setSetting(envKey, mode);
+            await thinclaw.setSetting(settingKey, mode);
             setEntries(prev => prev.map(ch =>
                 ch.id === channelId ? { ...ch, stream_mode: mode } : ch
             ));
