@@ -94,14 +94,14 @@ impl SidecarManager {
             .is_some()
     }
 
-    pub fn is_image_active(&self) -> bool {
+    pub fn is_image_configured(&self) -> bool {
         self.image_model_path
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
     }
 
-    pub fn is_tts_active(&self) -> bool {
+    pub fn is_tts_configured(&self) -> bool {
         self.tts_model_path
             .lock()
             .unwrap_or_else(|e| e.into_inner())

@@ -96,6 +96,26 @@ impl SkillRegistry {
         }
     }
 
+    /// Build a fresh registry with the same source configuration but no loaded
+    /// skills.
+    ///
+    /// This enables a load-then-swap reload: the caller runs the expensive
+    /// `discover_all` IO on the returned instance *without* holding a lock on the
+    /// live registry, then swaps it in under a brief write. That avoids stalling
+    /// concurrent skill reads behind discovery IO and avoids the torn-state
+    /// window of `reload` (which clears, then asynchronously repopulates, while
+    /// holding the write lock).
+    pub fn clone_config(&self) -> Self {
+        Self {
+            skills: Vec::new(),
+            user_dir: self.user_dir.clone(),
+            installed_dir: self.installed_dir.clone(),
+            workspace_dir: self.workspace_dir.clone(),
+            bundled_skills: self.bundled_skills.clone(),
+            external_read_only_dirs: self.external_read_only_dirs.clone(),
+        }
+    }
+
     /// Set the registry-installed skills directory.
     ///
     /// Skills installed via ClawHub or the skill tools are written here and
@@ -1370,6 +1390,30 @@ mod tests {
         let loaded = registry.reload().await;
         assert_eq!(loaded, vec!["persist-skill"]);
         assert_eq!(registry.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_clone_config_supports_load_then_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("swap-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: swap-skill\n---\n\nPrompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+        assert_eq!(registry.count(), 1);
+
+        // A config-clone starts empty but rediscovers the same skills off-lock,
+        // so it can be swapped in for the live registry without a torn state.
+        let mut fresh = registry.clone_config();
+        assert_eq!(fresh.count(), 0);
+        let loaded = fresh.discover_all().await;
+        assert_eq!(loaded, vec!["swap-skill"]);
+        assert_eq!(fresh.count(), 1);
     }
 
     #[tokio::test]

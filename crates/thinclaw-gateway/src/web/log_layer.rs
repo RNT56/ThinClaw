@@ -17,6 +17,7 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -175,9 +176,18 @@ impl LogLevelHandle {
 ///
 /// Returns the `LogLevelHandle` so callers can swap the filter at runtime.
 /// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
+///
+/// When `logs_dir` is `Some`, a rolling **daily** file sink (`thinclaw.log`) is
+/// attached too, giving persistent, post-incident-analysable logs alongside the
+/// stderr fmt layer and the in-memory ring buffer. The file layer inherits the
+/// global reloadable `EnvFilter`, so it records at the configured `RUST_LOG`
+/// level (not the terminal layer's quieter default). A blocking appender is used
+/// so there is no `WorkerGuard` lifetime to manage. If the directory cannot be
+/// created, file logging is skipped with a warning rather than aborting startup.
 pub fn init_tracing(
     log_broadcaster: Arc<LogBroadcaster>,
     debug_terminal_logs: bool,
+    logs_dir: Option<PathBuf>,
 ) -> Arc<LogLevelHandle> {
     let raw_filter =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "thinclaw=info,tower_http=warn".to_string());
@@ -210,6 +220,26 @@ pub fn init_tracing(
     let terminal_filter =
         default_terminal_log_level(debug_terminal_logs, std::env::var_os("RUST_LOG").is_some());
 
+    // Optional rolling daily file sink for persistent, post-incident logs. Uses a
+    // blocking appender (no `WorkerGuard` to keep alive) and disables ANSI so the
+    // on-disk log is plain text. Inherits the global reloadable filter above.
+    let file_layer = logs_dir.and_then(|dir| {
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            eprintln!(
+                "thinclaw: could not create log directory {}: {error}; file logging disabled",
+                dir.display()
+            );
+            return None;
+        }
+        let appender = tracing_appender::rolling::daily(&dir, "thinclaw.log");
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_target(false)
+                .with_writer(appender),
+        )
+    });
+
     tracing_subscriber::registry()
         .with(reload_layer)
         .with(
@@ -217,6 +247,7 @@ pub fn init_tracing(
                 .with_target(false)
                 .with_filter(terminal_filter),
         )
+        .with(file_layer)
         .with(WebLogLayer::new(log_broadcaster))
         .init();
 

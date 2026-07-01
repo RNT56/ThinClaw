@@ -108,31 +108,45 @@ pub fn gated(
 // a group — keep RemoteOnly, LocalOnly, and LocalAndRemote entries together so
 // that reviewers can verify the assignment at a glance.
 
-/// Seed route table: a representative slice of Tauri command names mapped to
-/// their [`RouteMode`].  This is the linter's ground truth; commands NOT listed
-/// here are unknown to the linter (not an error — the table is additive).
+/// Route table: classifies Tauri commands by [`RouteMode`]. Every command whose
+/// generated binding returns `BridgeError` (a *gated* command) MUST appear here
+/// — enforced by `all_gated_commands_are_classified`. Non-gated commands are
+/// enrolled incrementally; their absence is not an error.
 pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     // ---- RemoteOnly ---------------------------------------------------------
-    // These commands require a live remote gateway; they have no embedded-mode
-    // implementation (e.g. sandbox job control, GPU experiment flows).
+    // Require a live remote gateway; no embedded-mode implementation.
     (
         "thinclaw_experiments_gpu_launch_test",
         RouteMode::RemoteOnly,
     ),
     ("thinclaw_experiments_gpu_validate", RouteMode::RemoteOnly),
+    ("thinclaw_extension_reconnect", RouteMode::RemoteOnly),
     ("thinclaw_job_prompt", RouteMode::RemoteOnly),
     ("thinclaw_job_restart", RouteMode::RemoteOnly),
     ("thinclaw_learning_evaluate_outcomes", RouteMode::RemoteOnly),
     // ---- LocalOnly ----------------------------------------------------------
-    // These commands drive embedded sidecar servers; they have no meaning
-    // against a remote gateway.
+    // Embedded-only: sidecar servers, local-filesystem features (checkpoints,
+    // trajectory archive), and local mutations the gateway owns separately.
     ("direct_runtime_start_chat_server", RouteMode::LocalOnly),
     ("direct_runtime_start_stt_server", RouteMode::LocalOnly),
     ("direct_runtime_stop_chat_server", RouteMode::LocalOnly),
+    ("thinclaw_checkpoint_diff", RouteMode::LocalOnly),
+    ("thinclaw_checkpoint_restore", RouteMode::LocalOnly),
+    ("thinclaw_checkpoints_list", RouteMode::LocalOnly),
     // Agent-loop eval drives the embedded agent; no remote-gateway equivalent.
     ("thinclaw_experiments_run_eval", RouteMode::LocalOnly),
+    ("thinclaw_install_skill_repo", RouteMode::LocalOnly),
+    ("thinclaw_session_search", RouteMode::LocalOnly),
+    ("thinclaw_set_autonomy_mode", RouteMode::LocalOnly),
+    ("thinclaw_skills_toggle", RouteMode::LocalOnly),
+    ("thinclaw_trajectory_records", RouteMode::LocalOnly),
+    ("thinclaw_trajectory_stats", RouteMode::LocalOnly),
     // ---- LocalAndRemote -----------------------------------------------------
-    // These commands work in both modes; the dispatcher picks the right backend.
+    // Work in both modes; some (autonomy_*) still gate *execution* behind host
+    // policy via BridgeError::Unavailable.
+    ("thinclaw_autonomy_checks", RouteMode::LocalAndRemote),
+    ("thinclaw_autonomy_evidence", RouteMode::LocalAndRemote),
+    ("thinclaw_autonomy_rollouts", RouteMode::LocalAndRemote),
     ("thinclaw_cost_summary", RouteMode::LocalAndRemote),
     ("thinclaw_get_sessions", RouteMode::LocalAndRemote),
     ("thinclaw_jobs_list", RouteMode::LocalAndRemote),
@@ -231,6 +245,82 @@ mod tests {
                 "duplicate command name in ROUTE_TABLE: {name}"
             );
         }
+    }
+
+    fn snake_to_camel(s: &str) -> String {
+        let mut out = String::new();
+        let mut upper = false;
+        for c in s.chars() {
+            if c == '_' {
+                upper = true;
+            } else if upper {
+                out.push(c.to_ascii_uppercase());
+                upper = false;
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn camel_to_snake(s: &str) -> String {
+        let mut out = String::new();
+        for c in s.chars() {
+            if c.is_ascii_uppercase() {
+                out.push('_');
+                out.push(c.to_ascii_lowercase());
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Every command listed in ROUTE_TABLE must be a real registered command
+    /// (present in the generated bindings) — guards against typos/stale rows.
+    #[test]
+    fn route_table_commands_are_registered() {
+        let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
+        for (cmd, _) in ROUTE_TABLE {
+            let camel = snake_to_camel(cmd);
+            assert!(
+                bindings.contains(&format!("async {camel}(")),
+                "ROUTE_TABLE references `{cmd}` (`{camel}`) which is not a registered command in bindings.ts"
+            );
+        }
+    }
+
+    /// TDO-002 linter: every gated command (its generated binding returns
+    /// `BridgeError`) must be classified in ROUTE_TABLE, so the route-matrix can
+    /// never silently omit a gated capability.
+    #[test]
+    fn all_gated_commands_are_classified() {
+        let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
+        let mut checked = 0;
+        for line in bindings.lines() {
+            let line = line.trim();
+            if !line.starts_with("async ") || !line.contains("BridgeError>") {
+                continue;
+            }
+            let name = line["async ".len()..]
+                .split('(')
+                .next()
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                continue;
+            }
+            let snake = camel_to_snake(name);
+            assert!(
+                route_mode(&snake).is_some(),
+                "gated command `{snake}` returns BridgeError but is not classified in ROUTE_TABLE"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "expected at least one gated (BridgeError) command in bindings.ts"
+        );
     }
 
     #[test]

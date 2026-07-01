@@ -28,6 +28,14 @@ This checklist maps ThinClaw root runtime surfaces to Desktop support status. St
 | Learning | fixture-tested | Learning status/history/candidates/outcomes/proposals/reviews/rollbacks are visible. Mutation availability is tied to DB/runtime support and visible gate reasons. |
 | Provider vault | fixture-tested | Provider settings and keychain fallback are present. Remote mode maps desktop cloud provider aliases to ThinClaw provider slugs, proxies provider model discovery, saves custom OpenAI-compatible keys through the provider vault endpoint, and updates remote primary/provider/model/pool selection through `/api/providers/config`. The provider UI surfaces key readiness, primary model selection, cheap-lane status, and advisor readiness. |
 | Canvas / A2UI | wired | Canvas `StatusUpdate::CanvasAction` maps to `UiEvent::CanvasUpdate`; local AgentDeps include a `CanvasStore`. Remote gateway mode must preserve the same event schema and panel access semantics. |
+| Lifecycle events | fixture-tested | `StatusUpdate::ContextCompactionStarted`/`AdvisorConsultationStarted`/`SelfRepairStarted`/`SelfRepairCompleted` map to `UiEvent::AgentLifecycleEvent` via `event_mapping.rs`; emitted from the dispatcher (compaction, advisor) and the self-repair loop. |
+| Undo / redo | wired | `thinclaw_undo`/`thinclaw_redo` route `/undo`·`/redo` through the message pipeline (both modes); cockpit toolbar buttons added. |
+| Session search | wired | `thinclaw_session_search` (FTS + optional cheap-model summarization) + Session Search panel. LocalOnly. |
+| Checkpoints / rollback | wired | `list`/`diff`/`restore` commands + Rollback panel (filesystem shadow-git checkpoints). |
+| Trajectory viewer | wired | `stats`/`records` commands + Trajectory panel. |
+| Agent eval | wired | `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` (AgentLoopEnv, LocalOnly). Runtime smoke-test pending a running engine. |
+| Channel config | wired | `Channel::config_schema()` + DTOs; read commands + `thinclaw_channel_config_submit` (LocalOnly; WASM live, native restart-required); Signal/Discord impls + Channel Config panel. |
+| Tool policy | gated | `disabled_tools` deny-list enforced in the dispatcher tool-execution preflight. |
 
 ## External Release Operator Entries
 

@@ -145,14 +145,6 @@ async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<DirectSt
     else return { status: "error", error: e  as any };
 }
 },
-async checkWebSearch(query: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("check_web_search", { query }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async directMediaGenerateImage(params: ImageGenParams) : Promise<Result<ImageResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_generate_image", { params }) };
@@ -564,14 +556,6 @@ async getProjectDocuments(projectId: string) : Promise<Result<Document[], string
 async deleteDocument(id: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_document", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async rigCheckWebSearch(query: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("rig_check_web_search", { query }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -4047,7 +4031,7 @@ export type SftpConfigInput = { endpoint: string; username: string | null;
  * Path to SSH private key (e.g. `~/.ssh/id_rsa`) or password
  */
 key_or_password: string | null; root: string | null }
-export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_running: boolean; image_running: boolean; summarizer_running: boolean }
+export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_configured: boolean; image_configured: boolean; summarizer_running: boolean }
 /**
  * Slack configuration input
  */
@@ -4184,6 +4168,13 @@ export type UiEvent =
  * Explicit run lifecycle transition.
  */
 { kind: "LifecycleUpdate"; session_key: string; run_id: string; phase: string; status: string } |
+/**
+ * Agent lifecycle activity (context compaction, advisor consultation, …)
+ * surfaced as a transient, human-readable status for the Event Inspector.
+ * Distinct from `LifecycleUpdate` (run start/end) — these are mid-run
+ * internal phases the agent passes through.
+ */
+{ kind: "AgentLifecycleEvent"; session_key: string; run_id: string | null; phase: string; label: string; detail: string | null } |
 /**
  * Structured plan/progress update from the ThinClaw agent loop.
  */

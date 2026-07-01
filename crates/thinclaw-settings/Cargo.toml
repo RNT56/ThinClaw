@@ -9,10 +9,10 @@ publish = false
 thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }
 thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
 secrecy = { version = "0.10", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 toml = "0.8"
-tracing = "0.1"
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

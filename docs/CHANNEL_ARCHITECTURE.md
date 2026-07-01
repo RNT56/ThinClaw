@@ -139,6 +139,23 @@ Channel-specific formatting behavior belongs to the channel layer, not to generi
 
 Today the canonical lookup seam is `ChannelManager::formatting_hints_for()`. If you add or change channel-specific rendering behavior, update the owning native channel implementation or WASM manifest first so every surface sees the same guidance.
 
+## Runtime Configuration Ownership
+
+Channels that expose operator-tunable runtime settings (allowed senders, content
+filters, stream mode, …) describe them with a typed schema, mirroring the formatting-hints
+pattern:
+
+- **Native channels** override `Channel::config_schema()` (returns `Option<ConfigSchema>`,
+  default `None`) to return their `ConfigField` list. Signal and Discord implement it today.
+- **DTOs** (`ConfigSchema`/`ConfigField`/`ConfigOption`) live in `thinclaw-channels-core`; the
+  canonical lookup seams are `ChannelManager::config_schema_for()` and `config_schemas()`.
+- **Applying changes** flows through `ChannelManager::update_channel_runtime_config()` →
+  `Channel::update_runtime_config(HashMap)`. WASM channels apply changes live; native channels
+  using the default no-op persist their settings but require a channel restart to take effect.
+- **Operator surfaces** (e.g. the ThinClaw Desktop Channel Config panel) render the schema as a
+  form and submit values; the desktop `thinclaw_channel_config_submit` command persists each
+  field via settings and forwards to the live channel (embedded-only, LocalOnly-gated).
+
 ### Channel maturity (`production_status`)
 
 Each channel manifest declares a typed `production_status` (`production` |
@@ -288,6 +305,7 @@ If you are authoring a new channel:
 - build a **native channel** when you need persistent or local capabilities
 - build a **WASM channel** when you need stateless packaged delivery
 - define formatting/rendering guidance on the channel itself (`Channel::formatting_hints()` for native, `formatting_hints` in `*.capabilities.json` for WASM)
+- implement `Channel::config_schema()` if your channel exposes operator-tunable runtime settings, so surfaces can render a config form (see *Runtime Configuration Ownership* above)
 - use `IncomingEvent`, `mint_session_key`, and `parse_slash_command` for all new chat-platform ingress
 
 See [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) for the implementation guide.

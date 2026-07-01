@@ -55,7 +55,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          cargo test --features full \
+          cargo test --locked --features full \
             --test docker_sandbox_smoke \
             --test repo_project_docker_e2e \
             -- --ignored --nocapture --test-threads=1
@@ -76,7 +76,7 @@ jobs:
           key: nightly-network-smoke
       - name: Run live-network WASM channel smoke
         run: |
-          cargo test -p thinclaw-channels --lib \
+          cargo test --locked -p thinclaw-channels --lib \
             -- --ignored --nocapture test_dedicated_runtime_real_http
 
   nightly-heartbeat:
@@ -121,7 +121,7 @@ jobs:
       - name: Run heartbeat integration test
         if: ${{ env.ANTHROPIC_API_KEY != '' }}
         run: |
-          cargo test --features postgres \
+          cargo test --locked --features postgres \
             --test heartbeat_integration \
             -- --ignored --nocapture --test-threads=1
       - name: Skip notice (no LLM key)
