@@ -29,7 +29,7 @@ only to reduce root file count.
 
 | Crate | Owns |
 |---|---|
-| `thinclaw-types` | transport-neutral records, DTOs, small shared enums, and boundary data |
+| `thinclaw-types` | transport-neutral records, DTOs, small shared enums, and boundary data, including the routine domain DTOs (`routine` module: `Routine`, `Trigger`, `RoutineAction`, run/event/trigger status + decision enums, guardrails/notify config) consumed by persistence |
 | `thinclaw-runtime-contracts` | implementation-free shared runtime DTOs for ThinClaw clients and the Desktop host: asset, direct-runtime, model, provider (incl. `ApiStyle`/`ProviderEndpoint`), runtime, and secret contracts |
 | `thinclaw-safety` | safety primitives that do not depend on LLM/provider runtime |
 | `thinclaw-platform` | state paths, shell/platform helpers, host capability detection |
@@ -52,7 +52,7 @@ only to reduce root file count.
 | `thinclaw-channels-core` | core channel traits and message/status types |
 | `thinclaw-channels` | channel manager, native channel transports for Signal, Discord, Gmail, HTTP, BlueBubbles, Apple Mail, iMessage, and Nostr, TUI channel mechanics/DTOs, reactions/status helpers, pairing store support, setup-channel validation/projection helpers, ACP wire/status projection helpers, WASM channel primitives/runtime wrapper/loader/router/watcher, and root-independent WASM host-config/update policy |
 | `thinclaw-gateway` | gateway DTOs, auth helpers, OpenAI-compatible DTO/conversion/validation helpers, chat message-to-turn projection, settings import/redaction/update policies, routine webhook/preview policies, experiment lease-token/limit/status policies, provider credential validation/display/model-selection/routing policies, extension and channel setup-status projection policy, SSE/log/static-file primitives, status-to-SSE mapping, submission helpers, gateway service ports. Depends on `thinclaw-tools-core` (not `thinclaw-tools`) for MCP/execution DTOs so it stays free of the heavyweight tool runtime (wasmtime/chromiumoxide) |
-| `thinclaw-agent` | extracted agent support types, session/task domain, session-search rendering/windowing behind a transcript-store port, trajectory record/logging types, agent environment/eval runner framework behind a concrete-agent port, context monitoring and compaction algorithms behind summarizer/archive ports, self-repair policy and repair loop behind context/store/builder ports, run artifact records plus run driver/harness behind runtime lookup and memory-sync ports, filesystem checkpoints, command routing and dispatcher policy/helper logic, workspace-level agent routing and agent registry logic behind persistence/seeding ports, prompt helpers, cost guard, routine records and LLM-facing routine tools behind store/engine/outcome ports, routine engine trigger/event policy, worker loop policy, subagent lifecycle policy, outcome evaluator policy, agent-loop submission/response policy, learning/routine/context ports, job monitor event forwarding, agent-owned ports |
+| `thinclaw-agent` | extracted agent support types, session/task domain, session-search rendering/windowing behind a transcript-store port, trajectory record/logging types, agent environment/eval runner framework behind a concrete-agent port, context monitoring and compaction algorithms behind summarizer/archive ports, self-repair policy and repair loop behind context/store/builder ports, run artifact records plus run driver/harness behind runtime lookup and memory-sync ports, filesystem checkpoints, command routing and dispatcher policy/helper logic, workspace-level agent routing and agent registry logic behind persistence/seeding ports, prompt helpers, cost guard, LLM-facing routine tools behind store/engine/outcome ports, routine trigger-evaluation logic (regex/cron/chrono-tz) and engine trigger/event policy (the pure routine domain DTOs now live in `thinclaw-types::routine`, re-exported from `thinclaw_agent::routine` for path stability so persistence no longer depends on the agent layer), worker loop policy, subagent lifecycle policy, outcome evaluator policy, agent-loop submission/response policy, learning/routine/context ports, job monitor event forwarding, agent-owned ports |
 | `thinclaw-app` | root-independent startup/runtime policy, app assembly DTOs, setup/onboarding/profile/provider planning DTOs, bootstrap env planning, quiet startup spinner behavior |
 | `thinclaw-repo-projects` | repo-project supervisor domain types and state machines: project/task/run states and transitions, coding backend, merge method, GitHub auth mode, project policy, and merge-gate decision DTOs |
 
@@ -108,8 +108,10 @@ cargo test --workspace --no-run --features full
 rg "use thinclaw::" crates
 rg '^\s*thinclaw\s*=|^\s*\[.*\.thinclaw\]' crates -g Cargo.toml
 rg 'package\s*=\s*"thinclaw"' crates -g Cargo.toml
+rg 'thinclaw-agent' crates/thinclaw-db/Cargo.toml
 ```
 
-The structural searches should have no matches. CI runs the root-import and
-root-package dependency guards in the code-style job so crate-boundary
-violations fail before the expensive compile matrix.
+The structural searches should have no matches. CI runs the root-import,
+root-package, and `thinclaw-db`→`thinclaw-agent` dependency guards in the
+code-style job so crate-boundary violations fail before the expensive compile
+matrix. Persistence (`thinclaw-db`) must not depend on the agent layer.

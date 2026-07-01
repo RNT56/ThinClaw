@@ -6,10 +6,6 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use thinclaw_agent::routine::{
-    Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
-    RoutineTriggerDecision, RunStatus,
-};
 use thinclaw_experiments::{
     ExperimentArtifactRef, ExperimentCampaign, ExperimentLease, ExperimentModelUsageRecord,
     ExperimentProject, ExperimentRunnerProfile, ExperimentTarget, ExperimentTargetLink,
@@ -32,6 +28,10 @@ use thinclaw_repo_projects::{
 };
 pub use thinclaw_types::AgentWorkspaceRecord;
 pub use thinclaw_types::error::{DatabaseError, WorkspaceError};
+use thinclaw_types::routine::{
+    Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
+    RoutineTriggerDecision, RunStatus,
+};
 use thinclaw_types::{
     ActionRecord, BrokenTool, JobContext, JobState, SandboxJobRecord, SandboxJobSummary,
 };

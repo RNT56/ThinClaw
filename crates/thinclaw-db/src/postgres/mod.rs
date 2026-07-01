@@ -18,7 +18,7 @@ use crate::{
     IdentityRegistryStore, JobStore, RepoProjectStore, RoutineStore, SandboxStore, SettingsStore,
     ToolFailureStore, WorkspaceStore,
 };
-use thinclaw_agent::routine::{
+use thinclaw_types::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
     RoutineTriggerDecision, RunStatus,
 };
