@@ -468,6 +468,23 @@ Current contracts live in:
 
 Historical Scrappy/OpenClaw component inventories were removed from this parity ledger because they duplicated and drifted from the desktop documentation.
 
+### Parity batch — agent-internals & channel config (2026-06-29)
+
+First parity-closure batch (merged or in-flight; see `OVERHAUL_BACKLOG.md` for per-item state):
+
+| Capability | Status | Surface |
+|---|---|---|
+| Dual-mode bridge contract: `RouteMode`, typed `BridgeError`, `gated()`, `ROUTE_TABLE` linter | in-flight | `thinclaw/bridge.rs` |
+| Undo / redo | in-flight | `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons |
+| Session search | merged | `thinclaw_session_search` + Session Search panel |
+| Checkpoints / rollback | merged | `list`/`diff`/`restore` commands + Rollback panel |
+| Trajectory viewer | merged | `stats`/`records` commands + Trajectory panel |
+| Agent eval | in-flight | `thinclaw_experiments_list_envs`/`run_eval` |
+| Lifecycle events (context compaction, advisor, self-repair) | in-flight | new `StatusUpdate` variants → `UiEvent::AgentLifecycleEvent` |
+| Channel runtime config | in-flight | `Channel::config_schema()` + DTOs + read/submit commands + Channel Config panel |
+| Honest sidecar status | in-flight | `image_configured`/`tts_configured` (CLI tools — availability, not process state) |
+| Tool-policy enforcement | in-flight | `disabled_tools` deny-list enforced in dispatcher preflight |
+
 ### Owner: ThinClaw Desktop
 
 ---
