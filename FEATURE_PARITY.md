@@ -6,6 +6,8 @@ This document tracks both feature parity against OpenClaw (TypeScript reference 
 
 Desktop-oriented sections are maintained from ThinClaw Desktop contracts, local Tauri wiring, and the integration surfaces present in this repo. Detailed desktop runtime boundaries live under `apps/desktop/documentation/`.
 
+> **Desktop overhaul roadmap:** the end-to-end Desktop overhaul/upgrade/refinement plan (parity-first) is tracked in [`apps/desktop/documentation/OVERHAUL_PLAN.md`](apps/desktop/documentation/OVERHAUL_PLAN.md), with a tracker-ready epic/issue backlog in [`apps/desktop/documentation/OVERHAUL_BACKLOG.md`](apps/desktop/documentation/OVERHAUL_BACKLOG.md).
+
 **Key source cross-references:** [`src/service.rs`](src/service.rs) (launchd/systemd), [`src/tools/builtin/canvas.rs`](src/tools/builtin/canvas.rs) (A2UI canvas tool), [`src/channels/imessage.rs`](src/channels/imessage.rs) (iMessage channel), [`src/media/video.rs`](src/media/video.rs) (video pipeline), [`src/channels/signal.rs`](src/channels/signal.rs) (Signal), [`src/channels/discord.rs`](src/channels/discord.rs) (Discord), [`src/channels/nostr.rs`](src/channels/nostr.rs) (Nostr).
 
 **Legend:**
@@ -70,7 +72,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | launchd/systemd integration | ✅ | ✅ | Full `service.rs` (401 LOC, [`src/service.rs`](src/service.rs)) — install/start/stop/status/uninstall; macOS launchd plist + Linux systemd unit generation |
 | Bonjour/mDNS discovery | ✅ | ✅ | `MdnsConfig` + `DiscoveryTracker` ([`src/config/mdns_discovery.rs`](src/config/mdns_discovery.rs)) |
 | Tailscale integration | ✅ | ✅ | Full tunnel module (`tunnel/tailscale.rs`) with serve + funnel |
-| Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status |
+| Health check endpoints | ✅ | ✅ | `/api/health` is a real readiness probe (DB ping with 2s timeout + ≥1 LLM provider configured → `503` otherwise, so load balancers route away from not-ready instances) plus `/api/gateway/status` |
 | `doctor` diagnostics | ✅ | ✅ | `cli/doctor.rs` — DB, binary, LLM, and Tailscale checks |
 | Agent event broadcast | ✅ | ✅ | SSE broadcast manager + routine engine lifecycle events (Status, JobStarted, JobResult) |
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor`: periodic checks, failure tracking, auto-restart with cooldown |
@@ -465,6 +467,23 @@ Current contracts live in:
 - [`apps/desktop/documentation/runtime-parity-checklist.md`](apps/desktop/documentation/runtime-parity-checklist.md)
 
 Historical Scrappy/OpenClaw component inventories were removed from this parity ledger because they duplicated and drifted from the desktop documentation.
+
+### Parity batch — agent-internals & channel config (2026-06-29)
+
+First parity-closure batch (merged or in-flight; see `OVERHAUL_BACKLOG.md` for per-item state):
+
+| Capability | Status | Surface |
+|---|---|---|
+| Dual-mode bridge contract: `RouteMode`, typed `BridgeError`, `gated()`, `ROUTE_TABLE` linter | in-flight | `thinclaw/bridge.rs` |
+| Undo / redo | in-flight | `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons |
+| Session search | merged | `thinclaw_session_search` + Session Search panel |
+| Checkpoints / rollback | merged | `list`/`diff`/`restore` commands + Rollback panel |
+| Trajectory viewer | merged | `stats`/`records` commands + Trajectory panel |
+| Agent eval | in-flight | `thinclaw_experiments_list_envs`/`run_eval` |
+| Lifecycle events (context compaction, advisor, self-repair) | in-flight | new `StatusUpdate` variants → `UiEvent::AgentLifecycleEvent` |
+| Channel runtime config | in-flight | `Channel::config_schema()` + DTOs + read/submit commands + Channel Config panel |
+| Honest sidecar status | in-flight | `image_configured`/`tts_configured` (CLI tools — availability, not process state) |
+| Tool-policy enforcement | in-flight | `disabled_tools` deny-list enforced in dispatcher preflight |
 
 ### Owner: ThinClaw Desktop
 

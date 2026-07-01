@@ -22,6 +22,8 @@ The following commands can be typed directly into the agent's chat input:
 - `/summarize` — Request a summary of the current session.
 - `/suggest` — Ask the agent to suggest next steps based on the current context.
 - `/rollback` — Undo the last agent action or conversational turn.
+- `/undo` — Undo the last turn in a thread (also exposed in ThinClaw Desktop as the `thinclaw_undo` command + a cockpit toolbar button).
+- `/redo` — Redo a previously undone turn (desktop: `thinclaw_redo` command + toolbar button).
 
 Local clients (CLI, TUI, WebUI) may add extra client-specific controls such as:
 - `/skin <name>` — Change the interface visual theme (e.g., `/skin midnight`).

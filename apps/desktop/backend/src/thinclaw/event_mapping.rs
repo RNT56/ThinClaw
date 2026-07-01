@@ -345,6 +345,52 @@ pub fn status_to_ui_event(
                 model,
             })
         }
+
+        StatusUpdate::ContextCompactionStarted { used, limit } => {
+            Some(UiEvent::AgentLifecycleEvent {
+                session_key,
+                run_id,
+                phase: "context_compaction".to_string(),
+                label: "Context limit reached — compacting and retrying".to_string(),
+                detail: Some(format!("{used} tokens used vs {limit} limit")),
+            })
+        }
+
+        StatusUpdate::AdvisorConsultationStarted { reason } => Some(UiEvent::AgentLifecycleEvent {
+            session_key,
+            run_id,
+            phase: "advisor_consultation".to_string(),
+            label: "Consulting the advisor lane".to_string(),
+            detail: Some(reason),
+        }),
+
+        StatusUpdate::SelfRepairStarted {
+            repair_type,
+            target_id,
+            reason,
+        } => Some(UiEvent::AgentLifecycleEvent {
+            session_key,
+            run_id,
+            phase: "self_repair_started".to_string(),
+            label: format!("Self-repair: {repair_type} {target_id}"),
+            detail: Some(reason),
+        }),
+
+        StatusUpdate::SelfRepairCompleted {
+            repair_type,
+            target_id,
+            success,
+            summary,
+        } => Some(UiEvent::AgentLifecycleEvent {
+            session_key,
+            run_id,
+            phase: "self_repair_completed".to_string(),
+            label: format!(
+                "Self-repair {}: {repair_type} {target_id}",
+                if success { "succeeded" } else { "failed" }
+            ),
+            detail: Some(summary),
+        }),
     }
 }
 

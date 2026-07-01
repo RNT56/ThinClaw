@@ -145,14 +145,6 @@ async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<DirectSt
     else return { status: "error", error: e  as any };
 }
 },
-async checkWebSearch(query: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("check_web_search", { query }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async directMediaGenerateImage(params: ImageGenParams) : Promise<Result<ImageResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_generate_image", { params }) };
@@ -564,14 +556,6 @@ async getProjectDocuments(projectId: string) : Promise<Result<Document[], string
 async deleteDocument(id: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_document", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async rigCheckWebSearch(query: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("rig_check_web_search", { query }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -995,7 +979,13 @@ async thinclawSendMessage(sessionKey: string, text: string, deliver: boolean) : 
 /**
  * Subscribe to a session for live updates.
  *
- * **Intentional no-op**: ThinClaw sends events directly via TauriChannel.
+ * Activates the given `session_key` in the runtime's active-sessions map so
+ * that `TauriChannel` correctly routes subsequent SSE events to this session.
+ * For non-`agent:main` keys the session manager is also consulted to ensure
+ * the in-memory session record exists before any events can fire.
+ *
+ * Events themselves stream via the `thinclaw-event` Tauri channel; this
+ * command just registers intent so routing is correct from the first event.
  */
 async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
@@ -1011,6 +1001,37 @@ async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcR
 async thinclawAbortChat(sessionKey: string, runId: string | null) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_abort_chat", { sessionKey, runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Undo the last turn in a thread.
+ *
+ * Sends `/undo` through the normal message pipeline; the agent's
+ * `SubmissionParser` converts it to `Submission::Undo` and the dispatcher
+ * applies the per-thread undo. Works in both local and remote mode, mirroring
+ * `thinclaw_send_message`.
+ */
+async thinclawUndo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_undo", { sessionKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Redo a previously undone turn.
+ *
+ * Sends `/redo` through the normal message pipeline; the agent's
+ * `SubmissionParser` converts it to `Submission::Redo`. Works in both local and
+ * remote mode, mirroring `thinclaw_send_message`.
+ */
+async thinclawRedo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_redo", { sessionKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1208,7 +1229,7 @@ async thinclawSkillsStatus() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
+async thinclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_toggle", { key, enabled }) };
 } catch (e) {
@@ -1280,7 +1301,7 @@ async thinclawSkillPublish(name: string, targetRepo: string, dryRun: boolean | n
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, string>> {
+async thinclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_install_skill_repo", { repoUrl }) };
 } catch (e) {
@@ -1475,7 +1496,7 @@ async thinclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>>
  *
  * Persisted to identity.json and applied via env var for next engine start.
  */
-async thinclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_autonomy_mode", { enabled }) };
 } catch (e) {
@@ -1570,7 +1591,7 @@ async thinclawJobCancel(jobId: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobRestart(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobRestart(jobId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_restart", { jobId }) };
 } catch (e) {
@@ -1578,7 +1599,7 @@ async thinclawJobRestart(jobId: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobPrompt(jobId: string, content: string | null, done: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawJobPrompt(jobId: string, content: string | null, done: boolean | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_prompt", { jobId, content, done }) };
 } catch (e) {
@@ -1605,6 +1626,174 @@ async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<
 async thinclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_file_read", { jobId, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectsList() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectGet(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_get", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectCreate(input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_create", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectPlan(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_plan", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectStart(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_start", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectPause(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_pause", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectResume(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_resume", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectCancel(projectId: string, runId: string | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_cancel", { projectId, runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectApprove(projectId: string, input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_approve", { projectId, input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectEnqueue(projectId: string, item: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_enqueue", { projectId, item }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectEvents(projectId: string, limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_events", { projectId, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRepoProjectMergeGates(projectId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_merge_gates", { projectId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Report supervisor readiness: feature flag, credential mode, GitHub App
+ * config, derived install URL, and per-secret presence.
+ */
+async thinclawRepoProjectsReadiness() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_readiness") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enable + configure the supervisor (feature flag, GitHub App config, policy).
+ * Secret VALUES are never written here — only the names of secrets.
+ */
+async thinclawRepoProjectsSetup(input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_setup", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Securely store a GitHub credential (PAT or GitHub App PEM key) in the
+ * encrypted secrets store. The value never touches settings, events, or logs.
+ */
+async thinclawRepoProjectsSetCredential(name: string, valueSecret: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_set_credential", { name, valueSecret }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List the repositories the connected GitHub credential can act on — the
+ * connector repo picker. Each repo is marked with whether it is already
+ * under supervision.
+ */
+async thinclawRepoProjectsConnectableRepos() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_connectable_repos") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Bring selected repositories under supervision (a project per repo). Provide
+ * `repos: ["owner/repo", …]` or `all: true`.
+ */
+async thinclawRepoProjectsConnect(input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_connect", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enroll an additional repository into an existing project.
+ */
+async thinclawRepoProjectEnroll(projectId: string, input: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_enroll", { projectId, input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1666,7 +1855,7 @@ async thinclawAutonomyRollback() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyRollouts() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyRollouts() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_rollouts") };
 } catch (e) {
@@ -1674,7 +1863,7 @@ async thinclawAutonomyRollouts() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyChecks() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyChecks() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_checks") };
 } catch (e) {
@@ -1682,7 +1871,7 @@ async thinclawAutonomyChecks() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyEvidence() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyEvidence() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_evidence") };
 } catch (e) {
@@ -1962,6 +2151,18 @@ async thinclawMemorySearch(query: string, limit: number | null) : Promise<Result
 }
 },
 /**
+ * Search stored conversation transcripts for `query` and render windowed
+ * excerpts; optionally summarize matching sessions.
+ */
+async thinclawSessionSearch(query: string, limit: number | null, summarize: boolean | null) : Promise<Result<SessionSearchResult, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_session_search", { query, limit, summarize }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Export a session's history in the requested format.
  *
  * Supported formats: `md` (default), `json`, `txt`, `csv`, `html`.
@@ -2045,7 +2246,7 @@ async thinclawExtensionActivate(name: string) : Promise<Result<ExtensionActionRe
 /**
  * Reconnect an installed channel extension when the gateway supports it.
  */
-async thinclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_reconnect", { name }) };
 } catch (e) {
@@ -2297,6 +2498,63 @@ async thinclawPairingApprove(channel: string, code: string) : Promise<Result<Jso
 async thinclawCompactSession(sessionKey: string) : Promise<Result<CompactSessionResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_compact_session", { sessionKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List filesystem checkpoints (shadow-git snapshots) for a project directory,
+ * newest first as returned by the core.
+ */
+async thinclawCheckpointsList(projectDir: string) : Promise<Result<CheckpointEntryItem[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoints_list", { projectDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Diff the current project state against a checkpoint commit (unified diff text).
+ */
+async thinclawCheckpointDiff(projectDir: string, commitHash: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoint_diff", { projectDir, commitHash }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Restore a project (or a single `file`) to a checkpoint commit. The core
+ * creates a safety snapshot automatically before applying the restore.
+ */
+async thinclawCheckpointRestore(projectDir: string, commitHash: string, file: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoint_restore", { projectDir, commitHash, file }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Aggregate stats over the local trajectory archive (counts, span, outcomes).
+ */
+async thinclawTrajectoryStats() : Promise<Result<TrajectoryStatsItem, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The most recent trajectory turn records (default 100), as raw JSON values.
+ */
+async thinclawTrajectoryRecords(limit: number | null) : Promise<Result<JsonValue[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_records", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2674,7 +2932,7 @@ async thinclawLearningRecordRollback(artifactType: string, artifactName: string,
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningEvaluateOutcomes() : Promise<Result<JsonValue, string>> {
+async thinclawLearningEvaluateOutcomes() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_evaluate_outcomes") };
 } catch (e) {
@@ -2770,7 +3028,7 @@ async thinclawExperimentsCampaignAction(campaignId: string, action: string) : Pr
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_validate", { provider }) };
 } catch (e) {
@@ -2778,9 +3036,39 @@ async thinclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValu
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_launch_test", { provider }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List the agent-eval environments the desktop can describe.
+ *
+ * `agent_loop` is runnable against the embedded agent; the benchmark envs
+ * need case definitions and are CLI-only for now (reported as non-runnable).
+ */
+async thinclawExperimentsListEnvs() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_list_envs") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Run an agent-eval episode set against the embedded agent.
+ *
+ * Drives `AgentLoopEnv` for `n_episodes` (clamped 1..=20), each sending `prompt`
+ * as a single user message, capped at `max_steps` (clamped 1..=16). Episodes run
+ * in throwaway `agent-env:` sessions, so the user's threads are untouched.
+ * Local-only: the eval needs the embedded agent, so it is gated off in remote mode.
+ */
+async thinclawExperimentsRunEval(envId: string, prompt: string, nEpisodes: number, maxSteps: number) : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_run_eval", { envId, prompt, nEpisodes, maxSteps }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3289,6 +3577,21 @@ modelId: string | null;
  */
 available: boolean }
 /**
+ * A typed command outcome that distinguishes a *gated* capability (with its
+ * reason + remediation) from a genuine runtime error.
+ */
+export type BridgeError =
+/**
+ * The capability is intentionally unavailable in the current runtime mode.
+ */
+{ kind: "unavailable"; capability: string; reason: string; remediation: string | null; satisfied_by: RouteMode } |
+/**
+ * A genuine error (kept distinct from the gated state above).
+ * Struct variant (not a tuple) so the internally-tagged (`tag = "kind"`)
+ * representation stays valid for serde/specta export.
+ */
+{ kind: "runtime"; message: string }
+/**
  * Response cache statistics
  */
 export type CacheStats = { hits: number; misses: number; evictions: number; size_bytes: number; hit_rate: number }
@@ -3297,6 +3600,11 @@ export type CacheStats = { hits: number; misses: number; evictions: number; size
  */
 export type ChannelStatusEntry = { id: string; name: string; type: string; state: string; enabled: boolean; uptime_secs: number | null; messages_sent: number; messages_received: number; last_error: string | null; stream_mode: string }
 export type ChatServerConfig = { port: number; token: string; context_size: number; model_family: string }
+/**
+ * Frontend-facing checkpoint record. Mirrors `thinclaw_core` `CheckpointEntry`
+ * but renders the timestamp as an RFC3339 string so the type is specta-exportable.
+ */
+export type CheckpointEntryItem = { commit_hash: string; timestamp: string; summary: string }
 /**
  * Information about a child session spawned by a parent session.
  */
@@ -3592,6 +3900,22 @@ export type Project = { id: string; name: string; description: string | null; cr
 export type ProviderDiscoveryResult = { provider: string; models: ModelDescriptor[]; fromCache: boolean; error?: string | null }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 /**
+ * How a command behaves across the dual-mode runtime.
+ */
+export type RouteMode =
+/**
+ * Works in both embedded and remote-gateway mode.
+ */
+"local_and_remote" |
+/**
+ * Only meaningful against a remote gateway (e.g. sandbox job restart, GPU launch).
+ */
+"remote_only" |
+/**
+ * Only meaningful in embedded mode (e.g. local sidecar control).
+ */
+"local_only"
+/**
  * Request payload for provider route simulation.
  */
 export type RouteSimulationRequest = { prompt: string; has_vision: boolean; has_tools: boolean; requires_streaming: boolean }
@@ -3684,6 +4008,22 @@ session_key: string;
  */
 message_count: number }
 /**
+ * Rendered cross-session search results.
+ */
+export type SessionSearchResult = {
+/**
+ * One rendered hit per result (raw JSON: session/thread id, excerpt, score, …).
+ */
+results: JsonValue[];
+/**
+ * Whether matching sessions were LLM-summarized.
+ */
+summarized: boolean;
+/**
+ * Whether the renderer fell back to raw excerpts (e.g. no summarizer).
+ */
+fallback: boolean }
+/**
  * SFTP provider configuration input from the frontend.
  */
 export type SftpConfigInput = { endpoint: string; username: string | null;
@@ -3691,7 +4031,7 @@ export type SftpConfigInput = { endpoint: string; username: string | null;
  * Path to SSH private key (e.g. `~/.ssh/id_rsa`) or password
  */
 key_or_password: string | null; root: string | null }
-export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_running: boolean; image_running: boolean; summarizer_running: boolean }
+export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_configured: boolean; image_configured: boolean; summarizer_running: boolean }
 /**
  * Slack configuration input
  */
@@ -3773,6 +4113,11 @@ export type ToolInfoItem = { name: string; description: string; enabled: boolean
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
 /**
+ * Frontend-facing aggregate trajectory stats. Mirrors `TrajectoryStats` with
+ * paths/timestamps rendered as strings so the type is specta-exportable.
+ */
+export type TrajectoryStatsItem = { log_root: string; file_count: number; record_count: number; session_count: number; first_seen: string | null; last_seen: string | null; success_count: number; failure_count: number; neutral_count: number }
+/**
  * Stable UI event contract — what the ThinClaw chat UI consumes.
  *
  * Tagged with `#[serde(tag = "kind")]` so JSON looks like:
@@ -3823,6 +4168,13 @@ export type UiEvent =
  * Explicit run lifecycle transition.
  */
 { kind: "LifecycleUpdate"; session_key: string; run_id: string; phase: string; status: string } |
+/**
+ * Agent lifecycle activity (context compaction, advisor consultation, …)
+ * surfaced as a transient, human-readable status for the Event Inspector.
+ * Distinct from `LifecycleUpdate` (run start/end) — these are mid-run
+ * internal phases the agent passes through.
+ */
+{ kind: "AgentLifecycleEvent"; session_key: string; run_id: string | null; phase: string; label: string; detail: string | null } |
 /**
  * Structured plan/progress update from the ThinClaw agent loop.
  */

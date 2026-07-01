@@ -434,6 +434,20 @@ impl Agent {
                             "Context length exceeded, compacting messages and retrying"
                         );
 
+                        // Surface auto-compaction as a lifecycle event so the UI
+                        // shows why the turn paused instead of an unexplained gap.
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ContextCompactionStarted {
+                                    used: used as u64,
+                                    limit: limit as u64,
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+
                         *context_messages = compact_messages_for_retry(context_messages);
 
                         let retry_context = self.build_turn_context(

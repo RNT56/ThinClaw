@@ -5,7 +5,7 @@
 use tauri::State;
 
 use super::types::*;
-use crate::thinclaw::remote_proxy::RemoteGatewayProxy;
+use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 fn extension_info_from_json(ext: &serde_json::Value) -> ExtensionInfoItem {
@@ -562,7 +562,7 @@ pub async fn thinclaw_extension_registry_search(
 pub async fn thinclaw_extension_reconnect(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy
             .post_json(
@@ -573,9 +573,11 @@ pub async fn thinclaw_extension_reconnect(
         return Ok(extension_action_from_json(raw));
     }
 
-    Err(RemoteGatewayProxy::unavailable(
+    Err(gated(
         "extension reconnect",
-        "local desktop mode does not expose a channel manager restart handle yet; activate the extension or restart the gateway",
+        "local desktop mode does not expose a channel manager restart handle yet",
+        "activate the extension or restart the gateway, or connect a remote gateway that supports reconnect",
+        RouteMode::RemoteOnly,
     ))
 }
 
@@ -1512,10 +1514,16 @@ pub async fn thinclaw_compact_session(
 
     let agent = ironclaw.agent().await?;
 
-    // Get the session and thread to check turn count
+    // Real compaction (TDO-100): instead of returning an estimate, drive the core
+    // `ContextCompactor` with the primary provider to summarize older turns and mutate
+    // the live thread state in place. This is the same algorithm the agent loop runs
+    // automatically at ~80% context capacity, now exposed for manual invocation.
+    let llm_runtime = ironclaw.llm_runtime().await?;
+    let compactor = thinclaw_core::agent::ContextCompactor::new(llm_runtime.primary_handle());
+
     let session_mgr = agent.session_manager();
     let session = session_mgr.get_or_create_session("local_user").await;
-    let sess = session.lock().await;
+    let mut sess = session.lock().await;
 
     // Count total turns across threads
     let total_turns: usize = sess.threads.values().map(|t| t.turns.len()).sum();
@@ -1529,31 +1537,45 @@ pub async fn thinclaw_compact_session(
         });
     }
 
-    // Estimate "tokens" from turn text length (rough: 1 token ≈ 4 chars)
-    let est_tokens_before: u32 = sess
-        .threads
-        .values()
-        .flat_map(|t| t.turns.iter())
-        .map(|turn| {
-            let input_len = turn.user_input.len();
-            let response_len = turn.response.as_ref().map(|r| r.len()).unwrap_or(0);
-            ((input_len + response_len) / 4) as u32
-        })
-        .sum();
+    const KEEP_RECENT: usize = 3;
+    let mut tokens_before = 0usize;
+    let mut tokens_after = 0usize;
+    let mut turns_removed = 0usize;
+    let mut summaries: Vec<String> = Vec::new();
 
-    // For now return the estimate — actual compaction happens automatically
-    // when context hits 80% capacity in the agent loop
-    let keep_recent = 3;
-    let turns_to_remove = total_turns.saturating_sub(keep_recent);
+    for thread in sess.threads.values_mut() {
+        if thread.turns.len() <= KEEP_RECENT {
+            continue;
+        }
+        let result = compactor
+            .compact(
+                thread,
+                thinclaw_core::agent::CompactionStrategy::Summarize {
+                    keep_recent: KEEP_RECENT,
+                },
+                // `Summarize` rewrites turns in place; workspace archival is only used
+                // by the `MoveToWorkspace` strategy, so `None` is correct here.
+                None,
+            )
+            .await
+            .map_err(|e| format!("compaction failed: {e}"))?;
+        tokens_before += result.tokens_before;
+        tokens_after += result.tokens_after;
+        turns_removed += result.turns_removed;
+        if let Some(summary) = result.summary {
+            summaries.push(summary);
+        }
+    }
 
+    let thread_count = sess.threads.len();
     Ok(CompactSessionResponse {
-        tokens_before: est_tokens_before,
-        tokens_after: est_tokens_before
-            .saturating_sub(est_tokens_before * turns_to_remove as u32 / total_turns as u32),
-        turns_removed: turns_to_remove as u32,
-        summary: Some(format!(
-            "Estimated compaction: {} turns would be removed, keeping {} recent turns",
-            turns_to_remove, keep_recent
-        )),
+        tokens_before: tokens_before as u32,
+        tokens_after: tokens_after as u32,
+        turns_removed: turns_removed as u32,
+        summary: Some(if summaries.is_empty() {
+            format!("Compacted {turns_removed} turn(s) across {thread_count} thread(s)")
+        } else {
+            summaries.join("\n\n")
+        }),
     })
 }

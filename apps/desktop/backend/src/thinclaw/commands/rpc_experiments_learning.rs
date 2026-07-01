@@ -393,14 +393,18 @@ pub async fn thinclaw_learning_record_rollback(
 #[specta::specta]
 pub async fn thinclaw_learning_evaluate_outcomes(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json("/api/learning/outcomes/evaluate-now", &json!({}))
-            .await;
+            .await
+            .map_err(|e| e.into());
     }
-    Ok(unavailable(
+    Err(crate::thinclaw::bridge::gated(
+        "manual outcome evaluation",
         "Manual outcome evaluation requires the gateway outcome service; the Desktop local engine exposes outcome review state but not direct evaluator execution.",
+        "connect a remote gateway",
+        crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
 }
 
@@ -627,17 +631,21 @@ pub async fn thinclaw_experiments_campaign_action(
 pub async fn thinclaw_experiments_gpu_validate(
     ironclaw: State<'_, ThinClawRuntimeState>,
     provider: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
                 &format!("/api/experiments/providers/gpu-clouds/{provider}/validate"),
                 &json!({}),
             )
-            .await;
+            .await
+            .map_err(|e| e.into());
     }
-    Ok(unavailable(
+    Err(crate::thinclaw::bridge::gated(
+        "GPU credential validation",
         "GPU cloud credential validation is only available through a ThinClaw gateway because it requires the gateway secrets service.",
+        "connect a remote gateway",
+        crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
 }
 
@@ -646,16 +654,143 @@ pub async fn thinclaw_experiments_gpu_validate(
 pub async fn thinclaw_experiments_gpu_launch_test(
     ironclaw: State<'_, ThinClawRuntimeState>,
     provider: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
                 &format!("/api/experiments/providers/gpu-clouds/{provider}/launch-test"),
                 &json!({}),
             )
-            .await;
+            .await
+            .map_err(|e| e.into());
     }
-    Ok(unavailable(
+    Err(crate::thinclaw::bridge::gated(
+        "GPU launch test",
         "GPU cloud launch tests are only available through a ThinClaw gateway because Desktop local mode does not expose provider credentials for remote compute launch.",
+        "connect a remote gateway",
+        crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
+}
+
+// ── Agent eval (agent-loop environment) ─────────────────────────────────────
+
+/// List the agent-eval environments the desktop can describe.
+///
+/// `agent_loop` is runnable against the embedded agent; the benchmark envs
+/// need case definitions and are CLI-only for now (reported as non-runnable).
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_experiments_list_envs(
+    _ironclaw: State<'_, ThinClawRuntimeState>,
+) -> Result<Value, String> {
+    Ok(json!({
+        "available": true,
+        "environments": [
+            {
+                "id": "agent_loop",
+                "name": "Agent Loop",
+                "description": "Drive the embedded agent through episodes and score the resulting trajectory.",
+                "runnable": true,
+            },
+            {
+                "id": "terminal_bench",
+                "name": "Terminal Benchmark",
+                "description": "Execute terminal commands against benchmark cases. Needs case definitions — CLI-only for now.",
+                "runnable": false,
+            },
+            {
+                "id": "skill_bench",
+                "name": "Skill Benchmark",
+                "description": "Benchmark skill generation against cases. Needs case definitions — CLI-only for now.",
+                "runnable": false,
+            }
+        ]
+    }))
+}
+
+/// Run an agent-eval episode set against the embedded agent.
+///
+/// Drives `AgentLoopEnv` for `n_episodes` (clamped 1..=20), each sending `prompt`
+/// as a single user message, capped at `max_steps` (clamped 1..=16). Episodes run
+/// in throwaway `agent-env:` sessions, so the user's threads are untouched.
+/// Local-only: the eval needs the embedded agent, so it is gated off in remote mode.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_experiments_run_eval(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    env_id: String,
+    prompt: String,
+    n_episodes: u32,
+    max_steps: u32,
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
+    use crate::thinclaw::bridge::{gated, RouteMode};
+    use thinclaw_core::agent::env::{trajectory_summary, AgentAction, AgentLoopEnv, EnvRunner};
+
+    // Agent-loop eval drives the embedded local agent; unreachable in remote mode.
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(gated(
+            "experiment eval",
+            "Agent-loop evaluation runs against the embedded local agent, which is not reachable when connected to a remote gateway.",
+            "switch to the local embedded runtime to run evals",
+            RouteMode::LocalOnly,
+        ));
+    }
+
+    match env_id.to_ascii_lowercase().as_str() {
+        "agent_loop" => {
+            let agent = ironclaw.agent().await.map_err(|e| {
+                gated(
+                    "experiment eval",
+                    e,
+                    "start the ThinClaw engine first",
+                    RouteMode::LocalOnly,
+                )
+            })?;
+            let episodes = n_episodes.clamp(1, 20) as usize;
+            let steps = max_steps.clamp(1, 16) as usize;
+            let task = if prompt.trim().is_empty() {
+                "Briefly summarize your current capabilities.".to_string()
+            } else {
+                prompt
+            };
+
+            let env = AgentLoopEnv::new(agent).with_max_steps(steps);
+            let mut runner = EnvRunner::new(env);
+            let trajectories = runner
+                .evaluate(episodes, |_episode| {
+                    vec![AgentAction::UserMessage {
+                        content: task.clone(),
+                    }]
+                })
+                .await
+                .map_err(|e| {
+                    gated(
+                        "experiment eval",
+                        format!("agent_loop evaluation failed: {e}"),
+                        "check the engine logs for details",
+                        RouteMode::LocalOnly,
+                    )
+                })?;
+
+            Ok(json!({
+                "available": true,
+                "env_id": "agent_loop",
+                "episodes": trajectories.len(),
+                "summary": trajectory_summary(&trajectories),
+                "trajectories": trajectories,
+            }))
+        }
+        "terminal_bench" | "skill_bench" => Err(gated(
+            "benchmark eval",
+            "Terminal and skill benchmarks need case definitions, which Desktop cannot supply yet — run them through the `thinclaw` CLI experiment runner.",
+            "use the CLI experiment runner",
+            RouteMode::LocalOnly,
+        )),
+        other => Err(gated(
+            "experiment eval",
+            format!("Unknown environment '{other}'."),
+            "call thinclaw_experiments_list_envs to discover available environments",
+            RouteMode::LocalOnly,
+        )),
+    }
 }

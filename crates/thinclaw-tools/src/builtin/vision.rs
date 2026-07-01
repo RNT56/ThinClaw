@@ -164,7 +164,12 @@ impl Tool for VisionAnalyzeTool {
 
             (bytes.to_vec(), url.to_string())
         } else {
-            unreachable!()
+            // Guarded above (one of image_path / image_url must be set), but make
+            // the fallback a recoverable error rather than a process-killing panic
+            // in case the parameter extraction is ever refactored.
+            return Err(ToolError::ExecutionFailed(
+                "vision tool requires either image_path or image_url".to_string(),
+            ));
         };
 
         // Validate image format

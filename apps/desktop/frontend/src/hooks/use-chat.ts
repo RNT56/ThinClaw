@@ -228,7 +228,7 @@ export function useChat() {
                 const snapshot = await refreshRuntimeSnapshot();
                 setModelRunning(snapshot?.readiness === "ready" && !!snapshot.endpoint);
                 setSttRunning(s?.stt_running || false);
-                setImageRunning(s?.image_running || false);
+                setImageRunning(s?.image_configured || false);
             } catch (e) {
                 console.error("Status check failed", e);
                 setModelRunning(false);

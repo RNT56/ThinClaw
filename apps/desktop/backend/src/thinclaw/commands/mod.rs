@@ -26,6 +26,7 @@ mod gateway;
 mod keys;
 mod remote_provider_config;
 mod rpc;
+pub(crate) mod rpc_checkpoints;
 pub(crate) mod rpc_config;
 pub(crate) mod rpc_dashboard;
 pub(crate) mod rpc_experiments_learning;
@@ -34,13 +35,16 @@ pub(crate) mod rpc_jobs_autonomy;
 pub(crate) mod rpc_orchestration;
 pub(crate) mod rpc_repo_projects;
 pub(crate) mod rpc_routines;
+pub(crate) mod rpc_session_search;
 pub(crate) mod rpc_skills;
+pub(crate) mod rpc_trajectory;
 mod sessions;
 pub mod types;
 
 // Re-export all public command functions
 pub use gateway::*;
 pub use keys::*;
+pub use rpc_checkpoints::*;
 pub use rpc_config::*;
 pub use rpc_dashboard::*;
 pub use rpc_experiments_learning::*;
@@ -49,7 +53,9 @@ pub use rpc_jobs_autonomy::*;
 pub use rpc_orchestration::*;
 pub use rpc_repo_projects::*;
 pub use rpc_routines::*;
+pub use rpc_session_search::*;
 pub use rpc_skills::*;
+pub use rpc_trajectory::*;
 pub use sessions::*;
 pub use types::*;
 

@@ -108,7 +108,7 @@ jobs:
         with:
           key: windows-release-smoke
       - name: Host runtime smoke
-        run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway_port_zero -- --nocapture
+        run: cargo test --locked --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway_port_zero -- --nocapture
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
@@ -741,7 +741,7 @@ jobs:
               ;;
           esac
       - name: Build edge binary
-        run: cargo build --release --no-default-features --features edge --bin thinclaw --target ${{ matrix.target }}
+        run: cargo build --locked --release --no-default-features --features edge --bin thinclaw --target ${{ matrix.target }}
       - name: Package edge artifact
         shell: bash
         run: |

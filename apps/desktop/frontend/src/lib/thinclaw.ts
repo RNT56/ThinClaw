@@ -1000,6 +1000,29 @@ export async function searchMemory(
     return invoke('thinclaw_memory_search', { query, limit: limit ?? null });
 }
 
+/** Rendered cross-session transcript search results. */
+export interface SessionSearchResult {
+    results: ThinClawJson[];
+    summarized: boolean;
+    fallback: boolean;
+}
+
+/**
+ * Search stored conversation transcripts across sessions (local/embedded mode).
+ * Optionally LLM-summarizes matching sessions.
+ */
+export async function searchSessions(
+    query: string,
+    limit?: number | null,
+    summarize?: boolean | null,
+): Promise<SessionSearchResult> {
+    return invoke('thinclaw_session_search', {
+        query,
+        limit: limit ?? null,
+        summarize: summarize ?? null,
+    });
+}
+
 export interface SessionExportResponse {
     transcript: string;
     session_key: string;
@@ -1334,6 +1357,63 @@ export async function compactSession(sessionKey: string): Promise<CompactSession
     return invoke('thinclaw_compact_session', { sessionKey });
 }
 
+// ----------------------------------------------------------------------------
+// Filesystem checkpoints / rollback (TDO-103)
+// ----------------------------------------------------------------------------
+
+/** A shadow-git checkpoint snapshot of a project directory. */
+export interface CheckpointEntry {
+    commit_hash: string;
+    timestamp: string;
+    summary: string;
+}
+
+/** List filesystem checkpoints (newest first) for a project directory. */
+export async function listCheckpoints(projectDir: string): Promise<CheckpointEntry[]> {
+    return invoke('thinclaw_checkpoints_list', { projectDir });
+}
+
+/** Unified diff of the current project state vs a checkpoint commit. */
+export async function diffCheckpoint(projectDir: string, commitHash: string): Promise<string> {
+    return invoke('thinclaw_checkpoint_diff', { projectDir, commitHash });
+}
+
+/** Restore a project (or a single file) to a checkpoint commit. */
+export async function restoreCheckpoint(
+    projectDir: string,
+    commitHash: string,
+    file?: string | null,
+): Promise<void> {
+    return invoke('thinclaw_checkpoint_restore', { projectDir, commitHash, file: file ?? null });
+}
+
+// ----------------------------------------------------------------------------
+// Trajectory viewer (TDO-106)
+// ----------------------------------------------------------------------------
+
+/** Aggregate stats over the local trajectory archive. */
+export interface TrajectoryStats {
+    log_root: string;
+    file_count: number;
+    record_count: number;
+    session_count: number;
+    first_seen: string | null;
+    last_seen: string | null;
+    success_count: number;
+    failure_count: number;
+    neutral_count: number;
+}
+
+/** Aggregate stats (counts, span, outcomes) over the local trajectory archive. */
+export async function getTrajectoryStats(): Promise<TrajectoryStats> {
+    return invoke('thinclaw_trajectory_stats');
+}
+
+/** The most recent trajectory turn records (default 100) as raw JSON. */
+export async function getTrajectoryRecords(limit?: number | null): Promise<ThinClawJson[]> {
+    return invoke('thinclaw_trajectory_records', { limit: limit ?? null });
+}
+
 // ============================================================================
 // Sprint 13 — New Backend APIs
 // ============================================================================
@@ -1414,8 +1494,22 @@ export async function searchClawHub(query: string): Promise<{ entries: ClawHubEn
     return invoke('thinclaw_clawhub_search', { query });
 }
 
-/** Install a plugin from ClawHub. */
-export async function installFromClawHub(pluginId: string): Promise<void> {
+/** Result of a ClawHub install request. In local/embedded mode this is
+ *  prepare-only: the runtime stages the install and returns success=true with a
+ *  "Ready to install ..." message (it does not download/activate). Remote mode
+ *  proxies to the gateway install route. Callers should surface message/success
+ *  rather than assuming the plugin is fully installed. */
+export interface ClawHubInstallResult {
+    plugin_name?: string;
+    version?: string;
+    install_path?: string;
+    success?: boolean;
+    message?: string;
+}
+
+/** Request a ClawHub plugin install. Returns the runtime's result (see
+ *  {@link ClawHubInstallResult}) so callers can report the real outcome. */
+export async function installFromClawHub(pluginId: string): Promise<ClawHubInstallResult> {
     return invoke('thinclaw_clawhub_install', { pluginId });
 }
 
