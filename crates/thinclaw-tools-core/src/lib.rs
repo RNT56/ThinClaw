@@ -2,6 +2,10 @@
 
 pub mod builder;
 pub mod canvas;
+pub mod execution_descriptor;
+pub mod mcp;
+pub mod mcp_interaction;
+pub mod mcp_logging;
 pub mod rate_limiter;
 pub mod tool;
 pub mod url_guard;

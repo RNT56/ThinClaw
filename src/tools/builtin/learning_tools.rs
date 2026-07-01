@@ -603,15 +603,23 @@ impl Tool for SkillManageTool {
 
         match operation.as_str() {
             "reload" => {
-                let mut guard = self.registry.write().await;
                 if all {
-                    let loaded = guard.reload().await;
+                    // Load-then-swap: build a fresh registry and run the expensive
+                    // discovery IO off-lock, then swap it in under a brief write.
+                    // Concurrent skill reads are not blocked behind discovery, and
+                    // never observe the partially-populated state that the in-place
+                    // `reload` (clear-then-async-repopulate under the write lock)
+                    // exposes.
+                    let mut fresh = self.registry.read().await.clone_config();
+                    let loaded = fresh.discover_all().await;
+                    *self.registry.write().await = fresh;
                     return Ok(ToolOutput::success(
                         learning_policy::skill_manage_reload_all_output(loaded),
                         start.elapsed(),
                     ));
                 }
 
+                let mut guard = self.registry.write().await;
                 let reloaded = guard.reload_skill(&name).await.map_err(|err| {
                     ToolError::ExecutionFailed(format!(
                         "failed to reload skill '{}': {}",
