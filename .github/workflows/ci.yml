@@ -60,6 +60,8 @@ jobs:
             echo "thinclaw-gateway must not depend on thinclaw-tools: the light gateway crate must not pull the heavyweight tool runtime (wasmtime/chromiumoxide). MCP/execution DTOs live in thinclaw-tools-core."
             exit 1
           fi
+      - name: Check file sizes (god-file guard)
+        run: scripts/ci/check-file-sizes.sh
       - name: Check lints (cargo clippy)
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Guard Linux deploy port
