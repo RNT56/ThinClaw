@@ -11,16 +11,16 @@ use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
 use crate::postgres::PgBackendConfig;
+use thinclaw_types::SandboxJobSpec;
 #[cfg(feature = "postgres")]
-use thinclaw_agent::routine::{
+use thinclaw_types::error::DatabaseError;
+#[cfg(feature = "postgres")]
+use thinclaw_types::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventDecision,
     RoutineEventEvaluation, RoutineEventStatus, RoutineGuardrails, RoutinePolicy, RoutineRun,
     RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind, RoutineTriggerStatus, RunStatus,
     Trigger,
 };
-use thinclaw_types::SandboxJobSpec;
-#[cfg(feature = "postgres")]
-use thinclaw_types::error::DatabaseError;
 #[cfg(feature = "postgres")]
 use thinclaw_types::{ActionRecord, JobContext, JobState, StateTransition};
 

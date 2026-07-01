@@ -250,7 +250,12 @@ impl PairingStore {
         meta: Option<serde_json::Value>,
     ) -> Result<UpsertResult, PairingStoreError> {
         let path = pairing_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
+        fs::create_dir_all(path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "pairing path has no parent directory",
+            )
+        })?)?;
 
         let mut file = fs::OpenOptions::new()
             .read(true)
@@ -347,7 +352,12 @@ impl PairingStore {
 
     fn record_failed_approve(&self, channel: &str) -> Result<(), PairingStoreError> {
         let path = approve_attempts_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
+        fs::create_dir_all(path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "pairing path has no parent directory",
+            )
+        })?)?;
 
         // Open (or create) and lock before reading so concurrent callers
         // don't clobber each other's writes.
@@ -466,7 +476,12 @@ impl PairingStore {
         request: &PairingRequest,
     ) -> Result<(), PairingStoreError> {
         let path = pairing_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
+        fs::create_dir_all(path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "pairing path has no parent directory",
+            )
+        })?)?;
 
         let mut file = fs::OpenOptions::new()
             .read(true)
@@ -586,7 +601,12 @@ impl PairingStore {
         }
 
         let path = block_from_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
+        fs::create_dir_all(path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "pairing path has no parent directory",
+            )
+        })?)?;
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -703,7 +723,12 @@ impl PairingStore {
         }
 
         let path = allow_from_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
+        fs::create_dir_all(path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "pairing path has no parent directory",
+            )
+        })?)?;
 
         let file = fs::OpenOptions::new()
             .read(true)
