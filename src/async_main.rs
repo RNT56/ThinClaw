@@ -1661,77 +1661,12 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         registry
     };
 
-    // ── Periodic cost persistence ────────────────────────────────────
-    // Flush cost tracker entries to the DB every 60 seconds so cost
-    // data survives restarts (fixes the data-loss-on-restart gap).
-    if let Some(ref db) = components.db {
-        let persistence_plan = PeriodicPersistencePlan::cost_entries();
-        let persist_db = Arc::clone(db);
-        let persist_tracker = Arc::clone(&components.cost_tracker);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(persistence_plan.interval);
-            interval.tick().await; // skip the initial immediate tick
-            let mut last_count: usize = 0;
-            loop {
-                interval.tick().await;
-                let (snapshot, count) = {
-                    let guard = persist_tracker.lock().await;
-                    (guard.to_json(), guard.entry_count())
-                };
-                // Only write when new entries have been recorded.
-                if count != last_count {
-                    match persist_db
-                        .set_setting("default", persistence_plan.setting_key, &snapshot)
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::debug!("[cost] Persisted {} cost entries to DB", count);
-                            last_count = count;
-                        }
-                        Err(e) => {
-                            tracing::warn!("[cost] Failed to persist cost entries: {}", e);
-                        }
-                    }
-                }
-            }
-        });
-        tracing::info!("Cost persistence background task started (60s interval)");
-    }
-
-    // ── Background pricing sync ──────────────────────────────────────
-    // Fetch per-token pricing from OpenRouter's public API and update the
-    // dynamic cost overlay in costs.rs. Runs at startup (loading DB cache
-    // first for instant availability) then refreshes every 24 hours.
-    {
-        let pricing_db = components.db.as_ref().map(Arc::clone);
-        thinclaw::llm::pricing_sync::spawn_pricing_sync(pricing_db);
-        tracing::info!("Pricing sync background task started (24h interval)");
-    }
-
-    if config.experiments.enabled {
-        if let Some(db) = components.db.as_ref().cloned() {
-            let experiments_db = Arc::clone(&db);
-            tokio::spawn(async move {
-                thinclaw::api::experiments::start_experiment_controller_loop(experiments_db).await;
-            });
-            tracing::info!("Experiment controller reconciler started (periodic cadence)");
-
-            let reaper_db = Arc::clone(&db);
-            let retention_days = config.experiments.default_artifact_retention_days;
-            tokio::spawn(async move {
-                thinclaw::api::experiments::start_experiment_artifact_reaper_loop(
-                    reaper_db,
-                    retention_days,
-                )
-                .await;
-            });
-            tracing::info!(
-                "Experiment artifact reaper started (daily cadence, retention {retention_days}d)"
-            );
-        }
-    } else {
-        tracing::info!("Experiment controller not started because experiments are disabled.");
-    }
+    // ── Background maintenance loops ─────────────────────────────────
+    // Periodic cost persistence, per-token pricing sync, and (when enabled)
+    // the experiment controller/reaper — each self-contained and fire-and-forget.
+    start_cost_persistence(&components.db, &components.cost_tracker);
+    start_pricing_sync(&components.db);
+    start_experiment_loops(&components.db, &config);
 
     // Clone handles for the shutdown flush (before components are moved into deps).
     let shutdown_db = components.db.as_ref().map(Arc::clone);
@@ -1875,4 +1810,82 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Spawn the periodic cost-tracker persistence loop (flushes to the DB every
+/// 60s so cost data survives restarts). Fire-and-forget; no-op without a DB.
+fn start_cost_persistence(
+    db: &Option<Arc<dyn thinclaw::db::Database>>,
+    cost_tracker: &Arc<tokio::sync::Mutex<thinclaw::llm::cost_tracker::CostTracker>>,
+) {
+    if let Some(db) = db {
+        let persistence_plan = PeriodicPersistencePlan::cost_entries();
+        let persist_db = Arc::clone(db);
+        let persist_tracker = Arc::clone(cost_tracker);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(persistence_plan.interval);
+            interval.tick().await; // skip the initial immediate tick
+            let mut last_count: usize = 0;
+            loop {
+                interval.tick().await;
+                let (snapshot, count) = {
+                    let guard = persist_tracker.lock().await;
+                    (guard.to_json(), guard.entry_count())
+                };
+                // Only write when new entries have been recorded.
+                if count != last_count {
+                    match persist_db
+                        .set_setting("default", persistence_plan.setting_key, &snapshot)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::debug!("[cost] Persisted {} cost entries to DB", count);
+                            last_count = count;
+                        }
+                        Err(e) => {
+                            tracing::warn!("[cost] Failed to persist cost entries: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Cost persistence background task started (60s interval)");
+    }
+}
+
+/// Spawn the background pricing sync (loads the DB cache for instant
+/// availability, then refreshes from OpenRouter every 24h).
+fn start_pricing_sync(db: &Option<Arc<dyn thinclaw::db::Database>>) {
+    let pricing_db = db.as_ref().map(Arc::clone);
+    thinclaw::llm::pricing_sync::spawn_pricing_sync(pricing_db);
+    tracing::info!("Pricing sync background task started (24h interval)");
+}
+
+/// Spawn the experiment controller reconciler + artifact reaper when experiments
+/// are enabled; otherwise log that they are off.
+fn start_experiment_loops(db: &Option<Arc<dyn thinclaw::db::Database>>, config: &Config) {
+    if config.experiments.enabled {
+        if let Some(db) = db.as_ref().cloned() {
+            let experiments_db = Arc::clone(&db);
+            tokio::spawn(async move {
+                thinclaw::api::experiments::start_experiment_controller_loop(experiments_db).await;
+            });
+            tracing::info!("Experiment controller reconciler started (periodic cadence)");
+
+            let reaper_db = Arc::clone(&db);
+            let retention_days = config.experiments.default_artifact_retention_days;
+            tokio::spawn(async move {
+                thinclaw::api::experiments::start_experiment_artifact_reaper_loop(
+                    reaper_db,
+                    retention_days,
+                )
+                .await;
+            });
+            tracing::info!(
+                "Experiment artifact reaper started (daily cadence, retention {retention_days}d)"
+            );
+        }
+    } else {
+        tracing::info!("Experiment controller not started because experiments are disabled.");
+    }
 }
