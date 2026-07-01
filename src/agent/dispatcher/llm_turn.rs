@@ -238,6 +238,14 @@ impl Agent {
                 .await;
         }
 
+        // F-11: emit the per-request observability event before the call fires.
+        // Mirrors the LlmResponse emit below; NoopObserver discards at zero cost.
+        self.observer()
+            .record_event(&crate::observability::ObserverEvent::LlmRequest {
+                provider: std::env::var("LLM_BACKEND").unwrap_or_default(),
+                model: reasoning.current_llm().active_model_name(),
+                message_count: context_messages.len(),
+            });
         let llm_start = std::time::Instant::now();
         let mut recovered_from_override_failure = false;
         let mut streamed_text = false;

@@ -1248,6 +1248,8 @@ impl Agent {
     /// shuts everything down on exit. For Tauri/API mode, use
     /// [`start_background_tasks()`] and [`shutdown_background()`] directly.
     pub async fn run(self) -> Result<(), Error> {
+        // F-11: track uptime so the AgentEnd observability event can report duration.
+        let agent_started_at = std::time::Instant::now();
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 
@@ -1419,6 +1421,11 @@ impl Agent {
                 }
                 Err(e) => {
                     tracing::error!("Error handling message: {}", e);
+                    self.observer()
+                        .record_event(&crate::observability::ObserverEvent::Error {
+                            component: "agent_loop".to_string(),
+                            message: e.to_string(),
+                        });
                     if let Err(send_err) = self
                         .channels
                         .respond(&message, OutgoingResponse::text(format!("Error: {}", e)))
@@ -1441,6 +1448,20 @@ impl Agent {
                 }
             }
         }
+
+        // F-11: emit the agent-lifecycle end (uptime + cumulative tokens) before teardown.
+        let tokens_used = match self.deps.cost_tracker {
+            Some(ref tracker) => {
+                let tracker = tracker.lock().await;
+                Some(tracker.total_input_tokens() + tracker.total_output_tokens())
+            }
+            None => None,
+        };
+        self.observer()
+            .record_event(&crate::observability::ObserverEvent::AgentEnd {
+                duration: agent_started_at.elapsed(),
+                tokens_used,
+            });
 
         // Cleanup
         if let Some(ref watcher) = config_watcher {
