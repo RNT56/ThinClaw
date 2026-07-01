@@ -1788,6 +1788,8 @@ async fn status_to_acp_messages(
         | StatusUpdate::SelfRepairStarted { .. }
         | StatusUpdate::SelfRepairCompleted { .. }
         | StatusUpdate::CanvasAction(_) => None,
+        // Future variants are not projected to the ACP surface (non_exhaustive).
+        _ => None,
     };
 
     projected

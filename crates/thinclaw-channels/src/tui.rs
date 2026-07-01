@@ -212,6 +212,7 @@ impl From<StatusUpdate> for TuiUpdate {
             StatusUpdate::LifecycleStart { .. } | StatusUpdate::LifecycleEnd { .. } => {
                 TuiUpdate::Status(String::new())
             }
+            _ => TuiUpdate::Status(String::new()),
         }
     }
 }

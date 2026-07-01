@@ -344,6 +344,11 @@ pub(super) fn status_to_wit(
             ),
             metadata_json,
         },
+        _ => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: String::new(),
+            metadata_json,
+        },
     }
 }
 

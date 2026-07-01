@@ -648,6 +648,11 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             timestamp: chrono::Utc::now().to_rfc3339(),
             thread_id,
         },
+        // Future variants collapse to a generic status update (non_exhaustive).
+        _ => SseEvent::Status {
+            message: String::new(),
+            thread_id,
+        },
     }
 }
 

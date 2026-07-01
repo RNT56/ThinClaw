@@ -228,6 +228,7 @@ impl DraftReplyState {
 
 /// Status update types for showing agent activity.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StatusUpdate {
     /// Agent is thinking/processing.
     Thinking(String),

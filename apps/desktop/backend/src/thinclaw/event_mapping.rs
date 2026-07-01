@@ -391,6 +391,8 @@ pub fn status_to_ui_event(
             ),
             detail: Some(summary),
         }),
+        // Future StatusUpdate variants map to no UI event (non_exhaustive).
+        _ => None,
     }
 }
 
