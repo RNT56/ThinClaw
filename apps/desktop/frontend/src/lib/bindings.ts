@@ -609,7 +609,7 @@ async thinclawGetAnthropicKey() : Promise<Result<string | null, string>> {
 /**
  * Save Brave Search API key
  */
-async thinclawSaveBraveKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveBraveKey(key: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_brave_key", { key }) };
 } catch (e) {
@@ -1615,7 +1615,7 @@ async thinclawJobEvents(jobId: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_files_list", { jobId, path }) };
 } catch (e) {
@@ -1623,7 +1623,7 @@ async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_file_read", { jobId, path }) };
 } catch (e) {
@@ -1882,7 +1882,7 @@ async thinclawAutonomyEvidence() : Promise<Result<JsonValue, BridgeError>> {
 /**
  * Save HuggingFace token
  */
-async thinclawSetHfToken(token: string) : Promise<Result<null, string>> {
+async thinclawSetHfToken(token: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_hf_token", { token }) };
 } catch (e) {
@@ -1917,7 +1917,7 @@ async thinclawGetImplicitProviderKey(provider: string) : Promise<Result<string |
 /**
  * Save Amazon Bedrock AWS credentials
  */
-async thinclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: string, region: string) : Promise<Result<null, string>> {
+async thinclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: string, region: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_bedrock_credentials", { accessKeyId, secretAccessKey, region }) };
 } catch (e) {

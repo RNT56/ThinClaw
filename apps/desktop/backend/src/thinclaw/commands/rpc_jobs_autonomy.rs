@@ -3,6 +3,7 @@
 use tauri::State;
 use uuid::Uuid;
 
+use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 fn local_unavailable(capability: &str, reason: impl AsRef<str>) -> String {
@@ -335,14 +336,19 @@ pub async fn thinclaw_job_files_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
     path: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy.list_job_files(&job_id, path.as_deref()).await;
+        return proxy
+            .list_job_files(&job_id, path.as_deref())
+            .await
+            .map_err(BridgeError::from);
     }
 
-    Err(local_unavailable(
+    Err(gated(
         "job files",
         "only remote gateway sandbox jobs expose project file browsing",
+        "connect a remote gateway",
+        RouteMode::RemoteOnly,
     ))
 }
 
@@ -352,14 +358,19 @@ pub async fn thinclaw_job_file_read(
     ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
     path: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy.read_job_file(&job_id, &path).await;
+        return proxy
+            .read_job_file(&job_id, &path)
+            .await
+            .map_err(BridgeError::from);
     }
 
-    Err(local_unavailable(
+    Err(gated(
         "job file read",
         "only remote gateway sandbox jobs expose project file reads",
+        "connect a remote gateway",
+        RouteMode::RemoteOnly,
     ))
 }
 

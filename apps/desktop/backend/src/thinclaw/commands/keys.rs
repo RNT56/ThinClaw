@@ -13,6 +13,7 @@ use super::types::*;
 // ws_rpc removed — ThinClaw is in-process, no remote WS gateway
 use super::ThinClawManager;
 use crate::sidecar::SidecarManager;
+use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 async fn remote_secret_reads_are_opaque(ironclaw: &ThinClawRuntimeState) -> bool {
@@ -360,12 +361,14 @@ pub async fn thinclaw_save_brave_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
-        return Err(
-            "unavailable: remote Brave Search key management has no ThinClaw gateway endpoint"
-                .to_string(),
-        );
+        return Err(gated(
+            "Brave Search API key save",
+            "saving the Brave Search API key has no ThinClaw gateway endpoint in remote mode",
+            "switch ThinClaw Desktop to embedded (local) mode to save the Brave Search API key",
+            RouteMode::LocalOnly,
+        ));
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -506,12 +509,14 @@ pub async fn thinclaw_set_hf_token(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     token: String,
-) -> Result<(), String> {
+) -> Result<(), BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
-        return Err(
-            "unavailable: remote Hugging Face token management has no ThinClaw gateway endpoint"
-                .to_string(),
-        );
+        return Err(gated(
+            "Hugging Face token save",
+            "saving the Hugging Face token has no ThinClaw gateway endpoint in remote mode",
+            "switch ThinClaw Desktop to embedded (local) mode to save the Hugging Face token",
+            RouteMode::LocalOnly,
+        ));
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -680,7 +685,7 @@ pub async fn thinclaw_save_bedrock_credentials(
     access_key_id: String,
     secret_access_key: String,
     region: String,
-) -> Result<(), String> {
+) -> Result<(), BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         if access_key_id.trim().is_empty() && secret_access_key.trim().is_empty() {
             if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -691,10 +696,12 @@ pub async fn thinclaw_save_bedrock_credentials(
                 return Ok(());
             }
         }
-        return Err(
-            "unavailable: remote Bedrock AWS credential management has no ThinClaw gateway endpoint for access key id, secret access key, and region"
-                .to_string(),
-        );
+        return Err(gated(
+            "Bedrock AWS credential save",
+            "saving Amazon Bedrock AWS credentials (access key id, secret access key, region) has no ThinClaw gateway endpoint in remote mode",
+            "switch ThinClaw Desktop to embedded (local) mode to save Bedrock AWS credentials",
+            RouteMode::LocalOnly,
+        ));
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {
