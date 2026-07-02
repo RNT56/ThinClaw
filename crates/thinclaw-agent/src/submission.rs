@@ -122,7 +122,13 @@ impl SubmissionParser {
                 args: vec!["detail".to_string()],
             };
         }
-        if lower.starts_with("/model") {
+        // Exact or space-delimited only: a bare prefix match would swallow
+        // unrelated tokens like "/modelling". "/models" stays a listing alias.
+        if lower == "/model"
+            || lower == "/models"
+            || lower.starts_with("/model ")
+            || lower.starts_with("/models ")
+        {
             let args: Vec<String> = trimmed
                 .split_whitespace()
                 .skip(1)
@@ -607,6 +613,26 @@ mod tests {
         assert!(
             matches!(submission, Submission::UserInput { content } if content == "Hello, how are you?")
         );
+    }
+
+    #[test]
+    fn test_parser_model_requires_exact_or_space_delimited() {
+        let submission = SubmissionParser::parse("/model gpt-4o");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "model" && args == vec!["gpt-4o"])
+        );
+
+        let submission = SubmissionParser::parse("/models");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "model" && args.is_empty())
+        );
+
+        // "/modelling ideas" is chat, not a model switch.
+        let submission = SubmissionParser::parse("/modelling ideas");
+        assert!(!matches!(
+            submission,
+            Submission::SystemCommand { ref command, .. } if command == "model"
+        ));
     }
 
     #[test]

@@ -23,6 +23,36 @@ pub const TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE: &str =
 pub const STUCK_LOOP_FINALIZATION_FAILURE_RESPONSE: &str =
     "I was unable to make further progress. Please try rephrasing your request.";
 
+/// Classification of an LLM turn failure for dispatcher-level recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmTurnErrorKind {
+    /// The user interrupted the turn — never treated as a provider failure.
+    Cancelled,
+    /// The context exceeded the model window; compaction may recover it.
+    ContextLength,
+    /// Transient provider failure (rate limit, network, 5xx) worth retrying.
+    Transient,
+    /// Not recoverable at the dispatcher layer.
+    Fatal,
+}
+
+/// Dispatcher-level backoff schedule for transient provider failures. The
+/// provider stack retries with its own (jittered) backoff first; this second
+/// line of defense keeps a long multi-tool turn alive through a brief outage
+/// instead of losing all accumulated work to one blip.
+const TRANSIENT_LLM_RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(6),
+];
+
+/// Delay before the next dispatcher-level transient retry, or `None` when the
+/// budget is exhausted and the error should propagate.
+pub fn transient_llm_retry_delay(retries_used: u32) -> Option<std::time::Duration> {
+    TRANSIENT_LLM_RETRY_DELAYS
+        .get(retries_used as usize)
+        .copied()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvisorAutoEscalationPolicyMode {
     ManualOnly,
@@ -427,6 +457,15 @@ pub fn classify_tool_phase_text(text: &str, finish_reason: FinishReason) -> Tool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_llm_retry_schedule_is_bounded_and_increasing() {
+        let first = transient_llm_retry_delay(0).expect("first retry allowed");
+        let second = transient_llm_retry_delay(1).expect("second retry allowed");
+        assert!(second > first);
+        assert!(transient_llm_retry_delay(2).is_none());
+        assert!(transient_llm_retry_delay(u32::MAX).is_none());
+    }
 
     #[test]
     fn tool_phase_signal_requires_explicit_sentinel() {

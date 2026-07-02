@@ -34,7 +34,9 @@ impl Agent {
         let outcome = thinclaw_agent::thread_ops::restore_thread_from_undo(thread, &mut mgr);
         match &outcome {
             UndoRedoOutcome::Restored { .. } => {
-                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+                let usage_percent = self
+                    .effective_context_monitor()
+                    .usage_percent(&thread.messages());
                 drop(mgr);
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
@@ -67,7 +69,9 @@ impl Agent {
         let outcome = thinclaw_agent::thread_ops::restore_thread_from_redo(thread, &mut mgr);
         match &outcome {
             UndoRedoOutcome::Restored { .. } => {
-                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+                let usage_percent = self
+                    .effective_context_monitor()
+                    .usage_percent(&thread.messages());
                 drop(mgr);
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
@@ -124,13 +128,11 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         let messages = thread.messages();
-        let usage = self.context_monitor.usage_percent(&messages);
-        let strategy = self
-            .context_monitor
-            .suggest_compaction(&messages)
-            .unwrap_or(
-                crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
-            );
+        let monitor = self.effective_context_monitor();
+        let usage = monitor.usage_percent(&messages);
+        let strategy = monitor.suggest_compaction(&messages).unwrap_or(
+            crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
+        );
 
         let mut compactor = ContextCompactor::new(self.llm().clone());
         if let Some(ref tracker) = self.deps.cost_tracker {
@@ -141,7 +143,8 @@ impl Agent {
             .await
         {
             Ok(result) => {
-                let usage_after = self.context_monitor.usage_percent(&thread.messages());
+                let compaction_summary = result.summary.clone();
+                let usage_after = monitor.usage_percent(&thread.messages());
                 let session_extract_artifact = crate::agent::AgentRunArtifact::new(
                     "thread_compaction",
                     crate::agent::AgentRunStatus::Completed,
@@ -200,12 +203,14 @@ impl Agent {
                     raw_sender_id: actor_id.clone(),
                     stable_external_conversation_key: String::new(),
                 };
-                let fragment = self
+                let base_fragment = self
                     .build_post_compaction_context_fragment(
                         last_user_query,
                         Some(&compaction_identity),
                     )
                     .await;
+                let fragment =
+                    super::input::merge_summary_into_fragment(compaction_summary, base_fragment);
                 self.update_post_compaction_context(thread_id, fragment)
                     .await;
                 self.record_context_pressure_state(thread_id, usage_after)
@@ -233,7 +238,9 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
         thinclaw_agent::thread_ops::clear_thread(thread);
-        let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+        let usage_percent = self
+            .effective_context_monitor()
+            .usage_percent(&thread.messages());
         let mut session_extract_artifact = crate::agent::AgentRunArtifact::new(
             "thread_clear",
             crate::agent::AgentRunStatus::Completed,

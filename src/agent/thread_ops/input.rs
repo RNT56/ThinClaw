@@ -151,8 +151,9 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             let messages = thread.messages();
-            if let Some(strategy) = self.context_monitor.suggest_compaction(&messages) {
-                let pct = self.context_monitor.usage_percent(&messages);
+            let monitor = self.effective_context_monitor();
+            if let Some(strategy) = monitor.suggest_compaction(&messages) {
+                let pct = monitor.usage_percent(&messages);
                 tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
 
                 if let Some(store) = self.store().map(Arc::clone) {
@@ -209,19 +210,27 @@ impl Agent {
                 if let Some(ref tracker) = self.deps.cost_tracker {
                     compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
                 }
-                if let Err(e) = compactor
+                match compactor
                     .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
                     .await
                 {
-                    tracing::warn!("Auto-compaction failed: {}", e);
-                } else {
-                    auto_compaction_fragment = Some(
-                        self.build_post_compaction_context_fragment(
-                            Some(&message.content),
-                            Some(&resolved_identity),
-                        )
-                        .await,
-                    );
+                    Err(e) => {
+                        tracing::warn!("Auto-compaction failed: {}", e);
+                    }
+                    Ok(result) => {
+                        // Fold the generated summary into the post-compaction
+                        // fragment so the model keeps the gist of the dropped
+                        // turns. The fragment is persisted into thread runtime
+                        // and rehydrated, so the summary also survives restart.
+                        let base_fragment = self
+                            .build_post_compaction_context_fragment(
+                                Some(&message.content),
+                                Some(&resolved_identity),
+                            )
+                            .await;
+                        auto_compaction_fragment =
+                            Some(merge_summary_into_fragment(result.summary, base_fragment));
+                    }
                 }
             }
         }
@@ -458,5 +467,59 @@ impl Agent {
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
+    }
+}
+
+/// Combine a compaction summary with the rules/facts/skills fragment into the
+/// single post-compaction context slot. Either part may be absent.
+pub(super) fn merge_summary_into_fragment(
+    summary: Option<String>,
+    base_fragment: Option<String>,
+) -> Option<String> {
+    let summary_block = summary
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("## Summary of Earlier Conversation\n\n{s}"));
+
+    match (summary_block, base_fragment) {
+        (Some(summary), Some(base)) => Some(format!("{summary}\n\n{base}")),
+        (Some(summary), None) => Some(summary),
+        (None, base) => base,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_summary_into_fragment;
+
+    #[test]
+    fn merges_summary_ahead_of_fragment() {
+        let merged = merge_summary_into_fragment(
+            Some("did X and Y".to_string()),
+            Some("## Rules\n- be nice".to_string()),
+        )
+        .expect("merged fragment");
+        assert!(merged.contains("## Summary of Earlier Conversation"));
+        assert!(merged.contains("did X and Y"));
+        assert!(merged.contains("## Rules"));
+        assert!(merged.find("Summary").unwrap() < merged.find("Rules").unwrap());
+    }
+
+    #[test]
+    fn summary_only_and_fragment_only_and_empty() {
+        assert!(
+            merge_summary_into_fragment(Some("s".to_string()), None)
+                .unwrap()
+                .contains("## Summary of Earlier Conversation")
+        );
+        assert_eq!(
+            merge_summary_into_fragment(None, Some("frag".to_string())).as_deref(),
+            Some("frag")
+        );
+        assert_eq!(
+            merge_summary_into_fragment(Some("   ".to_string()), None),
+            None
+        );
+        assert_eq!(merge_summary_into_fragment(None, None), None);
     }
 }

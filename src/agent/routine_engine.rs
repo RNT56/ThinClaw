@@ -1144,6 +1144,10 @@ impl RoutineEngine {
                 routine_name
             )
         })?;
+        // Drain finished entries first: a JoinSet retains completed-task
+        // slots until joined, so an always-on engine would otherwise
+        // accumulate one entry per run for the process lifetime.
+        while guard.try_join_next().is_some() {}
         guard.spawn(task);
         Ok(())
     }
@@ -1197,7 +1201,10 @@ pub(crate) async fn persist_routine_runtime_update(
             )
             .await
         {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                auto_disable_failing_routine(store, routine_id, consecutive_failures).await;
+                return Ok(());
+            }
             Err(error) => {
                 last_error = Some(error);
                 if attempt < 3 {
@@ -1214,6 +1221,52 @@ pub(crate) async fn persist_routine_runtime_update(
 
     Err(last_error
         .unwrap_or_else(|| DatabaseError::Query("unknown runtime update failure".to_string())))
+}
+
+/// Disable a routine that has crossed the consecutive-failure threshold.
+/// Runs after every runtime update so all finalization paths (engine,
+/// worker, subagent) share the same policy; before this, a routine whose
+/// runs failed every time kept firing at full cadence forever.
+async fn auto_disable_failing_routine(
+    store: &Arc<dyn Database>,
+    routine_id: Uuid,
+    consecutive_failures: u32,
+) {
+    if !thinclaw_agent::routine_engine::routine_should_auto_disable(consecutive_failures) {
+        return;
+    }
+    // Reload rather than reusing a caller-held copy: update_routine writes the
+    // full row and a stale copy would clobber the runtime fields just written.
+    match store.get_routine(routine_id).await {
+        Ok(Some(mut routine)) if routine.enabled => {
+            routine.enabled = false;
+            match store.update_routine(&routine).await {
+                Ok(()) => {
+                    tracing::warn!(
+                        routine = %routine.name,
+                        consecutive_failures,
+                        "Routine auto-disabled after repeated consecutive failures; \
+                         re-enable it via routine_update once the cause is fixed"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        routine = %routine.name,
+                        "Failed to auto-disable repeatedly failing routine: {}",
+                        error
+                    );
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::error!(
+                routine_id = %routine_id,
+                "Failed to load routine for auto-disable check: {}",
+                error
+            );
+        }
+    }
 }
 
 /// IC-006: Spawn a periodic zombie reaper for routine runs.

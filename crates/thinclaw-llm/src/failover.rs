@@ -302,16 +302,31 @@ fn aggregate_token_capture_support(
     aggregate
 }
 
+/// Credential-scoped failures (invalid API key, expired session) don't
+/// implicate other failover entries, which carry their own credentials — an
+/// expired primary key must not become a full outage while a healthy fallback
+/// is configured. Not retryable on the *same* provider (see
+/// `retry::is_retryable`), but always worth advancing to the next one.
+fn is_credential_scoped(err: &LlmError) -> bool {
+    matches!(
+        err,
+        LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. }
+    )
+}
+
 fn can_failover_stream_start(err: &LlmError) -> bool {
-    is_retryable(err) || matches!(err, LlmError::StreamingUnsupported { .. })
+    is_retryable(err)
+        || is_credential_scoped(err)
+        || matches!(err, LlmError::StreamingUnsupported { .. })
 }
 
 /// An LLM provider that wraps multiple providers and tries each in sequence
 /// on transient failures.
 ///
 /// The first provider in the list is the primary. If it fails with a retryable
-/// error, the next provider is tried, and so on. Non-retryable errors
-/// (e.g. `AuthFailed`, `ContextLengthExceeded`) propagate immediately.
+/// or credential-scoped error (`AuthFailed`, `SessionExpired`), the next
+/// provider is tried, and so on. Other non-retryable errors
+/// (e.g. `ContextLengthExceeded`) propagate immediately.
 ///
 /// Providers that repeatedly fail with retryable errors are temporarily
 /// placed in cooldown and skipped, reducing latency.
@@ -548,7 +563,7 @@ impl FailoverProvider {
                     return Ok((i, response));
                 }
                 Err(err) => {
-                    if !is_retryable(&err) {
+                    if !is_retryable(&err) && !is_credential_scoped(&err) {
                         return Err(err);
                     }
 
@@ -747,7 +762,7 @@ impl LlmProvider for FailoverProvider {
                     if !can_failover_stream_start(&err) {
                         return Err(err);
                     }
-                    if is_retryable(&err)
+                    if (is_retryable(&err) || is_credential_scoped(&err))
                         && self.cooldowns[idx]
                             .record_failure(self.cooldown_config.failure_threshold)
                     {
@@ -834,7 +849,7 @@ impl LlmProvider for FailoverProvider {
                     if !can_failover_stream_start(&err) {
                         return Err(err);
                     }
-                    if is_retryable(&err)
+                    if (is_retryable(&err) || is_credential_scoped(&err))
                         && self.cooldowns[idx]
                             .record_failure(self.cooldown_config.failure_threshold)
                     {
@@ -932,6 +947,8 @@ mod tests {
     enum MockCompleteResult {
         Success,
         Error,
+        AuthError,
+        ContextError,
     }
 
     impl MockProvider {
@@ -948,6 +965,24 @@ mod tests {
             Self {
                 name,
                 complete_result: MockCompleteResult::Error,
+                stream_chunks: Vec::new(),
+                complete_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn auth_error(name: &'static str) -> Self {
+            Self {
+                name,
+                complete_result: MockCompleteResult::AuthError,
+                stream_chunks: Vec::new(),
+                complete_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn context_error(name: &'static str) -> Self {
+            Self {
+                name,
+                complete_result: MockCompleteResult::ContextError,
                 stream_chunks: Vec::new(),
                 complete_calls: AtomicUsize::new(0),
             }
@@ -992,6 +1027,13 @@ mod tests {
                 MockCompleteResult::Error => Err(LlmError::RequestFailed {
                     provider: self.name.to_string(),
                     reason: "mock failure".to_string(),
+                }),
+                MockCompleteResult::AuthError => Err(LlmError::AuthFailed {
+                    provider: self.name.to_string(),
+                }),
+                MockCompleteResult::ContextError => Err(LlmError::ContextLengthExceeded {
+                    used: 200_000,
+                    limit: 100_000,
                 }),
             }
         }
@@ -1045,6 +1087,43 @@ mod tests {
             finish_reason: FinishReason::Stop,
             token_capture: None,
         }
+    }
+
+    fn failover_pair(primary: MockProvider, fallback: MockProvider) -> FailoverProvider {
+        FailoverProvider::with_entries(
+            vec![
+                ProviderLeaseEntry::new(Arc::new(primary), "mock:1"),
+                ProviderLeaseEntry::new(Arc::new(fallback), "mock:2"),
+            ],
+            CooldownConfig::default(),
+            LeaseConfig {
+                max_concurrent: 1,
+                selection_strategy: LeaseSelectionStrategy::FillFirst,
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn auth_failure_advances_to_next_provider() {
+        let failover = failover_pair(
+            MockProvider::auth_error("primary"),
+            MockProvider::success("fallback"),
+        );
+
+        let response = failover.complete(request()).await.unwrap();
+        assert_eq!(response.provider_model.as_deref(), Some("fallback"));
+    }
+
+    #[tokio::test]
+    async fn context_length_error_propagates_without_failover() {
+        let failover = failover_pair(
+            MockProvider::context_error("primary"),
+            MockProvider::success("fallback"),
+        );
+
+        let err = failover.complete(request()).await.unwrap_err();
+        assert!(matches!(err, LlmError::ContextLengthExceeded { .. }));
     }
 
     #[test]

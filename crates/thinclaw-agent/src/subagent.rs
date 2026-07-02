@@ -208,6 +208,7 @@ pub enum SubagentCompletionOutcome {
     Success { response: String, iterations: usize },
     Error(String),
     TimedOut,
+    Cancelled,
 }
 
 /// Request to spawn a sub-agent.
@@ -619,6 +620,16 @@ pub fn subagent_result_from_completion(
             duration_ms,
             success: false,
             error: Some("Timed out".to_string()),
+        },
+        // The literal "Cancelled" is what subagent_status_from_result keys on.
+        SubagentCompletionOutcome::Cancelled => SubagentResult {
+            agent_id,
+            name: name.into(),
+            response: String::new(),
+            iterations: 0,
+            duration_ms,
+            success: false,
+            error: Some("Cancelled".to_string()),
         },
     }
 }

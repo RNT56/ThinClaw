@@ -44,9 +44,9 @@ use thinclaw_agent::subagent::{
     subagent_heartbeat_message, subagent_identity_defaults, subagent_iteration_limit_reason,
     subagent_job_metadata, subagent_learning_completion, subagent_learning_risk_tier,
     subagent_parent_message, subagent_result_from_completion, subagent_routine_actor,
-    subagent_routine_completion, subagent_spawned_response, subagent_status_after_mark_completed,
-    subagent_status_from_result, subagent_tool_activity_message, subagent_tool_warning_message,
-    subagent_warning_category, with_subagent_thread_metadata,
+    subagent_routine_completion, subagent_spawned_response, subagent_status_from_result,
+    subagent_tool_activity_message, subagent_tool_warning_message, subagent_warning_category,
+    with_subagent_thread_metadata,
 };
 pub use thinclaw_types::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
@@ -76,6 +76,12 @@ use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 use crate::workspace::Workspace;
 
 const SUBAGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a cancelled sub-agent gets to exit cooperatively (and run its
+/// finalization) before the task is hard-aborted.
+const SUBAGENT_CANCEL_GRACE: Duration = Duration::from_secs(20);
+/// How long finished sub-agent handles stay visible in list() before being
+/// evicted from the active map.
+const SUBAGENT_HANDLE_RETENTION: Duration = Duration::from_secs(3600);
 
 /// Shared heartbeat task for a running sub-agent.
 struct SubagentHeartbeat {
@@ -316,6 +322,12 @@ impl SubagentExecutor {
         // write lock to prevent TOCTOU races (Bug 37 fix).
         {
             let mut active = self.active.write().await;
+            // Evict aged terminal handles here — no background task calls
+            // cleanup(), so without this the map grows for the process
+            // lifetime, one entry per subagent ever spawned.
+            let cutoff = chrono::Utc::now()
+                - chrono::Duration::from_std(SUBAGENT_HANDLE_RETENTION).unwrap_or_default();
+            active.retain(|_, h| h.status == SubagentStatus::Running || h.spawned_at > cutoff);
             let running = active
                 .values()
                 .filter(|h| h.status == SubagentStatus::Running)
@@ -445,6 +457,7 @@ impl SubagentExecutor {
             let start = Instant::now();
             let (activity_tx, activity_rx) = watch::channel(Instant::now());
             let store_for_subagent_loop = store_for_task.clone();
+            let cancel_watch_outer = cancel_rx.clone();
             let heartbeat = SubagentHeartbeat::spawn(
                 channels.clone(),
                 ch_name.clone(),
@@ -506,12 +519,16 @@ impl SubagentExecutor {
                         iterations,
                     },
                 ),
-                Ok(Err(e)) => subagent_result_from_completion(
-                    id,
-                    agent_name.clone(),
-                    duration_ms,
-                    SubagentCompletionOutcome::Error(e.to_string()),
-                ),
+                Ok(Err(e)) => {
+                    // A cancel signal makes the loop exit with an error; report
+                    // it as a cancellation, not a failure.
+                    let outcome = if *cancel_watch_outer.borrow() {
+                        SubagentCompletionOutcome::Cancelled
+                    } else {
+                        SubagentCompletionOutcome::Error(e.to_string())
+                    };
+                    subagent_result_from_completion(id, agent_name.clone(), duration_ms, outcome)
+                }
                 Err(_timeout) => subagent_result_from_completion(
                     id,
                     agent_name.clone(),
@@ -788,6 +805,12 @@ impl SubagentExecutor {
     }
 
     /// Cancel a running sub-agent.
+    ///
+    /// Two-phase: the cooperative cancel watch fires first so the loop exits
+    /// through its normal completion path — running finalization (completion
+    /// event, learning event, routine-run completion, result reinjection).
+    /// The task is hard-aborted only if it fails to exit within the grace
+    /// period, since an abort skips all of that.
     pub async fn cancel(&self, agent_id: Uuid) -> bool {
         let mut active = self.active.write().await;
         if let Some(handle) = active.get_mut(&agent_id)
@@ -795,9 +818,21 @@ impl SubagentExecutor {
         {
             let _ = handle.cancel_tx.send(true);
             handle.status = subagent_cancelled_status();
-            // Abort the task if we have a handle
             if let Some(jh) = handle.join_handle.take() {
-                jh.abort();
+                let abort_handle = jh.abort_handle();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = jh => {}
+                        _ = tokio::time::sleep(SUBAGENT_CANCEL_GRACE) => {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                grace_secs = SUBAGENT_CANCEL_GRACE.as_secs(),
+                                "Sub-agent did not exit within cancel grace period — aborting"
+                            );
+                            abort_handle.abort();
+                        }
+                    }
+                });
             }
             tracing::info!(agent_id = %agent_id, "Sub-agent cancelled");
             return true;
@@ -834,14 +869,6 @@ impl SubagentExecutor {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(max_age).unwrap_or_default();
         let mut active = self.active.write().await;
         active.retain(|_, h| h.status == SubagentStatus::Running || h.spawned_at > cutoff);
-    }
-
-    /// Mark a sub-agent as completed (called when the join handle resolves).
-    pub async fn mark_completed(&self, agent_id: Uuid, success: bool, error: Option<String>) {
-        let mut active = self.active.write().await;
-        if let Some(h) = active.get_mut(&agent_id) {
-            h.status = subagent_status_after_mark_completed(success, error.as_deref());
-        }
     }
 }
 
@@ -949,10 +976,7 @@ async fn run_subagent_loop(
     for iteration in 0..max_iterations {
         // Check cancellation
         if *cancel_rx.borrow() {
-            return Err(Error::Tool(crate::error::ToolError::ExecutionFailed {
-                name: "subagent".to_string(),
-                reason: "Cancelled".to_string(),
-            }));
+            return Err(subagent_cancelled_error());
         }
 
         // Check for messages from the parent (non-blocking)
@@ -998,7 +1022,20 @@ async fn run_subagent_loop(
             max_output_tokens: None,
         };
 
-        let output = reasoning.respond_with_tools(&ctx).await?;
+        // Race the LLM call against cancellation so a cancel is observed
+        // within one await point instead of only at the next iteration —
+        // the loop then exits through the normal completion path and
+        // finalization (events, learning, routine-run completion) runs.
+        let output = {
+            let mut cancel_watch = cancel_rx.clone();
+            tokio::select! {
+                biased;
+                _ = wait_for_subagent_cancel(&mut cancel_watch) => {
+                    return Err(subagent_cancelled_error());
+                }
+                output = reasoning.respond_with_tools(&ctx) => output?,
+            }
+        };
 
         match output.result {
             RespondResult::Text(text) => {
@@ -1151,28 +1188,33 @@ async fn run_subagent_loop(
                         }
                     };
 
-                    let result_str =
-                        match execution::execute_tool_call(&prepared, &safety, &job_ctx).await {
-                            Ok(output) => output.sanitized_content,
-                            Err(err) => {
-                                let warning = err.to_string();
-                                let _ = channels
-                                    .send_status(
-                                        channel_name,
-                                        StatusUpdate::SubagentProgress {
-                                            agent_id: agent_id.to_string(),
-                                            message: subagent_tool_warning_message(
-                                                &tc.name, &warning,
-                                            ),
-                                            category: subagent_warning_category().to_string(),
-                                        },
-                                        channel_metadata,
-                                    )
-                                    .await;
-                                touch_subagent_activity(&activity_tx);
-                                format!("Error: {}", warning)
-                            }
-                        };
+                    let mut cancel_watch = cancel_rx.clone();
+                    let execution_result = tokio::select! {
+                        biased;
+                        _ = wait_for_subagent_cancel(&mut cancel_watch) => {
+                            return Err(subagent_cancelled_error());
+                        }
+                        result = execution::execute_tool_call(&prepared, &safety, &job_ctx) => result,
+                    };
+                    let result_str = match execution_result {
+                        Ok(output) => output.sanitized_content,
+                        Err(err) => {
+                            let warning = err.to_string();
+                            let _ = channels
+                                .send_status(
+                                    channel_name,
+                                    StatusUpdate::SubagentProgress {
+                                        agent_id: agent_id.to_string(),
+                                        message: subagent_tool_warning_message(&tc.name, &warning),
+                                        category: subagent_warning_category().to_string(),
+                                    },
+                                    channel_metadata,
+                                )
+                                .await;
+                            touch_subagent_activity(&activity_tx);
+                            format!("Error: {}", warning)
+                        }
+                    };
 
                     context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_str));
                 }
@@ -1184,6 +1226,27 @@ async fn run_subagent_loop(
         name: "subagent".to_string(),
         reason: subagent_iteration_limit_reason(max_iterations),
     }))
+}
+
+fn subagent_cancelled_error() -> Error {
+    Error::Tool(crate::error::ToolError::ExecutionFailed {
+        name: "subagent".to_string(),
+        reason: "Cancelled".to_string(),
+    })
+}
+
+/// Resolve when the cancel watch flips to `true`. If the sender is gone,
+/// cancellation can no longer be signalled, so pend forever instead of
+/// resolving spuriously and killing a healthy loop.
+async fn wait_for_subagent_cancel(rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 async fn build_subagent_system_prompt(

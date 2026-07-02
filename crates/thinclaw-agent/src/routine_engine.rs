@@ -312,6 +312,30 @@ pub struct RoutineRuntimeUpdatePlan {
     pub state: serde_json::Value,
 }
 
+/// Consecutive failures at which schedule backoff starts.
+pub const ROUTINE_FAILURE_BACKOFF_THRESHOLD: u32 = 3;
+/// Consecutive failures at which a routine is automatically disabled.
+pub const ROUTINE_AUTO_DISABLE_THRESHOLD: u32 = 10;
+
+/// Extra schedule delay after repeated consecutive failures, so a routine
+/// that fails every run stops firing at full cadence. `None` below the
+/// backoff threshold.
+pub fn routine_failure_backoff(consecutive_failures: u32) -> Option<chrono::Duration> {
+    match consecutive_failures {
+        n if n < ROUTINE_FAILURE_BACKOFF_THRESHOLD => None,
+        3 => Some(chrono::Duration::minutes(5)),
+        4 => Some(chrono::Duration::minutes(15)),
+        5 => Some(chrono::Duration::hours(1)),
+        _ => Some(chrono::Duration::hours(4)),
+    }
+}
+
+/// Whether a routine has failed often enough in a row to be auto-disabled
+/// (with an operator notification) instead of retrying forever.
+pub fn routine_should_auto_disable(consecutive_failures: u32) -> bool {
+    consecutive_failures >= ROUTINE_AUTO_DISABLE_THRESHOLD
+}
+
 pub fn routine_runtime_update_for_run(
     routine: &Routine,
     run_id: Uuid,
@@ -319,12 +343,18 @@ pub fn routine_runtime_update_for_run(
     user_timezone: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<RoutineRuntimeUpdatePlan, RoutineError> {
-    let next_fire_at = next_fire_for_routine(routine, user_timezone, now)?;
+    let mut next_fire_at = next_fire_for_routine(routine, user_timezone, now)?;
     let consecutive_failures = match status {
         RunStatus::Failed => routine.consecutive_failures + 1,
         RunStatus::Running => routine.consecutive_failures,
         RunStatus::Ok | RunStatus::Attention => 0,
     };
+    if status == RunStatus::Failed
+        && let Some(backoff) = routine_failure_backoff(consecutive_failures)
+    {
+        let earliest = now + backoff;
+        next_fire_at = next_fire_at.map(|fire_at| fire_at.max(earliest));
+    }
     let state = if status == RunStatus::Running {
         routine_state_with_runtime_advance(&routine.state, run_id, now)
     } else {
@@ -1428,6 +1458,44 @@ mod tests {
         let ok =
             routine_runtime_update_for_run(&routine, run_id, RunStatus::Ok, None, now).unwrap();
         assert_eq!(ok.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn failure_backoff_kicks_in_after_threshold_and_grows() {
+        assert_eq!(routine_failure_backoff(0), None);
+        assert_eq!(routine_failure_backoff(2), None);
+        let third = routine_failure_backoff(3).expect("backoff at threshold");
+        let sixth = routine_failure_backoff(6).expect("backoff past schedule");
+        assert!(sixth > third);
+        assert!(!routine_should_auto_disable(
+            ROUTINE_AUTO_DISABLE_THRESHOLD - 1
+        ));
+        assert!(routine_should_auto_disable(ROUTINE_AUTO_DISABLE_THRESHOLD));
+    }
+
+    #[test]
+    fn repeated_failures_push_next_fire_beyond_schedule() {
+        let now = Utc::now();
+        let mut routine = test_routine(
+            "backoff",
+            Trigger::Cron {
+                schedule: "every 1m".to_string(),
+            },
+        );
+        routine.consecutive_failures = 4; // this failure makes it 5 → 1h backoff
+        let run_id = Uuid::new_v4();
+
+        let failed =
+            routine_runtime_update_for_run(&routine, run_id, RunStatus::Failed, None, now).unwrap();
+        assert_eq!(failed.consecutive_failures, 5);
+        let next_fire = failed.next_fire_at.expect("cron routine has next fire");
+        assert!(next_fire >= now + chrono::Duration::minutes(59));
+
+        // Success resets the counter and the schedule is not pushed out.
+        let ok =
+            routine_runtime_update_for_run(&routine, run_id, RunStatus::Ok, None, now).unwrap();
+        let ok_fire = ok.next_fire_at.expect("cron routine has next fire");
+        assert!(ok_fire < now + chrono::Duration::minutes(5));
     }
 
     #[test]

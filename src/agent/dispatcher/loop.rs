@@ -302,13 +302,25 @@ impl Agent {
                     flush_msgs.push(flush_system);
                     flush_msgs.push(flush_user);
 
+                    // Only memory tools are executable in the flush turn (see
+                    // the allowlist below) — advertise exactly those, honoring
+                    // the routed agent's tool restrictions, instead of leaking
+                    // every registered tool definition into the flush prompt.
+                    let allowed_flush_tools = ["memory_write", "memory_read", "memory_tree"];
+                    let flush_tool_defs = self
+                        .tools()
+                        .tool_definitions_for_capabilities(
+                            routed_allowed_tools.as_deref(),
+                            routed_allowed_skills.as_deref(),
+                            None,
+                        )
+                        .await
+                        .into_iter()
+                        .filter(|tool| allowed_flush_tools.contains(&tool.name.as_str()))
+                        .collect::<Vec<_>>();
                     let flush_ctx = ReasoningContext::new()
                         .with_messages(flush_msgs)
-                        .with_tools(
-                            self.tools()
-                                .tool_definitions_for_capabilities(None, None, None)
-                                .await,
-                        );
+                        .with_tools(flush_tool_defs);
 
                     let flush_result = tokio::select! {
                         biased;
@@ -336,10 +348,8 @@ impl Agent {
                                 }
                                 crate::llm::RespondResult::ToolCalls { tool_calls, .. } => {
                                     // Agent wants to write memories — actually execute the tool calls!
-                                    // Only allow memory_write and memory_read tools in the flush context
-                                    // to prevent side effects.
-                                    let allowed_flush_tools =
-                                        ["memory_write", "memory_read", "memory_tree"];
+                                    // Only memory tools may run in the flush context
+                                    // to prevent side effects (allowlist declared above).
                                     for tc in &tool_calls {
                                         if !allowed_flush_tools.contains(&tc.name.as_str()) {
                                             tracing::debug!(

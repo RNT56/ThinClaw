@@ -50,29 +50,38 @@ impl Agent {
         } else {
             self.workspace().map(Arc::clone)
         };
-        let prompt_settings = if let Some(store) = self.store().map(Arc::clone) {
-            match store.get_all_settings(&identity.principal_id).await {
-                Ok(map) => crate::settings::Settings::from_db_map(&map).prompt,
-                Err(_) => crate::settings::PromptSettings::default(),
-            }
-        } else {
-            crate::settings::PromptSettings::default()
-        };
-        let existing_runtime = if let Some(store) = self.store().map(Arc::clone) {
-            match crate::agent::load_thread_runtime(&store, thread_id).await {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    tracing::debug!(
-                        thread = %thread_id,
-                        error = %err,
-                        "Failed to load thread runtime before prompt assembly"
-                    );
+        // Independent store reads on the hot path of every message — fetch
+        // them concurrently instead of paying their summed latency.
+        let store_handle = self.store().map(Arc::clone);
+        let (prompt_settings, existing_runtime) = tokio::join!(
+            async {
+                if let Some(store) = store_handle.as_ref() {
+                    match store.get_all_settings(&identity.principal_id).await {
+                        Ok(map) => crate::settings::Settings::from_db_map(&map).prompt,
+                        Err(_) => crate::settings::PromptSettings::default(),
+                    }
+                } else {
+                    crate::settings::PromptSettings::default()
+                }
+            },
+            async {
+                if let Some(store) = store_handle.as_ref() {
+                    match crate::agent::load_thread_runtime(store, thread_id).await {
+                        Ok(runtime) => runtime,
+                        Err(err) => {
+                            tracing::debug!(
+                                thread = %thread_id,
+                                error = %err,
+                                "Failed to load thread runtime before prompt assembly"
+                            );
+                            None
+                        }
+                    }
+                } else {
                     None
                 }
-            }
-        } else {
-            None
-        };
+            },
+        );
 
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
@@ -140,17 +149,14 @@ impl Agent {
             })
             .filter(|prompt| !prompt.trim().is_empty());
 
-        // Select and prepare active skills (if skills system is enabled)
-        let active_skills = self
-            .select_active_skills(&message.content, routed_allowed_skills.as_deref())
-            .await;
-
-        // Collect the full skill directory (all loaded skills, not just matched ones).
-        // This powers the always-on ## Skills section so the agent always knows
-        // what skills are installed, even when none keyword-matched this message.
-        let all_skills = self
-            .collect_all_skills(routed_allowed_skills.as_deref())
-            .await;
+        // Skill selection and the full skill directory are independent —
+        // fetch both concurrently. (The directory powers the always-on
+        // ## Skills section so the agent knows what is installed even when
+        // nothing keyword-matched this message.)
+        let (active_skills, all_skills) = tokio::join!(
+            self.select_active_skills(&message.content, routed_allowed_skills.as_deref()),
+            self.collect_all_skills(routed_allowed_skills.as_deref()),
+        );
 
         let skill_index_context = render_available_skill_index(
             &all_skills
@@ -193,8 +199,6 @@ impl Agent {
             self.llm().clone()
         };
 
-        let active_channel_names = self.channels.channel_names().await;
-        let active_channel_hint = self.channels.formatting_hints_for(&message.channel).await;
         let active_personality_overlay = {
             let session_guard = session.lock().await;
             session_guard
@@ -202,11 +206,19 @@ impl Agent {
                 .as_ref()
                 .map(personality::format_overlay)
         };
-        let linked_recall_block = if matches!(
-            identity.conversation_kind,
-            crate::identity::ConversationKind::Direct
-        ) && let Some(store) = self.store().map(Arc::clone)
-            && let Ok(mut conversations) = store
+        // Channel metadata, linked recall, and the three learning-provider
+        // fetches touch disjoint resources — run them all concurrently. The
+        // provider calls each carry a settings load plus a health probe, so
+        // overlapping them is the largest latency win in prompt preparation.
+        let linked_recall_fut = async {
+            if !matches!(
+                identity.conversation_kind,
+                crate::identity::ConversationKind::Direct
+            ) {
+                return None;
+            }
+            let store = self.store().map(Arc::clone)?;
+            let mut conversations = store
                 .list_actor_conversations_for_recall(
                     &identity.principal_id,
                     &identity.actor_id,
@@ -214,7 +226,7 @@ impl Agent {
                     8,
                 )
                 .await
-        {
+                .ok()?;
             conversations.retain(|summary| summary.id != thread_id);
             crate::history::LinkedConversationRecall::new(
                 identity.principal_id.clone(),
@@ -223,49 +235,59 @@ impl Agent {
                 conversations,
             )
             .compact_block_for_channel(Some(&message.channel))
-        } else {
-            None
         };
-        let (provider_context, provider_tool_extensions, provider_system_prompt) =
-            if let Some(store) = self.store().map(Arc::clone) {
-                let orchestrator = crate::agent::learning::LearningOrchestrator::new(
-                    store,
-                    self.workspace().cloned(),
-                    self.skill_registry().cloned(),
-                );
-                let frozen_block = if prompt_settings.session_freeze_enabled {
-                    existing_runtime
-                        .as_ref()
-                        .and_then(|runtime| runtime.frozen_provider_system_prompt.clone())
-                } else {
-                    None
-                };
-                let provider_system_prompt = if let Some(block) = frozen_block {
+        let provider_fut = async {
+            let Some(store) = self.store().map(Arc::clone) else {
+                return (None, Vec::new(), None);
+            };
+            let orchestrator = crate::agent::learning::LearningOrchestrator::new(
+                store,
+                self.workspace().cloned(),
+                self.skill_registry().cloned(),
+            );
+            let frozen_block = if prompt_settings.session_freeze_enabled {
+                existing_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.frozen_provider_system_prompt.clone())
+            } else {
+                None
+            };
+            let system_prompt_fut = async {
+                if let Some(block) = frozen_block {
                     Some(block)
                 } else {
                     orchestrator
                         .provider_system_prompt_block(&identity.principal_id)
                         .await
-                };
-                (
-                    orchestrator
-                        .prefetch_provider_context(&identity.principal_id, &message.content, 6)
-                        .await,
-                    orchestrator
-                        .provider_tool_extensions(&identity.principal_id)
-                        .await,
-                    provider_system_prompt,
-                )
-            } else {
-                (None, Vec::new(), None)
+                }
             };
-        let post_compaction_fragment = if let Some(store) = self.store().map(Arc::clone)
-            && let Ok(Some(runtime)) = crate::agent::load_thread_runtime(&store, thread_id).await
-        {
-            runtime.post_compaction_context
-        } else {
-            None
+            let (provider_context, provider_tool_extensions, provider_system_prompt) = tokio::join!(
+                orchestrator.prefetch_provider_context(&identity.principal_id, &message.content, 6),
+                orchestrator.provider_tool_extensions(&identity.principal_id),
+                system_prompt_fut,
+            );
+            (
+                provider_context,
+                provider_tool_extensions,
+                provider_system_prompt,
+            )
         };
+        let (
+            active_channel_names,
+            active_channel_hint,
+            linked_recall_block,
+            (provider_context, provider_tool_extensions, provider_system_prompt),
+        ) = tokio::join!(
+            self.channels.channel_names(),
+            self.channels.formatting_hints_for(&message.channel),
+            linked_recall_fut,
+            provider_fut,
+        );
+        // Reuse the runtime loaded at the top of this function instead of a
+        // second identical DB read (it cannot change mid-preparation).
+        let post_compaction_fragment = existing_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.post_compaction_context.clone());
         let sanitize_prompt_segment = |segment: &str, content: String| {
             let sanitized = sanitize_project_context_for_channel(
                 &content,
@@ -311,12 +333,10 @@ impl Agent {
                 format!("## Platform Formatting ({})\n{}", message.channel, hints),
             )
         });
-        let personality_overlay_context = active_personality_overlay.as_ref().map(|overlay| {
-            sanitize_prompt_segment(
-                "personality_overlay",
-                format!("## Temporary Personality\n\n{overlay}"),
-            )
-        });
+        // format_overlay already emits the "## Temporary Personality" header.
+        let personality_overlay_context = active_personality_overlay
+            .as_ref()
+            .map(|overlay| sanitize_prompt_segment("personality_overlay", overlay.clone()));
         let post_compaction_fragment = post_compaction_fragment
             .map(|fragment| sanitize_prompt_segment("post_compaction_fragment", fragment));
         let runtime_capability_hint = {

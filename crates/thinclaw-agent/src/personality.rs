@@ -197,6 +197,16 @@ mod tests {
     }
 
     #[test]
+    fn format_overlay_emits_exactly_one_header() {
+        let overlay = resolve_personality("technical");
+        let formatted = format_overlay(&overlay);
+        // Consumers must not re-wrap this output in another
+        // "## Temporary Personality" header (the prompt would carry it twice).
+        assert_eq!(formatted.matches("## Temporary Personality").count(), 1);
+        assert!(formatted.starts_with("## Temporary Personality\n\n"));
+    }
+
+    #[test]
     fn resolve_builtin_personality_is_case_insensitive() {
         let personality = resolve_personality("TeChNiCaL");
         assert_eq!(personality.name, "technical");

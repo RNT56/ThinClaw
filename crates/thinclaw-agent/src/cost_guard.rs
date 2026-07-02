@@ -158,26 +158,24 @@ impl CostGuard {
     /// Call this BEFORE making an LLM call. Does NOT record the action yet,
     /// call `record_action` after the action completes.
     pub async fn check_allowed(&self) -> Result<(), CostLimitExceeded> {
-        // Fast path: if budget already blown, skip the lock
-        if self.budget_exceeded.load(Ordering::Relaxed) {
-            let daily = self.daily_cost.lock().await;
-            let spent_cents = to_cents(daily.total);
-            return Err(CostLimitExceeded::DailyBudget {
-                spent_cents,
-                limit_cents: self.config.max_cost_per_day_cents.unwrap_or(0),
-            });
-        }
-
-        // Check daily budget
-        if let Some(limit_cents) = self.config.max_cost_per_day_cents {
-            let daily = self.daily_cost.lock().await;
-            let spent_cents = to_cents(daily.total);
-            if spent_cents >= limit_cents {
-                self.budget_exceeded.store(true, Ordering::Relaxed);
-                return Err(CostLimitExceeded::DailyBudget {
-                    spent_cents,
-                    limit_cents,
-                });
+        // Check daily budget. The day rollover must happen here as well as in
+        // record_cost_internal: once the budget trips, no call completes, so
+        // the record-path reset would never run and the block would outlive
+        // its day.
+        if self.budget_exceeded.load(Ordering::Relaxed)
+            || self.config.max_cost_per_day_cents.is_some()
+        {
+            let mut daily = self.daily_cost.lock().await;
+            self.roll_daily_if_needed(&mut daily);
+            if let Some(limit_cents) = self.config.max_cost_per_day_cents {
+                let spent_cents = to_cents(daily.total);
+                if spent_cents >= limit_cents {
+                    self.budget_exceeded.store(true, Ordering::Relaxed);
+                    return Err(CostLimitExceeded::DailyBudget {
+                        spent_cents,
+                        limit_cents,
+                    });
+                }
             }
         }
 
@@ -241,6 +239,17 @@ impl CostGuard {
             .await
     }
 
+    /// Reset the daily counter when the UTC day has rolled over.
+    fn roll_daily_if_needed(&self, daily: &mut DailyCost) {
+        let today = chrono::Utc::now().date_naive();
+        if today != daily.reset_date {
+            daily.total = Decimal::ZERO;
+            daily.reset_date = today;
+            self.budget_exceeded.store(false, Ordering::Relaxed);
+            tracing::info!("Cost guard: daily counter reset for {}", today);
+        }
+    }
+
     async fn record_cost_internal(
         &self,
         model: &str,
@@ -251,13 +260,7 @@ impl CostGuard {
         // Update daily cost (reset if new day)
         {
             let mut daily = self.daily_cost.lock().await;
-            let today = chrono::Utc::now().date_naive();
-            if today != daily.reset_date {
-                daily.total = Decimal::ZERO;
-                daily.reset_date = today;
-                self.budget_exceeded.store(false, Ordering::Relaxed);
-                tracing::info!("Cost guard: daily counter reset for {}", today);
-            }
+            self.roll_daily_if_needed(&mut daily);
             daily.total += cost;
 
             // Check if we just crossed the threshold
@@ -340,6 +343,11 @@ impl CostGuard {
     /// Configured hourly action limit, if any.
     pub fn hourly_action_limit(&self) -> Option<u64> {
         self.config.max_actions_per_hour
+    }
+
+    #[cfg(test)]
+    async fn set_reset_date_for_test(&self, date: chrono::NaiveDate) {
+        self.daily_cost.lock().await.reset_date = date;
     }
 }
 
@@ -432,6 +440,30 @@ mod tests {
             }
             other => panic!("Expected HourlyRate, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_daily_budget_unblocks_after_day_rollover() {
+        let guard = CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: Some(1), // $0.01 limit
+            max_actions_per_hour: None,
+        });
+
+        // Blow the budget and confirm calls are rejected.
+        guard.record_llm_call("gpt-4o", 10_000, 10_000, None).await;
+        assert!(guard.check_allowed().await.is_err());
+
+        // Simulate the UTC day rolling over while blocked: check_allowed
+        // itself must reset the counter (no successful call will ever run
+        // record_cost_internal while the guard is rejecting).
+        let yesterday = chrono::Utc::now()
+            .date_naive()
+            .pred_opt()
+            .expect("valid date");
+        guard.set_reset_date_for_test(yesterday).await;
+
+        assert!(guard.check_allowed().await.is_ok());
+        assert_eq!(guard.daily_spend().await, Decimal::ZERO);
     }
 
     #[tokio::test]

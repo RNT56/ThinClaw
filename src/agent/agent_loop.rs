@@ -351,6 +351,16 @@ impl Agent {
         .into()
     }
 
+    /// Recognize the error produced by [`Self::turn_interrupted_error`]. Kept
+    /// adjacent so the constructor and the check cannot drift apart.
+    pub(super) fn is_turn_interrupted_error(err: &Error) -> bool {
+        matches!(
+            err,
+            Error::Job(crate::error::JobError::ContextError { reason, .. })
+                if reason == "Interrupted"
+        )
+    }
+
     pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
         &self.deps.safety
     }
@@ -2002,8 +2012,25 @@ impl Agent {
                 .await
             }
             Submission::ApprovalResponse { approved, always } => {
-                self.process_approval(message, session, thread_id, None, approved, always)
-                    .await
+                // Bare conversational words ("ok", "yes", "no", "cancel")
+                // parse as approval responses, but outside an approval prompt
+                // they are normal replies — e.g. answering a yes/no question
+                // the agent just asked. Explicit slash commands (/approve,
+                // /deny, ...) keep approval semantics either way.
+                let bare_word = !message.content.trim_start().starts_with('/');
+                let awaiting_approval = {
+                    let sess = session.lock().await;
+                    sess.threads.get(&thread_id).is_some_and(|thread| {
+                        thread.state == crate::agent::session::ThreadState::AwaitingApproval
+                    })
+                };
+                if bare_word && !awaiting_approval {
+                    self.process_user_input(message, session, thread_id, message.content.trim())
+                        .await
+                } else {
+                    self.process_approval(message, session, thread_id, None, approved, always)
+                        .await
+                }
             }
         };
 
@@ -2093,6 +2120,11 @@ impl Agent {
         result
     }
 
+    /// Record the completed turn for trajectory/learning purposes.
+    ///
+    /// Snapshots the session under the lock, then runs the heavy tail
+    /// (artifact JSONL append, provider memory sync, generated-skill review)
+    /// in a detached task — none of it needs to block the user's response.
     async fn record_trajectory_turn(
         &self,
         message: &IncomingMessage,
@@ -2113,58 +2145,69 @@ impl Agent {
         if thread_snapshot.turns.len() <= starting_turn_count {
             return;
         }
-
-        let Some(turn) = thread_snapshot.turns.last() else {
+        if thread_snapshot.turns.last().is_none() {
             return;
-        };
-
-        let harness = crate::agent::AgentRunHarness::with_driver(
-            run_driver.clone(),
-            self.store().map(Arc::clone),
-        );
-        match harness
-            .record_chat_turn(
-                &self.config.name,
-                &self.llm().active_model_name(),
-                &session_snapshot,
-                thread_id,
-                message,
-                turn,
-            )
-            .await
-        {
-            Ok(_artifact) => {}
-            Err(err) => {
-                tracing::debug!(
-                    thread = %thread_id,
-                    error = %err,
-                    "Canonical run artifact logging failed"
-                );
-            }
         }
 
-        if let Some(store) = self.store().map(Arc::clone) {
-            let orchestrator = crate::agent::learning::LearningOrchestrator::new(
-                store,
-                self.workspace().cloned(),
-                self.skill_registry().cloned(),
-            );
-            if let Err(err) = orchestrator
-                .review_completed_turn_for_generated_skill(
+        let run_driver = run_driver.clone();
+        let harness_store = self.store().map(Arc::clone);
+        let agent_name = self.config.name.clone();
+        let model_name = self.llm().active_model_name();
+        let message = message.clone();
+        let store = self.store().map(Arc::clone);
+        let workspace = self.workspace().cloned();
+        let skill_registry = self.skill_registry().cloned();
+
+        tokio::spawn(async move {
+            let Some(turn) = thread_snapshot.turns.last() else {
+                return;
+            };
+
+            let harness = crate::agent::AgentRunHarness::with_driver(run_driver, harness_store);
+            match harness
+                .record_chat_turn(
+                    &agent_name,
+                    &model_name,
                     &session_snapshot,
                     thread_id,
-                    message,
+                    &message,
                     turn,
                 )
                 .await
             {
-                tracing::debug!(
-                    thread = %thread_id,
-                    error = %err,
-                    "Generated skill reviewer skipped turn"
-                );
+                Ok(_artifact) => {}
+                Err(err) => {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        error = %err,
+                        "Canonical run artifact logging failed"
+                    );
+                }
             }
-        }
+
+            if let Some(store) = store {
+                let orchestrator = crate::agent::learning::LearningOrchestrator::new(
+                    store,
+                    workspace,
+                    skill_registry,
+                );
+                if let Err(err) = orchestrator
+                    .review_completed_turn_for_generated_skill(
+                        &session_snapshot,
+                        thread_id,
+                        &message,
+                        turn,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        error = %err,
+                        "Generated skill reviewer skipped turn"
+                    );
+                }
+            }
+        });
     }
 
     /// Inject a message into session history without triggering a turn.

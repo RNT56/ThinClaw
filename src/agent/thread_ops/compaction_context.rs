@@ -15,6 +15,22 @@ use crate::workspace::paths;
 use thinclaw_agent::thread_ops::PostCompactionFactAccumulator;
 
 impl Agent {
+    /// Context monitor whose window is derived from the active model instead
+    /// of the fixed 100k default, using the synchronous model catalog (no
+    /// network call). Falls back to the default monitor when the model is
+    /// unknown. The threshold ratio is preserved.
+    pub(in crate::agent) fn effective_context_monitor(
+        &self,
+    ) -> crate::agent::context_monitor::ContextMonitor {
+        let model_name = self.llm().active_model_name();
+        match thinclaw_config::model_compat::find_model(&model_name) {
+            Some(model) if model.context_window > 0 => self
+                .context_monitor
+                .with_limit(model.context_window as usize),
+            _ => self.context_monitor,
+        }
+    }
+
     async fn collect_post_compaction_pinned_facts(
         &self,
         identity: Option<&ResolvedIdentity>,

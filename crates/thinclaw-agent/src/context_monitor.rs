@@ -69,6 +69,7 @@ impl Default for CompactionStrategy {
 }
 
 /// Monitors context size and suggests compaction.
+#[derive(Debug, Clone, Copy)]
 pub struct ContextMonitor {
     /// Maximum tokens allowed in context.
     context_limit: usize,

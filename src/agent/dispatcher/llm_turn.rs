@@ -115,6 +115,17 @@ impl Agent {
         }
     }
 
+    /// State of the streaming draft that matters for retry safety: whether a
+    /// message was posted and how much text has accumulated. If this changes
+    /// across a failed attempt, partial output already reached the user and a
+    /// retry would duplicate it.
+    async fn draft_retry_snapshot(
+        persistent_draft: &Arc<tokio::sync::Mutex<Option<crate::channels::DraftReplyState>>>,
+    ) -> Option<(bool, usize)> {
+        let persist = persistent_draft.lock().await;
+        persist.as_ref().map(|d| (d.posted, d.accumulated.len()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_llm_turn(
         &self,
@@ -240,8 +251,13 @@ impl Agent {
 
         let llm_start = std::time::Instant::now();
         let mut recovered_from_override_failure = false;
+        let mut compacted_for_retry = false;
+        let mut transient_retries_used: u32 = 0;
         let mut streamed_text = false;
         let output = loop {
+            // Snapshot the streaming draft so retry decisions can tell whether
+            // this attempt already delivered partial output to the user.
+            let draft_state_before = Self::draft_retry_snapshot(persistent_draft).await;
             let attempt: Result<crate::llm::RespondOutput, crate::error::Error> = if use_streaming {
                 let channels = Arc::clone(&self.channels);
                 let channel_name = message.channel.clone();
@@ -413,7 +429,7 @@ impl Agent {
                     Err(e) => Err(e),
                 }
             } else {
-                let first_attempt: Result<crate::llm::RespondOutput, crate::error::Error> = tokio::select! {
+                tokio::select! {
                     biased;
                     _ = self.wait_for_turn_cancellation(thread_id) => {
                         Err(Self::turn_interrupted_error(thread_id))
@@ -421,53 +437,64 @@ impl Agent {
                     result = reasoning.respond_with_tools(&context) => {
                         result.map_err(crate::error::Error::from)
                     }
-                };
-
-                match first_attempt {
-                    Ok(output) => Ok(output),
-                    Err(crate::error::Error::Llm(
-                        crate::error::LlmError::ContextLengthExceeded { used, limit },
-                    )) => {
-                        tracing::warn!(
-                            used,
-                            limit,
-                            "Context length exceeded, compacting messages and retrying"
-                        );
-
-                        *context_messages = compact_messages_for_retry(context_messages);
-
-                        let retry_context = self.build_turn_context(
-                            context_messages,
-                            available_tools.clone(),
-                            thread_id,
-                            &options,
-                        );
-
-                        tokio::select! {
-                            biased;
-                            _ = self.wait_for_turn_cancellation(thread_id) => {
-                                Err(Self::turn_interrupted_error(thread_id))
-                            }
-                            result = reasoning.respond_with_tools(&retry_context) => {
-                                result.map_err(|retry_err| {
-                                tracing::error!(
-                                    original_used = used,
-                                    original_limit = limit,
-                                    retry_error = %retry_err,
-                                    "Retry after auto-compaction also failed"
-                                );
-                                crate::error::Error::from(retry_err)
-                                })
-                            }
-                        }
-                    }
-                    Err(e) => Err(e),
                 }
             };
 
             match attempt {
                 Ok(output) => break output,
                 Err(err) => {
+                    let kind = classify_llm_turn_error(&err);
+
+                    // Cancellation is not a provider failure: propagate it
+                    // untouched instead of clearing a user-selected model
+                    // override or burning retry budget on it.
+                    if kind == LlmTurnErrorKind::Cancelled {
+                        return Err(err);
+                    }
+
+                    // Retrying a streamed attempt would repost partial output;
+                    // only recover when nothing reached the user yet.
+                    let retry_safe = !use_streaming
+                        || Self::draft_retry_snapshot(persistent_draft).await == draft_state_before;
+
+                    if kind == LlmTurnErrorKind::ContextLength && !compacted_for_retry && retry_safe
+                    {
+                        compacted_for_retry = true;
+                        tracing::warn!(
+                            error = %err,
+                            "Context length exceeded, compacting messages and retrying"
+                        );
+                        *context_messages = compact_messages_for_retry(context_messages);
+                        context = self.build_turn_context(
+                            context_messages,
+                            available_tools.clone(),
+                            thread_id,
+                            &options,
+                        );
+                        continue;
+                    }
+
+                    if kind == LlmTurnErrorKind::Transient
+                        && retry_safe
+                        && let Some(delay) = transient_llm_retry_delay(transient_retries_used)
+                    {
+                        transient_retries_used += 1;
+                        tracing::warn!(
+                            error = %err,
+                            attempt = transient_retries_used,
+                            delay_ms = delay.as_millis() as u64,
+                            "Transient LLM failure; retrying after backoff"
+                        );
+                        tokio::select! {
+                            biased;
+                            _ = self.wait_for_turn_cancellation(thread_id) => {
+                                return Err(Self::turn_interrupted_error(thread_id));
+                            }
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                        continue;
+                    }
+
                     if !recovered_from_override_failure
                         && let Some(ref override_lock) = self.deps.model_override
                         && let Some(failed_override) =
@@ -682,5 +709,28 @@ impl Agent {
             output,
             streamed_text,
         })
+    }
+}
+
+/// Classify an LLM turn failure for the dispatcher recovery loop. Kept next
+/// to the loop that consumes it; the retry schedule itself lives in
+/// `thinclaw_agent::dispatcher_policy`.
+fn classify_llm_turn_error(err: &Error) -> LlmTurnErrorKind {
+    if Agent::is_turn_interrupted_error(err) {
+        return LlmTurnErrorKind::Cancelled;
+    }
+    match err {
+        Error::Llm(crate::error::LlmError::ContextLengthExceeded { .. }) => {
+            LlmTurnErrorKind::ContextLength
+        }
+        Error::Llm(
+            crate::error::LlmError::RateLimited { .. }
+            | crate::error::LlmError::RequestFailed { .. }
+            | crate::error::LlmError::InvalidResponse { .. }
+            | crate::error::LlmError::SessionRenewalFailed { .. }
+            | crate::error::LlmError::Http(_)
+            | crate::error::LlmError::Io(_),
+        ) => LlmTurnErrorKind::Transient,
+        _ => LlmTurnErrorKind::Fatal,
     }
 }
