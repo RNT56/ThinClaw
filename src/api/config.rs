@@ -108,6 +108,9 @@ pub async fn import_settings(
         .set_all_settings(user_id, settings)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if settings.keys().any(|key| key.starts_with("learning.")) {
+        crate::agent::learning::invalidate_provider_ready_cache(store, user_id).await;
+    }
     Ok(())
 }
 
