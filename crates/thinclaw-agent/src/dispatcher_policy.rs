@@ -23,6 +23,10 @@ pub const CONTEXT_TRIM_TARGET_RATIO: f64 = 0.70;
 /// flush fires, prompting the agent to persist durable memories before the
 /// hard cap starts dropping old messages.
 pub const MEMORY_FLUSH_RATIO: f64 = 0.80;
+/// Tools the pre-compaction memory-flush turn may advertise and execute.
+/// One const for both the definition filter and the execution allowlist in
+/// the dispatcher loop, so the two can never drift.
+pub const MEMORY_FLUSH_ALLOWED_TOOLS: [&str; 3] = ["memory_write", "memory_read", "memory_tree"];
 pub const TOOL_PHASE_SYNTHESIS_PROMPT: &str = "Provide the final user-facing answer using the conversation and any tool results above. Do not call tools in this phase.";
 pub const TOOL_PHASE_NO_TOOLS_SENTINEL: &str = "NO_TOOLS_NEEDED";
 pub const TOOL_PHASE_PLANNING_PROMPT: &str = "Planner mode: decide which tools to call next. If tools are needed, call them directly. If no more tools are needed, do not draft the final answer here. Reply with only: NO_TOOLS_NEEDED";
@@ -65,7 +69,14 @@ pub fn context_cap_decision(
     let count_trigger = message_count > max_context_messages;
 
     if token_trigger || count_trigger {
-        let target_tokens = (token_limit as f64 * CONTEXT_TRIM_TARGET_RATIO) as usize;
+        // Guard the unreachable-today token_limit == 0 case: a zero target
+        // would trim a live conversation down to a single message where the
+        // old count-only cap degraded gracefully.
+        let target_tokens = if token_limit > 0 {
+            (token_limit as f64 * CONTEXT_TRIM_TARGET_RATIO) as usize
+        } else {
+            estimated_tokens.saturating_mul(7) / 10
+        };
         ContextCapDecision::TrimToBudget { target_tokens }
     } else {
         ContextCapDecision::WithinBudget
@@ -100,6 +111,11 @@ pub enum LlmTurnErrorKind {
 /// provider stack retries with its own (jittered) backoff first; this second
 /// line of defense keeps a long multi-tool turn alive through a brief outage
 /// instead of losing all accumulated work to one blip.
+///
+/// Deliberately a small fixed table rather than the provider layer's
+/// exponential+jitter formula (`thinclaw-llm`'s `retry_backoff_delay`): by
+/// the time an error reaches this layer the inner retries already spread the
+/// load, and two bounded attempts are the whole budget.
 const TRANSIENT_LLM_RETRY_DELAYS: [std::time::Duration; 2] = [
     std::time::Duration::from_secs(2),
     std::time::Duration::from_secs(6),

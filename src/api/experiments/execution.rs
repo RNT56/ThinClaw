@@ -579,7 +579,7 @@ pub(super) async fn execute_agent_env_benchmark_trial(
     trial: &ExperimentTrial,
 ) -> ApiResult<ExperimentRunnerCompletion> {
     let trajectories = match config {
-        AgentEnvBenchmarkConfig::TerminalBench { cases } => {
+        AgentEnvBenchmarkConfig::TerminalBench { cases, live_agent } => {
             let cases = cases
                 .into_iter()
                 .map(|mut case| {
@@ -590,36 +590,54 @@ pub(super) async fn execute_agent_env_benchmark_trial(
                 })
                 .collect::<Vec<_>>();
             // The env scores the agent ACTION's output against each case's
-            // checks. Until a real agent is wired into this trial path, feed
-            // each case's own command as the scripted reference action so the
-            // score measures the harness ceiling instead of a placeholder
-            // string that can never pass verification.
-            let scripted_actions: Vec<AgentAction> = cases
-                .iter()
-                .map(|case| AgentAction::UserMessage {
-                    content: case.command.clone(),
-                })
-                .collect();
+            // checks. With `live_agent`, the registered subagent runtime (a
+            // real LLM-backed agent) produces the command per case; otherwise
+            // each case's own command is the scripted reference action, so
+            // the score measures the harness ceiling deterministically.
+            let actions: Vec<AgentAction> = if live_agent {
+                let prompts = cases
+                    .iter()
+                    .map(|case| (case.name.clone(), terminal_bench_live_prompt(case)))
+                    .collect();
+                live_agent_actions(prompts).await?
+            } else {
+                cases
+                    .iter()
+                    .map(|case| AgentAction::UserMessage {
+                        content: case.command.clone(),
+                    })
+                    .collect()
+            };
             let mut runner = EnvRunner::new(TerminalBenchEnv::new(cases))
                 .with_artifact_root(artifact_dir.join("agent_env_runs"));
             runner
-                .evaluate(1, move |_| scripted_actions.clone())
+                .evaluate(1, move |_| actions.clone())
                 .await
                 .map_err(|err| ApiError::Internal(err.to_string()))?
         }
-        AgentEnvBenchmarkConfig::SkillBench { cases } => {
-            // Reference action per case: the skill content itself, which by
-            // construction satisfies the case's required substrings.
-            let scripted_actions: Vec<AgentAction> = cases
-                .iter()
-                .map(|case| AgentAction::UserMessage {
-                    content: case.skill_content.clone(),
-                })
-                .collect();
+        AgentEnvBenchmarkConfig::SkillBench { cases, live_agent } => {
+            // With `live_agent`, the agent answers each case applying the
+            // skill; otherwise the reference action is the skill content
+            // itself, which by construction satisfies the case's required
+            // substrings.
+            let actions: Vec<AgentAction> = if live_agent {
+                let prompts = cases
+                    .iter()
+                    .map(|case| (case.name.clone(), skill_bench_live_prompt(case)))
+                    .collect();
+                live_agent_actions(prompts).await?
+            } else {
+                cases
+                    .iter()
+                    .map(|case| AgentAction::UserMessage {
+                        content: case.skill_content.clone(),
+                    })
+                    .collect()
+            };
             let mut runner = EnvRunner::new(SkillBenchEnv::new(cases))
                 .with_artifact_root(artifact_dir.join("agent_env_runs"));
             runner
-                .evaluate(1, move |_| scripted_actions.clone())
+                .evaluate(1, move |_| actions.clone())
                 .await
                 .map_err(|err| ApiError::Internal(err.to_string()))?
         }
@@ -657,6 +675,112 @@ pub(super) async fn execute_agent_env_benchmark_trial(
             "trajectory_summary": trajectory_summary(&trajectories),
         }),
     })
+}
+
+fn terminal_bench_live_prompt(case: &crate::agent::env::TerminalBenchCase) -> String {
+    let mut requirements = Vec::new();
+    if !case.expected_stdout_contains.is_empty() {
+        requirements.push(format!(
+            "its stdout must contain: {}",
+            case.expected_stdout_contains.join(", ")
+        ));
+    }
+    if let Some(code) = case.expected_exit_code {
+        requirements.push(format!("it must exit with code {code}"));
+    }
+    let requirements = if requirements.is_empty() {
+        String::new()
+    } else {
+        format!(" Requirements: {}.", requirements.join("; "))
+    };
+    format!(
+        "Produce a single POSIX shell command for the benchmark task named '{}'.{} \
+         Reply with ONLY the shell command — no prose, no code fences.",
+        case.name, requirements
+    )
+}
+
+fn skill_bench_live_prompt(case: &crate::agent::env::SkillBenchCase) -> String {
+    format!(
+        "Apply the following skill to complete the benchmark task named '{}'.\n\n\
+         {}\n\n\
+         Respond with a concise answer that demonstrates the skill.",
+        case.name, case.skill_content
+    )
+}
+
+/// Strip a single wrapping fenced code block, if present, from an agent
+/// response — models often fence commands despite instructions not to.
+fn strip_code_fences(response: &str) -> String {
+    let trimmed = response.trim();
+    let Some(inner) = trimmed
+        .strip_prefix("```")
+        .and_then(|rest| rest.strip_suffix("```"))
+    else {
+        return trimmed.to_string();
+    };
+    // Drop an optional language tag on the opening fence line.
+    match inner.split_once('\n') {
+        Some((first_line, body)) if !first_line.trim().contains(' ') => body.trim().to_string(),
+        _ => inner.trim().to_string(),
+    }
+}
+
+/// Produce one action per bench case from the live agent runtime (the
+/// registered subagent executor). A per-case failure yields an empty action,
+/// which the env scores as 0.0 — an agent failure is a failed case, not a
+/// failed trial.
+async fn live_agent_actions(prompts: Vec<(String, String)>) -> ApiResult<Vec<AgentAction>> {
+    let Some(executor) = super::types::research_subagent_executor() else {
+        return Err(ApiError::Internal(
+            "live_agent benchmark requested but no subagent executor is registered".to_string(),
+        ));
+    };
+
+    let mut actions = Vec::with_capacity(prompts.len());
+    for (name, task) in prompts {
+        let request: crate::agent::SubagentSpawnRequest =
+            serde_json::from_value(serde_json::json!({
+                "name": format!("bench:{name}"),
+                "task": task,
+                "wait": true,
+                "timeout_secs": 120,
+                "allowed_tools": [],
+            }))
+            .map_err(|err| ApiError::Internal(err.to_string()))?;
+
+        let content = match executor
+            .spawn(
+                request,
+                "experiments",
+                &serde_json::json!({}),
+                "experiments",
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(result) if result.success => strip_code_fences(&result.response),
+            Ok(result) => {
+                tracing::warn!(
+                    case = %name,
+                    error = ?result.error,
+                    "Live-agent bench case failed; scoring as empty action"
+                );
+                String::new()
+            }
+            Err(err) => {
+                tracing::warn!(
+                    case = %name,
+                    error = %err,
+                    "Live-agent bench spawn failed; scoring as empty action"
+                );
+                String::new()
+            }
+        };
+        actions.push(AgentAction::UserMessage { content });
+    }
+    Ok(actions)
 }
 
 pub(super) async fn restore_campaign_worktree_after_trial(

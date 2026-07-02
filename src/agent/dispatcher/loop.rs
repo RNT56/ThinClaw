@@ -316,7 +316,7 @@ impl Agent {
                     // the allowlist below) — advertise exactly those, honoring
                     // the routed agent's tool restrictions, instead of leaking
                     // every registered tool definition into the flush prompt.
-                    let allowed_flush_tools = ["memory_write", "memory_read", "memory_tree"];
+                    let allowed_flush_tools = MEMORY_FLUSH_ALLOWED_TOOLS;
                     let flush_tool_defs = self
                         .tools()
                         .tool_definitions_for_capabilities(
@@ -465,8 +465,10 @@ impl Agent {
                     let max_rest = max_ctx.saturating_sub(systems.len()).max(1);
                     let mut kept_rest: std::collections::VecDeque<ChatMessage> =
                         rest.into_iter().collect();
-                    let mut rest_tokens = context_monitor
-                        .estimate_tokens(&kept_rest.iter().cloned().collect::<Vec<_>>());
+                    let mut rest_tokens: usize = kept_rest
+                        .iter()
+                        .map(|m| context_monitor.estimate_tokens(std::slice::from_ref(m)))
+                        .sum();
                     let mut dropped = 0usize;
                     // Drop oldest non-system messages first until the estimated
                     // total is at or below the trim target and the count is

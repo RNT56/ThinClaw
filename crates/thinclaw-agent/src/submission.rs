@@ -79,9 +79,18 @@ impl SubmissionParser {
                 "/suggest" => Submission::Suggest,
                 "/quit" => Submission::Quit,
                 "/restart" => Submission::Restart,
-                other => unreachable!(
-                    "registry entry {other:?} has no system_command and no Submission mapping"
-                ),
+                // A parser must never panic on user input: a registry entry
+                // without a mapping falls through to plain chat.
+                other => {
+                    tracing::warn!(
+                        command = other,
+                        "Registry entry has no system_command and no Submission mapping; \
+                         treating input as chat"
+                    );
+                    Submission::UserInput {
+                        content: content.to_string(),
+                    }
+                }
             };
         }
 
@@ -514,6 +523,20 @@ mod tests {
         assert!(
             matches!(submission, Submission::UserInput { content } if content == "Hello, how are you?")
         );
+    }
+
+    #[test]
+    fn test_parser_literal_placeholder_input_is_chat_not_panic() {
+        // "/thread <id>" appears verbatim in /help output; a user pasting it
+        // must get plain chat, not a parser panic (display-only registry
+        // entries are excluded from matching).
+        for input in ["/thread <id>", "/resume <id>"] {
+            let submission = SubmissionParser::parse(input);
+            assert!(
+                matches!(submission, Submission::UserInput { ref content } if content == input),
+                "expected UserInput for {input:?}"
+            );
+        }
     }
 
     #[test]

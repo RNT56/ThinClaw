@@ -37,13 +37,12 @@ const PERSONALITY_OVERLAY_METADATA_KEY: &str = "personality_overlay";
 /// `PERSONALITY_OVERLAY_METADATA_KEY`. `None` clears the overlay (stored as
 /// `Value::Null`, mirroring how `/model reset` clears its own key).
 fn overlay_to_metadata_value(overlay: Option<&SessionPersonalityOverlay>) -> serde_json::Value {
-    match overlay {
-        Some(overlay) => serde_json::json!({
-            "name": overlay.name,
-            "prompt_patch": overlay.prompt_patch,
-        }),
-        None => serde_json::Value::Null,
-    }
+    // serde derives on SessionPersonalityOverlay keep this codec in sync
+    // with the struct: a future field is round-tripped automatically instead
+    // of silently dropped by hand-written extraction.
+    overlay
+        .and_then(|overlay| serde_json::to_value(overlay).ok())
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Decode a session personality overlay back out of a conversation-metadata
@@ -55,9 +54,7 @@ fn overlay_from_metadata_value(metadata: &serde_json::Value) -> Option<SessionPe
     if entry.is_null() {
         return None;
     }
-    let name = entry.get("name")?.as_str()?.to_string();
-    let prompt_patch = entry.get("prompt_patch")?.as_str()?.to_string();
-    Some(SessionPersonalityOverlay::new(name, prompt_patch))
+    serde_json::from_value(entry.clone()).ok()
 }
 
 /// Persist the session personality overlay for `thread_id` so hydration can

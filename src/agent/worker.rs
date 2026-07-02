@@ -207,7 +207,10 @@ impl Worker {
     /// still actively making progress. The lease window is padded beyond
     /// the worker's own inactivity timeout so a slow-but-alive iteration
     /// doesn't race the reaper.
-    async fn renew_routine_lease(&self) {
+    async fn renew_routine_lease(
+        &self,
+        last_renewed: &std::sync::Mutex<Option<std::time::Instant>>,
+    ) {
         let (Some(store), Some(run_id_str)) = (self.store(), self.deps.routine_run_id.as_deref())
         else {
             return;
@@ -215,15 +218,13 @@ impl Worker {
         let Ok(run_id) = run_id_str.parse::<Uuid>() else {
             return;
         };
-        let lease_secs = (self.timeout().as_secs() as i64)
-            .saturating_add(120)
-            .max(120);
-        if let Err(e) = store.renew_routine_run_lease(run_id, lease_secs).await {
-            tracing::debug!(
-                run_id = %run_id,
-                "Failed to renew routine run lease: {}", e
-            );
-        }
+        crate::agent::routine_engine::renew_routine_run_lease_if_due(
+            store,
+            run_id,
+            self.timeout().as_secs(),
+            last_renewed,
+        )
+        .await;
     }
 
     fn use_planning(&self) -> bool {
@@ -559,6 +560,7 @@ impl Worker {
         }
 
         // Otherwise, use direct tool selection loop
+        let routine_lease_renewed_at = std::sync::Mutex::new(None);
         loop {
             // Check for stop signal
             if let Ok(msg) = rx.try_recv() {
@@ -585,7 +587,7 @@ impl Worker {
 
             iteration += 1;
             touch_worker_activity(activity_tx);
-            self.renew_routine_lease().await;
+            self.renew_routine_lease(&routine_lease_renewed_at).await;
             if worker_iteration_exceeded(iteration, max_iterations) {
                 if is_heartbeat {
                     let stuck_reason = heartbeat_iteration_exhausted_summary(max_iterations);
@@ -1258,6 +1260,7 @@ impl Worker {
         plan: &ActionPlan,
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
+        let routine_lease_renewed_at = std::sync::Mutex::new(None);
         for (i, action) in plan.actions.iter().enumerate() {
             // Check for stop signal
             if let Ok(msg) = rx.try_recv() {
@@ -1278,7 +1281,7 @@ impl Worker {
             }
 
             touch_worker_activity(activity_tx);
-            self.renew_routine_lease().await;
+            self.renew_routine_lease(&routine_lease_renewed_at).await;
             tracing::debug!(
                 "Job {} executing planned action {}/{}: {} - {}",
                 self.job_id,

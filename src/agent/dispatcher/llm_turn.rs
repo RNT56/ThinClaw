@@ -243,13 +243,14 @@ impl Agent {
                 .map(|m| m.content.clone());
             let event = crate::hooks::HookEvent::LlmInput {
                 model: request_model_name,
-                system_message: system_msg,
+                system_message: system_msg.clone(),
                 user_message: last_user_msg,
                 message_count: context_messages.len(),
                 user_id: message.user_id.clone(),
             };
-            match self.hooks().run(&event).await {
-                Ok(crate::hooks::HookOutcome::Continue { modified }) => {
+            match self.hooks().run_returning_event(&event).await {
+                Ok((crate::hooks::HookOutcome::Continue { modified }, final_event)) => {
+                    let mut hook_changed_context = false;
                     if let Some(new_content) = modified {
                         if let Some(last) = context_messages
                             .iter_mut()
@@ -258,6 +259,29 @@ impl Agent {
                         {
                             last.content = new_content;
                         }
+                        hook_changed_context = true;
+                    }
+                    // Typed HookPatch consumption: honor a system-message
+                    // override from the final event (the string-diff outcome
+                    // above can only express user-message changes).
+                    if let crate::hooks::HookEvent::LlmInput {
+                        system_message: final_system,
+                        ..
+                    } = final_event
+                        && final_system != system_msg
+                        && let Some(new_system) = final_system
+                    {
+                        if let Some(first_system) = context_messages
+                            .iter_mut()
+                            .find(|m| m.role == crate::llm::Role::System)
+                        {
+                            first_system.content = new_system;
+                        } else {
+                            context_messages.insert(0, ChatMessage::system(new_system));
+                        }
+                        hook_changed_context = true;
+                    }
+                    if hook_changed_context {
                         context = self.build_turn_context(
                             context_messages,
                             available_tools.clone(),
@@ -266,7 +290,7 @@ impl Agent {
                         );
                     }
                 }
-                Ok(crate::hooks::HookOutcome::Reject { reason }) => {
+                Ok((crate::hooks::HookOutcome::Reject { reason }, _)) => {
                     tracing::info!(reason = %reason, "BeforeLlmInput hook rejected LLM call");
                     return Err(crate::error::Error::Hook(
                         crate::hooks::HookError::Rejected {
@@ -358,6 +382,17 @@ impl Agent {
                     while let Some(chunk) = chunk_rx.recv().await {
                         if mode == crate::channels::StreamMode::EventChunks {
                             consumer_saw_event_chunk.store(true, Ordering::Relaxed);
+                            // Record delivered content in the draft accumulator
+                            // even though EventChunks doesn't edit a posted
+                            // message: draft_retry_snapshot uses accumulated
+                            // length to decide whether a failed attempt may be
+                            // retried, and without this every EventChunks
+                            // attempt looked untouched — a retry would replay
+                            // content the user already saw.
+                            {
+                                let mut d = consumer_draft.lock().await;
+                                d.accumulated.push_str(&chunk);
+                            }
                             let _ = consumer_channels
                                 .send_status(
                                     &consumer_ch_name,

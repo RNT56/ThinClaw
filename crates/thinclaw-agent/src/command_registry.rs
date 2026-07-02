@@ -61,6 +61,12 @@ impl CommandSpec {
     pub fn matches_token(&self, token: &str) -> bool {
         self.all_names().any(|name| name == token)
     }
+
+    /// Entries whose canonical name contains a `<placeholder>` exist for the
+    /// help listing only and must never match real input.
+    pub fn is_display_only(&self) -> bool {
+        self.name.contains('<')
+    }
 }
 
 /// The declarative slash-command table. This is the single source of truth
@@ -356,14 +362,6 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     },
 ];
 
-/// Look up a registry entry by exact command token (canonical name or
-/// alias), e.g. `"/model"` or `"/models"`.
-pub fn find_by_token(token: &str) -> Option<&'static CommandSpec> {
-    COMMAND_REGISTRY
-        .iter()
-        .find(|spec| spec.matches_token(token))
-}
-
 /// Match `lower` (the trimmed, lowercased full input) against a registry
 /// entry's arg style, returning the matched spec if `lower` is either the
 /// bare command/alias or `<command/alias> <args...>`.
@@ -373,11 +371,18 @@ pub fn find_by_token(token: &str) -> Option<&'static CommandSpec> {
 /// hand-write `lower == "/x" || lower.starts_with("/x ")` chains.
 pub fn match_command<'a>(lower: &str) -> Option<&'a CommandSpec> {
     COMMAND_REGISTRY.iter().find(|spec| {
+        // Placeholder entries like "/thread <id>" exist for help display
+        // only; matching them would send literal placeholder input (a user
+        // copying the help line verbatim) into command dispatch that has no
+        // handler for them.
+        if spec.is_display_only() {
+            return false;
+        }
         spec.all_names().any(|name| match spec.arg_style {
             ArgStyle::ExactOnly => lower == name,
-            ArgStyle::ExactOrSpaceDelimitedArgs => {
-                lower == name || lower.starts_with(&format!("{name} "))
-            }
+            ArgStyle::ExactOrSpaceDelimitedArgs => lower
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')),
         })
     })
 }
@@ -440,9 +445,14 @@ mod tests {
     }
 
     #[test]
-    fn find_by_token_matches_canonical_and_alias() {
-        assert_eq!(find_by_token("/compact").unwrap().name, "/compress");
-        assert_eq!(find_by_token("/vibe").unwrap().name, "/personality");
-        assert!(find_by_token("/nonexistent").is_none());
+    fn matches_token_covers_canonical_and_alias() {
+        let by_token = |token: &str| {
+            COMMAND_REGISTRY
+                .iter()
+                .find(|spec| spec.matches_token(token))
+        };
+        assert_eq!(by_token("/compact").unwrap().name, "/compress");
+        assert_eq!(by_token("/vibe").unwrap().name, "/personality");
+        assert!(by_token("/nonexistent").is_none());
     }
 }

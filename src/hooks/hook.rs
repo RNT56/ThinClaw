@@ -259,12 +259,13 @@ impl HookOutcome {
 /// applied by [`HookPatch::apply_to`]. Unhandled variants/fields are
 /// reserved for future wiring and are currently no-ops when applied.
 ///
-/// Consumption point: nothing in `src/agent/dispatcher/*` or
-/// `src/agent/agent_loop.rs` calls `Hook::execute_patch` or
-/// `HookPatch::apply_to` yet. Wiring a dispatcher call site to request and
-/// apply a typed patch (in addition to the existing string-based
-/// `HookOutcome::Continue` handling) is left as follow-up work so that this
-/// change stays additive to those files.
+/// Consumption point: `HookRegistry::run_with_context` requests a patch
+/// from each hook (via [`Hook::execute_patch`]) after its `execute`
+/// succeeds and applies it to the evolving event; the dispatcher's
+/// `BeforeLlmInput` site (`src/agent/dispatcher/llm_turn.rs`) reads the
+/// final event back through `HookRegistry::run_returning_event` and honors
+/// `LlmInput` user/system-message overrides. `AgentStart` patches are
+/// accepted structurally but not yet honored (see below).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HookPatch {

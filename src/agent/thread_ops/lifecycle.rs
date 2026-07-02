@@ -22,50 +22,26 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        let mut mgr = undo_mgr.lock().await;
-
-        let mut sess = session.lock().await;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
-        let outcome = thinclaw_agent::thread_ops::restore_thread_from_undo(thread, &mut mgr);
-        match &outcome {
-            UndoRedoOutcome::Restored { .. } => {
-                let usage_percent = self
-                    .effective_context_monitor()
-                    .usage_percent(&thread.messages());
-                // Row-count watermark for the thread as it stands *after*
-                // the undo mutation above, so hydration truncates DB
-                // history to match what /undo just restored in memory.
-                let active_message_row_count = thread.messages().len() as i64;
-                drop(sess);
-                self.clear_thread_runtime_transients(thread_id).await;
-                self.persist_active_watermark_and_undo_stack(
-                    thread_id,
-                    active_message_row_count,
-                    &mgr,
-                )
-                .await;
-                drop(mgr);
-                self.record_context_pressure_state(thread_id, usage_percent)
-                    .await;
-            }
-            UndoRedoOutcome::NothingAvailable | UndoRedoOutcome::Failed => {}
-        }
-
-        match thinclaw_agent::thread_ops::undo_redo_message(UndoRedoAction::Undo, &outcome) {
-            ThreadOperationMessage::Ok(message) => Ok(SubmissionResult::ok_with_message(message)),
-            ThreadOperationMessage::Error(message) => Ok(SubmissionResult::error(message)),
-        }
+        self.process_undo_or_redo(session, thread_id, UndoRedoAction::Undo)
+            .await
     }
 
     pub(in crate::agent) async fn process_redo(
         &self,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
+    ) -> Result<SubmissionResult, Error> {
+        self.process_undo_or_redo(session, thread_id, UndoRedoAction::Redo)
+            .await
+    }
+
+    /// Shared /undo and /redo driver — the two commands differ only in
+    /// which restore function runs and which action labels the result.
+    async fn process_undo_or_redo(
+        &self,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        action: UndoRedoAction,
     ) -> Result<SubmissionResult, Error> {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
@@ -76,15 +52,22 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        let outcome = thinclaw_agent::thread_ops::restore_thread_from_redo(thread, &mut mgr);
+        let outcome = match action {
+            UndoRedoAction::Undo => {
+                thinclaw_agent::thread_ops::restore_thread_from_undo(thread, &mut mgr)
+            }
+            UndoRedoAction::Redo => {
+                thinclaw_agent::thread_ops::restore_thread_from_redo(thread, &mut mgr)
+            }
+        };
         match &outcome {
             UndoRedoOutcome::Restored { .. } => {
                 let usage_percent = self
                     .effective_context_monitor()
                     .usage_percent(&thread.messages());
                 // Row-count watermark for the thread as it stands *after*
-                // the redo mutation above, so hydration truncates DB
-                // history to match what /redo just restored in memory.
+                // the mutation above, so hydration truncates DB history to
+                // match what was just restored in memory.
                 let active_message_row_count = thread.messages().len() as i64;
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
@@ -101,7 +84,7 @@ impl Agent {
             UndoRedoOutcome::NothingAvailable | UndoRedoOutcome::Failed => {}
         }
 
-        match thinclaw_agent::thread_ops::undo_redo_message(UndoRedoAction::Redo, &outcome) {
+        match thinclaw_agent::thread_ops::undo_redo_message(action, &outcome) {
             ThreadOperationMessage::Ok(message) => Ok(SubmissionResult::ok_with_message(message)),
             ThreadOperationMessage::Error(message) => Ok(SubmissionResult::error(message)),
         }

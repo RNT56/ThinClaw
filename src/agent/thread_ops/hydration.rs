@@ -5,8 +5,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::agent::Agent;
+use crate::agent::mutate_thread_runtime;
 use crate::agent::session::{PersistedSubagentState, ThreadRuntimeStateExt};
-use crate::agent::{load_thread_runtime, mutate_thread_runtime};
 use crate::channels::IncomingMessage;
 use crate::db::Database;
 use crate::history::ConversationKind as HistoryConversationKind;
@@ -403,13 +403,12 @@ impl Agent {
             None
         };
 
-        let runtime = if let Some(ref store) = store {
-            load_thread_runtime(store, thread_uuid)
-                .await
-                .unwrap_or(None)
-        } else {
-            None
-        };
+        // Decode the runtime from the metadata already fetched above —
+        // `load_thread_runtime` would refetch the identical row.
+        let runtime: Option<crate::agent::ThreadRuntimeState> =
+            conversation_metadata.as_ref().and_then(|metadata| {
+                thinclaw_agent::thread_runtime::decode_thread_runtime(metadata).unwrap_or(None)
+            });
 
         let db_messages = if let Some(ref store) = store {
             let mut db_messages = store

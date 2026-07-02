@@ -11,11 +11,11 @@ use crate::hooks::hook::{Hook, HookContext, HookError, HookEvent, HookFailureMod
 /// hook is automatically disabled (skipped on future events) rather than
 /// silently eating its full timeout on every matching event forever.
 ///
-/// A hook that fails/times out under `FailClosed` already stops the chain
-/// with an error on the very first failure, so auto-disable matters most
-/// for `FailOpen` hooks, whose failures would otherwise be invisible beyond
-/// a warn log — but the counter is tracked (and the hook auto-disabled)
-/// regardless of failure mode.
+/// Auto-disable applies to `FailOpen` hooks only: skipping a disabled hook
+/// is equivalent to passing it, so disabling a `FailClosed` hook would
+/// silently invert its guarantee into fail-open. `FailClosed` hooks keep
+/// failing the chain on every event until they recover or are replaced;
+/// their failure counter is still tracked for observability.
 pub const MAX_CONSECUTIVE_HOOK_FAILURES: u32 = 5;
 
 /// Serializable information about a registered hook.
@@ -67,10 +67,15 @@ impl HookEntry {
     /// Record a failure/timeout. Returns `true` if this call caused the
     /// hook to cross the auto-disable threshold (so the caller can log
     /// exactly once per disable event).
-    fn record_failure(&self) -> bool {
+    ///
+    /// `allow_disable` must be `false` for `FailClosed` hooks: skipping a
+    /// disabled hook is equivalent to passing it, and a fail-closed hook
+    /// must never silently convert into a pass-through — it keeps failing
+    /// the chain on every event until it recovers or is replaced.
+    fn record_failure(&self, allow_disable: bool) -> bool {
         let previous = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         let count = previous + 1;
-        if count >= MAX_CONSECUTIVE_HOOK_FAILURES {
+        if allow_disable && count >= MAX_CONSECUTIVE_HOOK_FAILURES {
             !self.disabled.swap(true, Ordering::Relaxed)
         } else {
             false
@@ -123,7 +128,9 @@ impl HookRegistry {
             // re-registering a hook under the same name also resets its
             // health tracking — otherwise a hook that was fixed and
             // re-registered would stay disabled from its prior failure
-            // streak.
+            // streak. An invocation of the OLD hook still in flight records
+            // its outcome on the orphaned entry (invisible here) — accepted:
+            // fresh health state after replacement is the desired semantic.
             hooks[index] = Arc::new(HookEntry::new(hook, priority));
         } else {
             hooks.push(Arc::new(HookEntry::new(hook, priority)));
@@ -210,6 +217,29 @@ impl HookRegistry {
         event: &HookEvent,
         ctx: &HookContext,
     ) -> Result<HookOutcome, HookError> {
+        self.run_with_context_returning_event(event, ctx)
+            .await
+            .map(|(outcome, _event)| outcome)
+    }
+
+    /// Like [`HookRegistry::run_with_context`], but also returns the final
+    /// event after all string modifications and typed [`HookPatch`]es were
+    /// applied, so callers can honor patched fields (e.g. an `LlmInput`
+    /// system-message override) that the string-diff `HookOutcome` cannot
+    /// express.
+    pub async fn run_returning_event(
+        &self,
+        event: &HookEvent,
+    ) -> Result<(HookOutcome, HookEvent), HookError> {
+        self.run_with_context_returning_event(event, &HookContext::default())
+            .await
+    }
+
+    async fn run_with_context_returning_event(
+        &self,
+        event: &HookEvent,
+        ctx: &HookContext,
+    ) -> Result<(HookOutcome, HookEvent), HookError> {
         let point = event.hook_point();
 
         // Clone matching, enabled hook entries and drop the read guard
@@ -235,7 +265,7 @@ impl HookRegistry {
         };
 
         if matching.is_empty() {
-            return Ok(HookOutcome::ok());
+            return Ok((HookOutcome::ok(), event.clone()));
         }
 
         let mut current_event = event.clone();
@@ -258,13 +288,17 @@ impl HookRegistry {
                     entry.record_success();
                     tracing::debug!(hook = hook.name(), "Hook modified content");
                     current_event.apply_modification(&value);
+                    apply_hook_patch(hook.as_ref(), &mut current_event, ctx);
                 }
                 Ok(Ok(HookOutcome::Continue { modified: None })) => {
                     entry.record_success();
-                    // No-op, continue chain
+                    // No string modification; the hook may still return a
+                    // typed patch.
+                    apply_hook_patch(hook.as_ref(), &mut current_event, ctx);
                 }
                 Ok(Err(err)) => {
-                    let just_disabled = entry.record_failure();
+                    let allow_disable = matches!(hook.failure_mode(), HookFailureMode::FailOpen);
+                    let just_disabled = entry.record_failure(allow_disable);
                     if just_disabled {
                         warn_hook_auto_disabled(hook.name());
                     }
@@ -285,7 +319,8 @@ impl HookRegistry {
                     }
                 }
                 Err(_elapsed) => {
-                    let just_disabled = entry.record_failure();
+                    let allow_disable = matches!(hook.failure_mode(), HookFailureMode::FailOpen);
+                    let just_disabled = entry.record_failure(allow_disable);
                     if just_disabled {
                         warn_hook_auto_disabled(hook.name());
                     }
@@ -314,11 +349,22 @@ impl HookRegistry {
         let modified = extract_content(&current_event);
         let original = extract_content(event);
 
-        if modified != original {
-            Ok(HookOutcome::modify(modified))
+        let outcome = if modified != original {
+            HookOutcome::modify(modified)
         } else {
-            Ok(HookOutcome::ok())
-        }
+            HookOutcome::ok()
+        };
+        Ok((outcome, current_event))
+    }
+}
+
+/// Request a typed patch from a hook and apply it to the evolving event.
+/// Runs synchronously after a successful `execute` — patch requests are
+/// cheap by contract (no I/O) and share the hook's success accounting.
+fn apply_hook_patch(hook: &dyn Hook, current_event: &mut HookEvent, ctx: &HookContext) {
+    if let Some(patch) = hook.execute_patch(current_event, ctx) {
+        tracing::debug!(hook = hook.name(), "Hook returned typed patch");
+        patch.apply_to(current_event);
     }
 }
 
@@ -418,6 +464,40 @@ mod tests {
         ) -> Result<HookOutcome, HookError> {
             let content = extract_content(event);
             Ok(HookOutcome::modify(format!("{}{}", content, self.suffix)))
+        }
+    }
+
+    /// A hook that returns a typed system-message patch for LlmInput.
+    struct SystemPatchHook {
+        name: String,
+        system_message: String,
+        points: Vec<HookPoint>,
+    }
+
+    #[async_trait]
+    impl Hook for SystemPatchHook {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn hook_points(&self) -> &[HookPoint] {
+            &self.points
+        }
+        async fn execute(
+            &self,
+            _event: &HookEvent,
+            _ctx: &HookContext,
+        ) -> Result<HookOutcome, HookError> {
+            Ok(HookOutcome::ok())
+        }
+        fn execute_patch(
+            &self,
+            _event: &HookEvent,
+            _ctx: &HookContext,
+        ) -> Option<crate::hooks::HookPatch> {
+            Some(crate::hooks::HookPatch::LlmInput {
+                user_message: None,
+                system_message: Some(self.system_message.clone()),
+            })
         }
     }
 
@@ -1056,5 +1136,89 @@ mod tests {
 
         let seen = captured.lock().expect("captured lock");
         assert_eq!(seen.as_slice(), &[serde_json::Value::Null]);
+    }
+
+    #[tokio::test]
+    async fn fail_closed_hook_never_auto_disables_into_pass_through() {
+        struct AlwaysFailingClosedHook;
+        #[async_trait]
+        impl Hook for AlwaysFailingClosedHook {
+            fn name(&self) -> &str {
+                "guardrail"
+            }
+            fn hook_points(&self) -> &[HookPoint] {
+                &[HookPoint::BeforeToolCall]
+            }
+            fn failure_mode(&self) -> HookFailureMode {
+                HookFailureMode::FailClosed
+            }
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                _ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
+                Err(HookError::ExecutionFailed {
+                    reason: "backend unreachable".to_string(),
+                })
+            }
+        }
+
+        let registry = HookRegistry::new();
+        registry.register(Arc::new(AlwaysFailingClosedHook)).await;
+
+        let event = HookEvent::ToolCall {
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({}),
+            user_id: "user".to_string(),
+            context: "chat".to_string(),
+        };
+
+        // Far past MAX_CONSECUTIVE_HOOK_FAILURES: every call must still fail
+        // the chain. A fail-closed guardrail must never silently become a
+        // pass-through.
+        for _ in 0..(MAX_CONSECUTIVE_HOOK_FAILURES + 3) {
+            let result = registry.run(&event).await;
+            assert!(result.is_err(), "FailClosed hook must keep blocking");
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_patch_reaches_the_returned_event() {
+        let registry = HookRegistry::new();
+        registry
+            .register(Arc::new(SystemPatchHook {
+                name: "system-patcher".to_string(),
+                system_message: "patched system prompt".to_string(),
+                points: vec![HookPoint::BeforeLlmInput],
+            }))
+            .await;
+
+        let event = HookEvent::LlmInput {
+            model: "test-model".to_string(),
+            system_message: Some("original system prompt".to_string()),
+            user_message: "hello".to_string(),
+            message_count: 2,
+            user_id: "user".to_string(),
+        };
+
+        let (outcome, final_event) = registry
+            .run_returning_event(&event)
+            .await
+            .expect("hook chain succeeds");
+
+        // The patch does not change the string-diff outcome (user message
+        // untouched), but the returned event carries the override.
+        assert!(matches!(outcome, HookOutcome::Continue { modified: None }));
+        match final_event {
+            HookEvent::LlmInput {
+                system_message,
+                user_message,
+                ..
+            } => {
+                assert_eq!(system_message.as_deref(), Some("patched system prompt"));
+                assert_eq!(user_message, "hello");
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
     }
 }

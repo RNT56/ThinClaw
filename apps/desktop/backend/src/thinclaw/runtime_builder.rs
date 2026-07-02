@@ -900,12 +900,9 @@ pub(crate) async fn build_inner(
                     )
                 };
 
-                // Mark as completed in the executor
-                if let Some(exec) = agent_for_subagent.subagent_executor() {
-                    exec.mark_completed(result.agent_id, result.success, result.error.clone())
-                        .await;
-                }
-
+                // Handle status/ledger updates are performed by the
+                // executor's own finalization block when the subagent task
+                // completes; no external completion call is needed here.
                 tracing::info!(
                     agent_id = %result.agent_id,
                     name = %result.name,

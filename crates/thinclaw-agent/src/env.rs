@@ -573,10 +573,19 @@ pub enum AgentEnvBenchmarkConfig {
     TerminalBench {
         #[serde(default)]
         cases: Vec<TerminalBenchCase>,
+        /// When true, actions are produced by the live agent runtime instead
+        /// of scripted per-case reference actions. Defaults to false so
+        /// benchmark trials stay deterministic and offline unless a campaign
+        /// explicitly opts in.
+        #[serde(default)]
+        live_agent: bool,
     },
     SkillBench {
         #[serde(default)]
         cases: Vec<SkillBenchCase>,
+        /// See `TerminalBench::live_agent`.
+        #[serde(default)]
+        live_agent: bool,
     },
 }
 
@@ -1008,7 +1017,9 @@ fn heuristic_reward(response: Option<&str>) -> f64 {
         Some("") | None => 0.0,
         Some(text) if text.to_ascii_lowercase().contains("error:") => 0.0,
         Some(text) if text.chars().count() < HEURISTIC_SUBSTANTIVE_MIN_LEN => 0.3,
-        Some(_) => 0.6,
+        // Strictly below SFT_QUALITY_GATE_SCORE: an unverified response must
+        // never clear the export gate on heuristics alone.
+        Some(_) => 0.55,
     }
 }
 
@@ -1070,15 +1081,15 @@ mod tests {
         assert_eq!(heuristic_reward(Some("ok")), 0.3);
         assert_eq!(heuristic_reward(Some("done")), 0.3);
 
-        // Substantive responses score 0.6 — the SFT quality gate threshold —
-        // but never exceed it, since the heuristic cannot confirm
-        // correctness. Only verifier-backed rewards should score above this.
+        // Substantive responses score 0.55 — strictly BELOW the SFT quality
+        // gate, since the heuristic cannot confirm correctness. Only
+        // verifier-backed rewards may clear the gate.
         let substantive =
             "Here is a longer, substantive response describing what happened in detail.";
         assert!(substantive.len() >= HEURISTIC_SUBSTANTIVE_MIN_LEN);
         let score = heuristic_reward(Some(substantive));
-        assert_eq!(score, SFT_QUALITY_GATE_SCORE);
-        assert!(score <= SFT_QUALITY_GATE_SCORE);
+        assert_eq!(score, 0.55);
+        assert!(score < SFT_QUALITY_GATE_SCORE);
     }
 
     #[test]
@@ -1092,7 +1103,10 @@ mod tests {
             "A long substantive unverified response with no way to confirm correctness.",
         ));
         assert!(verified_pass_reward > best_possible_heuristic);
-        assert_eq!(best_possible_heuristic, SFT_QUALITY_GATE_SCORE);
+        assert!(
+            best_possible_heuristic < SFT_QUALITY_GATE_SCORE,
+            "unverified heuristic scores must not clear the SFT gate"
+        );
         assert!(verified_pass_reward >= SFT_QUALITY_GATE_SCORE);
     }
 
@@ -1250,7 +1264,7 @@ mod tests {
         .expect("benchmark config present");
 
         match config {
-            AgentEnvBenchmarkConfig::TerminalBench { cases } => {
+            AgentEnvBenchmarkConfig::TerminalBench { cases, .. } => {
                 assert_eq!(cases.len(), 1);
                 assert_eq!(cases[0].name, "smoke");
                 assert_eq!(cases[0].expected_exit_code, Some(0));
@@ -1436,7 +1450,8 @@ mod tests {
             .await
             .expect("skill bench step");
         assert_eq!(result.metadata["verified"], serde_json::json!(false));
-        assert_eq!(result.reward, SFT_QUALITY_GATE_SCORE);
+        // Unverifiable case: heuristic fallback, strictly below the gate.
+        assert_eq!(result.reward, 0.55);
     }
 
     /// Build a small fixture of skill-bench cases whose pass/fail outcome

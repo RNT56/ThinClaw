@@ -32,7 +32,9 @@ fn help_section_for(name: &str) -> HelpSection {
         "/memory" | "/heartbeat" | "/summarize" | "/suggest" => HelpSection::Memory,
         "/skills" => HelpSection::Skills,
         "/restart" | "/quit" => HelpSection::Agent,
-        other => unreachable!("unassigned help section for command {other:?}"),
+        // A new registry entry without a section assignment lands in the
+        // System table instead of panicking help rendering at runtime.
+        _ => HelpSection::System,
     }
 }
 

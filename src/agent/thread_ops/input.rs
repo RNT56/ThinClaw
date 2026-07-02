@@ -367,7 +367,7 @@ impl Agent {
 
                 let (turn_number, messages) =
                     thinclaw_agent::thread_ops::complete_thread_response(thread, &payload.content);
-                let usage_percent = self.context_monitor.usage_percent(&messages);
+                let usage_percent = self.effective_context_monitor().usage_percent(&messages);
                 let _ = self
                     .channels
                     .send_status(
@@ -420,7 +420,7 @@ impl Agent {
                 let description = pending.description.clone();
                 let parameters = pending.parameters.clone();
                 let messages = thinclaw_agent::thread_ops::await_thread_approval(thread, pending);
-                let usage_percent = self.context_monitor.usage_percent(&messages);
+                let usage_percent = self.effective_context_monitor().usage_percent(&messages);
                 let _ = self
                     .channels
                     .send_status(
@@ -444,7 +444,7 @@ impl Agent {
             }
             Err(e) => {
                 let messages = thinclaw_agent::thread_ops::fail_thread_turn(thread, &e.to_string());
-                let usage_percent = self.context_monitor.usage_percent(&messages);
+                let usage_percent = self.effective_context_monitor().usage_percent(&messages);
                 // User message already persisted at turn start; nothing else to save
                 // Lifecycle end: error
                 let _ = self

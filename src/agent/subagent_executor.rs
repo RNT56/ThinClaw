@@ -167,6 +167,11 @@ pub struct SubagentHandle {
     pub task: String,
     pub status: SubagentStatus,
     pub spawned_at: chrono::DateTime<chrono::Utc>,
+    /// When the subagent reached a terminal status. Retention eviction
+    /// measures from here, not from `spawned_at`, so a long-running
+    /// subagent's result stays visible for the full retention window after
+    /// it finishes.
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     cancel_tx: watch::Sender<bool>,
     join_handle: Option<JoinHandle<SubagentResult>>,
     /// Send messages from the parent to this sub-agent.
@@ -328,7 +333,10 @@ impl SubagentExecutor {
             // lifetime, one entry per subagent ever spawned.
             let cutoff = chrono::Utc::now()
                 - chrono::Duration::from_std(SUBAGENT_HANDLE_RETENTION).unwrap_or_default();
-            active.retain(|_, h| h.status == SubagentStatus::Running || h.spawned_at > cutoff);
+            active.retain(|_, h| {
+                h.status == SubagentStatus::Running
+                    || h.completed_at.unwrap_or(h.spawned_at) > cutoff
+            });
             let running = active
                 .values()
                 .filter(|h| h.status == SubagentStatus::Running)
@@ -351,6 +359,7 @@ impl SubagentExecutor {
                     task: request.task.clone(),
                     status: SubagentStatus::Running,
                     spawned_at,
+                    completed_at: None,
                     cancel_tx: cancel_tx.clone(),
                     join_handle: None, // filled in after tokio::spawn
                     parent_to_sub_tx: parent_to_sub_tx.clone(),
@@ -514,6 +523,7 @@ impl SubagentExecutor {
                     cancel_rx,
                     parent_to_sub_rx,
                     max_iterations,
+                    timeout.as_secs(),
                     allowed.as_deref(),
                     allowed_skills.as_deref(),
                     &task_packet,
@@ -772,6 +782,7 @@ impl SubagentExecutor {
                 let mut active = active_for_task.write().await;
                 if let Some(handle) = active.get_mut(&id) {
                     handle.status = ledger_status.clone();
+                    handle.completed_at = Some(chrono::Utc::now());
                     handle.join_handle = None;
                 }
             }
@@ -870,8 +881,10 @@ impl SubagentExecutor {
         {
             let _ = handle.cancel_tx.send(true);
             handle.status = subagent_cancelled_status();
+            handle.completed_at = Some(chrono::Utc::now());
             if let Some(jh) = handle.join_handle.take() {
                 let abort_handle = jh.abort_handle();
+                let ledger_store = self.store.clone();
                 tokio::spawn(async move {
                     tokio::select! {
                         _ = jh => {}
@@ -882,6 +895,25 @@ impl SubagentExecutor {
                                 "Sub-agent did not exit within cancel grace period — aborting"
                             );
                             abort_handle.abort();
+                            // The abort skips the task's finalization block,
+                            // so close the ledger row here — otherwise it
+                            // stays 'running' until the next restart's
+                            // reconciliation sweep.
+                            if let Some(store) = ledger_store
+                                && let Err(e) = store
+                                    .complete_subagent_run(
+                                        agent_id,
+                                        "cancelled",
+                                        Some("aborted after cancel grace period"),
+                                    )
+                                    .await
+                            {
+                                tracing::debug!(
+                                    agent_id = %agent_id,
+                                    "Failed to close subagent ledger row after abort: {}",
+                                    e
+                                );
+                            }
                         }
                     }
                 });
@@ -920,7 +952,9 @@ impl SubagentExecutor {
     pub async fn cleanup(&self, max_age: Duration) {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(max_age).unwrap_or_default();
         let mut active = self.active.write().await;
-        active.retain(|_, h| h.status == SubagentStatus::Running || h.spawned_at > cutoff);
+        active.retain(|_, h| {
+            h.status == SubagentStatus::Running || h.completed_at.unwrap_or(h.spawned_at) > cutoff
+        });
     }
 }
 
@@ -942,11 +976,8 @@ impl SubagentExecutor {
 ///   routine's run history and concurrency counters aren't left stuck on a
 ///   phantom `running` entry.
 ///
-/// NOT wired into startup — see the module-level `SubagentExecutor`
-/// construction site (`src/main.rs`, forbidden to this change) for the one
-/// wiring line needed: call this once, after `components.db` is available
-/// and before the executor starts accepting new spawns, e.g.
-/// `reconcile_orphaned_subagent_runs(Arc::clone(db)).await;`
+/// Wired into startup in `src/main.rs` (immediately after the executor's
+/// store is attached, before new spawns are accepted).
 pub async fn reconcile_orphaned_subagent_runs(store: Arc<dyn crate::db::Database>) {
     let orphaned = match store.list_incomplete_subagent_runs().await {
         Ok(runs) => runs,
@@ -1035,6 +1066,7 @@ async fn run_subagent_loop(
     cancel_rx: watch::Receiver<bool>,
     mut parent_rx: mpsc::Receiver<String>,
     max_iterations: usize,
+    timeout_secs: u64,
     allowed_tools: Option<&[String]>,
     allowed_skills: Option<&[String]>,
     task_packet: &SubagentTaskPacket,
@@ -1130,23 +1162,26 @@ async fn run_subagent_loop(
         reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
     }
 
+    let routine_lease_renewed_at = std::sync::Mutex::new(None);
     for iteration in 0..max_iterations {
         // Check cancellation
         if *cancel_rx.borrow() {
             return Err(subagent_cancelled_error());
         }
 
-        // Renew the routine run's DB lease each iteration so a long-running
-        // subagent-executed routine isn't falsely reaped by the zombie
-        // cleanup while it's still actively making progress.
+        // Renew the routine run's DB lease (time-gated inside the helper) so
+        // a long-running subagent-executed routine isn't falsely reaped by
+        // the zombie cleanup while it's still actively making progress. Uses
+        // the spawn request's REAL timeout: a fixed default here let leases
+        // expire mid-iteration for subagents configured with longer budgets.
         if let (Some(run_id), Some(store)) = (routine_lease_run_id, store_for_lease.as_ref()) {
-            let lease_secs = (DEFAULT_TIMEOUT_SECS as i64).saturating_add(120);
-            if let Err(e) = store.renew_routine_run_lease(run_id, lease_secs).await {
-                tracing::debug!(
-                    run_id = %run_id,
-                    "Failed to renew subagent routine run lease: {}", e
-                );
-            }
+            crate::agent::routine_engine::renew_routine_run_lease_if_due(
+                store,
+                run_id,
+                timeout_secs,
+                &routine_lease_renewed_at,
+            )
+            .await;
         }
 
         // Check for messages from the parent (non-blocking)

@@ -1193,8 +1193,20 @@ impl RoutineEngine {
         })?;
         // Drain finished entries first: a JoinSet retains completed-task
         // slots until joined, so an always-on engine would otherwise
-        // accumulate one entry per run for the process lifetime.
-        while guard.try_join_next().is_some() {}
+        // accumulate one entry per run for the process lifetime. Joining is
+        // also the only place a panicked routine task becomes visible —
+        // surface it instead of silently discarding the JoinError.
+        while let Some(joined) = guard.try_join_next() {
+            if let Err(join_error) = joined
+                && join_error.is_panic()
+            {
+                tracing::error!(
+                    routine = %routine_name,
+                    "A previously-spawned routine task panicked: {}",
+                    join_error
+                );
+            }
+        }
         guard.spawn(task);
         Ok(())
     }
@@ -1270,6 +1282,38 @@ pub(crate) async fn persist_routine_runtime_update(
         .unwrap_or_else(|| DatabaseError::Query("unknown runtime update failure".to_string())))
 }
 
+/// Renew a routine run's reaper lease if enough of the window has elapsed.
+///
+/// Execution-loop iterations can be sub-second, and a DB write per iteration
+/// is wasted I/O for a lease measured in minutes — renewal is gated to once
+/// per third of the lease window. The lease is padded past `timeout_secs` so
+/// a slow-but-alive iteration never races the reaper. Shared by the worker
+/// and subagent execution loops so the formula and gating cannot drift.
+pub(crate) async fn renew_routine_run_lease_if_due(
+    store: &Arc<dyn Database>,
+    run_id: Uuid,
+    timeout_secs: u64,
+    last_renewed: &std::sync::Mutex<Option<std::time::Instant>>,
+) {
+    let lease_secs = (timeout_secs as i64).saturating_add(120).max(120);
+    let renew_every = Duration::from_secs(lease_secs as u64 / 3);
+    {
+        let last = last_renewed.lock().unwrap_or_else(|p| p.into_inner());
+        if last.is_some_and(|at| at.elapsed() < renew_every) {
+            return;
+        }
+    }
+    match store.renew_routine_run_lease(run_id, lease_secs).await {
+        Ok(()) => {
+            *last_renewed.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(std::time::Instant::now());
+        }
+        Err(e) => {
+            tracing::debug!(run_id = %run_id, "Failed to renew routine run lease: {}", e);
+        }
+    }
+}
+
 /// Disable a routine that has crossed the consecutive-failure threshold.
 /// Runs after every runtime update so all finalization paths (engine,
 /// worker, subagent) share the same policy; before this, a routine whose
@@ -1317,7 +1361,9 @@ async fn auto_disable_failing_routine(
 }
 
 /// IC-006: Spawn a periodic zombie reaper for routine runs.
-/// Checks every 2 minutes for runs that have exceeded the 10-minute TTL.
+/// Checks every 2 minutes for runs whose renewable lease has expired
+/// (legacy NULL-lease rows fall back to a fixed TTL — see
+/// `DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS`).
 pub fn spawn_zombie_reaper(engine: Arc<RoutineEngine>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(120));

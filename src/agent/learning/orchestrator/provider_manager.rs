@@ -24,11 +24,7 @@ impl MemoryProviderManager {
             Arc::new(QdrantProvider),
             Arc::new(CustomHttpProvider),
         ];
-        Self {
-            store,
-            providers,
-            ready_cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        }
+        Self { store, providers }
     }
 
     #[cfg(all(test, feature = "libsql"))]
@@ -36,11 +32,7 @@ impl MemoryProviderManager {
         store: Arc<dyn Database>,
         providers: Vec<Arc<dyn MemoryProvider>>,
     ) -> Self {
-        Self {
-            store,
-            providers,
-            ready_cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        }
+        Self { store, providers }
     }
 
     pub async fn load_settings_for_user(&self, user_id: &str) -> LearningSettings {
@@ -56,7 +48,15 @@ impl MemoryProviderManager {
     /// or shutdown) so the next `ready_active_provider` call reflects the
     /// change immediately instead of waiting out `READY_PROVIDER_CACHE_TTL`.
     pub(in crate::agent::learning) async fn invalidate_ready_cache(&self, user_id: &str) {
-        self.ready_cache.write().await.remove(user_id);
+        // Bump the epoch FIRST: a resolution racing this invalidation
+        // (settings already loaded, entry not yet inserted) recorded the old
+        // epoch and its insert is stale on arrival.
+        super::super::providers::ready_cache_epoch()
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        super::super::providers::global_ready_cache()
+            .write()
+            .await
+            .remove(user_id);
     }
 
     pub async fn provider_health(&self, user_id: &str) -> Vec<ProviderHealthStatus> {
@@ -129,8 +129,10 @@ impl MemoryProviderManager {
     /// read plus a live HTTP health probe (up to 5s), so the result is cached
     /// per user for [`READY_PROVIDER_CACHE_TTL`] — including the "not ready"
     /// outcome, so a misconfigured/unhealthy provider doesn't get re-probed on
-    /// every call either. The cache is bypassed if the underlying settings
-    /// change (detected via hash) even before the TTL elapses.
+    /// every call either. The fast path trusts the TTL plus the invalidation
+    /// epoch (bumped by `invalidate_ready_cache` on every explicit settings
+    /// mutation, from ANY manager instance); the settings-hash comparison
+    /// only guards the slow path, where fresh settings are available anyway.
     pub(in crate::agent::learning) async fn ready_active_provider(
         &self,
         user_id: &str,
@@ -139,9 +141,16 @@ impl MemoryProviderManager {
         Arc<dyn MemoryProvider>,
         ProviderHealthStatus,
     )> {
+        use super::super::providers::{global_ready_cache, ready_cache_epoch};
+
         let now = std::time::Instant::now();
-        if let Some(entry) = self.ready_cache.read().await.get(user_id)
+        // Snapshot the epoch BEFORE loading settings: if an invalidation
+        // lands between our settings load and our insert, the entry we
+        // insert carries a stale epoch and is ignored by every reader.
+        let epoch = ready_cache_epoch().load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(entry) = global_ready_cache().read().await.get(user_id)
             && entry.expires_at > now
+            && entry.epoch == epoch
         {
             return entry.ready.clone();
         }
@@ -150,13 +159,13 @@ impl MemoryProviderManager {
         let settings_hash =
             thinclaw_agent::learning_policy::stable_json_hash(&serde_json::json!(settings));
 
-        // A settings change invalidates a cached entry immediately, even if
-        // some other caller raced us here between the read-lock check above
-        // and this settings load.
+        // Re-check after the settings load: another caller may have finished
+        // the same resolution while we were reading settings.
         {
-            let cache = self.ready_cache.read().await;
+            let cache = global_ready_cache().read().await;
             if let Some(entry) = cache.get(user_id)
                 && entry.expires_at > now
+                && entry.epoch == epoch
                 && entry.settings_hash == settings_hash
             {
                 return entry.ready.clone();
@@ -186,14 +195,18 @@ impl MemoryProviderManager {
             None => None,
         };
 
-        self.ready_cache.write().await.insert(
-            user_id.to_string(),
-            ReadyProviderCacheEntry {
-                settings_hash,
-                expires_at: now + READY_PROVIDER_CACHE_TTL,
-                ready: ready.clone(),
-            },
-        );
+        super::super::providers::global_ready_cache()
+            .write()
+            .await
+            .insert(
+                user_id.to_string(),
+                ReadyProviderCacheEntry {
+                    settings_hash,
+                    epoch,
+                    expires_at: now + READY_PROVIDER_CACHE_TTL,
+                    ready: ready.clone(),
+                },
+            );
 
         ready
     }
@@ -443,6 +456,7 @@ mod ready_provider_cache_tests {
         let now = std::time::Instant::now();
         let entry = ReadyProviderCacheEntry {
             settings_hash: 42,
+            epoch: 0,
             expires_at: now + READY_PROVIDER_CACHE_TTL,
             ready: None,
         };
@@ -457,6 +471,7 @@ mod ready_provider_cache_tests {
 
         let expired_entry = ReadyProviderCacheEntry {
             settings_hash: 42,
+            epoch: 0,
             expires_at: now,
             ready: None,
         };

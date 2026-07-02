@@ -1291,15 +1291,33 @@ impl Agent {
         // BOOTSTRAP.md while bootstrap is still pending.
         // before entering the main message loop. Responses are routed to the
         // user's preferred notification channel (e.g., Telegram).
-        self.run_startup_hooks().await;
-
-        // From here on the agent is shared with per-conversation worker
-        // tasks: independent conversations proceed concurrently while
-        // messages within one conversation stay strictly ordered.
+        //
+        // The agent is shared from here on: startup hooks may be raced by
+        // Ctrl+C, and per-conversation worker tasks hold clones during the
+        // message loop (independent conversations proceed concurrently while
+        // messages within one conversation stay strictly ordered).
         let agent = Arc::new(self);
+
+        // Startup hooks run full agent turns and can take a long time when
+        // the provider is slow or down. Nothing awaits `ctrl_c()` before the
+        // message loop's select, and a SIGINT that arrives while no listener
+        // is registered is not redelivered to one created later — so without
+        // this race the process appears to ignore Ctrl+C until the message
+        // loop starts.
+        let startup_interrupted = tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Ctrl+C received during startup hooks, shutting down...");
+                true
+            }
+            _ = agent.run_startup_hooks() => false,
+        };
+
         let conversation_workers: Arc<
             Mutex<std::collections::HashMap<Uuid, tokio::sync::mpsc::Sender<IncomingMessage>>>,
         > = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let worker_handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let turn_permits = Arc::new(tokio::sync::Semaphore::new(
             Self::MAIN_LOOP_MAX_CONCURRENT_TURNS,
         ));
@@ -1307,52 +1325,77 @@ impl Agent {
         // is enough because a single signal ends the loop.
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        loop {
-            let message = tokio::select! {
-                biased;
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Ctrl+C received, shutting down...");
-                    break;
-                }
-                Some(()) = shutdown_rx.recv() => {
-                    tracing::info!("Shutdown command received, exiting...");
-                    break;
-                }
-                msg = message_stream.next() => {
-                    match msg {
-                        Some(m) => m,
-                        None => {
-                            tracing::info!("All channel streams ended, shutting down...");
-                            break;
+        if !startup_interrupted {
+            loop {
+                let message = tokio::select! {
+                    biased;
+                    _ = tokio::signal::ctrl_c() => {
+                        tracing::info!("Ctrl+C received, shutting down...");
+                        break;
+                    }
+                    Some(()) = shutdown_rx.recv() => {
+                        tracing::info!("Shutdown command received, exiting...");
+                        break;
+                    }
+                    msg = message_stream.next() => {
+                        match msg {
+                            Some(m) => m,
+                            None => {
+                                tracing::info!("All channel streams ended, shutting down...");
+                                break;
+                            }
                         }
                     }
-                }
-                // System events (heartbeat messages) — processed when idle.
-                // Uses biased; so channel messages take priority (heartbeat only fires
-                // when the message_stream has nothing queued).
-                Some(m) = async {
-                    match system_event_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
+                    // System events (heartbeat messages) — processed when idle.
+                    // Uses biased; so channel messages take priority (heartbeat only fires
+                    // when the message_stream has nothing queued).
+                    Some(m) = async {
+                        match system_event_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        tracing::info!(
+                            source = %m.channel,
+                            "Processing system event (heartbeat) in main session"
+                        );
+                        m
                     }
-                } => {
-                    tracing::info!(
-                        source = %m.channel,
-                        "Processing system event (heartbeat) in main session"
-                    );
-                    m
+                };
+
+                Self::dispatch_incoming_message(
+                    &agent,
+                    &conversation_workers,
+                    &worker_handles,
+                    &turn_permits,
+                    &shutdown_tx,
+                    routine_engine_for_loop.clone(),
+                    message,
+                )
+                .await;
+            }
+        }
+
+        // Drain in-flight conversation turns before tearing channels down:
+        // dropping the senders lets each worker finish its queue and exit,
+        // and the bounded join keeps shutdown from hanging on a stuck turn.
+        conversation_workers.lock().await.clear();
+        let handles = std::mem::take(&mut *worker_handles.lock().await);
+        if !handles.is_empty() {
+            let drain = async {
+                for handle in handles {
+                    let _ = handle.await;
                 }
             };
-
-            Self::dispatch_incoming_message(
-                &agent,
-                &conversation_workers,
-                &turn_permits,
-                &shutdown_tx,
-                routine_engine_for_loop.clone(),
-                message,
-            )
-            .await;
+            if tokio::time::timeout(Self::SHUTDOWN_DRAIN_TIMEOUT, drain)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    timeout_secs = Self::SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+                    "Conversation workers did not drain before shutdown timeout;                      in-flight turns may be dropped"
+                );
+            }
         }
 
         // Cleanup
@@ -1366,6 +1409,14 @@ impl Agent {
     }
 
     // ── Standalone-loop message dispatch ───────────────────────────────
+    //
+    // Extraction note (CLAUDE.md architecture hygiene): this block is a
+    // cohesive phase that belongs in its own submodule, but it is left here
+    // for now because it is tightly coupled to `run()`'s locals and to
+    // private helpers in this file (`should_suppress_outbound_response`,
+    // shutdown plumbing) whose visibility a move would have to widen mid-
+    // stabilization. Extract to `src/agent/conversation_dispatch.rs` once
+    // the dispatch protocol has settled (tracked follow-up).
 
     /// Bound on turns processed concurrently across all conversations in
     /// the standalone `run()` loop.
@@ -1376,6 +1427,9 @@ impl Agent {
         std::time::Duration::from_secs(300);
     /// Per-conversation queue depth before dispatch applies backpressure.
     const CONVERSATION_WORKER_QUEUE_DEPTH: usize = 64;
+    /// Bound on how long shutdown waits for in-flight conversation turns to
+    /// finish before proceeding with channel teardown.
+    const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
     /// Route one incoming message to its conversation's ordered worker.
     ///
@@ -1390,6 +1444,7 @@ impl Agent {
         workers: &Arc<
             Mutex<std::collections::HashMap<Uuid, tokio::sync::mpsc::Sender<IncomingMessage>>>,
         >,
+        worker_handles: &Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
         turn_permits: &Arc<tokio::sync::Semaphore>,
         shutdown_tx: &tokio::sync::mpsc::Sender<()>,
         routine_engine: Option<Arc<RoutineEngine>>,
@@ -1402,14 +1457,19 @@ impl Agent {
         ) {
             let agent = Arc::clone(agent);
             let shutdown_tx = shutdown_tx.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 if agent
-                    .handle_and_respond(&message, routine_engine.as_ref())
+                    .handle_and_respond(&message, Some(preview), routine_engine.as_ref())
                     .await
                 {
                     let _ = shutdown_tx.try_send(());
                 }
             });
+            {
+                let mut handles = worker_handles.lock().await;
+                handles.retain(|h| !h.is_finished());
+                handles.push(handle);
+            }
             return;
         }
 
@@ -1439,7 +1499,7 @@ impl Agent {
             if let std::collections::hash_map::Entry::Vacant(entry) = senders.entry(key) {
                 let (tx, rx) = tokio::sync::mpsc::channel(Self::CONVERSATION_WORKER_QUEUE_DEPTH);
                 entry.insert(tx);
-                Self::spawn_conversation_worker(
+                let handle = Self::spawn_conversation_worker(
                     Arc::clone(agent),
                     Arc::clone(workers),
                     Arc::clone(turn_permits),
@@ -1448,6 +1508,11 @@ impl Agent {
                     key,
                     rx,
                 );
+                {
+                    let mut handles = worker_handles.lock().await;
+                    handles.retain(|h| !h.is_finished());
+                    handles.push(handle);
+                }
             }
         }
     }
@@ -1462,7 +1527,7 @@ impl Agent {
         routine_engine: Option<Arc<RoutineEngine>>,
         key: Uuid,
         mut rx: tokio::sync::mpsc::Receiver<IncomingMessage>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 let message =
@@ -1495,13 +1560,13 @@ impl Agent {
                     break;
                 };
                 if agent
-                    .handle_and_respond(&message, routine_engine.as_ref())
+                    .handle_and_respond(&message, None, routine_engine.as_ref())
                     .await
                 {
                     let _ = shutdown_tx.try_send(());
                 }
             }
-        });
+        })
     }
 
     /// Process one incoming message end to end: run it through the agent,
@@ -1511,12 +1576,16 @@ impl Agent {
     async fn handle_and_respond(
         &self,
         message: &IncomingMessage,
+        parsed: Option<Submission>,
         routine_engine: Option<&Arc<RoutineEngine>>,
     ) -> bool {
         // Increment received counter for this channel.
         self.channels.record_received(&message.channel).await;
 
-        match self.handle_message_payload_external(message).await {
+        match self
+            .handle_message_payload_external_parsed(message, parsed)
+            .await
+        {
             Ok(Some(mut response)) if !response.is_empty() => {
                 // Suppress HEARTBEAT_OK responses from heartbeat messages
                 if should_suppress_outbound_response(&message.channel, &response.content) {
@@ -1779,7 +1848,7 @@ impl Agent {
             }),
         );
 
-        match self.handle_message(&message).await {
+        match self.handle_message(&message, None).await {
             Ok(Some(response)) if !response.is_empty() => {
                 let web_thread_synced = if let Some(target) = gateway_target {
                     self.sync_startup_hook_to_gateway_assistant(
@@ -2027,9 +2096,11 @@ impl Agent {
     async fn handle_message(
         &self,
         message: &IncomingMessage,
+        parsed: Option<Submission>,
     ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
-        // Parse submission type first
-        let mut submission = SubmissionParser::parse(&message.content);
+        // Parse submission type first (reusing the dispatch loop's parse
+        // when it already did the work for control-command routing).
+        let mut submission = parsed.unwrap_or_else(|| SubmissionParser::parse(&message.content));
 
         // Hook: BeforeInbound — allow hooks to modify or reject user input
         if submission.runs_inbound_hooks()
@@ -2298,6 +2369,19 @@ impl Agent {
         &self,
         message: &IncomingMessage,
     ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
+        self.handle_message_payload_external_parsed(message, None)
+            .await
+    }
+
+    /// Like [`Self::handle_message_payload_external`], but accepts an
+    /// already-parsed submission so the standalone dispatch loop (which
+    /// parses once for control-command routing) doesn't parse every message
+    /// twice.
+    async fn handle_message_payload_external_parsed(
+        &self,
+        message: &IncomingMessage,
+        parsed: Option<Submission>,
+    ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
         let run_driver = AgentRunDriver::new();
         if let Some(ref external_thread_id) = message.thread_id {
             self.maybe_hydrate_thread(message, external_thread_id).await;
@@ -2317,7 +2401,7 @@ impl Agent {
                 .unwrap_or(0)
         };
 
-        let result = self.handle_message(message).await;
+        let result = self.handle_message(message, parsed).await;
 
         self.record_trajectory_turn(
             message,
