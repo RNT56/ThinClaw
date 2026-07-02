@@ -26,16 +26,13 @@ impl MemoryProvider for HonchoProvider {
         }
         let base_url = provider_base_url(&provider.config)?;
         let token = provider_token(&provider.config);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .ok()?;
 
-        let mut request = client
+        let mut request = shared_http_client()
             .get(format!(
                 "{}/v1/user-context",
                 base_url.trim_end_matches('/')
             ))
+            .timeout(std::time::Duration::from_secs(5))
             .query(&[
                 ("user_id", user_id),
                 ("cadence", &provider.cadence.unwrap_or(5).to_string()),
@@ -105,13 +102,9 @@ impl MemoryProvider for HonchoProvider {
             .ok_or_else(|| "Honcho base_url not configured".to_string())?;
         let token = provider_token(&settings.providers.honcho.config);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        let mut req = client
+        let mut req = shared_http_client()
             .post(format!("{}/v1/search", base_url.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_secs(8))
             .json(&serde_json::json!({
                 "user_id": user_id,
                 "query": query,
@@ -163,13 +156,9 @@ impl MemoryProvider for HonchoProvider {
             .ok_or_else(|| "Honcho base_url not configured".to_string())?;
         let token = provider_token(&settings.providers.honcho.config);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        let mut req = client
+        let mut req = shared_http_client()
             .post(format!("{}/v1/ingest", base_url.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_secs(8))
             .json(&serde_json::json!({
                 "user_id": user_id,
                 "payload": payload,
@@ -208,15 +197,12 @@ impl MemoryProvider for HonchoProvider {
             .provider(self.name())
             .and_then(|provider| provider_token(&provider.config));
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-            .map_err(|e| e.to_string())?;
-        let mut req = client
+        let mut req = shared_http_client()
             .post(format!(
                 "{}/v1/session-summary",
                 base_url.trim_end_matches('/')
             ))
+            .timeout(std::time::Duration::from_secs(8))
             .json(&serde_json::json!({
                 "user_id": user_id,
                 "payload": payload,

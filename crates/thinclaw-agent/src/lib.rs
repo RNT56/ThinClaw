@@ -5,6 +5,7 @@ pub mod agent_registry;
 pub mod agent_router;
 pub mod checkpoint;
 pub mod command_catalog;
+pub mod command_registry;
 pub mod compaction;
 pub mod context_monitor;
 pub mod cost_guard;

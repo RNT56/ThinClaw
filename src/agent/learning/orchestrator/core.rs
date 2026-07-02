@@ -15,6 +15,31 @@ impl LearningOrchestrator {
         }
     }
 
+    /// Build an orchestrator that reuses an existing, already-warmed-up
+    /// [`MemoryProviderManager`] instead of constructing a fresh one.
+    ///
+    /// The orchestrator struct itself is a thin, cheap-to-clone wrapper; the
+    /// expensive state (pooled HTTP client, per-user readiness cache) lives on
+    /// `MemoryProviderManager`. Callers that hold a shared `Arc<LearningOrchestrator>`
+    /// but need a differently-scoped copy (for example, one with the routine
+    /// engine wired in once it becomes available at startup) should go through
+    /// this constructor with `orchestrator.memory_provider_manager()` so the
+    /// cache and connection pool stay shared rather than being rebuilt.
+    pub fn with_provider_manager(
+        store: Arc<dyn Database>,
+        workspace: Option<Arc<Workspace>>,
+        skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
+        provider_manager: Arc<MemoryProviderManager>,
+    ) -> Self {
+        Self {
+            store,
+            workspace,
+            skill_registry,
+            routine_engine: None,
+            provider_manager,
+        }
+    }
+
     pub fn with_routine_engine(mut self, routine_engine: Option<Arc<RoutineEngine>>) -> Self {
         self.routine_engine = routine_engine;
         self
@@ -92,6 +117,7 @@ impl LearningOrchestrator {
             };
         }
         self.persist_full_settings(user_id, &settings).await?;
+        self.provider_manager.invalidate_ready_cache(user_id).await;
         Ok(self.provider_health(user_id).await)
     }
 
@@ -106,6 +132,7 @@ impl LearningOrchestrator {
         settings.learning.providers.active = ActiveLearningProvider::None;
         settings.learning.providers.active_provider = None;
         self.persist_full_settings(user_id, &settings).await?;
+        self.provider_manager.invalidate_ready_cache(user_id).await;
         Ok(self.provider_health(user_id).await)
     }
 

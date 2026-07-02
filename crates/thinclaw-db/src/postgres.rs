@@ -16,12 +16,13 @@ use crate::postgres_workspace::Repository;
 use crate::{
     AgentRegistryStore, AgentWorkspaceRecord, ConversationStore, Database, ExperimentStore,
     IdentityRegistryStore, JobStore, RepoProjectStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    SubagentRunStore, ToolFailureStore, WorkspaceStore,
 };
 use thinclaw_agent::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
     RoutineTriggerDecision, RunStatus,
 };
+use thinclaw_agent::subagent::SubagentRunRecord;
 use thinclaw_experiments::{
     ExperimentArtifactRef, ExperimentCampaign, ExperimentLease, ExperimentModelUsageRecord,
     ExperimentProject, ExperimentRunnerProfile, ExperimentTarget, ExperimentTargetLink,
@@ -900,8 +901,16 @@ impl RoutineStore for PgBackend {
         self.store.link_routine_run_to_job(run_id, job_id).await
     }
 
-    async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
-        self.store.cleanup_stale_routine_runs().await
+    async fn renew_routine_run_lease(
+        &self,
+        run_id: Uuid,
+        lease_secs: i64,
+    ) -> Result<(), DatabaseError> {
+        self.store.renew_routine_run_lease(run_id, lease_secs).await
+    }
+
+    async fn cleanup_stale_routine_runs(&self, legacy_ttl_secs: i64) -> Result<u64, DatabaseError> {
+        self.store.cleanup_stale_routine_runs(legacy_ttl_secs).await
     }
 
     async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError> {
@@ -1088,6 +1097,28 @@ impl RoutineStore for PgBackend {
         limit: i64,
     ) -> Result<Vec<RoutineTrigger>, DatabaseError> {
         self.store.list_routine_triggers(routine_id, limit).await
+    }
+}
+
+// ==================== SubagentRunStore ====================
+
+#[async_trait]
+impl SubagentRunStore for PgBackend {
+    async fn insert_subagent_run(&self, run: &SubagentRunRecord) -> Result<(), DatabaseError> {
+        self.store.insert_subagent_run(run).await
+    }
+
+    async fn complete_subagent_run(
+        &self,
+        id: Uuid,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.store.complete_subagent_run(id, status, error).await
+    }
+
+    async fn list_incomplete_subagent_runs(&self) -> Result<Vec<SubagentRunRecord>, DatabaseError> {
+        self.store.list_incomplete_subagent_runs().await
     }
 }
 

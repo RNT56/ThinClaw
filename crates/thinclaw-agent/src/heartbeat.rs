@@ -87,6 +87,7 @@ pub trait HeartbeatOutcomeSummaryPort: Send + Sync {
 
 /// Heartbeat runner for proactive periodic execution.
 pub struct HeartbeatRunner {
+    enabled: bool,
     workspace: Arc<Workspace>,
     llm: Arc<dyn HeartbeatLlmPort>,
     outcome_summary: Option<Arc<dyn HeartbeatOutcomeSummaryPort>>,
@@ -94,13 +95,35 @@ pub struct HeartbeatRunner {
 
 impl HeartbeatRunner {
     /// Create a new heartbeat runner.
+    ///
+    /// `config.enabled` is honored by [`Self::check_heartbeat`], which
+    /// short-circuits to [`HeartbeatResult::Skipped`] without calling the
+    /// LLM when the caller has disabled heartbeat.
+    ///
+    /// `config.interval` and `config.max_failures` are not meaningful at
+    /// this layer: this runner performs a single synchronous check per
+    /// call rather than owning a polling loop, and it holds no state across
+    /// calls to count consecutive failures. Callers that need interval-based
+    /// scheduling or failure-count-based backoff must implement that above
+    /// this runner (see the routine engine's own heartbeat scheduling path).
+    ///
+    /// `config.notify_user_id` / `config.notify_channel` are also not used
+    /// here: this runner has no delivery port and only returns a
+    /// [`HeartbeatResult`] to the caller, which owns response delivery.
+    ///
+    /// `hygiene_config` is accepted for call-site/API compatibility with
+    /// callers that resolve heartbeat and hygiene configuration together,
+    /// but hygiene maintenance is a separate workspace subsystem
+    /// (`thinclaw_workspace::hygiene::run_if_due`) and is not invoked by
+    /// this runner.
     pub fn new(
-        _config: HeartbeatConfig,
+        config: HeartbeatConfig,
         _hygiene_config: HygieneConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn HeartbeatLlmPort>,
     ) -> Self {
         Self {
+            enabled: config.enabled,
             workspace,
             llm,
             outcome_summary: None,
@@ -114,7 +137,14 @@ impl HeartbeatRunner {
     }
 
     /// Run a single heartbeat check.
+    ///
+    /// Returns [`HeartbeatResult::Skipped`] immediately if the runner was
+    /// constructed with `HeartbeatConfig { enabled: false, .. }`.
     pub async fn check_heartbeat(&self) -> HeartbeatResult {
+        if !self.enabled {
+            return HeartbeatResult::Skipped;
+        }
+
         let checklist = match self.workspace.heartbeat_checklist().await {
             Ok(Some(content)) if !is_effectively_empty(&content) => content,
             Ok(_) => return HeartbeatResult::Skipped,
@@ -287,6 +317,182 @@ pub async fn build_daily_context(workspace: &Workspace) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
+    use thinclaw_types::error::WorkspaceError;
+    use thinclaw_workspace::{
+        MemoryChunk, MemoryDocument, SearchConfig, SearchResult, WorkspaceEntry, WorkspaceStore,
+    };
+    use uuid::Uuid;
+
+    /// Minimal `WorkspaceStore` stub. Every method panics if called, since
+    /// the tests that use it only exercise the disabled-heartbeat
+    /// short-circuit, which must return before touching the workspace.
+    struct UnreachableWorkspaceStore;
+
+    #[async_trait]
+    impl WorkspaceStore for UnreachableWorkspaceStore {
+        async fn get_document_by_path(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+            _path: &str,
+        ) -> Result<MemoryDocument, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn get_document_by_id(&self, _id: Uuid) -> Result<MemoryDocument, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn get_or_create_document_by_path(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+            _path: &str,
+        ) -> Result<MemoryDocument, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn update_document(&self, _id: Uuid, _content: &str) -> Result<(), WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn delete_document_by_path(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+            _path: &str,
+        ) -> Result<(), WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn list_directory(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+            _directory: &str,
+        ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn list_all_paths(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+        ) -> Result<Vec<String>, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn list_documents(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+        ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn delete_chunks(&self, _document_id: Uuid) -> Result<(), WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn insert_chunk(
+            &self,
+            _document_id: Uuid,
+            _chunk_index: i32,
+            _content: &str,
+            _embedding: Option<&[f32]>,
+        ) -> Result<Uuid, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn update_chunk_embedding(
+            &self,
+            _chunk_id: Uuid,
+            _embedding: &[f32],
+        ) -> Result<(), WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn get_chunks_without_embeddings(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+            _limit: usize,
+        ) -> Result<Vec<MemoryChunk>, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn hybrid_search(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+            _query: &str,
+            _embedding: Option<&[f32]>,
+            _config: &SearchConfig,
+        ) -> Result<Vec<SearchResult>, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+    }
+
+    struct UnreachableLlm;
+
+    #[async_trait]
+    impl HeartbeatLlmPort for UnreachableLlm {
+        async fn context_length(&self) -> Result<Option<u32>, String> {
+            unreachable!("disabled heartbeat must not call the LLM port")
+        }
+
+        async fn complete_heartbeat(&self, _request: CompletionRequest) -> Result<String, String> {
+            unreachable!("disabled heartbeat must not call the LLM port")
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_config_short_circuits_without_touching_workspace_or_llm() {
+        let workspace = Arc::new(Workspace::new_with_store(
+            "test-user",
+            Arc::new(UnreachableWorkspaceStore),
+        ));
+        let llm: Arc<dyn HeartbeatLlmPort> = Arc::new(UnreachableLlm);
+
+        let runner = HeartbeatRunner::new(
+            HeartbeatConfig::default().disabled(),
+            HygieneConfig::default(),
+            workspace,
+            llm,
+        );
+
+        let result = runner.check_heartbeat().await;
+        assert!(matches!(result, HeartbeatResult::Skipped));
+    }
+
+    #[tokio::test]
+    async fn enabled_config_does_not_short_circuit() {
+        // Sanity check for the inverse: an enabled runner proceeds far
+        // enough to reach the workspace store (and hits our stub's
+        // `unreachable!`), proving the short-circuit is gated on
+        // `enabled` specifically rather than always skipping.
+        let workspace = Arc::new(Workspace::new_with_store(
+            "test-user",
+            Arc::new(UnreachableWorkspaceStore),
+        ));
+        let llm: Arc<dyn HeartbeatLlmPort> = Arc::new(UnreachableLlm);
+
+        let runner = HeartbeatRunner::new(
+            HeartbeatConfig::default(),
+            HygieneConfig::default(),
+            workspace,
+            llm,
+        );
+
+        let outcome = std::panic::AssertUnwindSafe(runner.check_heartbeat())
+            .catch_unwind()
+            .await;
+        assert!(
+            outcome.is_err(),
+            "expected enabled runner to reach the workspace store stub"
+        );
+    }
 
     #[test]
     fn test_heartbeat_config_defaults() {

@@ -138,14 +138,41 @@ impl Agent {
                         "Workspace prompt context was truncated to fit prompt.project_context_max_tokens"
                     );
                 }
-                for pattern in &sanitized.warning_patterns {
-                    tracing::warn!(
-                        thread = %thread_id,
-                        pattern = %pattern,
-                        "Suspicious project context content detected during prompt assembly"
-                    );
+                match sanitized.response() {
+                    crate::agent::prompt_sanitation::InjectionResponse::DropSegment => {
+                        for warning in &sanitized.warnings {
+                            tracing::warn!(
+                                thread = %thread_id,
+                                pattern = %warning.pattern,
+                                severity = ?warning.severity,
+                                "Suspected prompt-injection content dropped from workspace prompt"
+                            );
+                        }
+                        "[segment removed: suspected prompt-injection content]".to_string()
+                    }
+                    crate::agent::prompt_sanitation::InjectionResponse::WarnUser => {
+                        for warning in &sanitized.warnings {
+                            tracing::warn!(
+                                thread = %thread_id,
+                                pattern = %warning.pattern,
+                                severity = ?warning.severity,
+                                "Suspicious project context content detected during prompt assembly"
+                            );
+                        }
+                        sanitized.content
+                    }
+                    crate::agent::prompt_sanitation::InjectionResponse::LogOnly => {
+                        for warning in &sanitized.warnings {
+                            tracing::info!(
+                                thread = %thread_id,
+                                pattern = %warning.pattern,
+                                severity = ?warning.severity,
+                                "Low-severity project context content flagged during prompt assembly"
+                            );
+                        }
+                        sanitized.content
+                    }
                 }
-                sanitized.content
             })
             .filter(|prompt| !prompt.trim().is_empty());
 
@@ -237,14 +264,13 @@ impl Agent {
             .compact_block_for_channel(Some(&message.channel))
         };
         let provider_fut = async {
-            let Some(store) = self.store().map(Arc::clone) else {
+            // Reuse the agent's shared orchestrator (and its warmed-up
+            // MemoryProviderManager readiness cache + pooled HTTP client)
+            // instead of constructing a fresh one on every prompt assembly —
+            // this closure alone issues up to 3 provider calls per message.
+            let Some(orchestrator) = self.learning_orchestrator() else {
                 return (None, Vec::new(), None);
             };
-            let orchestrator = crate::agent::learning::LearningOrchestrator::new(
-                store,
-                self.workspace().cloned(),
-                self.skill_registry().cloned(),
-            );
             let frozen_block = if prompt_settings.session_freeze_enabled {
                 existing_runtime
                     .as_ref()
@@ -302,15 +328,44 @@ impl Agent {
                     "Prompt context segment was truncated to fit prompt.project_context_max_tokens"
                 );
             }
-            for pattern in &sanitized.warning_patterns {
-                tracing::warn!(
-                    thread = %thread_id,
-                    segment,
-                    pattern = %pattern,
-                    "Suspicious prompt context content detected during prompt assembly"
-                );
+            match sanitized.response() {
+                crate::agent::prompt_sanitation::InjectionResponse::DropSegment => {
+                    for warning in &sanitized.warnings {
+                        tracing::warn!(
+                            thread = %thread_id,
+                            segment,
+                            pattern = %warning.pattern,
+                            severity = ?warning.severity,
+                            "Suspected prompt-injection content dropped from prompt segment"
+                        );
+                    }
+                    "[segment removed: suspected prompt-injection content]".to_string()
+                }
+                crate::agent::prompt_sanitation::InjectionResponse::WarnUser => {
+                    for warning in &sanitized.warnings {
+                        tracing::warn!(
+                            thread = %thread_id,
+                            segment,
+                            pattern = %warning.pattern,
+                            severity = ?warning.severity,
+                            "Suspicious prompt context content detected during prompt assembly"
+                        );
+                    }
+                    sanitized.content
+                }
+                crate::agent::prompt_sanitation::InjectionResponse::LogOnly => {
+                    for warning in &sanitized.warnings {
+                        tracing::info!(
+                            thread = %thread_id,
+                            segment,
+                            pattern = %warning.pattern,
+                            severity = ?warning.severity,
+                            "Low-severity prompt context content flagged during prompt assembly"
+                        );
+                    }
+                    sanitized.content
+                }
             }
-            sanitized.content
         };
         let provider_system_prompt = provider_system_prompt
             .map(|prompt| sanitize_prompt_segment("provider_system_prompt", prompt));

@@ -13,6 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::{Json, Router, extract::State, routing::post};
 use chrono::{DateTime, Utc};
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -185,6 +186,7 @@ pub trait AgentEnv: Send + Sync {
     async fn export_trajectory(&self) -> Trajectory;
 }
 
+#[derive(Clone)]
 pub struct AgentLoopEnv {
     name: String,
     agent: Arc<dyn AgentEnvAgent>,
@@ -335,6 +337,9 @@ impl AgentEnv for AgentLoopEnv {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalBenchCase {
     pub name: String,
+    /// Scripted fallback command, used only when the agent's action carries
+    /// no usable command text (see `TerminalBenchEnv::step`). Verified
+    /// episodes execute the agent's own action instead of this command.
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
@@ -346,10 +351,21 @@ pub struct TerminalBenchCase {
     pub timeout_secs: u64,
 }
 
+impl TerminalBenchCase {
+    /// A case is "verifiable" when it declares at least one expected-output
+    /// check. Verifiable cases score strictly from those checks; cases with
+    /// no checks at all cannot be verified and fall back to a heuristic
+    /// grade of the agent's own output (see `TerminalBenchEnv::step`).
+    fn is_verifiable(&self) -> bool {
+        !self.expected_stdout_contains.is_empty() || self.expected_exit_code.is_some()
+    }
+}
+
 fn default_terminal_bench_timeout_secs() -> u64 {
     30
 }
 
+#[derive(Clone)]
 pub struct TerminalBenchEnv {
     name: String,
     episode_id: String,
@@ -422,9 +438,24 @@ impl AgentEnv for TerminalBenchEnv {
             });
         };
 
+        // The agent's action carries the command it decided to run for this
+        // case. Prefer that over the scripted `case.command` so the
+        // benchmark measures the agent's own behavior. Only fall back to the
+        // scripted command (for log continuity) when the agent produced no
+        // usable command text; that fallback path is unverified and always
+        // scores 0.0.
+        let AgentAction::UserMessage { content } = &action;
+        let agent_command = content.trim();
+        let agent_action_usable = !agent_command.is_empty();
+        let command_to_run: &str = if agent_action_usable {
+            agent_command
+        } else {
+            case.command.as_str()
+        };
+
         let output = tokio::time::timeout(Duration::from_secs(case.timeout_secs), async {
             let mut command = Command::new("sh");
-            command.arg("-lc").arg(&case.command);
+            command.arg("-lc").arg(command_to_run);
             if let Some(cwd) = &case.cwd {
                 command.current_dir(cwd);
             }
@@ -441,7 +472,18 @@ impl AgentEnv for TerminalBenchEnv {
         let exit_ok = case
             .expected_exit_code
             .map_or(output.status.success(), |expected| expected == exit_code);
-        let reward = if stdout_ok && exit_ok { 1.0 } else { 0.0 };
+        let verified = agent_action_usable && case.is_verifiable();
+        let reward = if !agent_action_usable {
+            // No usable agent action: the scripted fallback ran (for log
+            // continuity) but nothing about the agent was measured.
+            0.0
+        } else if verified {
+            if stdout_ok && exit_ok { 1.0 } else { 0.0 }
+        } else {
+            // The agent acted, but the case has no expected-output checks to
+            // verify against; grade the agent's own output heuristically.
+            heuristic_reward(Some(&stdout))
+        };
         let response = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
         self.observations.push(response.clone());
         self.cursor += 1;
@@ -452,6 +494,9 @@ impl AgentEnv for TerminalBenchEnv {
             "exit_code": exit_code,
             "stdout_ok": stdout_ok,
             "exit_ok": exit_ok,
+            "agent_action_usable": agent_action_usable,
+            "verified": verified,
+            "command_source": if agent_action_usable { "agent_action" } else { "scripted_fallback" },
         });
         self.steps.push(TrajectoryStep {
             action,
@@ -501,10 +546,25 @@ impl AgentEnv for TerminalBenchEnv {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillBenchCase {
     pub name: String,
+    /// Reference skill content shown to the agent as context for this case.
+    /// This is no longer scored directly (see `SkillBenchEnv::step`) — it is
+    /// prompt material, not the agent's output.
     #[serde(alias = "skillContent")]
     pub skill_content: String,
+    /// Substrings the agent's action/answer must contain to be considered
+    /// correct. This doubles as the case's verifier: a case with no required
+    /// substrings is unverifiable and falls back to a heuristic grade of the
+    /// agent's action (see `SkillBenchEnv::step`).
     #[serde(default, alias = "requiredSubstrings")]
     pub required_substrings: Vec<String>,
+}
+
+impl SkillBenchCase {
+    /// A case is "verifiable" when it declares at least one required
+    /// substring to check the agent's action against.
+    fn is_verifiable(&self) -> bool {
+        !self.required_substrings.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -535,6 +595,7 @@ pub fn agent_env_benchmark_config(
         .map_err(|err| format!("Invalid AgentEnv benchmark config: {err}"))
 }
 
+#[derive(Clone)]
 pub struct SkillBenchEnv {
     name: String,
     episode_id: String,
@@ -606,21 +667,40 @@ impl AgentEnv for SkillBenchEnv {
                 metadata: serde_json::json!({ "terminal": true }),
             });
         };
-        let has_heading = case.skill_content.contains("# ");
-        let has_body = case.skill_content.lines().count() > 1;
+        // Score the agent's own action/answer against the case's verifier,
+        // rather than statically inspecting the reference `skill_content`.
+        let AgentAction::UserMessage { content } = &action;
+        let agent_answer = content.trim();
+        let agent_action_usable = !agent_answer.is_empty();
+        let verified = agent_action_usable && case.is_verifiable();
         let required_ok = case
             .required_substrings
             .iter()
-            .all(|needle| case.skill_content.contains(needle));
-        let reward = if has_heading && has_body && required_ok {
-            1.0
-        } else {
+            .all(|needle| agent_answer.contains(needle));
+        let reward = if !agent_action_usable {
+            // No usable agent action to grade at all.
             0.0
-        };
-        let response = if reward >= 1.0 {
-            format!("skill bench '{}' passed", case.name)
+        } else if verified {
+            if required_ok { 1.0 } else { 0.0 }
         } else {
-            format!("skill bench '{}' failed", case.name)
+            // The agent answered, but the case declares no verifier; grade
+            // the agent's own answer heuristically instead of the static
+            // reference `skill_content`.
+            heuristic_reward(Some(agent_answer))
+        };
+        let response = if !agent_action_usable {
+            format!("skill bench '{}' failed (no agent action)", case.name)
+        } else if verified {
+            if required_ok {
+                format!("skill bench '{}' passed", case.name)
+            } else {
+                format!("skill bench '{}' failed", case.name)
+            }
+        } else {
+            format!(
+                "skill bench '{}' unverified (heuristic reward {reward:.2})",
+                case.name
+            )
         };
         self.observations.push(response.clone());
         self.cursor += 1;
@@ -628,8 +708,8 @@ impl AgentEnv for SkillBenchEnv {
         let done = self.terminal;
         let metadata = serde_json::json!({
             "case": case.name,
-            "has_heading": has_heading,
-            "has_body": has_body,
+            "agent_action_usable": agent_action_usable,
+            "verified": verified,
             "required_ok": required_ok,
         });
         self.steps.push(TrajectoryStep {
@@ -677,9 +757,23 @@ impl AgentEnv for SkillBenchEnv {
     }
 }
 
+/// Trajectory score threshold used to gate SFT export and "completed" run
+/// artifact status. Verifier rewards (see `TerminalBenchEnv::step` and
+/// `SkillBenchEnv::step`) can score up to `1.0` and clear this gate;
+/// unverified `heuristic_reward` fallback scores are capped at `0.6` and
+/// therefore never clear a strict `>=`/`<` comparison against this constant
+/// on their own, which is what makes the gate meaningful again.
+pub const SFT_QUALITY_GATE_SCORE: f64 = 0.6;
+
+/// Default number of episodes run concurrently by [`EnvRunner::evaluate`]
+/// when the caller does not choose a different bound via
+/// [`EnvRunner::with_concurrency`].
+pub const DEFAULT_EVAL_CONCURRENCY: usize = 4;
+
 pub struct EnvRunner<E: AgentEnv> {
     env: E,
     artifact_logger: AgentRunArtifactLogger,
+    concurrency: usize,
 }
 
 impl<E: AgentEnv> EnvRunner<E> {
@@ -687,6 +781,7 @@ impl<E: AgentEnv> EnvRunner<E> {
         Self {
             env,
             artifact_logger: AgentRunArtifactLogger::new(),
+            concurrency: DEFAULT_EVAL_CONCURRENCY,
         }
     }
 
@@ -695,24 +790,66 @@ impl<E: AgentEnv> EnvRunner<E> {
         self
     }
 
+    /// Bound the number of episodes run concurrently by [`Self::evaluate`].
+    /// A value of `0` is treated as `1` (fully sequential).
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
+        self
+    }
+
+    /// Run `n_episodes` episodes and return their trajectories in episode
+    /// order.
+    ///
+    /// Independent episodes are run concurrently, bounded by
+    /// [`Self::with_concurrency`] (default [`DEFAULT_EVAL_CONCURRENCY`]).
+    /// Each episode runs against its own clone of the environment (reset
+    /// fresh for that episode), so steps *within* an episode stay strictly
+    /// sequential and never race with each other — only different episodes
+    /// may run at the same time. Results are collected and then persisted
+    /// (artifact logging) and returned in deterministic episode order
+    /// regardless of which episode happens to finish first.
     pub async fn evaluate<F>(
         &mut self,
         n_episodes: usize,
         mut actions_for_episode: F,
     ) -> anyhow::Result<Vec<Trajectory>>
     where
+        E: Clone,
         F: FnMut(usize) -> Vec<AgentAction>,
     {
-        let mut trajectories = Vec::new();
-        for episode in 0..n_episodes {
-            self.env.reset().await;
-            for action in actions_for_episode(episode) {
-                let _ = self.env.step(action).await?;
-                if self.env.is_terminal() {
-                    break;
+        let episode_actions: Vec<(usize, Vec<AgentAction>)> = (0..n_episodes)
+            .map(|episode| (episode, actions_for_episode(episode)))
+            .collect();
+
+        let concurrency = self.concurrency.max(1);
+        let base_env = self.env.clone();
+        let mut results: Vec<(usize, anyhow::Result<Trajectory>)> = stream::iter(episode_actions)
+            .map(|(episode, actions)| {
+                let mut episode_env = base_env.clone();
+                async move {
+                    let result: anyhow::Result<Trajectory> = async {
+                        episode_env.reset().await;
+                        for action in actions {
+                            let _ = episode_env.step(action).await?;
+                            if episode_env.is_terminal() {
+                                break;
+                            }
+                        }
+                        Ok(episode_env.export_trajectory().await)
+                    }
+                    .await;
+                    (episode, result)
                 }
-            }
-            let trajectory = self.env.export_trajectory().await;
+            })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+
+        results.sort_by_key(|(episode, _)| *episode);
+
+        let mut trajectories = Vec::with_capacity(results.len());
+        for (_, result) in results {
+            let trajectory = result?;
             self.persist_trajectory_artifact(&trajectory).await?;
             trajectories.push(trajectory);
         }
@@ -724,7 +861,10 @@ impl<E: AgentEnv> EnvRunner<E> {
         n_episodes: usize,
         output: &Path,
         prompt_for_episode: impl FnMut(usize) -> String,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        E: Clone,
+    {
         let mut prompt_for_episode = prompt_for_episode;
         let trajectories = self
             .evaluate(n_episodes, |idx| {
@@ -744,7 +884,7 @@ impl<E: AgentEnv> EnvRunner<E> {
             .await?;
         use tokio::io::AsyncWriteExt;
         for trajectory in trajectories {
-            if trajectory.score < 0.6 {
+            if trajectory.score < SFT_QUALITY_GATE_SCORE {
                 continue;
             }
             for step in trajectory.steps {
@@ -785,7 +925,7 @@ impl<E: AgentEnv> EnvRunner<E> {
     }
 
     async fn persist_trajectory_artifact(&self, trajectory: &Trajectory) -> anyhow::Result<()> {
-        let status = if trajectory.score >= 0.6 {
+        let status = if trajectory.score >= SFT_QUALITY_GATE_SCORE {
             AgentRunStatus::Completed
         } else {
             AgentRunStatus::Failed
@@ -841,11 +981,34 @@ async fn openai_chat_completions<E: AgentEnv>(
     }))
 }
 
+/// Minimum response length (in characters, after trimming) for a response to
+/// be considered "substantive" rather than "trivial" by [`heuristic_reward`].
+const HEURISTIC_SUBSTANTIVE_MIN_LEN: usize = 40;
+
+/// Graded fallback reward used only when an environment has no verifier
+/// available for a step (i.e. there is no scripted/expected answer to check
+/// the agent's action against).
+///
+/// This is intentionally a coarse, cheap proxy and is capped at
+/// [`SFT_QUALITY_GATE_SCORE`] (0.6): it can tell "the agent said nothing
+/// useful" from "the agent said something", but it cannot confirm
+/// correctness. Verifier rewards (see `TerminalBenchEnv::step` and
+/// `SkillBenchEnv::step`) supersede this heuristic whenever a case supplies
+/// expected-output checks, and only verified rewards can exceed 0.6 and
+/// clear the SFT quality gate used by [`EnvRunner::collect_sft_jsonl`] and
+/// [`EnvRunner::persist_trajectory_artifact`].
+///
+/// Scoring bands:
+/// - `0.0`: empty/missing response, or a response carrying an `error:` marker.
+/// - `0.3`: non-empty but trivial (shorter than
+///   [`HEURISTIC_SUBSTANTIVE_MIN_LEN`] characters after trimming).
+/// - `0.6`: substantive response with no verifier to confirm correctness.
 fn heuristic_reward(response: Option<&str>) -> f64 {
     match response.map(str::trim) {
         Some("") | None => 0.0,
-        Some(text) if text.to_ascii_lowercase().contains("error:") => 0.2,
-        Some(_) => 1.0,
+        Some(text) if text.to_ascii_lowercase().contains("error:") => 0.0,
+        Some(text) if text.chars().count() < HEURISTIC_SUBSTANTIVE_MIN_LEN => 0.3,
+        Some(_) => 0.6,
     }
 }
 
@@ -895,11 +1058,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn heuristic_reward_scores_empty_and_errors_low() {
+    fn heuristic_reward_is_graded_and_capped_at_the_sft_quality_gate() {
+        // Empty / missing / error-marker responses score 0.0.
         assert_eq!(heuristic_reward(None), 0.0);
         assert_eq!(heuristic_reward(Some("")), 0.0);
-        assert!(heuristic_reward(Some("Error: failed")) < 0.5);
-        assert_eq!(heuristic_reward(Some("All set")), 1.0);
+        assert_eq!(heuristic_reward(Some("   ")), 0.0);
+        assert_eq!(heuristic_reward(Some("Error: failed")), 0.0);
+        assert_eq!(heuristic_reward(Some("error: lowercase too")), 0.0);
+
+        // Trivial (short) non-empty responses score 0.3.
+        assert_eq!(heuristic_reward(Some("ok")), 0.3);
+        assert_eq!(heuristic_reward(Some("done")), 0.3);
+
+        // Substantive responses score 0.6 — the SFT quality gate threshold —
+        // but never exceed it, since the heuristic cannot confirm
+        // correctness. Only verifier-backed rewards should score above this.
+        let substantive =
+            "Here is a longer, substantive response describing what happened in detail.";
+        assert!(substantive.len() >= HEURISTIC_SUBSTANTIVE_MIN_LEN);
+        let score = heuristic_reward(Some(substantive));
+        assert_eq!(score, SFT_QUALITY_GATE_SCORE);
+        assert!(score <= SFT_QUALITY_GATE_SCORE);
+    }
+
+    #[test]
+    fn verifier_reward_beats_heuristic_reward_for_the_same_kind_of_response() {
+        // A verified pass (used by TerminalBenchEnv/SkillBenchEnv when a
+        // case's expected-output checks are satisfied) scores 1.0, which is
+        // strictly greater than anything heuristic_reward can produce on its
+        // own, and clears the SFT quality gate.
+        let verified_pass_reward = 1.0;
+        let best_possible_heuristic = heuristic_reward(Some(
+            "A long substantive unverified response with no way to confirm correctness.",
+        ));
+        assert!(verified_pass_reward > best_possible_heuristic);
+        assert_eq!(best_possible_heuristic, SFT_QUALITY_GATE_SCORE);
+        assert!(verified_pass_reward >= SFT_QUALITY_GATE_SCORE);
     }
 
     #[test]
@@ -1071,16 +1265,34 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn terminal_bench_env_runs_command_cases() {
-        let mut env = TerminalBenchEnv::new(vec![TerminalBenchCase {
-            name: "echo".to_string(),
-            command: "printf bench-ok".to_string(),
+    fn terminal_bench_case(name: &str, command: &str) -> TerminalBenchCase {
+        TerminalBenchCase {
+            name: name.to_string(),
+            command: command.to_string(),
             cwd: None,
             expected_stdout_contains: vec!["bench-ok".to_string()],
             expected_exit_code: Some(0),
             timeout_secs: 5,
-        }]);
+        }
+    }
+
+    fn skill_bench_case(name: &str) -> SkillBenchCase {
+        SkillBenchCase {
+            name: name.to_string(),
+            skill_content: "# Test Skill\nDo the thing.".to_string(),
+            required_substrings: vec!["Do the thing".to_string()],
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_bench_env_runs_command_cases() {
+        // The scripted `command` field is a deliberately wrong fallback here
+        // so this test only passes if the env actually executes the agent's
+        // action rather than the scripted command.
+        let mut env = TerminalBenchEnv::new(vec![terminal_bench_case(
+            "echo",
+            "printf scripted-fallback-should-not-run",
+        )]);
 
         let state = env.reset().await;
         assert_eq!(
@@ -1089,7 +1301,7 @@ mod tests {
         );
         let result = env
             .step(AgentAction::UserMessage {
-                content: "run".to_string(),
+                content: "printf bench-ok".to_string(),
             })
             .await
             .expect("terminal bench step");
@@ -1100,6 +1312,14 @@ mod tests {
         assert_eq!(
             trajectory.metadata["benchmark"],
             serde_json::json!("terminal_bench")
+        );
+        assert_eq!(
+            trajectory.steps[0].metadata["command_source"],
+            serde_json::json!("agent_action")
+        );
+        assert_eq!(
+            trajectory.steps[0].metadata["verified"],
+            serde_json::json!(true)
         );
         let capture = trajectory.steps[0]
             .token_capture
@@ -1112,16 +1332,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_bench_env_scores_skill_content() {
-        let mut env = SkillBenchEnv::new(vec![SkillBenchCase {
-            name: "skill".to_string(),
-            skill_content: "# Test Skill\nDo the thing.".to_string(),
-            required_substrings: vec!["Do the thing".to_string()],
-        }]);
+    async fn terminal_bench_env_scores_wrong_agent_action_as_verified_failure() {
+        let mut env = TerminalBenchEnv::new(vec![terminal_bench_case(
+            "echo",
+            "printf scripted-fallback",
+        )]);
         env.reset().await;
         let result = env
             .step(AgentAction::UserMessage {
-                content: "check".to_string(),
+                content: "printf totally-different-output".to_string(),
+            })
+            .await
+            .expect("terminal bench step");
+        assert_eq!(result.reward, 0.0);
+        assert_eq!(
+            result.metadata["command_source"],
+            serde_json::json!("agent_action")
+        );
+        assert_eq!(result.metadata["verified"], serde_json::json!(true));
+        assert_eq!(result.metadata["stdout_ok"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn terminal_bench_env_falls_back_to_scripted_command_and_scores_zero_when_agent_action_empty()
+     {
+        let mut env = TerminalBenchEnv::new(vec![terminal_bench_case("echo", "printf bench-ok")]);
+        env.reset().await;
+        let result = env
+            .step(AgentAction::UserMessage {
+                content: "   ".to_string(),
+            })
+            .await
+            .expect("terminal bench step");
+        // The scripted command still ran (so stdout_ok reflects that it
+        // would have passed), but the step is unverified/agent-less and
+        // therefore scores 0.0 regardless.
+        assert_eq!(result.reward, 0.0);
+        assert_eq!(
+            result.metadata["command_source"],
+            serde_json::json!("scripted_fallback")
+        );
+        assert_eq!(
+            result.metadata["agent_action_usable"],
+            serde_json::json!(false)
+        );
+        assert_eq!(result.metadata["stdout_ok"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn skill_bench_env_scores_agent_action_against_verifier() {
+        let mut env = SkillBenchEnv::new(vec![skill_bench_case("skill")]);
+        env.reset().await;
+        let result = env
+            .step(AgentAction::UserMessage {
+                content: "Do the thing".to_string(),
             })
             .await
             .expect("skill bench step");
@@ -1129,11 +1393,132 @@ mod tests {
         assert_eq!(result.reward, 1.0);
         let trajectory = env.export_trajectory().await;
         assert_eq!(trajectory.env_name, "skill_bench");
+        assert_eq!(
+            trajectory.steps[0].metadata["verified"],
+            serde_json::json!(true)
+        );
         let capture = trajectory.steps[0]
             .token_capture
             .as_ref()
             .expect("token capture capability marker");
         assert!(!capture.exact_tokens_supported);
         assert!(!capture.logprobs_supported);
+    }
+
+    #[tokio::test]
+    async fn skill_bench_env_scores_agent_action_missing_required_substring_as_failure() {
+        let mut env = SkillBenchEnv::new(vec![skill_bench_case("skill")]);
+        env.reset().await;
+        let result = env
+            .step(AgentAction::UserMessage {
+                content: "Do something unrelated".to_string(),
+            })
+            .await
+            .expect("skill bench step");
+        assert_eq!(result.reward, 0.0);
+        assert_eq!(result.metadata["verified"], serde_json::json!(true));
+        assert_eq!(result.metadata["required_ok"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn skill_bench_env_falls_back_to_heuristic_when_case_has_no_verifier() {
+        let mut env = SkillBenchEnv::new(vec![SkillBenchCase {
+            name: "unverifiable".to_string(),
+            skill_content: "# Reference\nSome context.".to_string(),
+            required_substrings: Vec::new(),
+        }]);
+        env.reset().await;
+        let result = env
+            .step(AgentAction::UserMessage {
+                content: "A long substantive answer with no verifier to check it against."
+                    .to_string(),
+            })
+            .await
+            .expect("skill bench step");
+        assert_eq!(result.metadata["verified"], serde_json::json!(false));
+        assert_eq!(result.reward, SFT_QUALITY_GATE_SCORE);
+    }
+
+    /// Build a small fixture of skill-bench cases whose pass/fail outcome
+    /// depends on the episode index, so concurrent vs. sequential runs can
+    /// be compared on non-trivial, mixed results.
+    fn concurrency_fixture_cases() -> Vec<SkillBenchCase> {
+        vec![
+            SkillBenchCase {
+                name: "case-a".to_string(),
+                skill_content: "# Reference A".to_string(),
+                required_substrings: vec!["alpha".to_string()],
+            },
+            SkillBenchCase {
+                name: "case-b".to_string(),
+                skill_content: "# Reference B".to_string(),
+                required_substrings: vec!["beta".to_string()],
+            },
+        ]
+    }
+
+    fn episode_action_for_concurrency_fixture(episode: usize) -> Vec<AgentAction> {
+        // Even episodes answer correctly for both cases; odd episodes get
+        // the second case wrong, producing a mixed set of scores.
+        let content = if episode.is_multiple_of(2) {
+            "alpha then beta".to_string()
+        } else {
+            "alpha only".to_string()
+        };
+        vec![
+            AgentAction::UserMessage {
+                content: content.clone(),
+            },
+            AgentAction::UserMessage { content },
+        ]
+    }
+
+    #[tokio::test]
+    async fn concurrent_evaluate_matches_sequential_evaluate_per_case() {
+        let n_episodes = 6;
+
+        let sequential_root = tempfile::tempdir().expect("sequential artifact tempdir");
+        let mut sequential_runner = EnvRunner::new(SkillBenchEnv::new(concurrency_fixture_cases()))
+            .with_artifact_root(sequential_root.path())
+            .with_concurrency(1);
+        let sequential = sequential_runner
+            .evaluate(n_episodes, episode_action_for_concurrency_fixture)
+            .await
+            .expect("sequential evaluate");
+
+        let concurrent_root = tempfile::tempdir().expect("concurrent artifact tempdir");
+        let mut concurrent_runner = EnvRunner::new(SkillBenchEnv::new(concurrency_fixture_cases()))
+            .with_artifact_root(concurrent_root.path())
+            .with_concurrency(4);
+        let concurrent = concurrent_runner
+            .evaluate(n_episodes, episode_action_for_concurrency_fixture)
+            .await
+            .expect("concurrent evaluate");
+
+        assert_eq!(sequential.len(), n_episodes);
+        assert_eq!(concurrent.len(), n_episodes);
+
+        for episode in 0..n_episodes {
+            let seq = &sequential[episode];
+            let con = &concurrent[episode];
+            assert_eq!(seq.score, con.score, "episode {episode} score mismatch");
+            assert_eq!(
+                seq.steps.len(),
+                con.steps.len(),
+                "episode {episode} step count mismatch"
+            );
+            for (seq_step, con_step) in seq.steps.iter().zip(con.steps.iter()) {
+                assert_eq!(seq_step.reward, con_step.reward);
+                assert_eq!(seq_step.response, con_step.response);
+                assert_eq!(seq_step.metadata, con_step.metadata);
+            }
+        }
+
+        // Sanity: the fixture actually produces mixed (non-uniform) scores,
+        // so this test would catch order- or race-dependent regressions
+        // rather than trivially passing on an all-zero or all-one fixture.
+        let scores: Vec<f64> = sequential.iter().map(|t| t.score).collect();
+        assert!(scores.contains(&1.0));
+        assert!(scores.iter().any(|&s| s < 1.0));
     }
 }

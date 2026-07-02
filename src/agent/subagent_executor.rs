@@ -34,19 +34,19 @@ pub use thinclaw_agent::subagent::{
     SubagentInfo, SubagentResult, SubagentResultMessage, SubagentSpawnRequest, SubagentStatus,
 };
 use thinclaw_agent::subagent::{
-    SubagentCompletionOutcome, SubagentConcurrency, SubagentJobMetadataInput,
-    SubagentLearningRiskTier, SubagentSpawnAdmission, SubagentSystemPromptSections,
-    extract_subagent_message, llm_metadata_from_json, normalize_subagent_progress_category,
-    render_subagent_system_prompt, resolve_parent_thread_id, should_cancel_subagent,
-    should_emit_subagent_heartbeat, should_force_subagent_text, should_reinject_subagent_result,
-    subagent_activity_category, subagent_allows_skill, subagent_cancelled_status,
-    subagent_completion_status_response, subagent_default_system_prompt, subagent_execution_grants,
-    subagent_heartbeat_message, subagent_identity_defaults, subagent_iteration_limit_reason,
-    subagent_job_metadata, subagent_learning_completion, subagent_learning_risk_tier,
-    subagent_parent_message, subagent_result_from_completion, subagent_routine_actor,
-    subagent_routine_completion, subagent_spawned_response, subagent_status_from_result,
-    subagent_tool_activity_message, subagent_tool_warning_message, subagent_warning_category,
-    with_subagent_thread_metadata,
+    SUBAGENT_RUN_ORPHANED_REASON, SubagentCompletionOutcome, SubagentConcurrency,
+    SubagentJobMetadataInput, SubagentLearningRiskTier, SubagentRunRecord, SubagentSpawnAdmission,
+    SubagentSystemPromptSections, extract_subagent_message, llm_metadata_from_json,
+    normalize_subagent_progress_category, render_subagent_system_prompt, resolve_parent_thread_id,
+    should_cancel_subagent, should_emit_subagent_heartbeat, should_force_subagent_text,
+    should_reinject_subagent_result, subagent_activity_category, subagent_allows_skill,
+    subagent_cancelled_status, subagent_completion_status_response, subagent_default_system_prompt,
+    subagent_execution_grants, subagent_heartbeat_message, subagent_identity_defaults,
+    subagent_iteration_limit_reason, subagent_job_metadata, subagent_learning_completion,
+    subagent_learning_risk_tier, subagent_parent_message, subagent_result_from_completion,
+    subagent_routine_actor, subagent_routine_completion, subagent_run_status_for_completion,
+    subagent_spawned_response, subagent_status_from_result, subagent_tool_activity_message,
+    subagent_tool_warning_message, subagent_warning_category, with_subagent_thread_metadata,
 };
 pub use thinclaw_types::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
@@ -320,6 +320,7 @@ impl SubagentExecutor {
 
         // Check concurrency limit AND insert tracking entry under a single
         // write lock to prevent TOCTOU races (Bug 37 fix).
+        let spawned_at = chrono::Utc::now();
         {
             let mut active = self.active.write().await;
             // Evict aged terminal handles here — no background task calls
@@ -349,12 +350,41 @@ impl SubagentExecutor {
                     name: request.name.clone(),
                     task: request.task.clone(),
                     status: SubagentStatus::Running,
-                    spawned_at: chrono::Utc::now(),
+                    spawned_at,
                     cancel_tx: cancel_tx.clone(),
                     join_handle: None, // filled in after tokio::spawn
                     parent_to_sub_tx: parent_to_sub_tx.clone(),
                 },
             );
+        }
+
+        // ── Durable ledger: record the run BEFORE spawning ──────────────
+        // Without this, a running sub-agent lives only in the in-memory
+        // `active` map above, so a process restart silently drops it and
+        // leaks any routine run it was finalizing. Best-effort: a ledger
+        // write failure does not block the sub-agent from running — the
+        // in-memory tracking above is still authoritative for this process.
+        let resolved_parent_thread_id =
+            resolve_parent_thread_id(parent_thread_id, channel_metadata);
+        let routine_run_id_for_ledger = channel_metadata
+            .get("routine_run_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(ref store) = self.store {
+            let run = SubagentRunRecord::new_running(
+                id,
+                request.name.clone(),
+                request.task.clone(),
+                Some(resolved_parent_thread_id.clone()),
+                routine_run_id_for_ledger.clone(),
+                spawned_at,
+            );
+            if let Err(e) = store.insert_subagent_run(&run).await {
+                tracing::warn!(
+                    agent_id = %id,
+                    "Failed to persist subagent run ledger entry: {}", e
+                );
+            }
         }
 
         let timeout = Duration::from_secs(
@@ -413,8 +443,8 @@ impl SubagentExecutor {
         let skill_registry = self.skill_registry.clone();
         let skills_config = self.skills_config.clone();
 
-        // For the result injection message
-        let parent_thread_id = resolve_parent_thread_id(parent_thread_id, channel_metadata);
+        // For the result injection message (already resolved above for the ledger write)
+        let parent_thread_id = resolved_parent_thread_id;
         let ch_meta =
             with_subagent_thread_metadata(channel_metadata, &parent_thread_id, channel_name);
 
@@ -736,11 +766,33 @@ impl SubagentExecutor {
                 }
             }
 
+            let ledger_status = subagent_status_from_result(&subagent_result);
+
             {
                 let mut active = active_for_task.write().await;
                 if let Some(handle) = active.get_mut(&id) {
-                    handle.status = subagent_status_from_result(&subagent_result);
+                    handle.status = ledger_status.clone();
                     handle.join_handle = None;
+                }
+            }
+
+            // ── Durable ledger: record completion (success, failure, ──────
+            // timeout, or cancellation). This finalization block runs for
+            // every exit path, including cancellation (two-phase cancel
+            // routes back through the normal completion path), so the
+            // ledger row is always closed out alongside the in-memory
+            // status update above.
+            if let Some(ref store) = store_for_task {
+                let (ledger_status_str, ledger_error) =
+                    subagent_run_status_for_completion(&ledger_status);
+                if let Err(e) = store
+                    .complete_subagent_run(id, ledger_status_str, ledger_error.as_deref())
+                    .await
+                {
+                    tracing::warn!(
+                        agent_id = %id,
+                        "Failed to update subagent run ledger entry: {}", e
+                    );
                 }
             }
 
@@ -872,6 +924,99 @@ impl SubagentExecutor {
     }
 }
 
+/// Startup reconciliation for the durable sub-agent run ledger.
+///
+/// Sub-agents only exist as live tokio tasks — a process restart drops them
+/// without ever reaching `SubagentExecutor`'s completion finalization block,
+/// which is what normally closes out a `subagent_runs` row. This leaves any
+/// row still `running` from a previous process, and (transitively) leaks
+/// the routine run it may have been finalizing, since nothing will ever
+/// call `complete_routine_run` for it either.
+///
+/// This walks every row [`crate::db::Database::list_incomplete_subagent_runs`]
+/// returns and:
+/// - marks the `subagent_runs` row as `failed` with
+///   [`SUBAGENT_RUN_ORPHANED_REASON`], and
+/// - when the row carries a `routine_run_id`, also completes that routine
+///   run as failed via [`crate::db::Database::complete_routine_run`], so the
+///   routine's run history and concurrency counters aren't left stuck on a
+///   phantom `running` entry.
+///
+/// NOT wired into startup — see the module-level `SubagentExecutor`
+/// construction site (`src/main.rs`, forbidden to this change) for the one
+/// wiring line needed: call this once, after `components.db` is available
+/// and before the executor starts accepting new spawns, e.g.
+/// `reconcile_orphaned_subagent_runs(Arc::clone(db)).await;`
+pub async fn reconcile_orphaned_subagent_runs(store: Arc<dyn crate::db::Database>) {
+    let orphaned = match store.list_incomplete_subagent_runs().await {
+        Ok(runs) => runs,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to list incomplete subagent runs for reconciliation: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    for run in orphaned {
+        tracing::warn!(
+            subagent_run_id = %run.id,
+            name = %run.name,
+            "Reconciling orphaned subagent run left running by a previous process"
+        );
+
+        if let Err(e) = store
+            .complete_subagent_run(
+                run.id,
+                thinclaw_agent::subagent::SUBAGENT_RUN_STATUS_FAILED,
+                Some(SUBAGENT_RUN_ORPHANED_REASON),
+            )
+            .await
+        {
+            tracing::warn!(
+                subagent_run_id = %run.id,
+                "Failed to mark orphaned subagent run as failed: {}", e
+            );
+            continue;
+        }
+
+        let Some(routine_run_id) = run.routine_run_id.as_deref() else {
+            continue;
+        };
+        let Ok(routine_run_uuid) = routine_run_id.parse::<Uuid>() else {
+            tracing::warn!(
+                subagent_run_id = %run.id,
+                routine_run_id = %routine_run_id,
+                "Orphaned subagent run has an unparsable routine_run_id, skipping routine finalization"
+            );
+            continue;
+        };
+
+        if let Err(e) = store
+            .complete_routine_run(
+                routine_run_uuid,
+                crate::agent::routine::RunStatus::Failed,
+                Some(SUBAGENT_RUN_ORPHANED_REASON),
+                None,
+            )
+            .await
+        {
+            tracing::warn!(
+                subagent_run_id = %run.id,
+                routine_run_id = %routine_run_id,
+                "Failed to finalize routine run for orphaned subagent: {}", e
+            );
+        } else {
+            tracing::info!(
+                subagent_run_id = %run.id,
+                routine_run_id = %routine_run_id,
+                "Finalized routine run as failed for orphaned subagent"
+            );
+        }
+    }
+}
+
 /// Run a mini agentic loop for a sub-agent.
 ///
 /// This is a simplified version of `Agent::run_agentic_loop()` that doesn't
@@ -925,6 +1070,18 @@ async fn run_subagent_loop(
         tool_profile,
     });
 
+    // If this subagent was spawned by a routine (see `execute_as_subagent` in
+    // routine_engine.rs), keep a store handle + parsed run id around so the
+    // iteration loop below can renew the routine run's DB lease. This is what
+    // lets the zombie reaper distinguish an actively-executing subagent-run
+    // routine from a genuinely orphaned one, instead of relying on a fixed
+    // wall-clock TTL.
+    let routine_lease_run_id = channel_metadata
+        .get("routine_run_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<Uuid>().ok());
+    let store_for_lease = store.clone();
+
     let provider_tool_extensions = if let Some(store) = store {
         let orchestrator =
             LearningOrchestrator::new(store, workspace.clone(), skill_registry.clone());
@@ -977,6 +1134,19 @@ async fn run_subagent_loop(
         // Check cancellation
         if *cancel_rx.borrow() {
             return Err(subagent_cancelled_error());
+        }
+
+        // Renew the routine run's DB lease each iteration so a long-running
+        // subagent-executed routine isn't falsely reaped by the zombie
+        // cleanup while it's still actively making progress.
+        if let (Some(run_id), Some(store)) = (routine_lease_run_id, store_for_lease.as_ref()) {
+            let lease_secs = (DEFAULT_TIMEOUT_SECS as i64).saturating_add(120);
+            if let Err(e) = store.renew_routine_run_lease(run_id, lease_secs).await {
+                tracing::debug!(
+                    run_id = %run_id,
+                    "Failed to renew subagent routine run lease: {}", e
+                );
+            }
         }
 
         // Check for messages from the parent (non-blocking)

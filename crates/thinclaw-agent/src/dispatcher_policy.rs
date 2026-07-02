@@ -3,12 +3,26 @@
 use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
+use serde::{Deserialize, Serialize};
+
 use thinclaw_llm_core::{ChatMessage, FinishReason, Role, ToolCall, turn_analysis::TurnAwareness};
 
 pub const TOOL_RESULT_KEEP_TURNS: usize = 3;
 pub const STUCK_WARN_THRESHOLD: u32 = 3;
 pub const STUCK_FORCE_THRESHOLD: u32 = 5;
 pub const LARGE_CONTEXT_ADVISOR_TOKEN_THRESHOLD: u32 = 12_000;
+/// Fraction of the model's token limit at which the hard context cap fires
+/// and old messages are trimmed. Message count remains a secondary bound
+/// (see [`context_cap_decision`]) because token estimation can undercount
+/// on some providers.
+pub const CONTEXT_HARD_CAP_RATIO: f64 = 0.90;
+/// Fraction of the model's token limit the trim targets once the hard cap
+/// fires, leaving headroom before the next turn re-triggers the cap.
+pub const CONTEXT_TRIM_TARGET_RATIO: f64 = 0.70;
+/// Fraction of the model's token limit at which the pre-compaction memory
+/// flush fires, prompting the agent to persist durable memories before the
+/// hard cap starts dropping old messages.
+pub const MEMORY_FLUSH_RATIO: f64 = 0.80;
 pub const TOOL_PHASE_SYNTHESIS_PROMPT: &str = "Provide the final user-facing answer using the conversation and any tool results above. Do not call tools in this phase.";
 pub const TOOL_PHASE_NO_TOOLS_SENTINEL: &str = "NO_TOOLS_NEEDED";
 pub const TOOL_PHASE_PLANNING_PROMPT: &str = "Planner mode: decide which tools to call next. If tools are needed, call them directly. If no more tools are needed, do not draft the final answer here. Reply with only: NO_TOOLS_NEEDED";
@@ -22,6 +36,52 @@ pub const TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE: &str =
     "I was unable to prepare the final answer cleanly. Please try again.";
 pub const STUCK_LOOP_FINALIZATION_FAILURE_RESPONSE: &str =
     "I was unable to make further progress. Please try rephrasing your request.";
+
+/// Decision produced by [`context_cap_decision`] for whether the dispatcher
+/// loop should trim `context_messages` before the next LLM call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextCapDecision {
+    /// Trim the oldest non-system messages until the estimated token count
+    /// is at or below `target_tokens`.
+    TrimToBudget { target_tokens: usize },
+    /// No trim needed; context is within budget on both axes.
+    WithinBudget,
+}
+
+/// Decide whether the hard context cap should trim `context_messages`.
+///
+/// Token estimate is the primary signal (one huge tool result can blow the
+/// real budget while many small messages don't), with message count kept
+/// as a secondary bound so pathologically message-heavy conversations still
+/// get capped even if token estimation undercounts them.
+pub fn context_cap_decision(
+    estimated_tokens: usize,
+    token_limit: usize,
+    message_count: usize,
+    max_context_messages: usize,
+) -> ContextCapDecision {
+    let token_trigger =
+        token_limit > 0 && estimated_tokens as f64 >= token_limit as f64 * CONTEXT_HARD_CAP_RATIO;
+    let count_trigger = message_count > max_context_messages;
+
+    if token_trigger || count_trigger {
+        let target_tokens = (token_limit as f64 * CONTEXT_TRIM_TARGET_RATIO) as usize;
+        ContextCapDecision::TrimToBudget { target_tokens }
+    } else {
+        ContextCapDecision::WithinBudget
+    }
+}
+
+/// Decide whether the pre-compaction memory flush should fire this
+/// iteration. Fires at most once per compaction cycle (`already_fired`
+/// guards re-firing until the hard cap actually drops messages and resets
+/// the flag).
+pub fn memory_flush_due(estimated_tokens: usize, token_limit: usize, already_fired: bool) -> bool {
+    if already_fired || token_limit == 0 {
+        return false;
+    }
+    estimated_tokens as f64 >= token_limit as f64 * MEMORY_FLUSH_RATIO
+}
 
 /// Classification of an LLM turn failure for dispatcher-level recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,7 +334,7 @@ impl AdvisorAutoTrigger {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvisorFailureContext {
     pub tool_name: String,
     pub message: String,
@@ -282,7 +342,7 @@ pub struct AdvisorFailureContext {
     pub checkpoint: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AdvisorTurnState {
     pub real_tool_result_count: u32,
     pub blocked_tool_signatures: HashSet<u64>,
@@ -652,5 +712,70 @@ mod tests {
             finalization_failure_response(FinalizationFailureKind::StuckLoop),
             STUCK_LOOP_FINALIZATION_FAILURE_RESPONSE
         );
+    }
+
+    #[test]
+    fn context_cap_stays_within_budget_below_both_thresholds() {
+        assert_eq!(
+            context_cap_decision(1_000, 100_000, 50, 200),
+            ContextCapDecision::WithinBudget
+        );
+    }
+
+    #[test]
+    fn context_cap_trims_at_90_percent_token_ratio() {
+        // Just below the 90% ratio: no trim.
+        assert_eq!(
+            context_cap_decision(89_999, 100_000, 50, 200),
+            ContextCapDecision::WithinBudget
+        );
+        // At or above the 90% ratio: trim to the 70% target.
+        assert_eq!(
+            context_cap_decision(90_000, 100_000, 50, 200),
+            ContextCapDecision::TrimToBudget {
+                target_tokens: 70_000
+            }
+        );
+        assert_eq!(
+            context_cap_decision(95_000, 100_000, 50, 200),
+            ContextCapDecision::TrimToBudget {
+                target_tokens: 70_000
+            }
+        );
+    }
+
+    #[test]
+    fn context_cap_trims_when_message_count_secondary_bound_exceeded() {
+        // Token usage is tiny, but message count exceeds max_context_messages.
+        assert_eq!(
+            context_cap_decision(10, 100_000, 201, 200),
+            ContextCapDecision::TrimToBudget {
+                target_tokens: 70_000
+            }
+        );
+        // Exactly at the cap does not trigger (only strictly greater).
+        assert_eq!(
+            context_cap_decision(10, 100_000, 200, 200),
+            ContextCapDecision::WithinBudget
+        );
+    }
+
+    #[test]
+    fn memory_flush_fires_once_at_80_percent_ratio() {
+        assert!(!memory_flush_due(79_999, 100_000, false));
+        assert!(memory_flush_due(80_000, 100_000, false));
+        assert!(memory_flush_due(100_000, 100_000, false));
+        // Already fired this cycle: does not re-fire even over threshold.
+        assert!(!memory_flush_due(95_000, 100_000, true));
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn memory_flush_and_context_cap_ratios_are_ordered() {
+        // Sanity: flush threshold sits strictly below the hard cap
+        // threshold, and the trim target sits strictly below the flush
+        // threshold, so the pipeline (flush -> cap -> trim) is coherent.
+        assert!(MEMORY_FLUSH_RATIO < CONTEXT_HARD_CAP_RATIO);
+        assert!(CONTEXT_TRIM_TARGET_RATIO < MEMORY_FLUSH_RATIO);
     }
 }

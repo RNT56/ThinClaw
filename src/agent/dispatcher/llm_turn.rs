@@ -1,7 +1,73 @@
 use super::*;
+
+/// Map the smart-routing complexity classifier's richer `TaskComplexity`
+/// into the config crate's minimal `SimpleComplexity`. `thinclaw-config`
+/// cannot depend on `thinclaw-llm-core` (see crate ownership docs), so the
+/// scaling function only knows about the small local enum; this dispatcher
+/// module is the seam that bridges the two.
+fn simple_complexity_from_task_complexity(
+    complexity: crate::llm::smart_routing::TaskComplexity,
+) -> crate::config::SimpleComplexity {
+    match complexity {
+        crate::llm::smart_routing::TaskComplexity::Simple => {
+            crate::config::SimpleComplexity::Simple
+        }
+        crate::llm::smart_routing::TaskComplexity::Moderate => {
+            crate::config::SimpleComplexity::Moderate
+        }
+        crate::llm::smart_routing::TaskComplexity::Complex => {
+            crate::config::SimpleComplexity::Complex
+        }
+    }
+}
+
 impl Agent {
     pub(super) fn thinking_config_for_model(&self, model_name: &str) -> crate::llm::ThinkingConfig {
         let (enabled, budget) = self.config.resolve_thinking_for_model(model_name);
+        if enabled {
+            crate::llm::ThinkingConfig::Enabled {
+                budget_tokens: budget,
+            }
+        } else {
+            crate::llm::ThinkingConfig::Disabled
+        }
+    }
+
+    /// Resolve the thinking config for a single turn, optionally adapting
+    /// the static per-model budget to the complexity of the last user
+    /// message.
+    ///
+    /// When `adaptive_thinking_enabled` is false (the default), this is
+    /// exactly `thinking_config_for_model` — no behavior change.
+    ///
+    /// When enabled, the last user message is classified with the same
+    /// cheap heuristic the smart-routing layer already uses
+    /// (`crate::llm::smart_routing::classify_message`: message length, code
+    /// fences, keyword matching — no LLM call), mapped into the config
+    /// crate's `SimpleComplexity`, and used to scale the resolved
+    /// `(enabled, budget_tokens)` base via `scale_thinking_budget`. This
+    /// only widens or narrows the thinking budget already permitted by
+    /// static config/per-model overrides; it never enables thinking for a
+    /// model that has it statically disabled beyond what scaling already
+    /// allows (scaling only ever disables or shrinks, except for
+    /// `Complex`, which passes the base through unchanged).
+    pub(super) fn thinking_config_for_turn(
+        &self,
+        model_name: &str,
+        last_user_message: &str,
+    ) -> crate::llm::ThinkingConfig {
+        if !self.config.adaptive_thinking_enabled {
+            return self.thinking_config_for_model(model_name);
+        }
+
+        let base = self.config.resolve_thinking_for_model(model_name);
+        let task_complexity = crate::llm::smart_routing::classify_message(
+            last_user_message,
+            &crate::llm::smart_routing::SmartRoutingConfig::default(),
+        );
+        let complexity = simple_complexity_from_task_complexity(task_complexity);
+        let (enabled, budget) = crate::config::scale_thinking_budget(base, complexity);
+
         if enabled {
             crate::llm::ThinkingConfig::Enabled {
                 budget_tokens: budget,
@@ -64,6 +130,12 @@ impl Agent {
         fallback_response: &'static str,
     ) -> Result<AgenticLoopResult, Error> {
         let final_model_name = reasoning.current_llm().active_model_name();
+        let final_last_user_message = context_messages
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::llm::Role::User)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
         let final_turn = self
             .execute_llm_turn(
                 reasoning,
@@ -76,7 +148,8 @@ impl Agent {
                 last_applied_model_override,
                 LlmTurnOptions {
                     force_text: true,
-                    thinking: self.thinking_config_for_model(&final_model_name),
+                    thinking: self
+                        .thinking_config_for_turn(&final_model_name, &final_last_user_message),
                     context_documents: context_documents.to_vec(),
                     stream_to_user: true,
                     emit_progress_status: true,
@@ -733,4 +806,71 @@ fn classify_llm_turn_error(err: &Error) -> LlmTurnErrorKind {
         ) => LlmTurnErrorKind::Transient,
         _ => LlmTurnErrorKind::Fatal,
     }
+}
+
+#[cfg(test)]
+mod adaptive_thinking_tests {
+    use super::simple_complexity_from_task_complexity;
+    use crate::config::SimpleComplexity;
+    use crate::llm::smart_routing::{SmartRoutingConfig, TaskComplexity, classify_message};
+
+    #[test]
+    fn task_complexity_maps_onto_simple_complexity_1to1() {
+        assert_eq!(
+            simple_complexity_from_task_complexity(TaskComplexity::Simple),
+            SimpleComplexity::Simple
+        );
+        assert_eq!(
+            simple_complexity_from_task_complexity(TaskComplexity::Moderate),
+            SimpleComplexity::Moderate
+        );
+        assert_eq!(
+            simple_complexity_from_task_complexity(TaskComplexity::Complex),
+            SimpleComplexity::Complex
+        );
+    }
+
+    /// End-to-end pure composition of the classifier + mapping used by
+    /// `Agent::thinking_config_for_turn` when adaptive thinking is enabled.
+    /// This does not require a live `Agent`, but exercises exactly the
+    /// classify -> map -> scale pipeline the dispatcher calls.
+    #[test]
+    fn adaptive_pipeline_scales_by_message_complexity() {
+        let base = (true, 20_000u32);
+        let config = SmartRoutingConfig::default();
+
+        let simple = simple_complexity_from_task_complexity(classify_message("hi", &config));
+        assert_eq!(simple, SimpleComplexity::Simple);
+        assert_eq!(
+            crate::config::scale_thinking_budget(base, simple),
+            (false, 0)
+        );
+
+        let moderate = simple_complexity_from_task_complexity(classify_message(
+            "Tell me more about that idea.",
+            &config,
+        ));
+        assert_eq!(moderate, SimpleComplexity::Moderate);
+        assert_eq!(
+            crate::config::scale_thinking_budget(base, moderate),
+            (true, 10_000)
+        );
+
+        let complex = simple_complexity_from_task_complexity(classify_message(
+            "implement a binary search function",
+            &config,
+        ));
+        assert_eq!(complex, SimpleComplexity::Complex);
+        assert_eq!(crate::config::scale_thinking_budget(base, complex), base);
+    }
+
+    // `thinking_config_for_turn`'s off-path (`adaptive_thinking_enabled ==
+    // false`) is a direct early return to `thinking_config_for_model` with
+    // no intervening logic, so there is no separate resolution path that
+    // can diverge — see the guard at the top of `thinking_config_for_turn`.
+    // Exercising it end-to-end requires a live `Agent` (DB/tool/channel
+    // wiring), which belongs in `dispatcher/tests.rs`'s fixtures rather
+    // than here; the pure pieces feeding the enabled path (message
+    // classification and budget scaling) are covered above and in
+    // `thinclaw_config::agent::tests`.
 }

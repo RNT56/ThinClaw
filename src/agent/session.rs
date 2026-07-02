@@ -73,6 +73,17 @@ pub struct ThreadRuntimeState {
     pub prompt_segment_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_context_refs: Vec<String>,
+    /// Watermark of how many oldest-first conversation rows in the DB are
+    /// still "active" for this thread. See
+    /// `thinclaw_agent::ports::ThreadRuntimeSnapshot::active_message_row_count`
+    /// for full semantics; this mirrors that field so both structs decode
+    /// the same `runtime` metadata JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_message_row_count: Option<i64>,
+    /// Capped snapshot of the undo stack (newest checkpoints only). Mirrors
+    /// `thinclaw_agent::ports::ThreadRuntimeSnapshot::undo_checkpoints`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo_checkpoints: Vec<thinclaw_agent::undo::Checkpoint>,
 }
 
 /// Compatibility methods that used to be inherent on the root `Thread`.
@@ -131,6 +142,8 @@ impl ThreadRuntimeStateExt for Thread {
             ephemeral_overlay_hash: snapshot.ephemeral_overlay_hash,
             prompt_segment_order: snapshot.prompt_segment_order,
             provider_context_refs: snapshot.provider_context_refs,
+            active_message_row_count: snapshot.active_message_row_count,
+            undo_checkpoints: snapshot.undo_checkpoints,
         }
     }
 
@@ -157,6 +170,8 @@ impl ThreadRuntimeStateExt for Thread {
             ephemeral_overlay_hash: runtime.ephemeral_overlay_hash,
             prompt_segment_order: runtime.prompt_segment_order,
             provider_context_refs: runtime.provider_context_refs,
+            active_message_row_count: runtime.active_message_row_count,
+            undo_checkpoints: runtime.undo_checkpoints,
         });
     }
 
@@ -229,6 +244,8 @@ pub(crate) fn thread_runtime_state_from_portable(
         ephemeral_overlay_hash: snapshot.ephemeral_overlay_hash,
         prompt_segment_order: snapshot.prompt_segment_order,
         provider_context_refs: snapshot.provider_context_refs,
+        active_message_row_count: snapshot.active_message_row_count,
+        undo_checkpoints: snapshot.undo_checkpoints,
     }
 }
 

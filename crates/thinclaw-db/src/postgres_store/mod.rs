@@ -43,6 +43,7 @@ mod routine_triggers;
 mod row_mapping;
 mod sandbox_jobs;
 mod settings;
+mod subagent_runs;
 mod tool_failures;
 mod types;
 

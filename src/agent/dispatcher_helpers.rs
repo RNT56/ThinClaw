@@ -286,6 +286,7 @@ mod tests {
                 max_context_messages: 200,
                 thinking_enabled: false,
                 thinking_budget_tokens: 10_000,
+                adaptive_thinking_enabled: false,
                 auto_approve_tools: false,
                 main_tool_profile: crate::tools::ToolProfile::Standard,
                 worker_tool_profile: crate::tools::ToolProfile::Restricted,

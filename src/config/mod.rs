@@ -42,7 +42,9 @@ use crate::settings::Settings;
 
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub(crate) use self::agent::resolve_personality_pack_from_settings;
-pub use self::agent::{AgentConfig, ModelThinkingOverride};
+pub use self::agent::{
+    AgentConfig, ModelThinkingOverride, SimpleComplexity, scale_thinking_budget,
+};
 pub use self::builder::BuilderModeConfig;
 #[cfg(feature = "nostr")]
 pub use self::channels::NostrConfig;

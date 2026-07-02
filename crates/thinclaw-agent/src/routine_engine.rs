@@ -88,6 +88,17 @@ pub fn trigger_kind_for_routine(routine: &Routine) -> RoutineTriggerKind {
     }
 }
 
+/// Whether a routine fire dispatched with this `trigger_type` label should
+/// have cron-stagger jitter applied before it executes.
+///
+/// Only cron-scheduled fires benefit from staggering: they're the ones that
+/// can pile up into a thundering-herd backlog after downtime (many due
+/// slots catching up at once). Event, manual, and system-event fires are
+/// reactive/user-initiated and should run immediately.
+pub fn should_jitter_trigger_type(trigger_type: &str) -> bool {
+    trigger_type == "cron"
+}
+
 pub fn active_key_for_scheduled_trigger(
     routine: &Routine,
     trigger_kind: RoutineTriggerKind,
@@ -1722,5 +1733,14 @@ mod tests {
         let channel = heartbeat_job_metadata(&routine, 3, "telegram", false);
         assert_eq!(channel["suppress_output"], serde_json::json!(false));
         assert_eq!(channel["notify_channel"], serde_json::json!("telegram"));
+    }
+
+    #[test]
+    fn should_jitter_trigger_type_only_applies_to_cron() {
+        assert!(should_jitter_trigger_type("cron"));
+        assert!(!should_jitter_trigger_type("event"));
+        assert!(!should_jitter_trigger_type("manual"));
+        assert!(!should_jitter_trigger_type("system_event"));
+        assert!(!should_jitter_trigger_type("port"));
     }
 }

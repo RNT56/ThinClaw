@@ -3,12 +3,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use thinclaw_agent::hook_dispatch::{NormalizedHookEvent, normalize_agent_hook_event};
+use thinclaw_agent::hook_dispatch::{
+    HookNormalizationError, NormalizedHookEvent, normalize_agent_hook_event,
+};
 use thinclaw_agent::ports::{
     AgentHookContext, AgentHookEvent, AgentHookOutcome, HookDispatchPort, HookPortError,
 };
 
-use crate::hooks::{HookError, HookEvent, HookOutcome, HookRegistry};
+use crate::hooks::{HookContext, HookError, HookEvent, HookOutcome, HookRegistry};
 
 pub struct RootHookDispatchPort {
     hooks: Arc<HookRegistry>,
@@ -27,17 +29,28 @@ impl HookDispatchPort for RootHookDispatchPort {
         event: AgentHookEvent,
         context: AgentHookContext,
     ) -> Result<AgentHookOutcome, HookPortError> {
-        let hook_event = hook_event_from_agent(event, context);
+        // Real invocation metadata (e.g. trace ids, routine-run context)
+        // travels alongside the event and must reach the hook instead of
+        // being dropped in favor of an always-empty `HookContext::default()`.
+        let metadata = context.metadata.clone();
+        let hook_event = hook_event_from_agent(event, context)?;
+        let hook_ctx = HookContext { metadata };
         self.hooks
-            .run(&hook_event)
+            .run_with_context(&hook_event, &hook_ctx)
             .await
             .map(hook_outcome_to_agent)
             .map_err(hook_error_to_agent)
     }
 }
 
-fn hook_event_from_agent(event: AgentHookEvent, context: AgentHookContext) -> HookEvent {
-    match normalize_agent_hook_event(event, context) {
+fn hook_event_from_agent(
+    event: AgentHookEvent,
+    context: AgentHookContext,
+) -> Result<HookEvent, HookPortError> {
+    let normalized =
+        normalize_agent_hook_event(event, context).map_err(hook_normalization_error_to_agent)?;
+
+    Ok(match normalized {
         NormalizedHookEvent::Inbound {
             user_id,
             channel,
@@ -147,7 +160,7 @@ fn hook_event_from_agent(event: AgentHookEvent, context: AgentHookContext) -> Ho
             mime_type,
             duration_secs,
         },
-    }
+    })
 }
 
 fn hook_outcome_to_agent(outcome: HookOutcome) -> AgentHookOutcome {
@@ -164,5 +177,15 @@ fn hook_error_to_agent(error: HookError) -> HookPortError {
             timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
         },
         HookError::Rejected { reason } => HookPortError::Rejected { reason },
+    }
+}
+
+/// Map a normalization failure (payload/point mismatch or a missing
+/// identity-keyed field) into the existing `HookPortError::ExecutionFailed`
+/// variant, so callers of `dispatch_hook` see a normal hook-dispatch error
+/// rather than a new, additional error surface.
+fn hook_normalization_error_to_agent(error: HookNormalizationError) -> HookPortError {
+    HookPortError::ExecutionFailed {
+        reason: error.to_string(),
     }
 }

@@ -1677,6 +1677,9 @@ async fn async_main() -> anyhow::Result<()> {
         let mut executor = executor;
         if let Some(ref db) = components.db {
             executor = executor.with_store(Arc::clone(db));
+            // Fail subagent-ledger rows (and their linked routine runs) left
+            // 'running' by a previous process before new work spawns.
+            thinclaw::agent::reconcile_orphaned_subagent_runs(Arc::clone(db)).await;
         }
         if let Some(ref sender) = routine_sse_sender {
             executor = executor.with_sse_tx(sender.clone());

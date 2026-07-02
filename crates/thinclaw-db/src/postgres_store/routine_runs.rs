@@ -113,27 +113,60 @@ impl Store {
         Ok(())
     }
 
-    /// Mark RUNNING routine runs older than 10 minutes as failed (zombie reaping).
+    /// Renew (or set) the lease on a RUNNING routine run.
     ///
-    /// Only reaps runs that have been in `running` status for more than
-    /// 10 minutes. This prevents the reaper from killing actively-executing
-    /// worker jobs that were dispatched recently.
-    pub async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
+    /// See [`crate::RoutineStore::renew_routine_run_lease`] for the full
+    /// rationale — this replaces the old fixed 10-minute zombie TTL with a
+    /// renewable lease so long-running full-job routine runs aren't falsely
+    /// reaped while their worker is still actively executing.
+    pub async fn renew_routine_run_lease(
+        &self,
+        run_id: Uuid,
+        lease_secs: i64,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let lease_expires_at =
+            Utc::now() + chrono::Duration::try_seconds(lease_secs.max(0)).unwrap_or_default();
+        conn.execute(
+            r#"
+            UPDATE routine_runs SET
+                lease_expires_at = $1
+            WHERE id = $2
+              AND status = 'running'
+            "#,
+            &[&lease_expires_at, &run_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Mark RUNNING routine runs with an expired lease as failed (zombie reaping).
+    ///
+    /// Reaps runs whose `lease_expires_at` has passed. Legacy rows with a
+    /// NULL lease fall back to `legacy_ttl_secs` measured from `started_at`
+    /// instead of the old hardcoded 10-minute cutoff.
+    pub async fn cleanup_stale_routine_runs(
+        &self,
+        legacy_ttl_secs: i64,
+    ) -> Result<u64, DatabaseError> {
         let conn = self.conn().await?;
         let now = Utc::now();
-        let cutoff = now
-            - chrono::Duration::try_minutes(10).expect("10 minutes is a valid chrono::Duration");
+        let legacy_cutoff =
+            now - chrono::Duration::try_seconds(legacy_ttl_secs.max(0)).unwrap_or_default();
         let count = conn
             .execute(
                 r#"
                 UPDATE routine_runs SET
                     status = 'failed',
                     completed_at = $1,
-                    result_summary = 'Orphaned: routine exceeded 10-minute TTL'
+                    result_summary = 'Orphaned: routine run lease expired'
                 WHERE status = 'running'
-                  AND started_at < $2
+                  AND (
+                      (lease_expires_at IS NOT NULL AND lease_expires_at < $1)
+                      OR (lease_expires_at IS NULL AND started_at < $2)
+                  )
                 "#,
-                &[&now, &cutoff],
+                &[&now, &legacy_cutoff],
             )
             .await?;
         Ok(count)

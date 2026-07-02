@@ -24,5 +24,7 @@ pub use bootstrap::{HookBootstrapSummary, bootstrap_hooks};
 pub use bundled::{
     HookBundleConfig, HookRegistrationSummary, register_bundle, register_bundled_hooks,
 };
-pub use hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint};
-pub use registry::{HookInfo, HookRegistry};
+pub use hook::{
+    Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPatch, HookPoint,
+};
+pub use registry::{HookInfo, HookRegistry, MAX_CONSECUTIVE_HOOK_FAILURES};

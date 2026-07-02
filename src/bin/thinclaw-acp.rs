@@ -268,6 +268,7 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
             max_context_messages: 200,
             thinking_enabled: false,
             thinking_budget_tokens: 128,
+            adaptive_thinking_enabled: false,
             auto_approve_tools: false,
             subagent_transparency_level: "balanced".to_string(),
             main_tool_profile: ToolProfile::Acp,

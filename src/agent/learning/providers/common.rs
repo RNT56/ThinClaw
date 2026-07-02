@@ -6,6 +6,21 @@ pub(super) use thinclaw_agent::learning_provider_policy::{
     provider_path_with_vars, provider_scoped_user_id,
 };
 
+/// Shared `reqwest::Client` reused by every memory-provider HTTP call.
+///
+/// Provider adapters used to build a brand-new `reqwest::Client` per request
+/// (per health probe, per recall, per export...), which pays TCP/TLS
+/// handshake cost on every call instead of reusing pooled connections. A
+/// single process-wide client (no default request timeout — callers set a
+/// per-request timeout via `RequestBuilder::timeout` to preserve each call
+/// site's existing budget) lets `reqwest`/hyper pool connections across
+/// requests to the same provider host.
+pub(super) fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(reqwest::Client::new);
+    &CLIENT
+}
+
 pub(super) fn provider_token(config: &std::collections::HashMap<String, String>) -> Option<String> {
     if let Some(token) = config.get("api_key").cloned().filter(|v| !v.is_empty()) {
         return Some(token);
@@ -94,16 +109,11 @@ pub(super) async fn configured_provider_health(
         .unwrap_or_else(|| default_health_path.unwrap_or("/health").to_string());
     let health_url = provider_join_url(&base_url, &health_path);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
-    let Ok(client) = client else {
-        return provider_http_client_error_status(provider_name, provider.enabled);
-    };
-
     let started = std::time::Instant::now();
     let request = apply_provider_auth(
-        client.get(&health_url),
+        shared_http_client()
+            .get(&health_url)
+            .timeout(std::time::Duration::from_secs(5)),
         &provider.config,
         default_auth_scheme,
     );
@@ -139,15 +149,10 @@ pub(super) async fn provider_health_request(
         return provider_missing_base_url_status(provider_name, enabled);
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
-    let Ok(client) = client else {
-        return provider_http_client_error_status(provider_name, enabled);
-    };
-
     let started = std::time::Instant::now();
-    let mut req = client.get(format!("{}/health", base_url.trim_end_matches('/')));
+    let mut req = shared_http_client()
+        .get(format!("{}/health", base_url.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_secs(5));
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }

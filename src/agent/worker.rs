@@ -7,14 +7,15 @@ use crate::llm::cost_tracker::CostTracker;
 use chrono::Utc;
 
 use thinclaw_agent::worker_runtime::{
-    DEFAULT_WORKER_ITERATIONS, RoutineFinalizationOutcome, WORKER_DIRECT_LOOP_DELAY_MS,
-    WORKER_TASK_FAILED_DURING_EXECUTION_REASON, WORKER_TOOL_KEEPALIVE_SECS,
-    WorkerActivityKeepalive, WorkerLoopMetadata, build_worker_system_prompt, compact_post_plan,
+    DEFAULT_WORKER_ITERATIONS, RoutineFinalizationOutcome, WORKER_COMPLETE_JOB_TOOL_NAME,
+    WORKER_DIRECT_LOOP_DELAY_MS, WORKER_TASK_FAILED_DURING_EXECUTION_REASON,
+    WORKER_TOOL_KEEPALIVE_SECS, WorkerActivityKeepalive, WorkerLoopMetadata,
+    build_worker_system_prompt, compact_post_plan, complete_job_tool_definition,
     heartbeat_completion_critique, heartbeat_iteration_exhausted_critique,
     heartbeat_iteration_exhausted_summary, heartbeat_iteration_exhausted_user_message,
-    is_worker_terminal_state, order_parallel_worker_results, should_finish_heartbeat_after_output,
-    should_nudge_worker, should_persist_heartbeat_completion_critique, touch_worker_activity,
-    worker_iteration_exceeded,
+    is_worker_terminal_state, order_parallel_worker_results, parse_complete_job_arguments,
+    should_finish_heartbeat_after_output, should_nudge_worker,
+    should_persist_heartbeat_completion_critique, touch_worker_activity, worker_iteration_exceeded,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -197,6 +198,32 @@ impl Worker {
 
     fn timeout(&self) -> Duration {
         self.deps.timeout
+    }
+
+    /// Renew the DB lease on this worker's routine run, if it was dispatched
+    /// from a routine. Called on every execution-loop iteration so a
+    /// long-running full-job routine (up to `AGENT_JOB_TIMEOUT_SECS`) is
+    /// never falsely reaped by the zombie cleanup as long as the worker is
+    /// still actively making progress. The lease window is padded beyond
+    /// the worker's own inactivity timeout so a slow-but-alive iteration
+    /// doesn't race the reaper.
+    async fn renew_routine_lease(&self) {
+        let (Some(store), Some(run_id_str)) = (self.store(), self.deps.routine_run_id.as_deref())
+        else {
+            return;
+        };
+        let Ok(run_id) = run_id_str.parse::<Uuid>() else {
+            return;
+        };
+        let lease_secs = (self.timeout().as_secs() as i64)
+            .saturating_add(120)
+            .max(120);
+        if let Err(e) = store.renew_routine_run_lease(run_id, lease_secs).await {
+            tracing::debug!(
+                run_id = %run_id,
+                "Failed to renew routine run lease: {}", e
+            );
+        }
     }
 
     fn use_planning(&self) -> bool {
@@ -440,6 +467,9 @@ impl Worker {
                 &capability_metadata,
             )
             .await;
+        reason_ctx
+            .available_tools
+            .push(complete_job_tool_definition());
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -555,6 +585,7 @@ impl Worker {
 
             iteration += 1;
             touch_worker_activity(activity_tx);
+            self.renew_routine_lease().await;
             if worker_iteration_exceeded(iteration, max_iterations) {
                 if is_heartbeat {
                     let stuck_reason = heartbeat_iteration_exhausted_summary(max_iterations);
@@ -608,6 +639,9 @@ impl Worker {
                     &capability_metadata,
                 )
                 .await;
+            reason_ctx
+                .available_tools
+                .push(complete_job_tool_definition());
 
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
@@ -701,9 +735,17 @@ impl Worker {
                             .collect();
 
                         let results = self.execute_tools_parallel(&selections, activity_tx).await;
+                        let mut job_finished = false;
                         for (selection, result) in selections.iter().zip(results) {
-                            self.process_tool_result(reason_ctx, selection, result.result)
-                                .await?;
+                            if self
+                                .process_tool_result(reason_ctx, selection, result.result)
+                                .await?
+                            {
+                                job_finished = true;
+                            }
+                        }
+                        if job_finished {
+                            return Ok(());
                         }
                     }
                 }
@@ -721,8 +763,12 @@ impl Worker {
                     .execute_tool(&selection.tool_name, &selection.parameters, activity_tx)
                     .await;
 
-                self.process_tool_result(reason_ctx, selection, result)
-                    .await?;
+                if self
+                    .process_tool_result(reason_ctx, selection, result)
+                    .await?
+                {
+                    return Ok(());
+                }
             } else {
                 // Multiple tools: execute in parallel
                 tracing::debug!(
@@ -734,9 +780,17 @@ impl Worker {
                 let results = self.execute_tools_parallel(&selections, activity_tx).await;
 
                 // Process all results
+                let mut job_finished = false;
                 for (selection, result) in selections.iter().zip(results) {
-                    self.process_tool_result(reason_ctx, selection, result.result)
-                        .await?;
+                    if self
+                        .process_tool_result(reason_ctx, selection, result.result)
+                        .await?
+                    {
+                        job_finished = true;
+                    }
+                }
+                if job_finished {
+                    return Ok(());
                 }
             }
 
@@ -885,6 +939,17 @@ impl Worker {
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, Error> {
+        // `complete_job` is a synthetic tool injected into the worker's tool
+        // list (see execution_loop) — it is never registered with the real
+        // tool registry. Short-circuit here so it doesn't hit
+        // prepare_tool_call and fail with "tool not found". The actual
+        // completion side-effect (marking the job done) is handled by the
+        // caller via process_tool_result, which inspects the tool name and
+        // the echoed params below.
+        if tool_name == WORKER_COMPLETE_JOB_TOOL_NAME {
+            return Ok(params.to_string());
+        }
+
         // Fetch job context early so we have the real user_id for hooks and rate limiting
         let job_ctx = deps.context_manager.get_context(job_id).await?;
         if job_ctx.state == JobState::Cancelled {
@@ -1115,9 +1180,32 @@ impl Worker {
                     });
                 }
 
+                // ── complete_job interception ────────────────────────────
+                // `complete_job` is a synthetic tool (see execution_loop) —
+                // it never reaches the real tool registry. execute_tool_inner
+                // short-circuits it by echoing back the call's own arguments
+                // as the "output", which we parse here to end the job. This
+                // is the structured counterpart to llm_signals_completion:
+                // it lets the model unambiguously signal completion instead
+                // of relying on free-text phrase matching, while still only
+                // ever being triggered by the LLM's own tool call (never by
+                // arbitrary tool output — the same trust boundary called out
+                // below).
+                if selection.tool_name == WORKER_COMPLETE_JOB_TOOL_NAME {
+                    let outcome = parse_complete_job_arguments(&selection.parameters);
+                    self.set_last_output(&outcome.summary);
+                    if outcome.success {
+                        self.mark_completed().await?;
+                    } else {
+                        self.mark_failed(&outcome.summary).await?;
+                    }
+                    return Ok(true);
+                }
+
                 // Tool output never drives job completion. A malicious tool could
                 // emit "TASK_COMPLETE" to force premature completion. Only the LLM's
-                // own structured response (in execution_loop) can mark a job done.
+                // own structured response (in execution_loop) or an explicit
+                // complete_job call (handled above) can mark a job done.
                 Ok(false)
             }
             Err(e) => {
@@ -1190,6 +1278,7 @@ impl Worker {
             }
 
             touch_worker_activity(activity_tx);
+            self.renew_routine_lease().await;
             tracing::debug!(
                 "Job {} executing planned action {}/{}: {} - {}",
                 self.job_id,
@@ -1632,6 +1721,7 @@ mod tests {
     use crate::util::llm_signals_completion;
     #[cfg(feature = "libsql")]
     use chrono::Utc;
+    use thinclaw_agent::worker_runtime::WORKER_COMPLETE_JOB_TOOL_DESCRIPTION;
 
     use super::*;
     #[cfg(feature = "libsql")]
@@ -2083,5 +2173,164 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(completed_run.status, RunStatus::Ok);
+    }
+
+    // ── complete_job tool interception ──────────────────────────────────
+
+    #[tokio::test]
+    async fn execution_loop_injects_complete_job_tool_definition() {
+        // execution_loop appends complete_job_tool_definition() to
+        // reason_ctx.available_tools after the registry + policy + profile
+        // filter chain, at both the initial setup and the per-iteration
+        // refresh sites. Reproduce that chain against an empty registry
+        // (mirrors make_worker's ToolRegistry) and assert the synthetic
+        // tool survives it, since it is appended after — not looked up
+        // through — the real registry.
+        let worker = make_worker(Vec::new()).await;
+
+        let mut defs = worker
+            .tools()
+            .tool_definitions_for_autonomous_capabilities(None, None, None)
+            .await;
+        defs.push(complete_job_tool_definition());
+
+        let complete_job_def = defs
+            .iter()
+            .find(|d| d.name == WORKER_COMPLETE_JOB_TOOL_NAME)
+            .expect("complete_job tool definition should be present in the worker's tool list");
+        assert_eq!(
+            complete_job_def.description,
+            WORKER_COMPLETE_JOB_TOOL_DESCRIPTION
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_job_tool_call_marks_job_completed() {
+        let worker = make_worker(Vec::new()).await;
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, Some("started".to_string()))
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+        let mut reason_ctx = ReasoningContext::new().with_job("test job");
+
+        let selection = ToolSelection {
+            tool_name: WORKER_COMPLETE_JOB_TOOL_NAME.to_string(),
+            parameters: serde_json::json!({ "summary": "Finished the task" }),
+            reasoning: String::new(),
+            alternatives: vec![],
+            tool_call_id: "call_complete".to_string(),
+        };
+
+        // execute_tool_inner short-circuits complete_job by echoing back its
+        // own arguments — mirrors what the real execution_loop path does
+        // before handing the result to process_tool_result.
+        let echoed = Ok(selection.parameters.to_string());
+        let job_finished = worker
+            .process_tool_result(&mut reason_ctx, &selection, echoed)
+            .await
+            .expect("process_tool_result should not error");
+
+        assert!(
+            job_finished,
+            "complete_job should signal the execution loop to stop"
+        );
+
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .expect("job context should exist");
+        assert_eq!(ctx.state, JobState::Completed);
+        assert_eq!(
+            worker.take_last_output().as_deref(),
+            Some("Finished the task")
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_job_tool_call_with_success_false_marks_job_failed() {
+        let worker = make_worker(Vec::new()).await;
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, Some("started".to_string()))
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+        let mut reason_ctx = ReasoningContext::new().with_job("test job");
+
+        let selection = ToolSelection {
+            tool_name: WORKER_COMPLETE_JOB_TOOL_NAME.to_string(),
+            parameters: serde_json::json!({
+                "summary": "Could not finish, blocked on missing credentials",
+                "success": false,
+            }),
+            reasoning: String::new(),
+            alternatives: vec![],
+            tool_call_id: "call_complete".to_string(),
+        };
+        let echoed = Ok(selection.parameters.to_string());
+
+        let job_finished = worker
+            .process_tool_result(&mut reason_ctx, &selection, echoed)
+            .await
+            .expect("process_tool_result should not error");
+        assert!(job_finished);
+
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .expect("job context should exist");
+        assert_eq!(ctx.state, JobState::Failed);
+    }
+
+    #[tokio::test]
+    async fn non_complete_job_tool_call_does_not_finish_the_job() {
+        let worker = make_worker(Vec::new()).await;
+        let mut reason_ctx = ReasoningContext::new().with_job("test job");
+
+        let selection = ToolSelection {
+            tool_name: "emit_user_message".to_string(),
+            parameters: serde_json::json!({}),
+            reasoning: String::new(),
+            alternatives: vec![],
+            tool_call_id: "call_other".to_string(),
+        };
+
+        let job_finished = worker
+            .process_tool_result(
+                &mut reason_ctx,
+                &selection,
+                Ok(serde_json::json!({"message": "", "message_type": "progress"}).to_string()),
+            )
+            .await
+            .expect("process_tool_result should not error");
+
+        assert!(
+            !job_finished,
+            "only complete_job should signal the loop to stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_tool_inner_short_circuits_complete_job_without_hitting_registry() {
+        // complete_job is never registered with the real ToolRegistry — an
+        // empty registry proves execute_tool_inner doesn't dispatch to it.
+        let worker = make_worker(Vec::new()).await;
+        let params = serde_json::json!({ "summary": "done", "success": true });
+
+        let result =
+            Worker::execute_tool_inner(&worker.deps, worker.job_id, "complete_job", &params)
+                .await
+                .expect("complete_job should short-circuit rather than fail with tool-not-found");
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed, params);
     }
 }

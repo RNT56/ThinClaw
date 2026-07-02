@@ -26,9 +26,18 @@ impl Agent {
             .prepare_prompt_context(message, session.clone(), thread_id)
             .await;
 
-        // Build context with messages that we'll mutate during the loop
-        let mut context_messages = initial_messages;
-        let mut generated_attachments = Vec::new();
+        // Per-turn mutable state (context messages, stuck-loop tracking,
+        // memory-flush/model-override flags, advisor state) bundled into a
+        // single struct passed by `&mut` to phase helpers.
+        let mut turn = TurnState {
+            context_messages: initial_messages,
+            generated_attachments: Vec::new(),
+            last_call_signature: None,
+            consecutive_same_calls: 0,
+            memory_flush_fired: false,
+            last_applied_model_override: None,
+            advisor_state: AdvisorTurnState::default(),
+        };
 
         let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
 
@@ -115,16 +124,6 @@ impl Agent {
         let iteration_policy = IterationLimitPolicy::new(max_tool_iterations);
         let mut iteration = 0;
 
-        // Stuck loop detection: track consecutive identical tool calls.
-        // If the LLM calls the same tool with the same arguments repeatedly,
-        // it's stuck. The policy decides when to warn or force finalization.
-        let mut last_call_signature: Option<u64> = None;
-        let mut consecutive_same_calls: u32 = 0;
-        // Track whether we've already fired the pre-compaction memory flush this cycle.
-        // Reset to false each time the hard history cap fires (a new compaction cycle begins).
-        let mut memory_flush_fired = false;
-        // Track the last applied model override to avoid recreating the provider each iteration.
-        let mut last_applied_model_override: Option<String> = None;
         // Store the original LLM so we can restore it when the override is reset.
         let original_llm = reasoning.current_llm();
 
@@ -142,7 +141,6 @@ impl Agent {
                 .map(|runtime| runtime.status().advisor_max_calls)
                 .unwrap_or(3),
         ));
-        let mut advisor_state = AdvisorTurnState::default();
 
         loop {
             iteration += 1;
@@ -171,7 +169,7 @@ impl Agent {
                 match decide_model_override_activation(
                     current_spec.as_deref(),
                     current_reason,
-                    last_applied_model_override.as_deref(),
+                    turn.last_applied_model_override.as_deref(),
                     crate::tools::builtin::llm_tools::is_runtime_supported_provider_slug,
                 ) {
                     ModelOverrideActivationDecision::Unchanged => {}
@@ -189,7 +187,7 @@ impl Agent {
                                 model_spec.to_string(),
                             ),
                         );
-                        last_applied_model_override = current_spec;
+                        turn.last_applied_model_override = current_spec;
                     }
                     ModelOverrideActivationDecision::Unsupported { model_spec, .. } => {
                         tracing::warn!(
@@ -198,15 +196,15 @@ impl Agent {
                         );
                         override_lock.clear(&model_override_scope_key).await;
                         reasoning.swap_llm(original_llm.clone());
-                        context_messages.push(ChatMessage::system(
+                        turn.context_messages.push(ChatMessage::system(
                             unsupported_model_override_note(model_spec),
                         ));
-                        last_applied_model_override = None;
+                        turn.last_applied_model_override = None;
                     }
                     ModelOverrideActivationDecision::Reset => {
                         tracing::info!("Agent model override reset — restoring primary");
                         reasoning.swap_llm(original_llm.clone());
-                        last_applied_model_override = None;
+                        turn.last_applied_model_override = None;
                     }
                 }
             }
@@ -222,7 +220,8 @@ impl Agent {
                 {
                     // Extract the last assistant or tool result content from
                     // context_messages so the user sees partial progress.
-                    let partial_output = context_messages
+                    let partial_output = turn
+                        .context_messages
                         .iter()
                         .rev()
                         .filter_map(|m| match m.role {
@@ -258,7 +257,7 @@ impl Agent {
                     return Ok(AgenticLoopResult::Response(
                         thinclaw_agent::submission::AgentResponsePayload::text(partial),
                     )
-                    .with_generated_attachments(&generated_attachments));
+                    .with_generated_attachments(&turn.generated_attachments));
                 }
             }
 
@@ -271,20 +270,31 @@ impl Agent {
                 .into());
             }
 
+            // Context monitor for this iteration, derived from the active
+            // model's context window. Reused below for both the memory-flush
+            // trigger and the hard context cap so token estimation only
+            // happens once per iteration.
+            let context_monitor = self.effective_context_monitor();
+            let estimated_context_tokens = context_monitor.estimate_tokens(&turn.context_messages);
+            let context_token_limit = context_monitor.limit();
+
             // ── Pre-compaction memory flush ──────────────────────────────
-            // When the conversation crosses 80% of the hard history cap,
+            // When the conversation crosses 80% of the model's token budget,
             // fire a silent agentic turn to prompt the agent to write any
             // durable memories BEFORE old messages get dropped by the cap.
             // This matches openclaw's `memoryFlush` pre-compaction ping.
             // The user never sees the response; NO_REPLY means nothing to save.
             {
-                let max_ctx = self.config.max_context_messages;
-                let flush_threshold = (max_ctx as f32 * 0.80) as usize;
-                if !memory_flush_fired && context_messages.len() >= flush_threshold {
-                    memory_flush_fired = true;
+                if memory_flush_due(
+                    estimated_context_tokens,
+                    context_token_limit,
+                    turn.memory_flush_fired,
+                ) {
+                    turn.memory_flush_fired = true;
                     tracing::info!(
-                        messages = context_messages.len(),
-                        threshold = flush_threshold,
+                        estimated_tokens = estimated_context_tokens,
+                        token_limit = context_token_limit,
+                        messages = turn.context_messages.len(),
                         "Pre-compaction memory flush triggered"
                     );
 
@@ -298,7 +308,7 @@ impl Agent {
                          (target: \"daily_log\"). If nothing important to save, reply with only: NO_REPLY"
                     ));
 
-                    let mut flush_msgs = context_messages.clone();
+                    let mut flush_msgs = turn.context_messages.clone();
                     flush_msgs.push(flush_system);
                     flush_msgs.push(flush_user);
 
@@ -413,54 +423,98 @@ impl Agent {
                         action = %action.action,
                         "Injecting canvas action into context"
                     );
-                    context_messages.push(ChatMessage::system(&msg));
+                    turn.context_messages.push(ChatMessage::system(&msg));
                 }
             }
 
             // Inject a nudge message when approaching the iteration limit so the
             // LLM is aware it should produce a final answer on the next turn.
             if iteration_decision.inject_nudge {
-                context_messages.push(ChatMessage::system(ITERATION_LIMIT_NUDGE_PROMPT));
+                turn.context_messages
+                    .push(ChatMessage::system(ITERATION_LIMIT_NUDGE_PROMPT));
             }
 
             let force_text = iteration_decision.force_text;
 
             // ── Hard chat history cap ───────────────────────────────────
-            // Enforce max_context_messages to prevent OOM on very long
-            // conversations. System messages are always kept; oldest
-            // non-system messages are dropped first.
+            // Enforce a token budget derived from the active model's context
+            // window (falling back to max_context_messages as a secondary
+            // bound) to prevent OOM/HTTP 400s on very long conversations or
+            // conversations padded by a few huge tool results. System
+            // messages are always kept; oldest non-system messages are
+            // dropped first until the estimated token count is back under
+            // the trim target.
             let max_ctx = self.config.max_context_messages;
-            if context_messages.len() > max_ctx {
-                let (systems, rest): (Vec<ChatMessage>, Vec<ChatMessage>) = context_messages
-                    .drain(..)
-                    .partition(|m| m.role == crate::llm::Role::System);
-                let keep_count = max_ctx.saturating_sub(systems.len());
-                let skip = rest.len().saturating_sub(keep_count);
-                tracing::info!(
-                    total = systems.len() + rest.len(),
-                    dropped = skip,
-                    "Chat history cap applied (max_context_messages={})",
-                    max_ctx
-                );
-                context_messages = systems;
-                context_messages.extend(rest.into_iter().skip(skip));
+            match context_cap_decision(
+                estimated_context_tokens,
+                context_token_limit,
+                turn.context_messages.len(),
+                max_ctx,
+            ) {
+                ContextCapDecision::TrimToBudget { target_tokens } => {
+                    let (systems, rest): (Vec<ChatMessage>, Vec<ChatMessage>) = turn
+                        .context_messages
+                        .drain(..)
+                        .partition(|m| m.role == crate::llm::Role::System);
 
-                // Re-sanitize immediately after cap truncation: the cap may have
-                // dropped an assistant(tool_calls) message while keeping its
-                // downstream Tool result messages, creating orphaned tool roles.
-                // Running sanitize_tool_messages here converts them to user messages
-                // before the LLM call, preventing HTTP 400 errors.
-                crate::llm::sanitize_tool_messages(&mut context_messages);
+                    let system_tokens = context_monitor.estimate_tokens(&systems);
+                    // Secondary bound: even once under the token target, also
+                    // keep total message count within max_ctx so pathological
+                    // conversations with many small messages (where token
+                    // estimation stays low) still get capped.
+                    let max_rest = max_ctx.saturating_sub(systems.len()).max(1);
+                    let mut kept_rest: std::collections::VecDeque<ChatMessage> =
+                        rest.into_iter().collect();
+                    let mut rest_tokens = context_monitor
+                        .estimate_tokens(&kept_rest.iter().cloned().collect::<Vec<_>>());
+                    let mut dropped = 0usize;
+                    // Drop oldest non-system messages first until the estimated
+                    // total is at or below the trim target and the count is
+                    // within the secondary bound (leave at least one message
+                    // so the conversation isn't emptied entirely).
+                    while kept_rest.len() > 1
+                        && (system_tokens + rest_tokens > target_tokens
+                            || kept_rest.len() > max_rest)
+                    {
+                        if let Some(oldest) = kept_rest.pop_front() {
+                            rest_tokens = rest_tokens.saturating_sub(
+                                context_monitor.estimate_tokens(std::slice::from_ref(&oldest)),
+                            );
+                            dropped += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    tracing::info!(
+                        total = systems.len() + kept_rest.len() + dropped,
+                        dropped,
+                        tokens_before = estimated_context_tokens,
+                        tokens_after = system_tokens + rest_tokens,
+                        target_tokens,
+                        max_context_messages = max_ctx,
+                        "Chat history cap applied"
+                    );
+                    turn.context_messages = systems;
+                    turn.context_messages.extend(kept_rest);
 
-                // Bug 9 fix (revised): reset the flush flag AFTER the hard cap
-                // actually drops messages so a new compaction cycle can trigger
-                // a fresh flush. Previously the reset fired in the same scope
-                // as the flush trigger (before truncation), which allowed a
-                // double-flush when messages jumped from the 80% threshold
-                // past max_ctx in a single iteration.
-                if skip > 0 {
-                    memory_flush_fired = false;
+                    // Re-sanitize immediately after cap truncation: the cap may have
+                    // dropped an assistant(tool_calls) message while keeping its
+                    // downstream Tool result messages, creating orphaned tool roles.
+                    // Running sanitize_tool_messages here converts them to user messages
+                    // before the LLM call, preventing HTTP 400 errors.
+                    crate::llm::sanitize_tool_messages(&mut turn.context_messages);
+
+                    // Bug 9 fix (revised): reset the flush flag AFTER the hard cap
+                    // actually drops messages so a new compaction cycle can trigger
+                    // a fresh flush. Previously the reset fired in the same scope
+                    // as the flush trigger (before truncation), which allowed a
+                    // double-flush when messages jumped from the 80% threshold
+                    // past max_ctx in a single iteration.
+                    if dropped > 0 {
+                        turn.memory_flush_fired = false;
+                    }
                 }
+                ContextCapDecision::WithinBudget => {}
             }
             // ── Tool-result pruning ─────────────────────────────────────
             // Strip old tool results from context before the LLM call.
@@ -470,9 +524,9 @@ impl Agent {
             // sent to the LLM, preventing token burn over long sessions.
             {
                 if let Some(prune_before_idx) =
-                    tool_result_prune_boundary(&context_messages, TOOL_RESULT_KEEP_TURNS)
+                    tool_result_prune_boundary(&turn.context_messages, TOOL_RESULT_KEEP_TURNS)
                 {
-                    let pruned: usize = context_messages[..prune_before_idx]
+                    let pruned: usize = turn.context_messages[..prune_before_idx]
                         .iter()
                         .filter(|m| m.role == crate::llm::Role::Tool)
                         .count();
@@ -483,7 +537,7 @@ impl Agent {
                             TOOL_RESULT_KEEP_TURNS
                         );
                         // Replace tool results in the old turns with a compact stub
-                        for msg in context_messages[..prune_before_idx].iter_mut() {
+                        for msg in turn.context_messages[..prune_before_idx].iter_mut() {
                             if msg.role == crate::llm::Role::Tool {
                                 msg.content =
                                     "[tool result pruned — see session history]".to_string();
@@ -536,7 +590,7 @@ impl Agent {
                 .await;
             let tool_defs = if let Some(runtime) = self.deps.llm_runtime.as_ref() {
                 if runtime
-                    .advisor_config_for_messages(&context_messages)
+                    .advisor_config_for_messages(&turn.context_messages)
                     .is_none()
                 {
                     tool_defs
@@ -568,30 +622,30 @@ impl Agent {
                 .deps
                 .llm_runtime
                 .as_ref()
-                .and_then(|runtime| runtime.advisor_config_for_messages(&context_messages))
+                .and_then(|runtime| runtime.advisor_config_for_messages(&turn.context_messages))
                 .is_some();
             if advisor_ready_for_turn
                 && let Some((trigger, checkpoint, blocked_signature)) = self
                     .next_auto_advisor_trigger(
                         runtime_status.as_ref(),
-                        &context_messages,
-                        &advisor_state,
-                        consecutive_same_calls,
-                        last_call_signature,
+                        &turn.context_messages,
+                        &turn.advisor_state,
+                        turn.consecutive_same_calls,
+                        turn.last_call_signature,
                     )
             {
                 self.inject_auto_advisor_consultation(
                     trigger,
                     checkpoint,
                     blocked_signature,
-                    &mut advisor_state,
-                    &mut context_messages,
+                    &mut turn.advisor_state,
+                    &mut turn.context_messages,
                     &session,
                     thread_id,
                     message,
                     advisor_call_budget.as_ref(),
-                    &mut last_call_signature,
-                    &mut consecutive_same_calls,
+                    &mut turn.last_call_signature,
+                    &mut turn.consecutive_same_calls,
                 )
                 .await?;
                 continue;
@@ -601,13 +655,13 @@ impl Agent {
                 self.deps.cheap_llm.is_some(),
                 force_text,
                 !tool_defs.is_empty(),
-                last_applied_model_override.is_some(),
+                turn.last_applied_model_override.is_some(),
             );
             let hold_complex_final_pass = advisor_ready_for_turn
                 && should_hold_complex_final_pass(
                     runtime_status.as_ref(),
-                    &context_messages,
-                    &advisor_state,
+                    &turn.context_messages,
+                    &turn.advisor_state,
                 );
             let tool_phase_primary_thinking_enabled = runtime_status
                 .as_ref()
@@ -618,13 +672,13 @@ impl Agent {
             let phase_one_turn = self
                 .execute_llm_turn(
                     &mut reasoning,
-                    &mut context_messages,
+                    &mut turn.context_messages,
                     tool_defs,
                     thread_id,
                     message,
                     &persistent_draft,
                     &original_llm,
-                    &mut last_applied_model_override,
+                    &mut turn.last_applied_model_override,
                     LlmTurnOptions {
                         force_text,
                         thinking: if !use_tool_phase_synthesis
@@ -662,13 +716,13 @@ impl Agent {
                                             text,
                                         ),
                                     )
-                                    .with_generated_attachments(&generated_attachments));
+                                    .with_generated_attachments(&turn.generated_attachments));
                                 };
 
                                 let cheap_model_name = cheap_llm.active_model_name();
                                 let mut synthesis_reasoning =
                                     reasoning.fork_with_llm(cheap_llm.clone());
-                                let mut synthesis_messages = context_messages.clone();
+                                let mut synthesis_messages = turn.context_messages.clone();
                                 synthesis_messages
                                     .push(ChatMessage::system(TOOL_PHASE_SYNTHESIS_PROMPT));
 
@@ -681,7 +735,7 @@ impl Agent {
                                         message,
                                         &persistent_draft,
                                         &cheap_llm,
-                                        &mut last_applied_model_override,
+                                        &mut turn.last_applied_model_override,
                                         LlmTurnOptions {
                                             force_text: true,
                                             thinking: self
@@ -708,7 +762,9 @@ impl Agent {
                                                 synthesis_streamed_text,
                                                 synthesized,
                                             )
-                                            .with_generated_attachments(&generated_attachments));
+                                            .with_generated_attachments(
+                                                &turn.generated_attachments,
+                                            ));
                                     }
                                     RespondResult::Text(text) => {
                                         tracing::warn!(
@@ -723,7 +779,7 @@ impl Agent {
                                                 ),
                                             ),
                                         )
-                                        .with_generated_attachments(&generated_attachments));
+                                        .with_generated_attachments(&turn.generated_attachments));
                                     }
                                     RespondResult::ToolCalls { .. } => {
                                         tracing::warn!(
@@ -736,51 +792,52 @@ impl Agent {
                                                 ),
                                             ),
                                         )
-                                        .with_generated_attachments(&generated_attachments));
+                                        .with_generated_attachments(&turn.generated_attachments));
                                     }
                                 }
                             }
                             ToolPhaseTextOutcome::PrimaryFinalText => {
                                 return Ok(self
                                     .agentic_result_from_text(phase_one_streamed_text, text)
-                                    .with_generated_attachments(&generated_attachments));
+                                    .with_generated_attachments(&turn.generated_attachments));
                             }
                             ToolPhaseTextOutcome::PrimaryNeedsFinalization => {
                                 return Ok(self
                                     .finalize_primary_text_only(
                                         &mut reasoning,
-                                        &mut context_messages,
+                                        &mut turn.context_messages,
                                         &prompt_context_documents,
                                         thread_id,
                                         message,
                                         &persistent_draft,
                                         &original_llm,
-                                        &mut last_applied_model_override,
+                                        &mut turn.last_applied_model_override,
                                         finalization_failure_response(
                                             FinalizationFailureKind::ToolPhase,
                                         ),
                                     )
                                     .await?
-                                    .with_generated_attachments(&generated_attachments));
+                                    .with_generated_attachments(&turn.generated_attachments));
                             }
                         }
                     }
 
                     if hold_complex_final_pass {
-                        let checkpoint = advisor_state
+                        let checkpoint = turn
+                            .advisor_state
                             .checkpoint_for(AdvisorAutoTrigger::ComplexFinalPass, "final_answer");
                         self.inject_auto_advisor_consultation(
                             AdvisorAutoTrigger::ComplexFinalPass,
                             checkpoint,
-                            last_call_signature,
-                            &mut advisor_state,
-                            &mut context_messages,
+                            turn.last_call_signature,
+                            &mut turn.advisor_state,
+                            &mut turn.context_messages,
                             &session,
                             thread_id,
                             message,
                             advisor_call_budget.as_ref(),
-                            &mut last_call_signature,
-                            &mut consecutive_same_calls,
+                            &mut turn.last_call_signature,
+                            &mut turn.consecutive_same_calls,
                         )
                         .await?;
                         continue;
@@ -788,7 +845,7 @@ impl Agent {
 
                     return Ok(self
                         .agentic_result_from_text(phase_one_streamed_text, text)
-                        .with_generated_attachments(&generated_attachments));
+                        .with_generated_attachments(&turn.generated_attachments));
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
@@ -800,18 +857,19 @@ impl Agent {
                     // If the same set of calls repeats consecutively, the LLM is
                     // likely stuck in a loop.
                     let signature_update = update_stuck_loop_signature(
-                        last_call_signature,
-                        consecutive_same_calls,
+                        turn.last_call_signature,
+                        turn.consecutive_same_calls,
                         sig,
                     );
-                    last_call_signature = signature_update.last_call_signature;
-                    consecutive_same_calls = signature_update.consecutive_same_calls;
+                    turn.last_call_signature = signature_update.last_call_signature;
+                    turn.consecutive_same_calls = signature_update.consecutive_same_calls;
 
-                    if advisor_state.blocked_tool_signatures.contains(&sig) {
-                        context_messages.push(ChatMessage::assistant_with_tool_calls(
-                            content,
-                            tool_calls.clone(),
-                        ));
+                    if turn.advisor_state.blocked_tool_signatures.contains(&sig) {
+                        turn.context_messages
+                            .push(ChatMessage::assistant_with_tool_calls(
+                                content,
+                                tool_calls.clone(),
+                            ));
                         for tc in &tool_calls {
                             let blocked_message = serde_json::json!({
                                 "status": "error",
@@ -819,83 +877,81 @@ impl Agent {
                                 "message": ADVISOR_BLOCKED_TOOL_RESULT_MESSAGE
                             })
                             .to_string();
-                            context_messages.push(ChatMessage::tool_result(
+                            turn.context_messages.push(ChatMessage::tool_result(
                                 &tc.id,
                                 &tc.name,
                                 blocked_message,
                             ));
                         }
-                        context_messages.push(ChatMessage::system(ADVISOR_BLOCKED_SYSTEM_PROMPT));
-                        last_call_signature = None;
-                        consecutive_same_calls = 0;
+                        turn.context_messages
+                            .push(ChatMessage::system(ADVISOR_BLOCKED_SYSTEM_PROMPT));
+                        turn.last_call_signature = None;
+                        turn.consecutive_same_calls = 0;
                         continue;
                     }
 
-                    match stuck_loop_decision(consecutive_same_calls) {
+                    match stuck_loop_decision(turn.consecutive_same_calls) {
                         StuckLoopDecision::ForceText => {
                             tracing::warn!(
                                 iteration,
-                                consecutive = consecutive_same_calls,
+                                consecutive = turn.consecutive_same_calls,
                                 tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
                                 "Stuck loop detected — forcing text-only response"
                             );
                             // Give the LLM one last chance with a strong nudge and no tools
-                            context_messages
+                            turn.context_messages
                                 .push(ChatMessage::system(STUCK_LOOP_FINALIZATION_PROMPT));
 
                             return Ok(self
                                 .finalize_primary_text_only(
                                     &mut reasoning,
-                                    &mut context_messages,
+                                    &mut turn.context_messages,
                                     &prompt_context_documents,
                                     thread_id,
                                     message,
                                     &persistent_draft,
                                     &original_llm,
-                                    &mut last_applied_model_override,
+                                    &mut turn.last_applied_model_override,
                                     finalization_failure_response(
                                         FinalizationFailureKind::StuckLoop,
                                     ),
                                 )
                                 .await?
-                                .with_generated_attachments(&generated_attachments));
+                                .with_generated_attachments(&turn.generated_attachments));
                         }
                         StuckLoopDecision::Warn => {
                             tracing::info!(
                                 iteration,
-                                consecutive = consecutive_same_calls,
+                                consecutive = turn.consecutive_same_calls,
                                 tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
                                 "Possible stuck loop detected — injecting nudge"
                             );
-                            context_messages.push(ChatMessage::system(STUCK_LOOP_NUDGE_PROMPT));
+                            turn.context_messages
+                                .push(ChatMessage::system(STUCK_LOOP_NUDGE_PROMPT));
                         }
                         StuckLoopDecision::Continue => {}
                     }
 
-                    let blocked_signature = last_call_signature;
+                    let blocked_signature = turn.last_call_signature;
                     if let Some(result) = self
                         .execute_tool_calls_phase(
                             content,
                             tool_calls,
-                            &mut context_messages,
+                            &mut turn,
                             &session,
                             thread_id,
                             message,
                             &job_ctx,
                             advisor_call_budget.as_ref(),
-                            &mut advisor_state,
                             &identity,
                             routed_agent_workspace_id,
                             routed_allowed_tools.as_deref(),
                             routed_allowed_skills.as_deref(),
                             blocked_signature,
-                            &mut last_call_signature,
-                            &mut consecutive_same_calls,
-                            &mut generated_attachments,
                         )
                         .await?
                     {
-                        return Ok(result.with_generated_attachments(&generated_attachments));
+                        return Ok(result.with_generated_attachments(&turn.generated_attachments));
                     }
                 }
             }

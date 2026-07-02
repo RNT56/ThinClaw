@@ -1,163 +1,92 @@
 //! Shared cross-surface command vocabulary.
+//!
+//! The help table and the TUI's forwarded/autocomplete command lists are
+//! generated from the single [`crate::command_registry::COMMAND_REGISTRY`]
+//! table, so the three surfaces cannot drift from each other.
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-#[derive(Clone, Copy)]
-struct CommandEntry {
-    command: &'static str,
-    description: &'static str,
+use crate::command_registry::{self, CommandSpec};
+
+/// Help-table sections, identified by which registry entries belong in them.
+/// Order matches the historical section layout.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HelpSection {
+    System,
+    Session,
+    Identity,
+    Memory,
+    Skills,
+    Agent,
 }
 
-const SYSTEM_COMMANDS: &[CommandEntry] = &[
-    CommandEntry {
-        command: "/help",
-        description: "Show this help",
-    },
-    CommandEntry {
-        command: "/status",
-        description: "Session status, context usage, model info",
-    },
-    CommandEntry {
-        command: "/context",
-        description: "List injected context sources",
-    },
-    CommandEntry {
-        command: "/context detail",
-        description: "Show full injected context",
-    },
-    CommandEntry {
-        command: "/model [name]",
-        description: "Show or switch the active model",
-    },
-    CommandEntry {
-        command: "/rollback ...",
-        description: "Filesystem rollback command family",
-    },
-    CommandEntry {
-        command: "/version",
-        description: "Show version info",
-    },
-    CommandEntry {
-        command: "/tools",
-        description: "List available tools",
-    },
-    CommandEntry {
-        command: "/debug",
-        description: "Toggle debug mode",
-    },
-    CommandEntry {
-        command: "/ping",
-        description: "Connectivity check",
-    },
-];
+fn help_section_for(name: &str) -> HelpSection {
+    match name {
+        "/help" | "/status" | "/context" | "/model" | "/rollback" | "/version" | "/tools"
+        | "/debug" | "/ping" => HelpSection::System,
+        "/undo" | "/redo" | "/compress" | "/clear" | "/interrupt" | "/new" | "/thread new"
+        | "/thread <id>" | "/resume <id>" => HelpSection::Session,
+        "/identity" | "/personality" | "/skin" => HelpSection::Identity,
+        "/memory" | "/heartbeat" | "/summarize" | "/suggest" => HelpSection::Memory,
+        "/skills" => HelpSection::Skills,
+        "/restart" | "/quit" => HelpSection::Agent,
+        other => unreachable!("unassigned help section for command {other:?}"),
+    }
+}
 
-const SESSION_COMMANDS: &[CommandEntry] = &[
-    CommandEntry {
-        command: "/undo",
-        description: "Undo last turn",
-    },
-    CommandEntry {
-        command: "/redo",
-        description: "Redo undone turn",
-    },
-    CommandEntry {
-        command: "/compress",
-        description: "Compress the context window (`/compact` alias)",
-    },
-    CommandEntry {
-        command: "/clear",
-        description: "Clear current thread",
-    },
-    CommandEntry {
-        command: "/interrupt",
-        description: "Stop current operation between tool iterations",
-    },
-    CommandEntry {
-        command: "/new",
-        description: "Start a new conversation thread",
-    },
-    CommandEntry {
-        command: "/thread new",
-        description: "Start a new conversation thread",
-    },
-    CommandEntry {
-        command: "/thread <id>",
-        description: "Switch to a thread",
-    },
-    CommandEntry {
-        command: "/resume <id>",
-        description: "Resume from a checkpoint",
-    },
-];
+/// Display label for a help-listed command. A handful of commands show
+/// extra usage hints (`[name]`, `...`, `<id>`) that aren't part of the
+/// matchable command name itself.
+fn help_label(spec: &CommandSpec) -> &'static str {
+    match spec.name {
+        "/context" => "/context",
+        "/model" => "/model [name]",
+        "/rollback" => "/rollback ...",
+        "/personality" => "/personality [name]",
+        "/skin" => "/skin [name]",
+        other => other,
+    }
+}
 
-const IDENTITY_COMMANDS: &[CommandEntry] = &[
-    CommandEntry {
-        command: "/identity",
-        description: "Show the active agent name, base pack, skin, and session overlay",
-    },
-    CommandEntry {
-        command: "/personality [name]",
-        description: "Set, show, or clear a temporary session personality (`/vibe` alias)",
-    },
-    CommandEntry {
-        command: "/skin [name]",
-        description: "Show or describe the configured CLI skin",
-    },
-];
+fn help_entries_for(section: HelpSection) -> Vec<(&'static str, &'static str)> {
+    let mut out: Vec<(&'static str, &'static str)> = command_registry::help_entries()
+        .filter(|spec| help_section_for(spec.name) == section)
+        .map(|spec| (help_label(spec), spec.help_text))
+        .collect();
 
-const MEMORY_COMMANDS: &[CommandEntry] = &[
-    CommandEntry {
-        command: "/memory",
-        description: "Summarize memory, recall, learning, and continuity surfaces",
-    },
-    CommandEntry {
-        command: "/heartbeat",
-        description: "Run the heartbeat check",
-    },
-    CommandEntry {
-        command: "/summarize",
-        description: "Summarize the current thread",
-    },
-    CommandEntry {
-        command: "/suggest",
-        description: "Suggest next steps",
-    },
-];
+    // `/context detail` is a usage variant of `/context`, not its own
+    // registry entry; keep it directly under `/context` in the System
+    // section like the original hand-written table did.
+    if section == HelpSection::System
+        && let Some(pos) = out.iter().position(|(label, _)| *label == "/context")
+    {
+        out.insert(pos + 1, ("/context detail", "Show full injected context"));
+    }
 
-const SKILL_COMMANDS: &[CommandEntry] = &[CommandEntry {
-    command: "/skills",
-    description: "List installed skills or search the registry",
-}];
+    out
+}
 
-const AGENT_COMMANDS: &[CommandEntry] = &[
-    CommandEntry {
-        command: "/restart",
-        description: "Restart the agent process",
-    },
-    CommandEntry {
-        command: "/quit",
-        description: "Exit the current client",
-    },
-];
-
-fn render_section(title: &str, commands: &[CommandEntry]) -> String {
+fn render_section(title: &str, entries: &[(&'static str, &'static str)]) -> String {
     let mut lines = vec![format!("{title}:")];
-    for command in commands {
-        lines.push(format!("  {:<22} {}", command.command, command.description));
+    for (command, description) in entries {
+        lines.push(format!("  {:<22} {}", command, description));
     }
     lines.join("\n")
 }
 
 pub fn agent_help_text() -> String {
     [
-        render_section("System", SYSTEM_COMMANDS),
-        render_section("Session", SESSION_COMMANDS),
-        render_section("Identity & Personality", IDENTITY_COMMANDS),
-        render_section("Memory & Growth", MEMORY_COMMANDS),
-        render_section("Skills", SKILL_COMMANDS),
-        render_section("Agent", AGENT_COMMANDS),
+        render_section("System", &help_entries_for(HelpSection::System)),
+        render_section("Session", &help_entries_for(HelpSection::Session)),
+        render_section(
+            "Identity & Personality",
+            &help_entries_for(HelpSection::Identity),
+        ),
+        render_section("Memory & Growth", &help_entries_for(HelpSection::Memory)),
+        render_section("Skills", &help_entries_for(HelpSection::Skills)),
+        render_section("Agent", &help_entries_for(HelpSection::Agent)),
     ]
     .join("\n\n")
 }
@@ -671,90 +600,49 @@ Local TUI:\n\
   PageUp/Down            Scroll the conversation\n\
   Tab                    Autocomplete commands\n\
   Home/End               Jump to start/end of input",
-        render_section("Shared system", SYSTEM_COMMANDS),
-        render_section("Shared session", SESSION_COMMANDS),
-        render_section("Shared memory & growth", MEMORY_COMMANDS),
+        render_section("Shared system", &help_entries_for(HelpSection::System)),
+        render_section("Shared session", &help_entries_for(HelpSection::Session)),
         render_section(
-            "Shared identity, skills, and agent",
-            &[IDENTITY_COMMANDS, SKILL_COMMANDS, AGENT_COMMANDS].concat()
+            "Shared memory & growth",
+            &help_entries_for(HelpSection::Memory)
         ),
+        render_section("Shared identity, skills, and agent", &{
+            let mut combined = help_entries_for(HelpSection::Identity);
+            combined.extend(help_entries_for(HelpSection::Skills));
+            combined.extend(help_entries_for(HelpSection::Agent));
+            combined
+        }),
     )
 }
 
+/// TUI-local commands that never appear in the shared submission-parser
+/// vocabulary (they are handled entirely inside the TUI, e.g. job shortcuts
+/// or view controls), plus the `/thread` and `/resume` prefix tokens which
+/// the registry only tracks as usage-hint help labels
+/// (`/thread new`, `/thread <id>`, `/resume <id>`).
+const TUI_ONLY_FORWARDED: &[&str] = &["/job", "/cancel", "/list", "/thread", "/resume"];
+
+const TUI_ONLY_AUTOCOMPLETE: &[&str] = &[
+    "/back", "/close", "/dismiss", "/top", "/bottom", "/reset", "/think", "/job", "/cancel",
+    "/list", "/thread", "/resume", "/cls",
+];
+
 pub fn tui_forwarded_commands() -> &'static [&'static str] {
-    &[
-        "/undo",
-        "/redo",
-        "/job",
-        "/cancel",
-        "/list",
-        "/compress",
-        "/compact",
-        "/model",
-        "/models",
-        "/version",
-        "/tools",
-        "/context",
-        "/ping",
-        "/thread",
-        "/resume",
-        "/restart",
-        "/rollback",
-        "/identity",
-        "/memory",
-        "/skills",
-        "/heartbeat",
-        "/summarize",
-        "/suggest",
-        "/personality",
-        "/vibe",
-    ]
+    static COMMANDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    COMMANDS.get_or_init(|| {
+        let mut names: Vec<&'static str> = command_registry::forwarded_names().collect();
+        names.extend_from_slice(TUI_ONLY_FORWARDED);
+        names
+    })
 }
 
 pub fn tui_autocomplete_commands() -> &'static [&'static str] {
-    &[
-        "/help",
-        "/back",
-        "/close",
-        "/dismiss",
-        "/top",
-        "/bottom",
-        "/clear",
-        "/new",
-        "/reset",
-        "/exit",
-        "/quit",
-        "/think",
-        "/status",
-        "/interrupt",
-        "/undo",
-        "/redo",
-        "/compress",
-        "/compact",
-        "/context",
-        "/model",
-        "/models",
-        "/version",
-        "/tools",
-        "/thread",
-        "/resume",
-        "/restart",
-        "/ping",
-        "/job",
-        "/cancel",
-        "/list",
-        "/rollback",
-        "/identity",
-        "/memory",
-        "/skills",
-        "/heartbeat",
-        "/summarize",
-        "/suggest",
-        "/personality",
-        "/vibe",
-        "/skin",
-        "/cls",
-    ]
+    static COMMANDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    COMMANDS.get_or_init(|| {
+        let mut names: Vec<&'static str> = command_registry::autocomplete_names().collect();
+        names.extend_from_slice(TUI_ONLY_AUTOCOMPLETE);
+        names
+    })
 }
 
 #[cfg(test)]
@@ -766,6 +654,40 @@ mod tests {
         assert_eq!(format_count(42, "downloads"), "42 downloads");
         assert_eq!(format_count(1_250, "downloads"), "1.2K downloads");
         assert_eq!(format_count(1_250_000, "downloads"), "1.2M downloads");
+    }
+
+    /// Regression test for command-vocabulary drift: every registry command
+    /// flagged `tui_forwarded`/`tui_autocomplete` must actually show up in
+    /// the generated TUI lists. This previously drifted twice: `/debug` was
+    /// help-listed but missing from `tui_autocomplete_commands()`, and
+    /// `/skin` was autocompletable but missing from
+    /// `tui_forwarded_commands()`.
+    #[test]
+    fn help_forwarded_and_autocomplete_lists_stay_consistent_with_registry() {
+        let forwarded = tui_forwarded_commands();
+        let autocomplete = tui_autocomplete_commands();
+
+        for spec in command_registry::COMMAND_REGISTRY {
+            if spec.tui_forwarded {
+                assert!(
+                    forwarded.contains(&spec.name),
+                    "{:?} is flagged tui_forwarded but missing from tui_forwarded_commands()",
+                    spec.name
+                );
+            }
+            if spec.tui_autocomplete {
+                assert!(
+                    autocomplete.contains(&spec.name),
+                    "{:?} is flagged tui_autocomplete but missing from tui_autocomplete_commands()",
+                    spec.name
+                );
+            }
+        }
+
+        // The two drift items the registry design fixes: /debug is
+        // autocompletable, and /skin is forwarded.
+        assert!(autocomplete.contains(&"/debug"));
+        assert!(forwarded.contains(&"/skin"));
     }
 
     #[test]

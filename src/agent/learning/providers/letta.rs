@@ -46,13 +46,10 @@ impl MemoryProvider for LettaProvider {
             "/v1/agents/{agent_id}/archival-memory/search",
         );
         let url = provider_join_url(&base_url, &path);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|error| error.to_string())?;
         let request = apply_provider_auth(
-            client
+            shared_http_client()
                 .get(&url)
+                .timeout(std::time::Duration::from_secs(15))
                 .query(&[("query", query.to_string()), ("topK", limit.to_string())]),
             &provider.config,
             "bearer",

@@ -40,16 +40,25 @@ pub struct OutcomeService {
     workspace: Option<Arc<Workspace>>,
     skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
     routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
+    /// Built once (in `new`, and rebuilt in `with_learning_context` once the
+    /// routine engine is known) instead of per `route_outcome_candidate` call.
+    /// `route_outcome_candidate` runs once per evaluated candidate, so a
+    /// service processing a batch used to construct a fresh
+    /// `LearningOrchestrator` (and `MemoryProviderManager`) per candidate.
+    learning_orchestrator: Arc<LearningOrchestrator>,
 }
 
 impl OutcomeService {
     pub fn new(store: Arc<dyn Database>, cheap_llm: Option<Arc<dyn LlmProvider>>) -> Self {
+        let learning_orchestrator =
+            Arc::new(LearningOrchestrator::new(Arc::clone(&store), None, None));
         Self {
             store,
             cheap_llm,
             workspace: None,
             skill_registry: None,
             routine_engine: None,
+            learning_orchestrator,
         }
     }
 
@@ -59,6 +68,18 @@ impl OutcomeService {
         skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
         routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
     ) -> Self {
+        // Reuse the existing orchestrator's MemoryProviderManager (pooled
+        // client + readiness cache) rather than starting a new one, even
+        // though workspace/skill_registry/routine_engine are changing here.
+        self.learning_orchestrator = Arc::new(
+            LearningOrchestrator::with_provider_manager(
+                Arc::clone(&self.store),
+                workspace.clone(),
+                skill_registry.clone(),
+                self.learning_orchestrator.memory_provider_manager(),
+            )
+            .with_routine_engine(routine_engine.clone()),
+        );
         self.workspace = workspace;
         self.skill_registry = skill_registry;
         self.routine_engine = routine_engine;
@@ -352,13 +373,8 @@ impl OutcomeService {
     }
 
     async fn route_outcome_candidate(&self, candidate: &LearningCandidate) -> Result<(), String> {
-        let orchestrator = LearningOrchestrator::new(
-            Arc::clone(&self.store),
-            self.workspace.clone(),
-            self.skill_registry.clone(),
-        )
-        .with_routine_engine(self.routine_engine.clone());
-        let outcome = orchestrator
+        let outcome = self
+            .learning_orchestrator
             .route_existing_candidate(EVALUATOR_OUTCOME, candidate)
             .await?;
         tracing::debug!(

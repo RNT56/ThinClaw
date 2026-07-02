@@ -1086,12 +1086,32 @@ CREATE TABLE IF NOT EXISTS routine_runs (
     result_summary TEXT,
     tokens_used INTEGER,
     job_id TEXT REFERENCES agent_jobs(id),
+    lease_expires_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id);
 CREATE INDEX IF NOT EXISTS idx_routine_runs_routine_trigger_key
     ON routine_runs(routine_id, trigger_key);
+
+-- Durable ledger for in-process sub-agent runs (SubagentExecutor). Without
+-- this, running sub-agents live only in an in-memory map and a process
+-- restart silently drops in-flight delegated work — including any routine
+-- run they were finalizing.
+CREATE TABLE IF NOT EXISTS subagent_runs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    task TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    parent_thread_id TEXT,
+    routine_run_id TEXT,
+    spawned_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_status ON subagent_runs(status);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_routine_run ON subagent_runs(routine_run_id);
 
 CREATE TABLE IF NOT EXISTS routine_event_inbox (
     id TEXT PRIMARY KEY,
@@ -1232,6 +1252,7 @@ CREATE INDEX IF NOT EXISTS idx_routines_event_triggers ON routines(user_id);
 
 -- routine_runs
 CREATE INDEX IF NOT EXISTS idx_routine_runs_status ON routine_runs(status);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_lease_expires ON routine_runs(lease_expires_at) WHERE status = 'running';
 
 -- heartbeat_state
 CREATE INDEX IF NOT EXISTS idx_heartbeat_next_run ON heartbeat_state(next_run);
@@ -1752,6 +1773,32 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         version: 21,
         description: "Add routine trigger queue routine index",
         sql: "CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_routine_created ON routine_trigger_queue(routine_id, created_at DESC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 27,
+        description: "Add routine run lease expiry column",
+        sql: "ALTER TABLE routine_runs ADD COLUMN lease_expires_at TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 27,
+        description: "Add routine run lease expiry index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_routine_runs_lease_expires ON routine_runs(lease_expires_at) WHERE status = 'running'",
+    },
+    // ── V28: durable sub-agent run ledger ────────────────────────────────
+    LibsqlColumnUpgrade {
+        version: 28,
+        description: "Create subagent_runs table",
+        sql: "CREATE TABLE IF NOT EXISTS subagent_runs (id TEXT PRIMARY KEY, name TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running', parent_thread_id TEXT, routine_run_id TEXT, spawned_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT, error TEXT)",
+    },
+    LibsqlColumnUpgrade {
+        version: 28,
+        description: "Index subagent_runs status",
+        sql: "CREATE INDEX IF NOT EXISTS idx_subagent_runs_status ON subagent_runs(status)",
+    },
+    LibsqlColumnUpgrade {
+        version: 28,
+        description: "Index subagent_runs routine_run_id",
+        sql: "CREATE INDEX IF NOT EXISTS idx_subagent_runs_routine_run ON subagent_runs(routine_run_id)",
     },
 ];
 

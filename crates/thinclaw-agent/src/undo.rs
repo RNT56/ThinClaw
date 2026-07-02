@@ -13,6 +13,11 @@ use thinclaw_llm_core::ChatMessage;
 /// Maximum number of checkpoints to keep by default.
 const DEFAULT_MAX_CHECKPOINTS: usize = 20;
 
+/// Maximum number of checkpoints persisted into the durable thread runtime
+/// envelope. Checkpoints carry full message history, so persistence keeps
+/// only the newest few rather than the full in-memory `max_checkpoints`.
+pub const MAX_PERSISTED_CHECKPOINTS: usize = 5;
+
 /// A snapshot of conversation state at a point in time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -201,6 +206,25 @@ impl UndoManager {
         self.redo_stack.clear();
     }
 
+    /// Snapshot the newest `max` undo checkpoints (oldest to newest) for
+    /// durable persistence. The redo stack is intentionally not persisted:
+    /// it represents speculative future state that is safe to drop across a
+    /// restart, whereas the undo stack is what `/undo` needs to keep working.
+    pub fn persisted_checkpoints(&self, max: usize) -> Vec<Checkpoint> {
+        let skip = self.undo_stack.len().saturating_sub(max);
+        self.undo_stack.iter().skip(skip).cloned().collect()
+    }
+
+    /// Rebuild an undo manager from a persisted (already capped) checkpoint
+    /// list, preserving this manager's configured checkpoint limit.
+    pub fn restore_from_checkpoints(&mut self, checkpoints: Vec<Checkpoint>) {
+        self.undo_stack = checkpoints.into_iter().collect();
+        while self.undo_stack.len() > self.max_checkpoints {
+            self.undo_stack.pop_front();
+        }
+        self.redo_stack.clear();
+    }
+
     /// Restore to a specific checkpoint by ID.
     ///
     /// This invalidates all checkpoints after this one.
@@ -346,6 +370,73 @@ mod tests {
             .undo(cp_redo.turn_number, cp_redo.messages)
             .expect("second undo should succeed");
         assert_eq!(cp_undo2.turn_number, 1);
+    }
+
+    #[test]
+    fn test_persisted_checkpoints_caps_to_newest() {
+        let mut manager = UndoManager::new();
+        for i in 0..8 {
+            manager.checkpoint(i, vec![], format!("Turn {}", i));
+        }
+        assert_eq!(manager.undo_count(), 8);
+
+        let persisted = manager.persisted_checkpoints(MAX_PERSISTED_CHECKPOINTS);
+        assert_eq!(persisted.len(), MAX_PERSISTED_CHECKPOINTS);
+        // Newest checkpoints (turns 3..=7) should be kept, oldest-first order preserved.
+        let turn_numbers: Vec<usize> = persisted.iter().map(|c| c.turn_number).collect();
+        assert_eq!(turn_numbers, vec![3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_persisted_checkpoints_smaller_than_cap_returns_all() {
+        let mut manager = UndoManager::new();
+        manager.checkpoint(0, vec![], "Turn 0");
+        manager.checkpoint(1, vec![], "Turn 1");
+
+        let persisted = manager.persisted_checkpoints(MAX_PERSISTED_CHECKPOINTS);
+        assert_eq!(persisted.len(), 2);
+    }
+
+    #[test]
+    fn test_undo_stack_round_trips_through_serialization_with_cap() {
+        let mut manager = UndoManager::new();
+        for i in 0..8 {
+            manager.checkpoint(
+                i,
+                vec![ChatMessage::user(format!("msg-{i}"))],
+                format!("Turn {}", i),
+            );
+        }
+
+        let persisted = manager.persisted_checkpoints(MAX_PERSISTED_CHECKPOINTS);
+        let json = serde_json::to_string(&persisted).expect("serialize checkpoints");
+        let decoded: Vec<Checkpoint> =
+            serde_json::from_str(&json).expect("deserialize checkpoints");
+        assert_eq!(decoded.len(), MAX_PERSISTED_CHECKPOINTS);
+
+        let mut restored = UndoManager::new();
+        restored.restore_from_checkpoints(decoded);
+        assert_eq!(restored.undo_count(), MAX_PERSISTED_CHECKPOINTS);
+        assert!(!restored.can_redo());
+
+        // The restored stack should walk backwards through the newest
+        // checkpoints, most recent first.
+        let cp = restored
+            .undo(8, vec![])
+            .expect("undo should succeed after restore");
+        assert_eq!(cp.turn_number, 7);
+    }
+
+    #[test]
+    fn test_restore_from_checkpoints_respects_max_checkpoints_limit() {
+        let mut manager = UndoManager::new().with_max_checkpoints(3);
+        let checkpoints: Vec<Checkpoint> = (0..5)
+            .map(|i| Checkpoint::new(i, vec![], format!("Turn {}", i)))
+            .collect();
+
+        manager.restore_from_checkpoints(checkpoints);
+
+        assert_eq!(manager.undo_count(), 3);
     }
 
     #[test]

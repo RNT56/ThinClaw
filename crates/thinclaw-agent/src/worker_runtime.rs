@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use thinclaw_llm_core::{ChatMessage, Role};
+use thinclaw_llm_core::{ChatMessage, Role, ToolDefinition};
 use thinclaw_types::JobState;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -252,8 +252,72 @@ to see them directly.
 You can also use the `canvas` tool to display rich structured content (tables, panels, etc.) \
 in the user's UI.
 
-Report when the job is complete or if you encounter issues you cannot resolve.{identity_section}"#
+IMPORTANT: When the job is done (or you have gone as far as you can and need to stop), call \
+the `{WORKER_COMPLETE_JOB_TOOL_NAME}` tool with a short summary of what you did. This is the \
+reliable way to end the job — do not just describe completion in plain text and stop calling \
+tools, since that may not be recognized.{identity_section}"#
     )
+}
+
+/// Name of the synthetic tool workers can call to explicitly signal job
+/// completion, instead of relying on the LLM's free text matching
+/// `llm_signals_completion` phrase patterns.
+pub const WORKER_COMPLETE_JOB_TOOL_NAME: &str = "complete_job";
+
+/// Description surfaced to the LLM for the `complete_job` tool.
+pub const WORKER_COMPLETE_JOB_TOOL_DESCRIPTION: &str = "Signal that this job is finished. Call \
+this exactly once when you have completed the assigned work (or have determined you cannot \
+make further progress and should stop). Provide a short summary of what was done or why you \
+are stopping. This is the authoritative way to end a job — do not rely on describing \
+completion in plain text alone.";
+
+/// Build the synthetic `complete_job` tool definition injected into the
+/// worker's tool list. This tool is intercepted directly in the worker's
+/// tool-execution path (like `emit_user_message`) and is never dispatched
+/// to the tool registry.
+pub fn complete_job_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: WORKER_COMPLETE_JOB_TOOL_NAME.to_string(),
+        description: WORKER_COMPLETE_JOB_TOOL_DESCRIPTION.to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "A short summary of what was accomplished, or why the job is being stopped.",
+                },
+                "success": {
+                    "type": "boolean",
+                    "description": "Whether the job completed successfully. Defaults to true.",
+                },
+            },
+            "required": ["summary"],
+        }),
+    }
+}
+
+/// Outcome parsed from a `complete_job` tool call's arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompleteJobOutcome {
+    pub summary: String,
+    pub success: bool,
+}
+
+/// Parse the arguments of a `complete_job` tool call into a
+/// [`CompleteJobOutcome`]. `success` defaults to `true` when absent so a
+/// model that only provides `summary` still completes the job normally.
+pub fn parse_complete_job_arguments(arguments: &serde_json::Value) -> CompleteJobOutcome {
+    let summary = arguments
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Job completed")
+        .to_string();
+    let success = arguments
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    CompleteJobOutcome { summary, success }
 }
 
 pub fn heartbeat_iteration_exhausted_summary(max_iterations: usize) -> String {
@@ -543,6 +607,57 @@ mod tests {
         assert_eq!(outcome.summary, "Job completed successfully");
         assert_eq!(outcome.job_user_id.as_deref(), Some("user"));
         assert_eq!(outcome.job_actor_id.as_deref(), Some("actor"));
+    }
+
+    #[test]
+    fn complete_job_tool_definition_parses_and_serializes() {
+        let def = complete_job_tool_definition();
+        assert_eq!(def.name, WORKER_COMPLETE_JOB_TOOL_NAME);
+        assert_eq!(def.name, "complete_job");
+        assert!(!def.description.is_empty());
+
+        let json = serde_json::to_string(&def).expect("tool definition should serialize");
+        let round_tripped: thinclaw_llm_core::ToolDefinition =
+            serde_json::from_str(&json).expect("tool definition should deserialize");
+        assert_eq!(round_tripped.name, def.name);
+        assert_eq!(round_tripped.description, def.description);
+        assert_eq!(round_tripped.parameters, def.parameters);
+
+        // Parameters must describe a valid JSON schema object with a
+        // required `summary` field and an optional `success` field.
+        assert_eq!(def.parameters["type"], "object");
+        assert_eq!(def.parameters["required"], serde_json::json!(["summary"]));
+        assert!(def.parameters["properties"]["summary"].is_object());
+        assert!(def.parameters["properties"]["success"].is_object());
+    }
+
+    #[test]
+    fn parse_complete_job_arguments_defaults_success_true() {
+        let args = serde_json::json!({ "summary": "Did the thing" });
+        let outcome = parse_complete_job_arguments(&args);
+        assert_eq!(outcome.summary, "Did the thing");
+        assert!(outcome.success);
+    }
+
+    #[test]
+    fn parse_complete_job_arguments_honors_explicit_failure() {
+        let args = serde_json::json!({ "summary": "Could not finish", "success": false });
+        let outcome = parse_complete_job_arguments(&args);
+        assert_eq!(outcome.summary, "Could not finish");
+        assert!(!outcome.success);
+    }
+
+    #[test]
+    fn parse_complete_job_arguments_falls_back_when_summary_missing() {
+        let outcome = parse_complete_job_arguments(&serde_json::json!({}));
+        assert_eq!(outcome.summary, "Job completed");
+        assert!(outcome.success);
+    }
+
+    #[test]
+    fn worker_system_prompt_instructs_model_to_call_complete_job() {
+        let prompt = build_worker_system_prompt("title", "description", None);
+        assert!(prompt.contains(WORKER_COMPLETE_JOB_TOOL_NAME));
     }
 
     #[test]

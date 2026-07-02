@@ -5,14 +5,14 @@ use std::sync::Arc;
 use thinclaw_agent::ports::{
     ChannelStatusPort, HookDispatchPort, LearningOutcomesPort, ModelOverridePort,
     RoutineExecutionPort, RoutineStorePort, SettingsPort, SkillContextPort, ThreadStorePort,
-    ToolExecutionPort, WorkspacePromptAssemblyPort,
+    ToolExecutionPort,
 };
 use tokio::sync::RwLock;
 
 use crate::agent::{
     RootChannelStatusPort, RootHookDispatchPort, RootLearningOutcomesPort, RootModelOverridePort,
     RootRoutineExecutionPort, RootRoutineStorePort, RootSettingsPort, RootSkillContextPort,
-    RootThreadStorePort, RootToolExecutionPort, RootWorkspacePromptAssemblyPort,
+    RootThreadStorePort, RootToolExecutionPort,
 };
 use crate::channels::ChannelManager;
 use crate::config::SkillsConfig;
@@ -34,7 +34,6 @@ pub struct RootAgentRuntimePorts {
     pub model_overrides: Option<Arc<dyn ModelOverridePort>>,
     pub learning_outcomes: Option<Arc<dyn LearningOutcomesPort>>,
     pub skills: Option<Arc<dyn SkillContextPort>>,
-    pub prompt_assembly: Arc<dyn WorkspacePromptAssemblyPort>,
     pub settings: Option<Arc<dyn SettingsPort>>,
     pub threads: Option<Arc<dyn ThreadStorePort>>,
     pub routines: Option<Arc<dyn RoutineStorePort>>,
@@ -63,7 +62,6 @@ impl RootAgentRuntimePorts {
                 .map(|store| RootLearningOutcomesPort::shared(Arc::clone(store))),
             skills: skill_registry
                 .map(|registry| RootSkillContextPort::shared(registry, skills_config)),
-            prompt_assembly: RootWorkspacePromptAssemblyPort::shared(),
             settings: store
                 .as_ref()
                 .map(|store| RootSettingsPort::shared(Arc::clone(store))),
@@ -96,7 +94,6 @@ mod tests {
             model_overrides: None,
             learning_outcomes: None,
             skills: None,
-            prompt_assembly: RootWorkspacePromptAssemblyPort::shared(),
             settings: None,
             threads: None,
             routines: None,

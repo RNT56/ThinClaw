@@ -6,12 +6,12 @@ use uuid::Uuid;
 
 use thinclaw_llm_core::ChatMessage;
 
-use crate::ports::{PortableThreadState, ThreadRuntimeSnapshot, ThreadStorePort};
+use crate::ports::{PortableThreadState, ThreadMessage, ThreadRuntimeSnapshot, ThreadStorePort};
 use crate::session::{
     PendingApproval, PendingAuth, PendingAuthMode, Thread, ThreadState,
     message_hides_user_input_in_main_chat,
 };
-use crate::undo::UndoManager;
+use crate::undo::{Checkpoint, UndoManager};
 use thinclaw_types::error::DatabaseError;
 
 pub const DIRECT_THREAD_ROLE_KEY: &str = "direct_thread_role";
@@ -257,7 +257,15 @@ pub fn runtime_snapshot_for_persistence(
         runtime.ephemeral_overlay_hash = existing.ephemeral_overlay_hash.clone();
         runtime.prompt_segment_order = existing.prompt_segment_order.clone();
         runtime.provider_context_refs = existing.provider_context_refs.clone();
+        runtime.undo_checkpoints = existing.undo_checkpoints.clone();
     }
+    // The active-message watermark always tracks the live in-memory thread:
+    // every persisted turn grows it (1 row per user message, 1 more once the
+    // assistant responds), and `/undo`/`/redo`/`/clear` set it explicitly via
+    // `set_active_message_row_count` right after they mutate `thread.turns`.
+    // Recomputing it here keeps normal turns from leaving a stale, too-small
+    // watermark in place after an earlier undo.
+    runtime.active_message_row_count = Some(thread.messages().len() as i64);
 
     runtime
 }
@@ -625,6 +633,45 @@ pub async fn clear_thread_runtime_transients(
         if runtime.state == PortableThreadState::AwaitingApproval {
             runtime.state = PortableThreadState::Idle;
         }
+    })
+    .await
+}
+
+/// Truncate durable conversation rows to the active-message watermark
+/// before they are replayed into an in-memory thread.
+///
+/// Rows are ordered oldest-first (as returned by history storage) and the
+/// watermark counts how many of the oldest rows are still "active" after
+/// `/undo`, `/redo`, or `/clear`. `None` (no watermark recorded yet) keeps
+/// every row so pre-existing threads behave exactly as before this field
+/// was introduced. This is pure so it can be unit-tested without a store.
+pub fn truncate_messages_to_watermark(
+    messages: Vec<ThreadMessage>,
+    active_message_row_count: Option<i64>,
+) -> Vec<ThreadMessage> {
+    match active_message_row_count {
+        Some(watermark) => {
+            let keep = usize::try_from(watermark.max(0)).unwrap_or(usize::MAX);
+            messages.into_iter().take(keep).collect()
+        }
+        None => messages,
+    }
+}
+
+/// Persist the active-message watermark and a capped undo-stack snapshot in
+/// one write. Called after `/undo`, `/redo`, `/clear`, and checkpoint resume
+/// mutate the in-memory thread and undo manager, so a restart truncates
+/// rehydrated history to what the user actually sees and `/undo` keeps
+/// working instead of silently losing its stack.
+pub async fn set_active_watermark_and_undo_stack(
+    store: &dyn ThreadStorePort,
+    thread_id: Uuid,
+    active_message_row_count: i64,
+    undo_checkpoints: Vec<Checkpoint>,
+) -> Result<ThreadRuntimeSnapshot, DatabaseError> {
+    mutate_thread_runtime_snapshot(store, thread_id, |runtime| {
+        runtime.active_message_row_count = Some(active_message_row_count);
+        runtime.undo_checkpoints = undo_checkpoints.clone();
     })
     .await
 }
@@ -1092,6 +1139,81 @@ mod tests {
         assert!(runtime.prompt_snapshot_hash.is_none());
         assert!(runtime.prompt_segment_order.is_empty());
         assert!(runtime.provider_context_refs.is_empty());
+    }
+
+    fn sample_thread_message(role: &str, content: &str) -> ThreadMessage {
+        ThreadMessage {
+            id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            role: role.to_string(),
+            content: content.to_string(),
+            actor_id: None,
+            actor_display_name: None,
+            raw_sender_id: None,
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn truncate_messages_to_watermark_keeps_oldest_n_rows() {
+        let messages = vec![
+            sample_thread_message("user", "first"),
+            sample_thread_message("assistant", "first reply"),
+            sample_thread_message("user", "second"),
+            sample_thread_message("assistant", "second reply"),
+        ];
+
+        let truncated = truncate_messages_to_watermark(messages, Some(2));
+        assert_eq!(truncated.len(), 2);
+        assert_eq!(truncated[0].content, "first");
+        assert_eq!(truncated[1].content, "first reply");
+    }
+
+    #[test]
+    fn truncate_messages_to_watermark_zero_clears_history() {
+        let messages = vec![
+            sample_thread_message("user", "first"),
+            sample_thread_message("assistant", "first reply"),
+        ];
+
+        let truncated = truncate_messages_to_watermark(messages, Some(0));
+        assert!(truncated.is_empty());
+    }
+
+    #[test]
+    fn truncate_messages_to_watermark_none_keeps_all_rows() {
+        let messages = vec![
+            sample_thread_message("user", "first"),
+            sample_thread_message("assistant", "first reply"),
+        ];
+
+        let truncated = truncate_messages_to_watermark(messages.clone(), None);
+        assert_eq!(truncated.len(), messages.len());
+    }
+
+    #[test]
+    fn truncate_messages_to_watermark_beyond_len_is_noop() {
+        let messages = vec![sample_thread_message("user", "only")];
+
+        let truncated = truncate_messages_to_watermark(messages.clone(), Some(50));
+        assert_eq!(truncated.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_active_watermark_and_undo_stack_persists_both_fields() {
+        let thread_id = Uuid::new_v4();
+        let store = MemoryThreadStore::new(None);
+        let checkpoints = vec![Checkpoint::new(1, vec![], "Turn 1")];
+
+        let runtime =
+            set_active_watermark_and_undo_stack(&store, thread_id, 2, checkpoints.clone())
+                .await
+                .unwrap();
+
+        assert_eq!(runtime.active_message_row_count, Some(2));
+        assert_eq!(runtime.undo_checkpoints.len(), 1);
+        assert_eq!(runtime.undo_checkpoints[0].turn_number, 1);
     }
 
     #[tokio::test]

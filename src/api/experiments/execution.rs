@@ -589,26 +589,37 @@ pub(super) async fn execute_agent_env_benchmark_trial(
                     case
                 })
                 .collect::<Vec<_>>();
+            // The env scores the agent ACTION's output against each case's
+            // checks. Until a real agent is wired into this trial path, feed
+            // each case's own command as the scripted reference action so the
+            // score measures the harness ceiling instead of a placeholder
+            // string that can never pass verification.
+            let scripted_actions: Vec<AgentAction> = cases
+                .iter()
+                .map(|case| AgentAction::UserMessage {
+                    content: case.command.clone(),
+                })
+                .collect();
             let mut runner = EnvRunner::new(TerminalBenchEnv::new(cases))
                 .with_artifact_root(artifact_dir.join("agent_env_runs"));
             runner
-                .evaluate(1, |_| {
-                    vec![AgentAction::UserMessage {
-                        content: "run terminal_bench".to_string(),
-                    }]
-                })
+                .evaluate(1, move |_| scripted_actions.clone())
                 .await
                 .map_err(|err| ApiError::Internal(err.to_string()))?
         }
         AgentEnvBenchmarkConfig::SkillBench { cases } => {
+            // Reference action per case: the skill content itself, which by
+            // construction satisfies the case's required substrings.
+            let scripted_actions: Vec<AgentAction> = cases
+                .iter()
+                .map(|case| AgentAction::UserMessage {
+                    content: case.skill_content.clone(),
+                })
+                .collect();
             let mut runner = EnvRunner::new(SkillBenchEnv::new(cases))
                 .with_artifact_root(artifact_dir.join("agent_env_runs"));
             runner
-                .evaluate(1, |_| {
-                    vec![AgentAction::UserMessage {
-                        content: "run skill_bench".to_string(),
-                    }]
-                })
+                .evaluate(1, move |_| scripted_actions.clone())
                 .await
                 .map_err(|err| ApiError::Internal(err.to_string()))?
         }

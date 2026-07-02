@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::AgenticLoopResult;
-use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
+use crate::agent::learning::{ImprovementClass, LearningEvent, RiskTier};
 use crate::agent::session::{Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
@@ -181,12 +181,12 @@ impl Agent {
                         None,
                     );
 
-                    if store.insert_learning_event(&event).await.is_ok() {
-                        let orchestrator = LearningOrchestrator::new(
-                            store,
-                            self.workspace().cloned(),
-                            self.skill_registry().cloned(),
-                        );
+                    if store.insert_learning_event(&event).await.is_ok()
+                        // Reuse the agent's shared orchestrator instead of
+                        // constructing a fresh LearningOrchestrator (and
+                        // MemoryProviderManager) on every compaction nudge.
+                        && let Some(orchestrator) = self.learning_orchestrator()
+                    {
                         let _ = orchestrator
                             .handle_event("pre_compaction_memory_nudge", &event)
                             .await;

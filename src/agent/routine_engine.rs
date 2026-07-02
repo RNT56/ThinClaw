@@ -27,13 +27,14 @@ use thinclaw_agent::routine_engine::{
     increment_decision_count, lightweight_routine_messages, render_trigger_payload_block,
     routine_cooldown_allows, routine_event_evaluation_details, routine_event_owner_matches,
     routine_requests_desktop_capabilities, routine_runtime_update_for_run, sanitize_routine_name,
-    scheduled_run_trigger_key, should_continue_queue_drain, should_refresh_event_cache,
-    summarize_runtime_capabilities, truncate,
+    scheduled_run_trigger_key, should_continue_queue_drain, should_jitter_trigger_type,
+    should_refresh_event_cache, summarize_runtime_capabilities, truncate,
 };
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::agent::Scheduler;
+use crate::agent::cron_stagger::{FinishedRunPayload, StaggerConfig};
 use crate::agent::outcomes;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventDecision,
@@ -89,6 +90,12 @@ pub struct RoutineEngine {
 
 const EVENT_QUEUE_BATCH_LIMIT: i64 = 64;
 const TRIGGER_QUEUE_BATCH_LIMIT: i64 = 64;
+
+/// Initial DB lease window (seconds) set on a routine run at spawn time,
+/// before the worker/subagent (or lightweight inline execution) has had a
+/// chance to renew it. Generous enough to cover engine scheduling jitter
+/// and job-dispatch latency without masking a genuinely dead run for long.
+const INITIAL_ROUTINE_RUN_LEASE_SECS: i64 = 300;
 
 #[derive(Clone)]
 struct CachedEventRoutine {
@@ -1067,6 +1074,24 @@ impl RoutineEngine {
                 reason: format!("failed to create run record: {error}"),
             })?;
 
+        // Set an initial lease immediately at spawn so the run is protected
+        // from the zombie reaper from the moment it's created — lightweight
+        // and immediate runs may otherwise sit with no lease for a moment
+        // before the worker/subagent takes over and starts renewing it.
+        // `INITIAL_ROUTINE_RUN_LEASE_SECS` only needs to cover the window
+        // until the first renewal; workers/subagents extend it from there.
+        if let Err(error) = self
+            .store
+            .renew_routine_run_lease(run.id, INITIAL_ROUTINE_RUN_LEASE_SECS)
+            .await
+        {
+            tracing::warn!(
+                routine = %routine.name,
+                run_id = %run.id,
+                "Failed to set initial routine run lease: {}", error
+            );
+        }
+
         let engine = EngineContext {
             store: self.store.clone(),
             llm: self.llm.clone(),
@@ -1082,7 +1107,19 @@ impl RoutineEngine {
         let routine_name = routine.name.clone();
         let run_id = run.id;
         let run_for_task = run.clone();
+        // IC-CRON-STAGGER: add random jitter before cron-triggered fires so a
+        // post-downtime backlog of due cron routines doesn't thundering-herd
+        // the LLM backend the moment the engine catches up. Other trigger
+        // kinds (event, manual, system_event) fire immediately as before.
+        let cron_jitter = if should_jitter_trigger_type(trigger_type) {
+            StaggerConfig::from_env().jitter_delay()
+        } else {
+            std::time::Duration::ZERO
+        };
         self.spawn_tracked_task(&routine_name, async move {
+            if !cron_jitter.is_zero() {
+                tokio::time::sleep(cron_jitter).await;
+            }
             execute_routine(engine, routine, run_for_task).await;
         })
         .map_err(|reason| RoutineError::ExecutionFailed { reason })?;
@@ -1099,13 +1136,23 @@ impl RoutineEngine {
         tracing::info!("Aborted all running routine tasks");
     }
 
-    /// IC-006: Reap zombie routine runs that have exceeded the 10-minute TTL.
+    /// IC-006: Reap zombie routine runs whose lease has expired.
     ///
     /// Pure DB cleanup — marks stale `running` rows as `failed`. No in-memory
     /// counter manipulation needed because the DB is the single source of
     /// truth for global concurrency gating.
+    ///
+    /// Runs with a live lease are never reaped regardless of age — workers
+    /// and subagents renew the lease while actively executing. Legacy rows
+    /// with no lease at all fall back to
+    /// [`crate::db::DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS`] instead of the old
+    /// hardcoded 10-minute cutoff.
     pub async fn reap_zombie_runs(&self) {
-        match self.store.cleanup_stale_routine_runs().await {
+        match self
+            .store
+            .cleanup_stale_routine_runs(crate::db::DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS)
+            .await
+        {
             Ok(reaped) => {
                 if reaped > 0 {
                     tracing::info!("IC-006: Reaped {} zombie routine runs", reaped);
@@ -1493,6 +1540,26 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         .await
     {
         tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
+    }
+
+    // IC-CRON-STAGGER: notify an optional external webhook that this run
+    // finished, if CRON_FINISHED_WEBHOOK is configured. Fire-and-forget —
+    // webhook delivery failures are logged but never affect run outcome.
+    if let Some(webhook_url) = StaggerConfig::from_env().finished_webhook_url {
+        let payload = FinishedRunPayload {
+            routine_id: routine.id.to_string(),
+            routine_name: routine.name.clone(),
+            success: status != RunStatus::Failed,
+            duration_ms: Utc::now()
+                .signed_duration_since(run.started_at)
+                .num_milliseconds()
+                .max(0) as u64,
+            error: summary.clone().filter(|_| status == RunStatus::Failed),
+            completed_at: Utc::now().to_rfc3339(),
+        };
+        tokio::spawn(async move {
+            crate::agent::cron_stagger::notify_finished_run(&webhook_url, &payload).await;
+        });
     }
 
     let mut completed_run = run.clone();
@@ -1940,11 +2007,19 @@ async fn execute_heartbeat(
                 "Injected heartbeat into main session — dispatcher will process with full context"
             );
 
-            // Return Running — the dispatcher handles completion.
-            // The main session will produce the response (HEARTBEAT_OK or findings).
+            // Complete the run now, as `Ok`. This run's job is delivering the
+            // heartbeat prompt into the main session — that delivery just
+            // succeeded. The dispatcher turn that follows is a normal
+            // conversational turn on the main session, not part of this
+            // routine run, and nothing else ever calls complete_routine_run
+            // for it. Previously this returned `RunStatus::Running` on the
+            // (incorrect) assumption that "the dispatcher handles
+            // completion" — it doesn't, so every main-session heartbeat run
+            // was eventually reaped as a failure by the zombie cleanup,
+            // poisoning run history and downstream learning signals.
             return Ok((
-                RunStatus::Running,
-                Some("Injected into main session — awaiting agent response".to_string()),
+                RunStatus::Ok,
+                Some("Injected into main session".to_string()),
                 None,
             ));
         } else {
@@ -2429,7 +2504,114 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
+    async fn main_session_heartbeat_run_completes_ok_after_injection() {
+        // Regression test for the "every main-session heartbeat run is
+        // eventually reaped as a failure" bug: execute_heartbeat's
+        // light_context=false path used to inject the prompt into the main
+        // session and return RunStatus::Running with a comment claiming
+        // "the dispatcher handles completion" — but nothing ever called
+        // complete_routine_run for these runs, so the zombie reaper marked
+        // every one of them as failed once its TTL elapsed. The fix
+        // completes the run immediately as Ok (delivery of the prompt is
+        // this run's job), independent of however the dispatcher later
+        // processes that injected message.
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        // Seed a non-empty HEARTBEAT.md so execute_heartbeat doesn't take
+        // the "checklist empty — skip" early-return path.
+        workspace
+            .write("HEARTBEAT.md", "- Check server status\n")
+            .await
+            .unwrap();
+
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+        let (system_event_tx, mut system_event_rx) = mpsc::channel(4);
+
+        let engine = RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            Arc::new(StubLlm::new(
+                "unused — main-session injection short-circuits",
+            )),
+            workspace,
+            notify_tx,
+            None,
+        )
+        .with_system_event_tx(system_event_tx);
+
+        let routine = make_test_routine(
+            "main-session-heartbeat",
+            Trigger::Manual,
+            RoutineAction::Heartbeat {
+                light_context: false,
+                prompt: None,
+                include_reasoning: false,
+                active_start_hour: None,
+                active_end_hour: None,
+                target: "chat".to_string(),
+                max_iterations: 5,
+                interval_secs: None,
+            },
+        );
+        db.create_routine(&routine).await.unwrap();
+
+        let run_id = engine.fire_manual(routine.id).await.unwrap();
+
+        // The heartbeat prompt should have been injected into the main
+        // session via system_event_tx.
+        let injected = tokio::time::timeout(Duration::from_secs(2), system_event_rx.recv())
+            .await
+            .expect("heartbeat message should be injected")
+            .expect("system_event_tx should not be closed");
+        assert_eq!(
+            injected
+                .metadata
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            run_id.to_string()
+        );
+
+        // The routine run must reach a terminal `Ok` state on its own —
+        // nothing else (no dispatcher turn) completes it in this test.
+        let mut completed = None;
+        for _ in 0..20 {
+            let runs = db.list_routine_runs(routine.id, 5).await.unwrap();
+            if let Some(run) = runs.into_iter().find(|r| r.id == run_id)
+                && run.status != RunStatus::Running
+            {
+                completed = Some(run);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let completed = completed.expect("heartbeat run should reach a terminal state");
+        assert_eq!(completed.status, RunStatus::Ok);
+        assert_eq!(
+            completed.result_summary.as_deref(),
+            Some("Injected into main session")
+        );
+        assert!(completed.completed_at.is_some());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn cron_ticker_checks_due_routines_immediately_on_startup() {
+        // Cron-triggered fires now go through IC-CRON-STAGGER jitter
+        // (`StaggerConfig::from_env().jitter_delay()`), which defaults to up
+        // to 30s. Pin it to 0 for this test so the short polling window
+        // below stays meaningful — `lock_env` serializes against any other
+        // test in the process that also mutates env vars.
+        let _env_guard = thinclaw_config::helpers::lock_env();
+        unsafe {
+            std::env::set_var("CRON_STAGGER_SECS", "0");
+        }
+
         let (db, _tmp) = test_db().await;
         let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
             "default",
@@ -2473,6 +2655,9 @@ mod tests {
         }
 
         handle.abort();
+        unsafe {
+            std::env::remove_var("CRON_STAGGER_SECS");
+        }
         assert!(
             fired,
             "due cron routine should be checked immediately without waiting for the first interval"

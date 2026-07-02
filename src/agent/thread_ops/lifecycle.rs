@@ -37,9 +37,19 @@ impl Agent {
                 let usage_percent = self
                     .effective_context_monitor()
                     .usage_percent(&thread.messages());
-                drop(mgr);
+                // Row-count watermark for the thread as it stands *after*
+                // the undo mutation above, so hydration truncates DB
+                // history to match what /undo just restored in memory.
+                let active_message_row_count = thread.messages().len() as i64;
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
+                self.persist_active_watermark_and_undo_stack(
+                    thread_id,
+                    active_message_row_count,
+                    &mgr,
+                )
+                .await;
+                drop(mgr);
                 self.record_context_pressure_state(thread_id, usage_percent)
                     .await;
             }
@@ -72,9 +82,19 @@ impl Agent {
                 let usage_percent = self
                     .effective_context_monitor()
                     .usage_percent(&thread.messages());
-                drop(mgr);
+                // Row-count watermark for the thread as it stands *after*
+                // the redo mutation above, so hydration truncates DB
+                // history to match what /redo just restored in memory.
+                let active_message_row_count = thread.messages().len() as i64;
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
+                self.persist_active_watermark_and_undo_stack(
+                    thread_id,
+                    active_message_row_count,
+                    &mgr,
+                )
+                .await;
+                drop(mgr);
                 self.record_context_pressure_state(thread_id, usage_percent)
                     .await;
             }
@@ -241,6 +261,9 @@ impl Agent {
         let usage_percent = self
             .effective_context_monitor()
             .usage_percent(&thread.messages());
+        // /clear empties the in-memory thread, so the watermark drops to 0:
+        // hydration must not resurrect the cleared DB rows after a restart.
+        let active_message_row_count = thread.messages().len() as i64;
         let mut session_extract_artifact = crate::agent::AgentRunArtifact::new(
             "thread_clear",
             crate::agent::AgentRunStatus::Completed,
@@ -263,7 +286,12 @@ impl Agent {
 
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        undo_mgr.lock().await.clear();
+        {
+            let mut mgr = undo_mgr.lock().await;
+            mgr.clear();
+            self.persist_active_watermark_and_undo_stack(thread_id, active_message_row_count, &mgr)
+                .await;
+        }
         drop(sess);
         if let Some(store) = self.store().map(Arc::clone) {
             let manager = crate::agent::learning::MemoryProviderManager::new(store);
@@ -333,22 +361,28 @@ impl Agent {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
-        let description = {
+        let outcome = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thinclaw_agent::thread_ops::restore_thread_from_checkpoint(
+            let description = thinclaw_agent::thread_ops::restore_thread_from_checkpoint(
                 thread,
                 &mut mgr,
                 checkpoint_id,
-            )
+            );
+            // Row-count watermark for the thread as it stands *after* the
+            // checkpoint restore above, so hydration truncates DB history to
+            // match what /resume just restored in memory.
+            description.map(|description| (description, thread.messages().len() as i64))
         };
 
-        if let Some(description) = description {
-            drop(mgr);
+        if let Some((description, active_message_row_count)) = outcome {
             self.clear_thread_runtime_transients(thread_id).await;
+            self.persist_active_watermark_and_undo_stack(thread_id, active_message_row_count, &mgr)
+                .await;
+            drop(mgr);
             Ok(SubmissionResult::ok_with_message(format!(
                 "Resumed from checkpoint: {}",
                 description

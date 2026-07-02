@@ -220,6 +220,18 @@ impl Session {
             false
         }
     }
+
+    /// Mark this session as active right now.
+    ///
+    /// Thread creation, switching, and hydration already update
+    /// `last_active_at`, but those only happen at the start/edges of a
+    /// conversation. Call this wherever a turn is actually recorded (e.g.
+    /// alongside runtime-snapshot persistence) so a long-running
+    /// conversation is not pruned as idle by `prune_stale_sessions` while
+    /// still mid-turn.
+    pub fn touch_last_active(&mut self) {
+        self.last_active_at = Utc::now();
+    }
 }
 
 /// State of a thread.
@@ -457,6 +469,8 @@ impl Thread {
             ephemeral_overlay_hash: None,
             prompt_segment_order: Vec::new(),
             provider_context_refs: Vec::new(),
+            active_message_row_count: None,
+            undo_checkpoints: Vec::new(),
         }
     }
 
@@ -840,6 +854,21 @@ mod tests {
     }
 
     #[test]
+    fn test_touch_last_active_advances_timestamp() {
+        let mut session = Session::new("user-touch");
+        let baseline = session.last_active_at;
+
+        // Force a strictly earlier baseline so the assertion isn't flaky on
+        // fast clocks/coarse timer resolution.
+        session.last_active_at = baseline - chrono::TimeDelta::seconds(60);
+        let before = session.last_active_at;
+
+        session.touch_last_active();
+
+        assert!(session.last_active_at > before);
+    }
+
+    #[test]
     fn test_thread_turns() {
         let mut thread = Thread::new(Uuid::new_v4());
 
@@ -1120,6 +1149,8 @@ mod tests {
             ephemeral_overlay_hash: None,
             prompt_segment_order: Vec::new(),
             provider_context_refs: Vec::new(),
+            active_message_row_count: None,
+            undo_checkpoints: Vec::new(),
         });
 
         assert_eq!(thread.state, ThreadState::Interrupted);
@@ -1150,6 +1181,8 @@ mod tests {
                 "ephemeral:provider_recall".to_string(),
             ],
             provider_context_refs: vec!["provider:1".to_string(), "provider:2".to_string()],
+            active_message_row_count: Some(4),
+            undo_checkpoints: Vec::new(),
         };
 
         let encoded = serde_json::to_string(&runtime).expect("serialize runtime");
@@ -1171,6 +1204,10 @@ mod tests {
         );
         assert_eq!(decoded.prompt_segment_order, runtime.prompt_segment_order);
         assert_eq!(decoded.provider_context_refs, runtime.provider_context_refs);
+        assert_eq!(
+            decoded.active_message_row_count,
+            runtime.active_message_row_count
+        );
     }
 
     #[test]
