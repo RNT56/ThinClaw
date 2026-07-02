@@ -49,14 +49,15 @@ impl MemoryProviderManager {
     /// change immediately instead of waiting out `READY_PROVIDER_CACHE_TTL`.
     pub(in crate::agent::learning) async fn invalidate_ready_cache(&self, user_id: &str) {
         // Bump the epoch FIRST: a resolution racing this invalidation
-        // (settings already loaded, entry not yet inserted) recorded the old
-        // epoch and its insert is stale on arrival.
+        // (settings already loaded, entry not yet inserted) snapshotted the
+        // old epoch and will skip its insert.
         super::super::providers::ready_cache_epoch()
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let key = super::super::providers::ready_cache_key(&self.store, user_id);
         super::super::providers::global_ready_cache()
             .write()
             .await
-            .remove(user_id);
+            .remove(&key);
     }
 
     pub async fn provider_health(&self, user_id: &str) -> Vec<ProviderHealthStatus> {
@@ -141,16 +142,16 @@ impl MemoryProviderManager {
         Arc<dyn MemoryProvider>,
         ProviderHealthStatus,
     )> {
-        use super::super::providers::{global_ready_cache, ready_cache_epoch};
+        use super::super::providers::{global_ready_cache, ready_cache_epoch, ready_cache_key};
 
         let now = std::time::Instant::now();
+        let key = ready_cache_key(&self.store, user_id);
         // Snapshot the epoch BEFORE loading settings: if an invalidation
-        // lands between our settings load and our insert, the entry we
-        // insert carries a stale epoch and is ignored by every reader.
+        // lands between now and our insert, the insert is skipped (see the
+        // guard below), so a raced resolution can never install stale state.
         let epoch = ready_cache_epoch().load(std::sync::atomic::Ordering::SeqCst);
-        if let Some(entry) = global_ready_cache().read().await.get(user_id)
+        if let Some(entry) = global_ready_cache().read().await.get(&key)
             && entry.expires_at > now
-            && entry.epoch == epoch
         {
             return entry.ready.clone();
         }
@@ -163,9 +164,8 @@ impl MemoryProviderManager {
         // the same resolution while we were reading settings.
         {
             let cache = global_ready_cache().read().await;
-            if let Some(entry) = cache.get(user_id)
+            if let Some(entry) = cache.get(&key)
                 && entry.expires_at > now
-                && entry.epoch == epoch
                 && entry.settings_hash == settings_hash
             {
                 return entry.ready.clone();
@@ -195,18 +195,24 @@ impl MemoryProviderManager {
             None => None,
         };
 
-        super::super::providers::global_ready_cache()
-            .write()
-            .await
-            .insert(
-                user_id.to_string(),
-                ReadyProviderCacheEntry {
-                    settings_hash,
-                    epoch,
-                    expires_at: now + READY_PROVIDER_CACHE_TTL,
-                    ready: ready.clone(),
-                },
-            );
+        {
+            let mut cache = super::super::providers::global_ready_cache().write().await;
+            // Insert guard: skip when an invalidation moved the epoch after
+            // our snapshot — this resolution may predate the settings change.
+            // Checked under the write lock so it cannot interleave with the
+            // invalidator's bump-then-remove sequence.
+            let current = ready_cache_epoch().load(std::sync::atomic::Ordering::SeqCst);
+            if current == epoch {
+                cache.insert(
+                    key,
+                    ReadyProviderCacheEntry {
+                        settings_hash,
+                        expires_at: now + READY_PROVIDER_CACHE_TTL,
+                        ready: ready.clone(),
+                    },
+                );
+            }
+        }
 
         ready
     }
@@ -456,7 +462,6 @@ mod ready_provider_cache_tests {
         let now = std::time::Instant::now();
         let entry = ReadyProviderCacheEntry {
             settings_hash: 42,
-            epoch: 0,
             expires_at: now + READY_PROVIDER_CACHE_TTL,
             ready: None,
         };
@@ -471,7 +476,6 @@ mod ready_provider_cache_tests {
 
         let expired_entry = ReadyProviderCacheEntry {
             settings_hash: 42,
-            epoch: 0,
             expires_at: now,
             ready: None,
         };

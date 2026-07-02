@@ -12,12 +12,6 @@ pub(in crate::agent::learning) struct ReadyProviderCacheEntry {
     /// Hash of the [`LearningSettings`] used to produce `ready`, so a settings
     /// change can be detected even before the TTL naturally expires the entry.
     pub(in crate::agent::learning) settings_hash: u64,
-    /// [`ready_cache_epoch`] value observed *before* the settings that
-    /// produced this entry were loaded. An explicit invalidation bumps the
-    /// epoch, so an entry inserted by a resolution that raced the
-    /// invalidation is stale on arrival instead of resurrecting the
-    /// pre-change provider for a full TTL.
-    pub(in crate::agent::learning) epoch: u64,
     pub(in crate::agent::learning) expires_at: std::time::Instant,
     pub(in crate::agent::learning) ready: Option<(
         LearningSettings,
@@ -53,9 +47,25 @@ pub(in crate::agent::learning) fn global_ready_cache()
 }
 
 /// Monotonic invalidation epoch for [`global_ready_cache`]. Bumped by every
-/// explicit invalidation; entries record the epoch they were resolved under
-/// and are ignored when it no longer matches.
+/// explicit invalidation. Resolvers snapshot it before loading settings and
+/// skip their cache INSERT when it moved — so a resolution that raced an
+/// invalidation can never install a stale entry, without readers having to
+/// epoch-check (which would evict every user's entry on any one user's
+/// invalidation).
 pub(in crate::agent::learning) fn ready_cache_epoch() -> &'static std::sync::atomic::AtomicU64 {
     static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     &EPOCH
+}
+
+/// Composite cache key: store identity + user. Clones of the same
+/// `Arc<dyn Database>` share an allocation (same pointer → shared cache
+/// entries, the design goal); managers over *different* stores — parallel
+/// tests, future multi-tenant embedding — are isolated instead of serving
+/// each other's resolutions for a same-named user.
+pub(in crate::agent::learning) fn ready_cache_key(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+) -> String {
+    let store_ptr = Arc::as_ptr(store) as *const () as usize;
+    format!("{store_ptr:x}:{user_id}")
 }

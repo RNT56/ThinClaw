@@ -68,13 +68,16 @@ impl HookEntry {
     /// hook to cross the auto-disable threshold (so the caller can log
     /// exactly once per disable event).
     ///
-    /// `allow_disable` must be `false` for `FailClosed` hooks: skipping a
-    /// disabled hook is equivalent to passing it, and a fail-closed hook
-    /// must never silently convert into a pass-through — it keeps failing
-    /// the chain on every event until it recovers or is replaced.
-    fn record_failure(&self, allow_disable: bool) -> bool {
+    /// Auto-disable is derived from the entry's own hook here — not passed
+    /// by the caller — so no future failure path can forget the rule:
+    /// skipping a disabled hook is equivalent to passing it, and a
+    /// fail-closed hook must never silently convert into a pass-through; it
+    /// keeps failing the chain on every event until it recovers or is
+    /// replaced.
+    fn record_failure(&self) -> bool {
         let previous = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         let count = previous + 1;
+        let allow_disable = matches!(self.hook.failure_mode(), HookFailureMode::FailOpen);
         if allow_disable && count >= MAX_CONSECUTIVE_HOOK_FAILURES {
             !self.disabled.swap(true, Ordering::Relaxed)
         } else {
@@ -204,6 +207,12 @@ impl HookRegistry {
     /// Callers that have real invocation metadata to pass to hooks should
     /// prefer [`HookRegistry::run_with_context`] — this method exists so
     /// call sites that only have an event (no context) keep compiling.
+    ///
+    /// Typed [`HookPatch`]es ARE applied along the chain here, but the
+    /// patched event is discarded with only the outcome returned — a call
+    /// site that needs to honor patched fields must use
+    /// [`HookRegistry::run_returning_event`] instead (as the BeforeLlmInput
+    /// dispatch site does).
     pub async fn run(&self, event: &HookEvent) -> Result<HookOutcome, HookError> {
         self.run_with_context(event, &HookContext::default()).await
     }
@@ -297,8 +306,7 @@ impl HookRegistry {
                     apply_hook_patch(hook.as_ref(), &mut current_event, ctx);
                 }
                 Ok(Err(err)) => {
-                    let allow_disable = matches!(hook.failure_mode(), HookFailureMode::FailOpen);
-                    let just_disabled = entry.record_failure(allow_disable);
+                    let just_disabled = entry.record_failure();
                     if just_disabled {
                         warn_hook_auto_disabled(hook.name());
                     }
@@ -319,8 +327,7 @@ impl HookRegistry {
                     }
                 }
                 Err(_elapsed) => {
-                    let allow_disable = matches!(hook.failure_mode(), HookFailureMode::FailOpen);
-                    let just_disabled = entry.record_failure(allow_disable);
+                    let just_disabled = entry.record_failure();
                     if just_disabled {
                         warn_hook_auto_disabled(hook.name());
                     }

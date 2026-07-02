@@ -719,11 +719,23 @@ fn strip_code_fences(response: &str) -> String {
     else {
         return trimmed.to_string();
     };
-    // Drop an optional language tag on the opening fence line.
+    // Drop an optional language tag on the opening fence line. Only strip
+    // when the token looks like a fence annotation (lowercase alphanumeric,
+    // short) — a real first line such as "Done" or "Summary" is content.
     match inner.split_once('\n') {
-        Some((first_line, body)) if !first_line.trim().contains(' ') => body.trim().to_string(),
+        Some((first_line, body)) if is_fence_language_tag(first_line.trim()) => {
+            body.trim().to_string()
+        }
         _ => inner.trim().to_string(),
     }
+}
+
+fn is_fence_language_tag(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 12
+        && token
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '+' || c == '-')
 }
 
 /// Produce one action per bench case from the live agent runtime (the

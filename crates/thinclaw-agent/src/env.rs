@@ -769,9 +769,9 @@ impl AgentEnv for SkillBenchEnv {
 /// Trajectory score threshold used to gate SFT export and "completed" run
 /// artifact status. Verifier rewards (see `TerminalBenchEnv::step` and
 /// `SkillBenchEnv::step`) can score up to `1.0` and clear this gate;
-/// unverified `heuristic_reward` fallback scores are capped at `0.6` and
-/// therefore never clear a strict `>=`/`<` comparison against this constant
-/// on their own, which is what makes the gate meaningful again.
+/// unverified `heuristic_reward` fallback scores are capped at `0.55` —
+/// strictly below this constant — so they can never clear the gate on
+/// their own, which is what makes the gate meaningful again.
 pub const SFT_QUALITY_GATE_SCORE: f64 = 0.6;
 
 /// Default number of episodes run concurrently by [`EnvRunner::evaluate`]
@@ -998,20 +998,20 @@ const HEURISTIC_SUBSTANTIVE_MIN_LEN: usize = 40;
 /// available for a step (i.e. there is no scripted/expected answer to check
 /// the agent's action against).
 ///
-/// This is intentionally a coarse, cheap proxy and is capped at
-/// [`SFT_QUALITY_GATE_SCORE`] (0.6): it can tell "the agent said nothing
-/// useful" from "the agent said something", but it cannot confirm
+/// This is intentionally a coarse, cheap proxy and is capped at `0.55`,
+/// strictly below [`SFT_QUALITY_GATE_SCORE`]: it can tell "the agent said
+/// nothing useful" from "the agent said something", but it cannot confirm
 /// correctness. Verifier rewards (see `TerminalBenchEnv::step` and
 /// `SkillBenchEnv::step`) supersede this heuristic whenever a case supplies
-/// expected-output checks, and only verified rewards can exceed 0.6 and
-/// clear the SFT quality gate used by [`EnvRunner::collect_sft_jsonl`] and
+/// expected-output checks, and only verified rewards can clear the SFT
+/// quality gate used by [`EnvRunner::collect_sft_jsonl`] and
 /// [`EnvRunner::persist_trajectory_artifact`].
 ///
 /// Scoring bands:
 /// - `0.0`: empty/missing response, or a response carrying an `error:` marker.
 /// - `0.3`: non-empty but trivial (shorter than
 ///   [`HEURISTIC_SUBSTANTIVE_MIN_LEN`] characters after trimming).
-/// - `0.6`: substantive response with no verifier to confirm correctness.
+/// - `0.55`: substantive response with no verifier to confirm correctness.
 fn heuristic_reward(response: Option<&str>) -> f64 {
     match response.map(str::trim) {
         Some("") | None => 0.0,

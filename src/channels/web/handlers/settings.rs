@@ -132,6 +132,13 @@ pub(crate) async fn settings_set_handler(
             tracing::error!("Failed to set setting '{}': {}", key, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    if key.starts_with("learning.") {
+        crate::agent::learning::invalidate_provider_ready_cache(
+            &store,
+            &request_identity.principal_id,
+        )
+        .await;
+    }
 
     if let (Some(jm), Some(update)) = (state.job_manager.clone(), cc_update) {
         tokio::spawn(async move {
@@ -263,6 +270,13 @@ pub(crate) async fn settings_delete_handler(
             tracing::error!("Failed to delete setting '{}': {}", key, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    if key.starts_with("learning.") {
+        crate::agent::learning::invalidate_provider_ready_cache(
+            &store,
+            &request_identity.principal_id,
+        )
+        .await;
+    }
 
     if let Some(cm) = state.channel_manager.clone() {
         if is_telegram_transport_mode_key(&key) {

@@ -418,6 +418,9 @@ impl Worker {
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
         touch_worker_activity(activity_tx);
+        // Shared across the plan phase and the direct-selection loop so the
+        // plan->direct fallthrough doesn't reset the lease-renewal throttle.
+        let routine_lease_renewed_at = std::sync::Mutex::new(None);
         let job_context = self.context_manager().get_context(self.job_id).await.ok();
         let capability_metadata = job_context
             .as_ref()
@@ -523,8 +526,15 @@ impl Worker {
         // If we have a plan, execute it — but fall through to direct
         // selection if the plan didn't finish the job.
         if let Some(ref plan) = plan {
-            self.execute_plan(rx, reasoning, reason_ctx, plan, activity_tx)
-                .await?;
+            self.execute_plan(
+                &routine_lease_renewed_at,
+                rx,
+                reasoning,
+                reason_ctx,
+                plan,
+                activity_tx,
+            )
+            .await?;
 
             // Check whether the job reached a terminal state.
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
@@ -560,7 +570,6 @@ impl Worker {
         }
 
         // Otherwise, use direct tool selection loop
-        let routine_lease_renewed_at = std::sync::Mutex::new(None);
         loop {
             // Check for stop signal
             if let Ok(msg) = rx.try_recv() {
@@ -1254,13 +1263,13 @@ impl Worker {
     /// Execute a pre-generated plan.
     async fn execute_plan(
         &self,
+        routine_lease_renewed_at: &std::sync::Mutex<Option<std::time::Instant>>,
         rx: &mut mpsc::Receiver<WorkerMessage>,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
         plan: &ActionPlan,
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
-        let routine_lease_renewed_at = std::sync::Mutex::new(None);
         for (i, action) in plan.actions.iter().enumerate() {
             // Check for stop signal
             if let Ok(msg) = rx.try_recv() {

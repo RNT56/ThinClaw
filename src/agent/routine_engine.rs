@@ -1200,9 +1200,13 @@ impl RoutineEngine {
             if let Err(join_error) = joined
                 && join_error.is_panic()
             {
+                // The JoinSet is shared by all routines, so the panicked
+                // task's own routine name is unknown at drain time — do NOT
+                // attribute it to `routine_name` (the routine currently
+                // spawning), which would misdirect debugging.
                 tracing::error!(
-                    routine = %routine_name,
-                    "A previously-spawned routine task panicked: {}",
+                    "A previously-spawned routine task panicked (drained while spawning '{}'): {}",
+                    routine_name,
                     join_error
                 );
             }

@@ -49,7 +49,7 @@ impl SubagentRunStore for LibSqlBackend {
             r#"
                 UPDATE subagent_runs SET
                     status = ?2, completed_at = ?3, error = ?4
-                WHERE id = ?1
+                WHERE id = ?1 AND status = 'running'
             "#,
             params![id.to_string(), status, now, opt_text(error)],
         )

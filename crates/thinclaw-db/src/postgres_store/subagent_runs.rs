@@ -67,7 +67,7 @@ impl Store {
             r#"
             UPDATE subagent_runs SET
                 status = $2, completed_at = $3, error = $4
-            WHERE id = $1
+            WHERE id = $1 AND status = 'running'
             "#,
             &[&id, &status, &now, &error],
         )

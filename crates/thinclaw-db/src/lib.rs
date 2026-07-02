@@ -742,6 +742,9 @@ pub trait SubagentRunStore: Send + Sync {
     /// Mark a sub-agent run as finished (success, failure, timeout, or
     /// cancellation). `status` should be one of the `SUBAGENT_RUN_STATUS_*`
     /// constants in `thinclaw_agent::subagent`.
+    /// First-write-wins: only a row still in `running` is updated, so a
+    /// racing second completion (e.g. grace-abort fallback vs the task's own
+    /// finalization) cannot overwrite the first recorded terminal outcome.
     async fn complete_subagent_run(
         &self,
         id: Uuid,

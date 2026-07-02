@@ -1316,8 +1316,11 @@ impl Agent {
         let conversation_workers: Arc<
             Mutex<std::collections::HashMap<Uuid, tokio::sync::mpsc::Sender<IncomingMessage>>>,
         > = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let worker_handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        // JoinSet (not a bare Vec<JoinHandle>): joining is the only place a
+        // panicked worker becomes visible, and the shutdown drain needs a
+        // single ordered join point.
+        let worker_tasks: Arc<Mutex<tokio::task::JoinSet<()>>> =
+            Arc::new(Mutex::new(tokio::task::JoinSet::new()));
         let turn_permits = Arc::new(tokio::sync::Semaphore::new(
             Self::MAIN_LOOP_MAX_CONCURRENT_TURNS,
         ));
@@ -1366,7 +1369,7 @@ impl Agent {
                 Self::dispatch_incoming_message(
                     &agent,
                     &conversation_workers,
-                    &worker_handles,
+                    &worker_tasks,
                     &turn_permits,
                     &shutdown_tx,
                     routine_engine_for_loop.clone(),
@@ -1380,11 +1383,15 @@ impl Agent {
         // dropping the senders lets each worker finish its queue and exit,
         // and the bounded join keeps shutdown from hanging on a stuck turn.
         conversation_workers.lock().await.clear();
-        let handles = std::mem::take(&mut *worker_handles.lock().await);
-        if !handles.is_empty() {
+        {
+            let mut tasks = worker_tasks.lock().await;
             let drain = async {
-                for handle in handles {
-                    let _ = handle.await;
+                while let Some(joined) = tasks.join_next().await {
+                    if let Err(join_error) = joined
+                        && join_error.is_panic()
+                    {
+                        tracing::error!("A conversation worker panicked: {}", join_error);
+                    }
                 }
             };
             if tokio::time::timeout(Self::SHUTDOWN_DRAIN_TIMEOUT, drain)
@@ -1444,7 +1451,7 @@ impl Agent {
         workers: &Arc<
             Mutex<std::collections::HashMap<Uuid, tokio::sync::mpsc::Sender<IncomingMessage>>>,
         >,
-        worker_handles: &Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+        worker_tasks: &Arc<Mutex<tokio::task::JoinSet<()>>>,
         turn_permits: &Arc<tokio::sync::Semaphore>,
         shutdown_tx: &tokio::sync::mpsc::Sender<()>,
         routine_engine: Option<Arc<RoutineEngine>>,
@@ -1457,19 +1464,15 @@ impl Agent {
         ) {
             let agent = Arc::clone(agent);
             let shutdown_tx = shutdown_tx.clone();
-            let handle = tokio::spawn(async move {
+            Self::spawn_tracked(worker_tasks, async move {
                 if agent
                     .handle_and_respond(&message, Some(preview), routine_engine.as_ref())
                     .await
                 {
                     let _ = shutdown_tx.try_send(());
                 }
-            });
-            {
-                let mut handles = worker_handles.lock().await;
-                handles.retain(|h| !h.is_finished());
-                handles.push(handle);
-            }
+            })
+            .await;
             return;
         }
 
@@ -1499,7 +1502,7 @@ impl Agent {
             if let std::collections::hash_map::Entry::Vacant(entry) = senders.entry(key) {
                 let (tx, rx) = tokio::sync::mpsc::channel(Self::CONVERSATION_WORKER_QUEUE_DEPTH);
                 entry.insert(tx);
-                let handle = Self::spawn_conversation_worker(
+                Self::spawn_conversation_worker(
                     Arc::clone(agent),
                     Arc::clone(workers),
                     Arc::clone(turn_permits),
@@ -1507,17 +1510,32 @@ impl Agent {
                     routine_engine.clone(),
                     key,
                     rx,
-                );
-                {
-                    let mut handles = worker_handles.lock().await;
-                    handles.retain(|h| !h.is_finished());
-                    handles.push(handle);
-                }
+                    worker_tasks,
+                )
+                .await;
             }
         }
     }
 
-    fn spawn_conversation_worker(
+    /// Spawn a future into the shared worker JoinSet, draining any finished
+    /// entries first (joining is also where a panicked worker is surfaced).
+    async fn spawn_tracked(
+        worker_tasks: &Arc<Mutex<tokio::task::JoinSet<()>>>,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let mut tasks = worker_tasks.lock().await;
+        while let Some(joined) = tasks.try_join_next() {
+            if let Err(join_error) = joined
+                && join_error.is_panic()
+            {
+                tracing::error!("A conversation worker panicked: {}", join_error);
+            }
+        }
+        tasks.spawn(task);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_conversation_worker(
         agent: Arc<Agent>,
         workers: Arc<
             Mutex<std::collections::HashMap<Uuid, tokio::sync::mpsc::Sender<IncomingMessage>>>,
@@ -1527,8 +1545,9 @@ impl Agent {
         routine_engine: Option<Arc<RoutineEngine>>,
         key: Uuid,
         mut rx: tokio::sync::mpsc::Receiver<IncomingMessage>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
+        worker_tasks: &Arc<Mutex<tokio::task::JoinSet<()>>>,
+    ) {
+        Self::spawn_tracked(worker_tasks, async move {
             loop {
                 let message =
                     match tokio::time::timeout(Self::CONVERSATION_WORKER_IDLE_TIMEOUT, rx.recv())
@@ -1567,6 +1586,7 @@ impl Agent {
                 }
             }
         })
+        .await;
     }
 
     /// Process one incoming message end to end: run it through the agent,

@@ -12,6 +12,7 @@ mod zep;
 pub use manager::MemoryProviderManager;
 pub(super) use manager::{
     READY_PROVIDER_CACHE_TTL, ReadyProviderCacheEntry, global_ready_cache, ready_cache_epoch,
+    ready_cache_key,
 };
 pub use types::*;
 

@@ -413,6 +413,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn matchable_entries_never_contain_placeholder_brackets() {
+        // is_display_only() keys off '<' in the canonical name; a matchable
+        // (non-display) entry containing '<' would be silently excluded from
+        // match_command. Keep the convention honest.
+        for spec in COMMAND_REGISTRY {
+            if !spec.is_display_only() {
+                assert!(
+                    spec.all_names().all(|name| !name.contains('<')),
+                    "matchable entry {:?} contains a placeholder bracket",
+                    spec.name
+                );
+            } else {
+                assert!(
+                    matches!(spec.arg_style, ArgStyle::ExactOnly),
+                    "display-only entry {:?} must be ExactOnly",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_entry_name_starts_with_slash() {
         for spec in COMMAND_REGISTRY {
             assert!(

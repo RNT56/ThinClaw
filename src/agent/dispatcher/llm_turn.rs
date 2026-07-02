@@ -261,25 +261,41 @@ impl Agent {
                         }
                         hook_changed_context = true;
                     }
-                    // Typed HookPatch consumption: honor a system-message
-                    // override from the final event (the string-diff outcome
-                    // above can only express user-message changes).
+                    // Typed HookPatch consumption: honor user- and
+                    // system-message overrides from the final event. The
+                    // string-diff outcome above already covers user-message
+                    // changes made via HookOutcome::Continue; this also
+                    // catches a patch-only user_message override, which the
+                    // outcome cannot express.
                     if let crate::hooks::HookEvent::LlmInput {
                         system_message: final_system,
+                        user_message: final_user,
                         ..
                     } = final_event
-                        && final_system != system_msg
-                        && let Some(new_system) = final_system
                     {
-                        if let Some(first_system) = context_messages
-                            .iter_mut()
-                            .find(|m| m.role == crate::llm::Role::System)
+                        if !hook_changed_context
+                            && let Some(last) = context_messages
+                                .iter_mut()
+                                .rev()
+                                .find(|m| m.role == crate::llm::Role::User)
+                            && last.content != final_user
                         {
-                            first_system.content = new_system;
-                        } else {
-                            context_messages.insert(0, ChatMessage::system(new_system));
+                            last.content = final_user;
+                            hook_changed_context = true;
                         }
-                        hook_changed_context = true;
+                        if final_system != system_msg
+                            && let Some(new_system) = final_system
+                        {
+                            if let Some(first_system) = context_messages
+                                .iter_mut()
+                                .find(|m| m.role == crate::llm::Role::System)
+                            {
+                                first_system.content = new_system;
+                            } else {
+                                context_messages.insert(0, ChatMessage::system(new_system));
+                            }
+                            hook_changed_context = true;
+                        }
                     }
                     if hook_changed_context {
                         context = self.build_turn_context(

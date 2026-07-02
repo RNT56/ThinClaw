@@ -408,8 +408,9 @@ pub trait Hook: Send + Sync {
     /// `HookOutcome::Continue { modified }` channel cannot express) can
     /// override this method.
     ///
-    /// Note: nothing currently calls this method — see the consumption-point
-    /// doc comment on [`HookPatch`] for what still needs wiring.
+    /// Called by `HookRegistry` after each successful `execute`; the
+    /// returned patch is applied to the evolving event (see [`HookPatch`]
+    /// for which fields each consumer honors).
     fn execute_patch(&self, _event: &HookEvent, _ctx: &HookContext) -> Option<HookPatch> {
         None
     }
