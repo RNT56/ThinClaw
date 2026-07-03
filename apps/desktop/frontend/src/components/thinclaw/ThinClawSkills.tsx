@@ -9,7 +9,7 @@ import {
     Zap,
     Package,
     CheckCircle2,
-    Github,
+    FolderGit2,
     Plus,
     ExternalLink,
     AlertCircle,
@@ -94,7 +94,7 @@ function SkillCard({
                     "p-2.5 rounded-xl border transition-colors flex items-center justify-center text-xl",
                     enabled ? "bg-primary/10 border-primary/20 text-primary" : "bg-white/5 border-border/40 text-muted-foreground"
                 )}>
-                    {skill.emoji || (skill.source === 'thinclaw-engine-bundled' ? <Package className="w-5 h-5" /> : <Github className="w-5 h-5" />)}
+                    {skill.emoji || (skill.source === 'thinclaw-engine-bundled' ? <Package className="w-5 h-5" /> : <FolderGit2 className="w-5 h-5" />)}
                 </div>
                 <div className="flex items-center gap-2">
                     {!skill.eligible && skill.install && skill.install.length > 0 && (
@@ -465,7 +465,7 @@ export function ThinClawSkills() {
                                 <div className="h-px bg-border/40" />
                                 <div className="flex items-center gap-3">
                                     <div className="p-2 bg-primary/10 rounded-lg">
-                                        <Github className="w-5 h-5 text-primary" />
+                                        <FolderGit2 className="w-5 h-5 text-primary" />
                                     </div>
                                     <div>
                                         <h3 className="font-semibold text-sm">Install Skill Repository</h3>
