@@ -14,7 +14,7 @@ import {
     FileCheck2,
     FileText,
     GitBranch,
-    Github,
+    FolderGit2,
     KeyRound,
     ListChecks,
     Pause,
@@ -205,7 +205,7 @@ function setupIcon(key: string): LucideIcon {
         case 'feature_flag':
             return Settings2;
         case 'github_app':
-            return Github;
+            return FolderGit2;
         case 'docker_agents':
             return Container;
         case 'coding_backend':
