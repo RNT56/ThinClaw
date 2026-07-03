@@ -99,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
 
     let channels = Arc::new(ChannelManager::new());
     let (acp_channel, acp_outbound_rx) = acp::channel_pair();
+    let acp_outbound_tx = acp_channel.outbound_sender();
     let acp_state = acp_channel.shared_state();
     channels.add(Box::new(acp_channel)).await;
 
@@ -194,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
         shared_secrets_store,
     );
 
-    acp::run_stdio(agent, acp_outbound_rx, acp_state).await?;
+    acp::run_stdio(agent, acp_outbound_tx, acp_outbound_rx, acp_state).await?;
 
     if restart_requested.load(Ordering::SeqCst) {
         eprintln!("ThinClaw ACP restart was requested; exiting for supervisor restart.");
@@ -205,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
     let channels = Arc::new(ChannelManager::new());
     let (acp_channel, acp_outbound_rx) = acp::channel_pair();
+    let acp_outbound_tx = acp_channel.outbound_sender();
     let acp_state = acp_channel.shared_state();
     channels.add(Box::new(acp_channel)).await;
 
@@ -300,7 +302,7 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
         Some(Arc::new(SessionManager::new())),
     ));
 
-    acp::run_stdio(agent, acp_outbound_rx, acp_state).await
+    acp::run_stdio(agent, acp_outbound_tx, acp_outbound_rx, acp_state).await
 }
 
 struct SmokeLlm;

@@ -349,7 +349,16 @@ async fn manual_routine_pipeline_records_history_and_notifications() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn event_and_cron_routines_execute_end_to_end() {
+    // Cron-triggered fires go through IC-CRON-STAGGER jitter (up to 30s by
+    // default), which would starve this test's polling window. Pin it to 0;
+    // `lock_env` serializes against other env-mutating tests in the binary.
+    let _env_guard = thinclaw_config::helpers::lock_env();
+    unsafe {
+        std::env::set_var("CRON_STAGGER_SECS", "0");
+    }
+
     let Some(ctx) = contract_db_or_skip().await else {
         return;
     };
@@ -485,6 +494,9 @@ async fn event_and_cron_routines_execute_end_to_end() {
     ];
     notified_names.sort();
     assert_eq!(notified_names, vec![cron_name, event_name]);
+    unsafe {
+        std::env::remove_var("CRON_STAGGER_SECS");
+    }
 }
 
 #[tokio::test]
