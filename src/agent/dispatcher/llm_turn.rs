@@ -362,6 +362,14 @@ impl Agent {
                 .await;
         }
 
+        // F-11: emit the per-request observability event before the call fires.
+        // Mirrors the LlmResponse emit below; NoopObserver discards at zero cost.
+        self.observer()
+            .record_event(&crate::observability::ObserverEvent::LlmRequest {
+                provider: std::env::var("LLM_BACKEND").unwrap_or_default(),
+                model: reasoning.current_llm().active_model_name(),
+                message_count: context_messages.len(),
+            });
         let llm_start = std::time::Instant::now();
         let mut recovered_from_override_failure = false;
         let mut compacted_for_retry = false;
@@ -588,6 +596,24 @@ impl Agent {
                             error = %err,
                             "Context length exceeded, compacting messages and retrying"
                         );
+                        // Surface auto-compaction as a lifecycle event so the UI
+                        // shows why the turn paused instead of an unexplained gap.
+                        if let crate::error::Error::Llm(
+                            crate::error::LlmError::ContextLengthExceeded { used, limit },
+                        ) = &err
+                        {
+                            let _ = self
+                                .channels
+                                .send_status(
+                                    &message.channel,
+                                    StatusUpdate::ContextCompactionStarted {
+                                        used: *used as u64,
+                                        limit: *limit as u64,
+                                    },
+                                    &message.metadata,
+                                )
+                                .await;
+                        }
                         *context_messages = compact_messages_for_retry(context_messages);
                         context = self.build_turn_context(
                             context_messages,

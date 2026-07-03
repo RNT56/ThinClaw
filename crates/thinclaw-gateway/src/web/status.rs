@@ -13,6 +13,35 @@ pub fn health_response() -> HealthResponse {
     }
 }
 
+/// Map readiness-probe results to an HTTP status + body for `/api/health`.
+///
+/// Pure so the readiness contract is unit-testable without constructing the full
+/// gateway runtime state. Returns `200 healthy` only when the database is
+/// reachable *and* at least one LLM provider is configured; otherwise `503
+/// unhealthy`, so load balancers stop routing to an instance that cannot serve.
+pub fn readiness_response(
+    db_ready: bool,
+    provider_configured: bool,
+) -> (StatusCode, HealthResponse) {
+    if db_ready && provider_configured {
+        (
+            StatusCode::OK,
+            HealthResponse {
+                status: "healthy",
+                channel: "gateway",
+            },
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            HealthResponse {
+                status: "unhealthy",
+                channel: "gateway",
+            },
+        )
+    }
+}
+
 pub fn gateway_restart_already_in_progress_response() -> ActionResponse {
     ActionResponse::ok("Restart already in progress")
 }
@@ -358,6 +387,34 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             message: msg,
             thread_id,
         },
+        StatusUpdate::ContextCompactionStarted { used, limit } => SseEvent::Status {
+            message: format!("Compacting context ({used}/{limit} tokens) and retrying"),
+            thread_id,
+        },
+        StatusUpdate::AdvisorConsultationStarted { .. } => SseEvent::Status {
+            message: "Consulting the advisor lane".to_string(),
+            thread_id,
+        },
+        StatusUpdate::SelfRepairStarted {
+            repair_type,
+            target_id,
+            ..
+        } => SseEvent::Status {
+            message: format!("Self-repair: {repair_type} {target_id}"),
+            thread_id,
+        },
+        StatusUpdate::SelfRepairCompleted {
+            repair_type,
+            target_id,
+            success,
+            ..
+        } => SseEvent::Status {
+            message: format!(
+                "Self-repair {}: {repair_type} {target_id}",
+                if success { "succeeded" } else { "failed" }
+            ),
+            thread_id,
+        },
         StatusUpdate::Plan { entries } => SseEvent::PlanUpdate { entries, thread_id },
         StatusUpdate::Usage {
             input_tokens,
@@ -591,6 +648,11 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             timestamp: chrono::Utc::now().to_rfc3339(),
             thread_id,
         },
+        // Future variants collapse to a generic status update (non_exhaustive).
+        _ => SseEvent::Status {
+            message: String::new(),
+            thread_id,
+        },
     }
 }
 
@@ -643,6 +705,27 @@ mod tests {
                 "channel": "gateway",
             })
         );
+    }
+
+    #[test]
+    fn readiness_503_when_db_down() {
+        let (code, body) = readiness_response(false, true);
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "unhealthy");
+    }
+
+    #[test]
+    fn readiness_503_when_no_provider() {
+        let (code, body) = readiness_response(true, false);
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "unhealthy");
+    }
+
+    #[test]
+    fn readiness_200_when_all_ready() {
+        let (code, body) = readiness_response(true, true);
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body.status, "healthy");
     }
 
     #[test]

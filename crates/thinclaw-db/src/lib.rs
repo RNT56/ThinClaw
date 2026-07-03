@@ -6,11 +6,6 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use thinclaw_agent::routine::{
-    Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
-    RoutineTriggerDecision, RunStatus,
-};
-use thinclaw_agent::subagent::SubagentRunRecord;
 use thinclaw_experiments::{
     ExperimentArtifactRef, ExperimentCampaign, ExperimentLease, ExperimentModelUsageRecord,
     ExperimentProject, ExperimentRunnerProfile, ExperimentTarget, ExperimentTargetLink,
@@ -33,6 +28,11 @@ use thinclaw_repo_projects::{
 };
 pub use thinclaw_types::AgentWorkspaceRecord;
 pub use thinclaw_types::error::{DatabaseError, WorkspaceError};
+use thinclaw_types::routine::{
+    Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
+    RoutineTriggerDecision, RunStatus,
+};
+use thinclaw_types::subagent::SubagentRunRecord;
 use thinclaw_types::{
     ActionRecord, BrokenTool, JobContext, JobState, SandboxJobRecord, SandboxJobSummary,
 };
@@ -741,7 +741,7 @@ pub trait SubagentRunStore: Send + Sync {
 
     /// Mark a sub-agent run as finished (success, failure, timeout, or
     /// cancellation). `status` should be one of the `SUBAGENT_RUN_STATUS_*`
-    /// constants in `thinclaw_agent::subagent`.
+    /// constants in `thinclaw_types::subagent`.
     /// First-write-wins: only a row still in `running` is updated, so a
     /// racing second completion (e.g. grace-abort fallback vs the task's own
     /// finalization) cannot overwrite the first recorded terminal outcome.
@@ -1219,6 +1219,20 @@ pub trait Database:
 {
     /// Run schema migrations for this backend.
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
+
+    /// Lightweight readiness ping that exercises the database connection.
+    ///
+    /// The default performs a cheap bounded read (a metadata lookup for a
+    /// non-existent id) so it round-trips to a real backend without depending on
+    /// any seeded data: a healthy backend returns `Ok(None)` → `Ok(())`, while a
+    /// connection failure surfaces as `Err`. Readiness probes treat `Err` (or a
+    /// timeout applied by the caller) as not-ready. In-memory/mock backends with
+    /// no connection to fail are free to keep the default.
+    async fn health_check(&self) -> Result<(), DatabaseError> {
+        self.get_conversation_metadata(Uuid::nil())
+            .await
+            .map(|_| ())
+    }
 
     /// Create a portable snapshot (backup) of the database.
     ///

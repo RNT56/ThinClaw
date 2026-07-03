@@ -7,7 +7,7 @@
 #![cfg_attr(not(feature = "postgres"), allow(unused_imports))]
 
 use super::*;
-use thinclaw_agent::subagent::SubagentRunRecord;
+use thinclaw_types::subagent::SubagentRunRecord;
 
 #[cfg(feature = "postgres")]
 pub(super) fn row_to_subagent_run(

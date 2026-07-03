@@ -57,7 +57,7 @@ impl SetupWizard {
         match self.selected_profile {
             OnboardingProfile::Balanced => {
                 self.settings.skills_enabled = true;
-                self.settings.observability_backend = "none".to_string();
+                self.settings.observability_backend = "log".to_string();
                 self.settings.providers.smart_routing_enabled = true;
                 if self.settings.providers.routing_mode == crate::settings::RoutingMode::PrimaryOnly
                 {
@@ -70,7 +70,7 @@ impl SetupWizard {
             }
             OnboardingProfile::LocalAndPrivate => {
                 self.settings.skills_enabled = true;
-                self.settings.observability_backend = "none".to_string();
+                self.settings.observability_backend = "log".to_string();
                 if self.settings.llm_backend.is_none() {
                     self.settings.llm_backend = Some("ollama".to_string());
                 }
@@ -85,7 +85,7 @@ impl SetupWizard {
             }
             OnboardingProfile::BuilderAndCoding => {
                 self.settings.skills_enabled = true;
-                self.settings.observability_backend = "none".to_string();
+                self.settings.observability_backend = "log".to_string();
                 self.settings.providers.smart_routing_enabled = true;
                 self.settings.providers.routing_mode =
                     crate::settings::RoutingMode::AdvisorExecutor;
@@ -96,7 +96,7 @@ impl SetupWizard {
             }
             OnboardingProfile::ChannelFirst => {
                 self.settings.skills_enabled = true;
-                self.settings.observability_backend = "none".to_string();
+                self.settings.observability_backend = "log".to_string();
                 self.settings.providers.smart_routing_enabled = true;
                 if self.settings.providers.routing_mode == crate::settings::RoutingMode::PrimaryOnly
                 {
@@ -112,7 +112,7 @@ impl SetupWizard {
 
     fn apply_headless_remote_profile_defaults(&mut self, pi_os_lite: bool) {
         self.settings.skills_enabled = true;
-        self.settings.observability_backend = "none".to_string();
+        self.settings.observability_backend = "log".to_string();
         self.settings.providers.smart_routing_enabled = true;
         if self.settings.providers.routing_mode == crate::settings::RoutingMode::PrimaryOnly {
             self.settings.providers.routing_mode = crate::settings::RoutingMode::CheapSplit;

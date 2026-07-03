@@ -2,7 +2,6 @@
 
 pub mod auth_profiles;
 mod credential_detect;
-pub mod dangerous_tools;
 pub mod device_pairing;
 pub mod elevated;
 pub mod key_rotation;

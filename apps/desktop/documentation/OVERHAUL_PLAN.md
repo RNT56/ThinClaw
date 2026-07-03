@@ -3,6 +3,15 @@
 > **Status:** Living roadmap (draft v1) · **Created:** 2026-06-27 · **Owner:** _TBD_
 > **Scope:** End-to-end overhaul of ThinClaw Desktop (`apps/desktop/`).
 > **Companion:** executable backlog in [`OVERHAUL_BACKLOG.md`](OVERHAUL_BACKLOG.md).
+>
+> **Progress (2026-06-29):** the first parity-closure batch has landed/is in-flight —
+> the dual-mode bridge contract (RouteMode/BridgeError/ROUTE_TABLE), real compaction,
+> checkpoints/rollback, session search, trajectory viewer, undo/redo, agent eval,
+> lifecycle events (compaction/advisor/self-repair → `UiEvent::AgentLifecycleEvent`),
+> and the channel-config framework. Several §5a "invisible agent internals" gaps and the
+> §5c channel-config gap are now addressed. See the completion-status table in
+> [`OVERHAUL_BACKLOG.md`](OVERHAUL_BACKLOG.md) and
+> [`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md) for per-item state.
 
 This is the maintainer-facing roadmap for taking ThinClaw Desktop from its current
 **experimental** state to a coherent, parity-complete, production-ready 1.0. It is

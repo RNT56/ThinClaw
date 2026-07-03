@@ -55,7 +55,7 @@ Configurable via `GATEWAY_HOST` (default `127.0.0.1`) and `GATEWAY_PORT` (defaul
 Bearer token middleware applied to all `/api/*` routes via `route_layer`. Token checked in two locations:
 
 1. `Authorization: Bearer <token>` header (primary)
-2. `?token=<token>` query parameter (fallback for SSE `EventSource` which cannot set headers)
+2. `?token=<token>` query parameter (fallback for SSE `EventSource` which cannot set headers). Per RFC 6750 §2.3, tokens in URLs can leak via access logs, proxies, and `Referer` headers; the first time this fallback is exercised the gateway logs a one-time `tracing::warn!` so operators are aware of the trade-off. Prefer the `Authorization` header where the client supports it.
 
 Both paths use **constant-time comparison** via `subtle::ConstantTimeEq` (`ct_eq`).
 

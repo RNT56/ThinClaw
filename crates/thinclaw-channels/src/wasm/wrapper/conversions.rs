@@ -91,7 +91,7 @@ pub(super) fn status_to_wit(
             metadata_json,
         },
         StatusUpdate::StreamChunk(chunk) => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Thinking,
+            status: wit_channel::StatusType::StreamChunk,
             message: chunk.clone(),
             metadata_json,
         },
@@ -114,10 +114,42 @@ pub(super) fn status_to_wit(
             }
         }
         StatusUpdate::Plan { entries } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::Plan,
             message: format!(
                 "[plan] {}",
                 serde_json::to_string(entries).unwrap_or_default()
+            ),
+            metadata_json,
+        },
+        StatusUpdate::ContextCompactionStarted { used, limit } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::ContextCompactionStarted,
+            message: format!("Compacting context ({used}/{limit} tokens) and retrying"),
+            metadata_json,
+        },
+        StatusUpdate::AdvisorConsultationStarted { .. } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::AdvisorConsultationStarted,
+            message: "Consulting the advisor lane".to_string(),
+            metadata_json,
+        },
+        StatusUpdate::SelfRepairStarted {
+            repair_type,
+            target_id,
+            ..
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::SelfRepairStarted,
+            message: format!("Self-repair: {repair_type} {target_id}"),
+            metadata_json,
+        },
+        StatusUpdate::SelfRepairCompleted {
+            repair_type,
+            target_id,
+            success,
+            ..
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::SelfRepairCompleted,
+            message: format!(
+                "Self-repair {}: {repair_type} {target_id}",
+                if *success { "succeeded" } else { "failed" }
             ),
             metadata_json,
         },
@@ -127,7 +159,7 @@ pub(super) fn status_to_wit(
             cost_usd,
             model,
         } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::Usage,
             message: format!(
                 "[usage] {} input + {} output tokens{}{}",
                 input_tokens,
@@ -209,12 +241,12 @@ pub(super) fn status_to_wit(
             reason,
             ..
         } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::CredentialPrompt,
             message: format!("Credential needed ({secret_name}): {reason}"),
             metadata_json,
         },
         StatusUpdate::Error { message, code } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::Error,
             message: format!(
                 "[error{}] {}",
                 code.as_ref().map(|c| format!(": {c}")).unwrap_or_default(),
@@ -223,7 +255,7 @@ pub(super) fn status_to_wit(
             metadata_json,
         },
         StatusUpdate::CanvasAction(action) => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::CanvasAction,
             message: format!(
                 "[canvas] {}",
                 serde_json::to_string(action).unwrap_or_default()
@@ -234,17 +266,17 @@ pub(super) fn status_to_wit(
             content,
             message_type,
         } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::AgentMessage,
             message: format!("[agent_message:{}] {}", message_type, content),
             metadata_json,
         },
         StatusUpdate::LifecycleStart { run_id } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Thinking,
+            status: wit_channel::StatusType::LifecycleStart,
             message: format!("lifecycle:start:{}", run_id),
             metadata_json,
         },
         StatusUpdate::LifecycleEnd { run_id, phase } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Done,
+            status: wit_channel::StatusType::LifecycleEnd,
             message: format!("lifecycle:end:{}:{}", phase, run_id),
             metadata_json,
         },
@@ -254,7 +286,7 @@ pub(super) fn status_to_wit(
             task,
             ..
         } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::SubagentSpawned,
             message: format!(
                 "[subagent:spawned:{}] {}",
                 agent_id,
@@ -271,7 +303,7 @@ pub(super) fn status_to_wit(
             message,
             category,
         } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::SubagentProgress,
             message: format!(
                 "[subagent:progress:{}:{}] {}",
                 agent_id,
@@ -292,7 +324,7 @@ pub(super) fn status_to_wit(
             iterations,
             ..
         } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
+            status: wit_channel::StatusType::SubagentCompleted,
             message: format!(
                 "[subagent:{}:{}] {}",
                 if *success { "completed" } else { "failed" },
@@ -310,6 +342,11 @@ pub(super) fn status_to_wit(
                     *duration_ms as f64 / 1000.0
                 ))
             ),
+            metadata_json,
+        },
+        _ => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: String::new(),
             metadata_json,
         },
     }
@@ -332,6 +369,32 @@ pub(super) fn clone_wit_status_update(
             wit_channel::StatusType::JobStarted => wit_channel::StatusType::JobStarted,
             wit_channel::StatusType::AuthRequired => wit_channel::StatusType::AuthRequired,
             wit_channel::StatusType::AuthCompleted => wit_channel::StatusType::AuthCompleted,
+            wit_channel::StatusType::StreamChunk => wit_channel::StatusType::StreamChunk,
+            wit_channel::StatusType::Plan => wit_channel::StatusType::Plan,
+            wit_channel::StatusType::Usage => wit_channel::StatusType::Usage,
+            wit_channel::StatusType::CredentialPrompt => wit_channel::StatusType::CredentialPrompt,
+            wit_channel::StatusType::Error => wit_channel::StatusType::Error,
+            wit_channel::StatusType::CanvasAction => wit_channel::StatusType::CanvasAction,
+            wit_channel::StatusType::AgentMessage => wit_channel::StatusType::AgentMessage,
+            wit_channel::StatusType::LifecycleStart => wit_channel::StatusType::LifecycleStart,
+            wit_channel::StatusType::LifecycleEnd => wit_channel::StatusType::LifecycleEnd,
+            wit_channel::StatusType::SubagentSpawned => wit_channel::StatusType::SubagentSpawned,
+            wit_channel::StatusType::SubagentProgress => wit_channel::StatusType::SubagentProgress,
+            wit_channel::StatusType::SubagentCompleted => {
+                wit_channel::StatusType::SubagentCompleted
+            }
+            wit_channel::StatusType::ContextCompactionStarted => {
+                wit_channel::StatusType::ContextCompactionStarted
+            }
+            wit_channel::StatusType::AdvisorConsultationStarted => {
+                wit_channel::StatusType::AdvisorConsultationStarted
+            }
+            wit_channel::StatusType::SelfRepairStarted => {
+                wit_channel::StatusType::SelfRepairStarted
+            }
+            wit_channel::StatusType::SelfRepairCompleted => {
+                wit_channel::StatusType::SelfRepairCompleted
+            }
         },
         message: update.message.clone(),
         metadata_json: update.metadata_json.clone(),

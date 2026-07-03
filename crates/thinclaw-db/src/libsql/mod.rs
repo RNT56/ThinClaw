@@ -30,14 +30,14 @@ use libsql::{Connection, Database as LibSqlDatabase};
 use rust_decimal::Decimal;
 
 use crate::Database;
-use thinclaw_agent::routine::{
+use thinclaw_types::JobState;
+use thinclaw_types::error::DatabaseError;
+use thinclaw_types::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventDecision,
     RoutineEventEvaluation, RoutineEventStatus, RoutineGuardrails, RoutinePolicy, RoutineRun,
     RoutineTrigger, RunStatus, Trigger,
 };
-use thinclaw_agent::subagent::SubagentRunRecord;
-use thinclaw_types::JobState;
-use thinclaw_types::error::DatabaseError;
+use thinclaw_types::subagent::SubagentRunRecord;
 use thinclaw_workspace::MemoryDocument;
 
 use crate::libsql_migrations;

@@ -7,7 +7,9 @@ use serde_json::Value;
 use thinclaw_core::channels::StatusUpdate;
 
 use super::sanitizer::strip_llm_tokens;
-use super::ui_types::{UiEvent, UiUsage};
+use super::ui_types::{
+    MessageType, RunStatus, SubAgentStatus, SubAgentStatusKnown, ToolStatus, UiEvent, UiUsage,
+};
 
 fn session_key_from_metadata(metadata: &Value) -> Option<&str> {
     metadata
@@ -90,7 +92,7 @@ pub fn status_to_ui_event(
             session_key,
             run_id,
             tool_name: name,
-            status: "started".into(),
+            status: ToolStatus::Started,
             input: parameters.unwrap_or(Value::Null),
             output: Value::Null,
         }),
@@ -103,7 +105,11 @@ pub fn status_to_ui_event(
             session_key,
             run_id,
             tool_name: name,
-            status: if success { "ok" } else { "error" }.into(),
+            status: if success {
+                ToolStatus::Ok
+            } else {
+                ToolStatus::Error
+            },
             input: Value::Null,
             output: result_preview.map(Value::String).unwrap_or(Value::Null),
         }),
@@ -112,7 +118,7 @@ pub fn status_to_ui_event(
             session_key,
             run_id,
             tool_name: name,
-            status: "stream".into(),
+            status: ToolStatus::Stream,
             input: Value::Null,
             output: Value::String(preview),
         }),
@@ -120,7 +126,7 @@ pub fn status_to_ui_event(
         StatusUpdate::Status(text) => Some(UiEvent::RunStatus {
             session_key,
             run_id,
-            status: text,
+            status: RunStatus::from_wire(text),
             error: None,
         }),
 
@@ -218,7 +224,7 @@ pub fn status_to_ui_event(
             run_id,
             message_id: message_id.to_string(),
             content: strip_llm_tokens(&content),
-            message_type,
+            message_type: MessageType::from_wire(message_type),
         }),
 
         // Lifecycle events — signal turn start/end to the frontend with an
@@ -261,7 +267,7 @@ pub fn status_to_ui_event(
             parent_session: session_key,
             child_session: agent_id,
             task: format!("[{}] {}", name, task),
-            status: "running".into(),
+            status: SubAgentStatus::Known(SubAgentStatusKnown::Running),
             progress: Some(0.0),
             result_preview: None,
         }),
@@ -274,7 +280,7 @@ pub fn status_to_ui_event(
             parent_session: session_key,
             child_session: agent_id,
             task: message,
-            status: format!("running:{}", category),
+            status: SubAgentStatus::Other(format!("running:{}", category)),
             progress: None,
             result_preview: None,
         }),
@@ -308,9 +314,9 @@ pub fn status_to_ui_event(
                     duration_ms as f64 / 1000.0
                 ),
                 status: if success {
-                    "completed".into()
+                    SubAgentStatus::Known(SubAgentStatusKnown::Completed)
                 } else {
-                    "failed".into()
+                    SubAgentStatus::Known(SubAgentStatusKnown::Failed)
                 },
                 progress: Some(1.0),
                 result_preview: Some(preview),
@@ -345,6 +351,54 @@ pub fn status_to_ui_event(
                 model,
             })
         }
+
+        StatusUpdate::ContextCompactionStarted { used, limit } => {
+            Some(UiEvent::AgentLifecycleEvent {
+                session_key,
+                run_id,
+                phase: "context_compaction".to_string(),
+                label: "Context limit reached — compacting and retrying".to_string(),
+                detail: Some(format!("{used} tokens used vs {limit} limit")),
+            })
+        }
+
+        StatusUpdate::AdvisorConsultationStarted { reason } => Some(UiEvent::AgentLifecycleEvent {
+            session_key,
+            run_id,
+            phase: "advisor_consultation".to_string(),
+            label: "Consulting the advisor lane".to_string(),
+            detail: Some(reason),
+        }),
+
+        StatusUpdate::SelfRepairStarted {
+            repair_type,
+            target_id,
+            reason,
+        } => Some(UiEvent::AgentLifecycleEvent {
+            session_key,
+            run_id,
+            phase: "self_repair_started".to_string(),
+            label: format!("Self-repair: {repair_type} {target_id}"),
+            detail: Some(reason),
+        }),
+
+        StatusUpdate::SelfRepairCompleted {
+            repair_type,
+            target_id,
+            success,
+            summary,
+        } => Some(UiEvent::AgentLifecycleEvent {
+            session_key,
+            run_id,
+            phase: "self_repair_completed".to_string(),
+            label: format!(
+                "Self-repair {}: {repair_type} {target_id}",
+                if success { "succeeded" } else { "failed" }
+            ),
+            detail: Some(summary),
+        }),
+        // Future StatusUpdate variants map to no UI event (non_exhaustive).
+        _ => None,
     }
 }
 
@@ -458,7 +512,7 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                 session_key,
                 run_id,
                 tool_name: value_string(&value, "name").unwrap_or_default(),
-                status: "started".into(),
+                status: ToolStatus::Started,
                 input: Value::Null,
                 output: Value::Null,
             }]
@@ -470,9 +524,9 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                 run_id,
                 tool_name: value_string(&value, "name").unwrap_or_default(),
                 status: if value_bool(&value, "success").unwrap_or(false) {
-                    "ok".into()
+                    ToolStatus::Ok
                 } else {
-                    "error".into()
+                    ToolStatus::Error
                 },
                 input: Value::Null,
                 output: Value::Null,
@@ -484,7 +538,7 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                 session_key,
                 run_id,
                 tool_name: value_string(&value, "name").unwrap_or_default(),
-                status: "stream".into(),
+                status: ToolStatus::Stream,
                 input: Value::Null,
                 output: value.get("preview").cloned().unwrap_or(Value::Null),
             }]
@@ -529,7 +583,7 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
             vec![UiEvent::RunStatus {
                 session_key,
                 run_id,
-                status: message,
+                status: RunStatus::from_wire(message),
                 error: None,
             }]
         }
@@ -653,7 +707,7 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                 parent_session,
                 child_session,
                 task: value_string(&value, "task").unwrap_or_default(),
-                status: "running".into(),
+                status: SubAgentStatus::Known(SubAgentStatusKnown::Running),
                 progress: Some(0.0),
                 result_preview: None,
             }]
@@ -665,10 +719,10 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                 parent_session,
                 child_session,
                 task: value_string(&value, "message").unwrap_or_default(),
-                status: format!(
+                status: SubAgentStatus::Other(format!(
                     "running:{}",
                     value_string(&value, "category").unwrap_or_else(|| "progress".into())
-                ),
+                )),
                 progress: None,
                 result_preview: None,
             }]
@@ -698,9 +752,9 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                     value_u64(&value, "duration_ms").unwrap_or_default() as f64 / 1000.0
                 ),
                 status: if success {
-                    "completed".into()
+                    SubAgentStatus::Known(SubAgentStatusKnown::Completed)
                 } else {
-                    "failed".into()
+                    SubAgentStatus::Known(SubAgentStatusKnown::Failed)
                 },
                 progress: Some(1.0),
                 result_preview: Some(preview),
@@ -1090,7 +1144,7 @@ mod tests {
                 if parent_session == "thread-parent"
                     && child_session == "child-1"
                     && task == "research"
-                    && status == "running"
+                    && *status == SubAgentStatus::Known(SubAgentStatusKnown::Running)
                     && *progress == Some(0.0)
         ));
 

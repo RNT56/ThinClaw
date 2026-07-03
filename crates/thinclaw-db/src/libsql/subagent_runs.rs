@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use super::{LibSqlBackend, SUBAGENT_RUN_COLUMNS, fmt_ts, opt_text, row_to_subagent_run_libsql};
 use crate::SubagentRunStore;
-use thinclaw_agent::subagent::SubagentRunRecord;
 use thinclaw_types::error::DatabaseError;
+use thinclaw_types::subagent::SubagentRunRecord;
 
 #[async_trait]
 impl SubagentRunStore for LibSqlBackend {
@@ -87,7 +87,7 @@ impl SubagentRunStore for LibSqlBackend {
 mod tests {
     use super::*;
     use crate::Database;
-    use thinclaw_agent::subagent::{
+    use thinclaw_types::subagent::{
         SUBAGENT_RUN_STATUS_COMPLETED, SUBAGENT_RUN_STATUS_FAILED, SUBAGENT_RUN_STATUS_RUNNING,
     };
 

@@ -27,7 +27,6 @@ import {
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
-import { listen } from '@tauri-apps/api/event';
 import { ThinClawModeBadge, useThinClawStatusSnapshot } from './ThinClawModeBadge';
 
 // ── Channel icon mapping ────────────────────────────────────────
@@ -59,12 +58,15 @@ const CHANNEL_DESCRIPTIONS: Record<string, string> = {
     bluebubbles: 'Cross-platform iMessage bridge via BlueBubbles server. Supports media, read receipts, and group chats.',
 };
 
-const STREAM_MODES = ['', 'full', 'typing_only', 'disabled'];
+// Runtime stream-mode vocabulary (channels-core StreamMode::from_str_value):
+// '' = None (send the full reply), 'edit' = live message edits, 'status' =
+// typing-indicator, 'chunks' = event-chunked. Only telegram + discord honor it.
+const STREAM_MODES = ['', 'edit', 'status', 'chunks'];
 const STREAM_MODE_LABELS: Record<string, string> = {
-    '': 'Default',
-    'full': 'Full Streaming',
-    'typing_only': 'Typing Only',
-    'disabled': 'Disabled',
+    '': 'Off (full reply)',
+    'edit': 'Live Edit',
+    'status': 'Typing Indicator',
+    'chunks': 'Chunked',
 };
 
 // ── Channel Card  ────────────────────────────────────────────────
@@ -194,8 +196,6 @@ export function ThinClawChannels() {
     const [channels, setChannels] = useState<thinclaw.ChannelInfo[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [expandedChannel, setExpandedChannel] = useState<string | null>(null);
-    const [qrCode, setQrCode] = useState<string | null>(null);
-    const [_waStatus, setWaStatus] = useState<'connected' | 'disconnected' | 'authenticating' | 'error'>('disconnected');
     const [settingsMap, setSettingsMap] = useState<Record<string, any>>({});
     const { status: runtimeStatus, isRemote } = useThinClawStatusSnapshot(15000);
     const [appleAllowFrom, setAppleAllowFrom] = useState('');
@@ -242,30 +242,6 @@ export function ThinClawChannels() {
     useEffect(() => {
         fetchChannels();
         fetchSettings();
-
-        // Listen for login events (QR codes, etc)
-        const unlisten = listen('thinclaw-event', (event: any) => {
-            const payload = event.payload;
-            if (payload.kind === 'WebLogin') {
-                if (payload.provider === 'whatsapp') {
-                    if (payload.qr_code) {
-                        setQrCode(payload.qr_code);
-                        setWaStatus('authenticating');
-                    }
-                    if (payload.status === 'connected') {
-                        setWaStatus('connected');
-                        setQrCode(null);
-                        toast.success('WhatsApp connected successfully');
-                    }
-                    if (payload.status === 'error') {
-                        setWaStatus('error');
-                        toast.error('WhatsApp connection failed');
-                    }
-                }
-            }
-        });
-
-        return () => { unlisten.then(fn => fn()); };
     }, [fetchChannels, fetchSettings]);
 
     // ── Gmail OAuth + Status ────────────────────────────────────────────
@@ -344,9 +320,10 @@ export function ThinClawChannels() {
     };
 
     const handleStreamModeChange = async (channelId: string, mode: string) => {
-        const envKey = `${channelId.toUpperCase()}_STREAM_MODE`;
+        // Runtime reads the namespaced per-channel key (telegram/discord only).
+        const settingKey = `channels.${channelId}_stream_mode`;
         try {
-            await thinclaw.setSetting(envKey, mode);
+            await thinclaw.setSetting(settingKey, mode);
             // Update local state
             setChannels(prev => prev.map(ch =>
                 ch.id === channelId ? { ...ch, stream_mode: mode } : ch
@@ -357,7 +334,7 @@ export function ThinClawChannels() {
         }
     };
 
-    const streamChannels = ['discord', 'telegram', 'slack'];
+    const streamChannels = ['discord', 'telegram'];
     const activeChannels = channels.filter(ch => ch.enabled);
     const inactiveChannels = channels.filter(ch => !ch.enabled);
 
@@ -437,44 +414,6 @@ export function ThinClawChannels() {
                     </div>
                 </div>
             )}
-
-            {/* QR Code Modal for WhatsApp */}
-            <AnimatePresence>
-                {qrCode && (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                        <motion.div
-                            initial={{ scale: 0.9, opacity: 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            exit={{ scale: 0.9, opacity: 0 }}
-                            className="bg-card border border-border/40 rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl shadow-black/50"
-                        >
-                            <h2 className="text-2xl font-bold mb-2">Scan QR Code</h2>
-                            <p className="text-sm text-muted-foreground mb-6">Open WhatsApp on your phone and scan this code to link your device.</p>
-
-                            <div className="bg-white p-4 rounded-2xl mx-auto w-fit mb-6 shadow-inner">
-                                <img
-                                    src={`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(qrCode)}`}
-                                    alt="WhatsApp QR Code"
-                                    className="w-48 h-48 block"
-                                />
-                            </div>
-
-                            <div className="flex flex-col gap-3">
-                                <div className="flex items-center justify-center gap-2 text-blue-400 animate-pulse text-sm font-medium">
-                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                    Waiting for scan...
-                                </div>
-                                <button
-                                    onClick={() => setQrCode(null)}
-                                    className="text-xs text-muted-foreground hover:text-foreground transition-colors mt-2"
-                                >
-                                    Cancel Authentication
-                                </button>
-                            </div>
-                        </motion.div>
-                    </div>
-                )}
-            </AnimatePresence>
 
             {/* Info Notice */}
             <div className="p-6 rounded-2xl border bg-blue-500/5 border-blue-500/20 flex gap-4">
@@ -573,13 +512,22 @@ export function ThinClawChannels() {
                                             <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
                                                 Label Filter
                                             </label>
-                                            <input
-                                                type="text"
-                                                value={gmailLabelFilter}
-                                                onChange={e => setGmailLabelFilter(e.target.value)}
-                                                placeholder="INBOX, Category:Primary"
-                                                className="mt-1 w-full h-8 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono focus:ring-1 focus:ring-primary/30 outline-none transition-all"
-                                            />
+                                            <div className="mt-1 flex items-center gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={gmailLabelFilter}
+                                                    onChange={e => setGmailLabelFilter(e.target.value)}
+                                                    placeholder="INBOX, Category:Primary"
+                                                    className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono focus:ring-1 focus:ring-primary/30 outline-none transition-all"
+                                                />
+                                                <button
+                                                    onClick={() => saveSetting('channels.gmail_label_filters', gmailLabelFilter.trim() || null, 'Gmail label filter')}
+                                                    className="flex h-8 items-center gap-1.5 rounded-lg border border-red-500/20 bg-red-500/10 px-3 text-[10px] font-bold uppercase tracking-wider text-red-400 hover:bg-red-500/20"
+                                                >
+                                                    <Save className="h-3.5 w-3.5" />
+                                                    Save
+                                                </button>
+                                            </div>
                                             <p className="text-[10px] text-muted-foreground/50 mt-0.5">
                                                 Comma-separated Gmail labels to watch. Leave empty to watch INBOX.
                                             </p>

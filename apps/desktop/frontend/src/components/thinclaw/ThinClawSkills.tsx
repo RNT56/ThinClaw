@@ -50,7 +50,6 @@ function actionOk(resp: any): boolean {
 
 function SkillCard({
     skill,
-    onToggle,
     onInspect,
     onReload,
     onRemove,
@@ -58,26 +57,15 @@ function SkillCard({
     onPublish,
 }: {
     skill: thinclaw.Skill;
-    onToggle: (key: string, enabled: boolean) => void;
     onInspect: (name: string) => void;
     onReload: (name: string) => void;
     onRemove: (name: string) => void;
     onTrust: (name: string, trust: string) => void;
     onPublish: (name: string) => void;
 }) {
-    const [isToggling, setIsToggling] = useState(false);
     const [isInstalling, setIsInstalling] = useState(false);
     // Force disabled visual if not eligible
     const enabled = !skill.disabled && skill.eligible;
-
-    const handleToggle = async () => {
-        setIsToggling(true);
-        try {
-            await onToggle(skill.skillKey, !enabled);
-        } finally {
-            setIsToggling(false);
-        }
-    };
 
     const handleInstallDeps = async () => {
         if (!skill.install || skill.install.length === 0) return;
@@ -119,24 +107,17 @@ function SkillCard({
                             Fix
                         </button>
                     )}
-                    <button
-                        onClick={handleToggle}
-                        disabled={isToggling || (!skill.eligible && !enabled)}
-                        className={cn(
-                            "transition-all",
-                            enabled ? "text-primary hover:opacity-80" : "text-muted-foreground",
-                            !skill.eligible && !enabled ? "cursor-not-allowed opacity-30" : "hover:text-foreground"
-                        )}
-                        title={!skill.eligible && !enabled ? "Fix dependencies before activating" : ""}
+                    {/* Read-only status — skills are loaded or removed, not toggled at runtime */}
+                    <span
+                        className={cn(enabled ? "text-primary" : "text-muted-foreground/40")}
+                        title={enabled ? "Loaded and active" : (!skill.eligible ? "Fix dependencies to activate" : "Inactive")}
                     >
-                        {isToggling ? (
-                            <RefreshCw className="w-6 h-6 animate-spin" />
-                        ) : enabled ? (
+                        {enabled ? (
                             <ToggleRight className="w-8 h-8" />
                         ) : (
                             <ToggleLeft className="w-8 h-8" />
                         )}
-                    </button>
+                    </span>
                 </div>
             </div>
 
@@ -241,17 +222,6 @@ export function ThinClawSkills() {
     useEffect(() => {
         fetchData();
     }, []);
-
-    const handleToggle = async (key: string, enabled: boolean) => {
-        try {
-            await thinclaw.toggleThinClawSkill(key, enabled);
-            setSkills(prev => prev.map(s => s.skillKey === key ? { ...s, disabled: !enabled } : s));
-            toast.success(`${enabled ? 'Enabled' : 'Disabled'} ${key}`);
-        } catch (e) {
-            toast.error(`Failed to toggle skill: ${e}`);
-            fetchData();
-        }
-    };
 
     const handleInstallRepo = async () => {
         if (!repoUrl) return;
@@ -556,7 +526,6 @@ export function ThinClawSkills() {
                                                     >
                                         <SkillCard
                                             skill={skill}
-                                            onToggle={handleToggle}
                                             onInspect={handleInspect}
                                             onReload={handleReload}
                                             onRemove={handleRemove}

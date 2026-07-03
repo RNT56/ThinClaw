@@ -30,7 +30,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::tts::direct_media_tts_list_voices,
         crate::stt::direct_media_transcribe_audio,
         // ── Web & Image ─────────────────────────────────────────────────
-        crate::web_search::check_web_search,
         crate::image_gen::direct_media_generate_image,
         // ── RAG ─────────────────────────────────────────────────────────
         crate::rag::direct_rag_ingest_document,
@@ -88,7 +87,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::projects::get_project_documents,
         crate::projects::delete_document,
         // ── Rig Agent ───────────────────────────────────────────────────
-        crate::rig_lib::rig_check_web_search,
         crate::rig_lib::agent_chat,
         // ── ThinClaw Agent Cockpit ──────────────────────────────────────
         crate::thinclaw::commands::thinclaw_get_status,
@@ -127,6 +125,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_send_message,
         crate::thinclaw::commands::thinclaw_subscribe_session,
         crate::thinclaw::commands::thinclaw_abort_chat,
+        crate::thinclaw::commands::thinclaw_undo,
+        crate::thinclaw::commands::thinclaw_redo,
         crate::thinclaw::commands::thinclaw_resolve_approval,
         crate::thinclaw::commands::thinclaw_get_diagnostics,
         crate::thinclaw::commands::thinclaw_clear_memory,
@@ -240,6 +240,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         // New feature commands
         crate::thinclaw::commands::thinclaw_set_thinking,
         crate::thinclaw::commands::thinclaw_memory_search,
+        crate::thinclaw::commands::thinclaw_session_search,
         crate::thinclaw::commands::thinclaw_export_session,
         // Hooks & extensions management
         crate::thinclaw::commands::thinclaw_hooks_list,
@@ -287,6 +288,9 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_cost_export_csv,
         crate::thinclaw::commands::thinclaw_cost_reset,
         crate::thinclaw::commands::thinclaw_channel_status_list,
+        crate::thinclaw::commands::thinclaw_channel_config_schema,
+        crate::thinclaw::commands::thinclaw_channel_config_schemas,
+        crate::thinclaw::commands::thinclaw_channel_config_submit,
         crate::thinclaw::commands::thinclaw_agents_set_default,
         crate::thinclaw::commands::thinclaw_clawhub_search,
         crate::thinclaw::commands::thinclaw_clawhub_install,
@@ -333,6 +337,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_experiments_campaign_action,
         crate::thinclaw::commands::thinclaw_experiments_gpu_validate,
         crate::thinclaw::commands::thinclaw_experiments_gpu_launch_test,
+        crate::thinclaw::commands::thinclaw_experiments_list_envs,
+        crate::thinclaw::commands::thinclaw_experiments_run_eval,
         // ── Permissions ─────────────────────────────────────────────────
         crate::permissions::get_permission_status,
         crate::permissions::request_permission,

@@ -30,7 +30,7 @@ pub struct ObservabilityConfig {
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
-            backend: "none".into(),
+            backend: "log".into(),
         }
     }
 }
@@ -55,9 +55,9 @@ mod tests {
     use crate::observability::*;
 
     #[test]
-    fn default_config_is_none() {
+    fn default_config_is_log() {
         let cfg = ObservabilityConfig::default();
-        assert_eq!(cfg.backend, "none");
+        assert_eq!(cfg.backend, "log");
     }
 
     #[test]

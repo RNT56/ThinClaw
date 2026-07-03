@@ -115,6 +115,27 @@ For example:
 - Slack should be documented as a WASM channel package in ThinClaw.
 - Discord needs both paths documented clearly: native Gateway and packaged interactions.
 
+## Status Forwarding To WASM Channels
+
+The host forwards agent activity to WASM channels through the `on-status`
+callback in `wit/channel.wit`, carrying a `status-update` record whose
+`status-type` enum classifies the event and whose `message` / `metadata-json`
+fields carry the human-readable detail and structured data. WIT enum variants
+carry no payload, so payload-bearing host events (subagent lifecycle, credential
+prompts, canvas actions, etc.) map to a dedicated `status-type` for
+classification while their detail continues to travel through `message` /
+`metadata-json`.
+
+The `status-type` enum now covers every host `StatusUpdate` variant (lifecycle
+start/end, sub-agent spawn/progress/complete, credential prompts, usage, plan,
+canvas, agent messages, error, context compaction, advisor consultation, and
+self-repair) instead of collapsing them to the generic `status` variant. This
+lets packaged channels react to lifecycle, sub-agent, and credential events
+directly rather than string-matching the message body. The channel WIT contract
+carries a `near:agent@x.y.z` package version (mirrored by `CHANNEL_WIT_VERSION`
+in the host runtime) so host and packaged artifacts can negotiate additive
+changes; bump the minor version when adding `status-type` variants.
+
 ## Code Ownership
 
 `thinclaw-channels` owns root-independent channel primitives: channel manager,
@@ -138,6 +159,23 @@ Channel-specific formatting behavior belongs to the channel layer, not to generi
 - **Prompt assembly** should consume resolved hints injected by the channel/runtime path. It should not reintroduce channel-name switches inside `src/llm/reasoning.rs`.
 
 Today the canonical lookup seam is `ChannelManager::formatting_hints_for()`. If you add or change channel-specific rendering behavior, update the owning native channel implementation or WASM manifest first so every surface sees the same guidance.
+
+## Runtime Configuration Ownership
+
+Channels that expose operator-tunable runtime settings (allowed senders, content
+filters, stream mode, …) describe them with a typed schema, mirroring the formatting-hints
+pattern:
+
+- **Native channels** override `Channel::config_schema()` (returns `Option<ConfigSchema>`,
+  default `None`) to return their `ConfigField` list. Signal and Discord implement it today.
+- **DTOs** (`ConfigSchema`/`ConfigField`/`ConfigOption`) live in `thinclaw-channels-core`; the
+  canonical lookup seams are `ChannelManager::config_schema_for()` and `config_schemas()`.
+- **Applying changes** flows through `ChannelManager::update_channel_runtime_config()` →
+  `Channel::update_runtime_config(HashMap)`. WASM channels apply changes live; native channels
+  using the default no-op persist their settings but require a channel restart to take effect.
+- **Operator surfaces** (e.g. the ThinClaw Desktop Channel Config panel) render the schema as a
+  form and submit values; the desktop `thinclaw_channel_config_submit` command persists each
+  field via settings and forwards to the live channel (embedded-only, LocalOnly-gated).
 
 ### Channel maturity (`production_status`)
 
@@ -288,6 +326,7 @@ If you are authoring a new channel:
 - build a **native channel** when you need persistent or local capabilities
 - build a **WASM channel** when you need stateless packaged delivery
 - define formatting/rendering guidance on the channel itself (`Channel::formatting_hints()` for native, `formatting_hints` in `*.capabilities.json` for WASM)
+- implement `Channel::config_schema()` if your channel exposes operator-tunable runtime settings, so surfaces can render a config form (see *Runtime Configuration Ownership* above)
 - use `IncomingEvent`, `mint_session_key`, and `parse_slash_command` for all new chat-platform ingress
 
 See [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) for the implementation guide.

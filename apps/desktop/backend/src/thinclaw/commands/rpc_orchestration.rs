@@ -120,6 +120,18 @@ pub(crate) mod sub_agent_registry {
 mod sub_agent_registry_tests {
     use super::super::types::ChildSessionInfo;
     use super::sub_agent_registry;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    // The registry is a process-global static and `clear()`/`all_children()`
+    // operate on that shared state, so these tests cannot run concurrently:
+    // one test's `clear()` would wipe another's freshly-registered children
+    // mid-assert (and vice-versa for the global count). Serialize them, and
+    // start each from a known-empty registry.
+    fn serial() -> &'static Mutex<()> {
+        static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+        SERIAL.get_or_init(|| Mutex::new(()))
+    }
 
     fn child(session_key: &str) -> ChildSessionInfo {
         ChildSessionInfo {
@@ -133,7 +145,8 @@ mod sub_agent_registry_tests {
 
     #[tokio::test]
     async fn remove_parent_evicts_children() {
-        // Unique parent key so this test does not race the shared registry.
+        let _serial = serial().lock().await;
+        sub_agent_registry::clear().await;
         let parent = "test-parent:remove-parent-evicts";
         sub_agent_registry::register(parent, child(&format!("{parent}:task-1"))).await;
         sub_agent_registry::register(parent, child(&format!("{parent}:task-2"))).await;
@@ -145,8 +158,8 @@ mod sub_agent_registry_tests {
 
     #[tokio::test]
     async fn clear_empties_registered_children() {
-        // `clear()` is global; assert via this parent's own view to avoid a
-        // cross-test count race on the process-wide registry.
+        let _serial = serial().lock().await;
+        sub_agent_registry::clear().await;
         let parent = "test-parent:clear-empties";
         sub_agent_registry::register(parent, child(&format!("{parent}:task-1"))).await;
         sub_agent_registry::clear().await;
@@ -193,7 +206,7 @@ pub async fn thinclaw_spawn_session(
             parent_session: parent.clone(),
             child_session: child_key.clone(),
             task: task.clone(),
-            status: "running".to_string(),
+            status: crate::thinclaw::ui_types::SubAgentStatus::from_wire("running"),
             progress: Some(0.0),
             result_preview: None,
         };
@@ -275,7 +288,7 @@ pub async fn thinclaw_spawn_session(
                 parent_session: parent.clone(),
                 child_session: child_bg.clone(),
                 task: task_label,
-                status: status.to_string(),
+                status: crate::thinclaw::ui_types::SubAgentStatus::from_wire(status),
                 progress: Some(if run_ok { 1.0 } else { 0.0 }),
                 result_preview: preview.clone(),
             };
@@ -389,7 +402,7 @@ pub async fn thinclaw_update_sub_agent_status(
             parent_session: parent_key,
             child_session: child_session.clone(),
             task,
-            status: status.clone(),
+            status: crate::thinclaw::ui_types::SubAgentStatus::from_wire(status.clone()),
             progress: if status == "completed" {
                 Some(1.0)
             } else {

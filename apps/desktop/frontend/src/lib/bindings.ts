@@ -145,14 +145,6 @@ async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<DirectSt
     else return { status: "error", error: e  as any };
 }
 },
-async checkWebSearch(query: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("check_web_search", { query }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async directMediaGenerateImage(params: ImageGenParams) : Promise<Result<ImageResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_generate_image", { params }) };
@@ -569,14 +561,6 @@ async deleteDocument(id: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async rigCheckWebSearch(query: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("rig_check_web_search", { query }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async agentChat(request: string) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("agent_chat", { request }) };
@@ -625,7 +609,7 @@ async thinclawGetAnthropicKey() : Promise<Result<string | null, string>> {
 /**
  * Save Brave Search API key
  */
-async thinclawSaveBraveKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveBraveKey(key: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_brave_key", { key }) };
 } catch (e) {
@@ -1017,6 +1001,37 @@ async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcR
 async thinclawAbortChat(sessionKey: string, runId: string | null) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_abort_chat", { sessionKey, runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Undo the last turn in a thread.
+ *
+ * Sends `/undo` through the normal message pipeline; the agent's
+ * `SubmissionParser` converts it to `Submission::Undo` and the dispatcher
+ * applies the per-thread undo. Works in both local and remote mode, mirroring
+ * `thinclaw_send_message`.
+ */
+async thinclawUndo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_undo", { sessionKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Redo a previously undone turn.
+ *
+ * Sends `/redo` through the normal message pipeline; the agent's
+ * `SubmissionParser` converts it to `Submission::Redo`. Works in both local and
+ * remote mode, mirroring `thinclaw_send_message`.
+ */
+async thinclawRedo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_redo", { sessionKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1600,7 +1615,7 @@ async thinclawJobEvents(jobId: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_files_list", { jobId, path }) };
 } catch (e) {
@@ -1608,7 +1623,7 @@ async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_file_read", { jobId, path }) };
 } catch (e) {
@@ -1867,7 +1882,7 @@ async thinclawAutonomyEvidence() : Promise<Result<JsonValue, BridgeError>> {
 /**
  * Save HuggingFace token
  */
-async thinclawSetHfToken(token: string) : Promise<Result<null, string>> {
+async thinclawSetHfToken(token: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_hf_token", { token }) };
 } catch (e) {
@@ -1902,7 +1917,7 @@ async thinclawGetImplicitProviderKey(provider: string) : Promise<Result<string |
 /**
  * Save Amazon Bedrock AWS credentials
  */
-async thinclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: string, region: string) : Promise<Result<null, string>> {
+async thinclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: string, region: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_bedrock_credentials", { accessKeyId, secretAccessKey, region }) };
 } catch (e) {
@@ -2130,6 +2145,18 @@ async thinclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promi
 async thinclawMemorySearch(query: string, limit: number | null) : Promise<Result<MemorySearchResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_memory_search", { query, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Search stored conversation transcripts for `query` and render windowed
+ * excerpts; optionally summarize matching sessions.
+ */
+async thinclawSessionSearch(query: string, limit: number | null, summarize: boolean | null) : Promise<Result<SessionSearchResult, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_session_search", { query, limit, summarize }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2588,6 +2615,45 @@ async thinclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], string>
 }
 },
 /**
+ * Return the configuration schema for a single channel, if it exposes one.
+ */
+async thinclawChannelConfigSchema(channelId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_config_schema", { channelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return configuration schemas for every channel that exposes one.
+ */
+async thinclawChannelConfigSchemas() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_config_schemas") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Apply configuration changes to a channel.
+ *
+ * Persists each field under `channels.{channel_id}_{field}` and forwards the
+ * values to the live channel's `update_runtime_config`. WASM channels apply the
+ * change live; native channels (Signal, Discord, …) use the default no-op and
+ * persist but require a channel restart to take effect (reported via the note).
+ * Embedded-only (D-3): a remote gateway owns its own channels.
+ */
+async thinclawChannelConfigSubmit(channelId: string, values: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_config_submit", { channelId, values }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Set the default agent profile.
  */
 async thinclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> {
@@ -3012,6 +3078,36 @@ async thinclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValu
 async thinclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_launch_test", { provider }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List the agent-eval environments the desktop can describe.
+ *
+ * `agent_loop` is runnable against the embedded agent; the benchmark envs
+ * need case definitions and are CLI-only for now (reported as non-runnable).
+ */
+async thinclawExperimentsListEnvs() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_list_envs") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Run an agent-eval episode set against the embedded agent.
+ *
+ * Drives `AgentLoopEnv` for `n_episodes` (clamped 1..=20), each sending `prompt`
+ * as a single user message, capped at `max_steps` (clamped 1..=16). Episodes run
+ * in throwaway `agent-env:` sessions, so the user's threads are untouched.
+ * Local-only: the eval needs the embedded agent, so it is gated off in remote mode.
+ */
+async thinclawExperimentsRunEval(envId: string, prompt: string, nEpisodes: number, maxSteps: number) : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_run_eval", { envId, prompt, nEpisodes, maxSteps }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3793,6 +3889,27 @@ snippet: string;
  */
 score: number }
 /**
+ * Mid-loop agent message classification carried by [`UiEvent::AgentMessage`].
+ *
+ * Matches the `emit_user_message` tool schema (`progress` | `interim_result`
+ * | `question` | `warning`). The tool default is `progress`, but the value is
+ * not strictly clamped upstream, so any other classification round-trips
+ * through [`MessageType::Other`].
+ */
+export type MessageType =
+/**
+ * One of the recognised message classifications.
+ */
+MessageTypeKnown |
+/**
+ * Any other classification string (preserved verbatim).
+ */
+string
+/**
+ * The recognised, closed set of [`MessageType`] values.
+ */
+export type MessageTypeKnown = "progress" | "interim_result" | "question" | "warning"
+/**
  * Which AI modality a backend serves.
  */
 export type Modality = "chat" | "embedding" | "tts" | "stt" | "diffusion"
@@ -3927,6 +4044,29 @@ export type RoutingRulesResponse = { rules: RoutingRule[]; smart_routing_enabled
  * Full routing policy status for the routing UI dashboard.
  */
 export type RoutingStatusResponse = { enabled: boolean; default_provider: string; routing_mode: string; primary_model: string | null; preferred_cheap_provider: string | null; cheap_model: string | null; primary_pool_order: string[]; cheap_pool_order: string[]; fallback_chain: string[]; advisor_ready: boolean; advisor_disabled_reason: string | null; executor_target: string | null; advisor_target: string | null; diagnostics: string[]; runtime_revision: number | null; llm_select_state: string; rule_count: number; rules: RoutingRuleSummary[]; latency_data: LatencyEntry[] }
+/**
+ * Run lifecycle status carried by [`UiEvent::RunStatus`].
+ *
+ * Historically a free-form string (`StatusUpdate::Status(text)` and the
+ * gateway `status` message forward arbitrary human-readable text). The known
+ * terminal/active states are modelled as named variants with their exact wire
+ * strings preserved; any other value round-trips losslessly through
+ * [`RunStatus::Other`]. The exported TypeScript type is therefore a union of
+ * the known literals plus `string`.
+ */
+export type RunStatus =
+/**
+ * One of the recognised run states.
+ */
+RunStatusKnown |
+/**
+ * Any other free-form status string (preserved verbatim).
+ */
+string
+/**
+ * The recognised, closed set of [`RunStatus`] values.
+ */
+export type RunStatusKnown = "started" | "in_flight" | "ok" | "error" | "aborted" | "done" | "interrupted" | "rejected"
 export type RuntimeCapability = "chat" | "embedding" | "tts" | "stt" | "diffusion"
 export type RuntimeExposurePolicy = "direct_only" | "shared_when_enabled" | "network_exposed"
 export type RuntimeReadiness = "ready" | "starting" | "setup_required" | "unavailable"
@@ -3951,6 +4091,22 @@ session_key: string;
  */
 message_count: number }
 /**
+ * Rendered cross-session search results.
+ */
+export type SessionSearchResult = {
+/**
+ * One rendered hit per result (raw JSON: session/thread id, excerpt, score, …).
+ */
+results: JsonValue[];
+/**
+ * Whether matching sessions were LLM-summarized.
+ */
+summarized: boolean;
+/**
+ * Whether the renderer fell back to raw excerpts (e.g. no summarizer).
+ */
+fallback: boolean }
+/**
  * SFTP provider configuration input from the frontend.
  */
 export type SftpConfigInput = { endpoint: string; username: string | null;
@@ -3958,7 +4114,7 @@ export type SftpConfigInput = { endpoint: string; username: string | null;
  * Path to SSH private key (e.g. `~/.ssh/id_rsa`) or password
  */
 key_or_password: string | null; root: string | null }
-export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_running: boolean; image_running: boolean; summarizer_running: boolean }
+export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_configured: boolean; image_configured: boolean; summarizer_running: boolean }
 /**
  * Slack configuration input
  */
@@ -3985,6 +4141,27 @@ export type StandardAsset = { name: string; category: string; filename: string; 
  */
 export type StorageCategory = { id: string; label: string; size_bytes: number }
 export type StreamChunk = { content: string; done: boolean; usage: DirectTokenUsage | null; context_update: DirectChatMessage[] | null }
+/**
+ * Sub-agent progress status carried by [`UiEvent::SubAgentUpdate`].
+ *
+ * Known lifecycle states use their exact wire strings; the running-with-
+ * category form (`running:<category>`) and any operator-supplied status from
+ * the `thinclaw_update_sub_agent_status` RPC round-trip losslessly through
+ * [`SubAgentStatus::Other`].
+ */
+export type SubAgentStatus =
+/**
+ * One of the recognised sub-agent states.
+ */
+SubAgentStatusKnown |
+/**
+ * Any other status string, e.g. `running:thinking` (preserved verbatim).
+ */
+string
+/**
+ * The recognised, closed set of [`SubAgentStatus`] values.
+ */
+export type SubAgentStatusKnown = "running" | "completed" | "failed"
 export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string; app_memory: number; memory_bandwidth_gbps: number }
 export type TAURI_CHANNEL<TSend> = import("@tauri-apps/api/core").Channel<TSend>
 /**
@@ -4036,6 +4213,30 @@ export type ThinkingConfig = { enabled: boolean; budget_tokens: number | null }
  */
 export type ToolInfoItem = { name: string; description: string; enabled: boolean; source: string }
 /**
+ * Tool-execution status carried by [`UiEvent::ToolUpdate`].
+ *
+ * The wire strings are preserved exactly (`started` | `stream` | `ok` |
+ * `error`) so existing frontend runtime checks keep working, while the
+ * exported TypeScript type becomes an exhaustive string-literal union.
+ */
+export type ToolStatus =
+/**
+ * Tool call has started executing.
+ */
+"started" |
+/**
+ * Intermediate streamed tool result.
+ */
+"stream" |
+/**
+ * Tool completed successfully.
+ */
+"ok" |
+/**
+ * Tool failed.
+ */
+"error"
+/**
  * Tool list response
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
@@ -4086,15 +4287,22 @@ export type UiEvent =
 /**
  * Tool execution update
  */
-{ kind: "ToolUpdate"; session_key: string; run_id: string | null; tool_name: string; status: string; input: JsonValue; output: JsonValue } |
+{ kind: "ToolUpdate"; session_key: string; run_id: string | null; tool_name: string; status: ToolStatus; input: JsonValue; output: JsonValue } |
 /**
  * Run status change
  */
-{ kind: "RunStatus"; session_key: string; run_id: string | null; status: string; error: string | null } |
+{ kind: "RunStatus"; session_key: string; run_id: string | null; status: RunStatus; error: string | null } |
 /**
  * Explicit run lifecycle transition.
  */
 { kind: "LifecycleUpdate"; session_key: string; run_id: string; phase: string; status: string } |
+/**
+ * Agent lifecycle activity (context compaction, advisor consultation, …)
+ * surfaced as a transient, human-readable status for the Event Inspector.
+ * Distinct from `LifecycleUpdate` (run start/end) — these are mid-run
+ * internal phases the agent passes through.
+ */
+{ kind: "AgentLifecycleEvent"; session_key: string; run_id: string | null; phase: string; label: string; detail: string | null } |
 /**
  * Structured plan/progress update from the ThinClaw agent loop.
  */
@@ -4136,7 +4344,7 @@ export type UiEvent =
  * changes state. The frontend can use this to show a progress panel
  * in the parent session's chat view.
  */
-{ kind: "SubAgentUpdate"; parent_session: string; child_session: string; task: string; status: string; progress: number | null; result_preview: string | null } |
+{ kind: "SubAgentUpdate"; parent_session: string; child_session: string; task: string; status: SubAgentStatus; progress: number | null; result_preview: string | null } |
 /**
  * Sandbox/job lifecycle update.
  */
@@ -4148,7 +4356,7 @@ export type UiEvent =
  * (the agentic loop continues), so the processing indicator should
  * stay active. These are NOT ephemeral status text.
  */
-{ kind: "AgentMessage"; session_key: string; run_id: string | null; message_id: string; content: string; message_type: string } |
+{ kind: "AgentMessage"; session_key: string; run_id: string | null; message_id: string; content: string; message_type: MessageType } |
 /**
  * Factory reset completed — frontend must clear all cached state
  */

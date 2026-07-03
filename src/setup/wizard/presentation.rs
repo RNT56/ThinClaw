@@ -173,13 +173,13 @@ impl SetupWizard {
         crate::setup::prompts::print_blank_line();
 
         let options: &[&str] = &[
-            "None (no overhead, default)",
-            "Log (structured events via tracing)",
+            "Log (structured events via tracing, default)",
+            "None (no overhead)",
         ];
         let idx = select_one("Observability backend", options).map_err(SetupError::Io)?;
         let backend = match idx {
-            1 => "log",
-            _ => "none",
+            1 => "none",
+            _ => "log",
         };
         self.settings.observability_backend = backend.to_string();
 

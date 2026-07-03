@@ -315,6 +315,8 @@ impl Agent {
             runner = runner.with_cost_tracker(std::sync::Arc::clone(tracker));
         }
 
+        self.observer()
+            .record_event(&crate::observability::ObserverEvent::HeartbeatTick);
         match runner.check_heartbeat().await {
             crate::agent::HeartbeatResult::Ok => Ok(SubmissionResult::ok_with_message(
                 command_catalog::heartbeat_clear_text(),
