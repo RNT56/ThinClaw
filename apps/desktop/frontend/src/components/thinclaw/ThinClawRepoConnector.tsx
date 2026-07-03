@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-    Github,
+    FolderGit2,
     KeyRound,
     Link2,
     RefreshCw,
@@ -209,7 +209,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                         <ChevronRight className="h-4 w-4 text-muted-foreground" />
                     )}
                     <div className="rounded-md border border-white/10 bg-white/[0.04] p-1.5">
-                        <Github className="h-4 w-4 text-foreground" />
+                        <FolderGit2 className="h-4 w-4 text-foreground" />
                     </div>
                     <div>
                         <p className="text-sm font-semibold">GitHub Connector</p>
@@ -341,7 +341,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                 {/* GitHub App config */}
                                 <section className="space-y-2.5">
                                     <div className="flex items-center gap-2">
-                                        <Github className="h-3.5 w-3.5 text-primary" />
+                                        <FolderGit2 className="h-3.5 w-3.5 text-primary" />
                                         <p className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">
                                             GitHub App (optional)
                                         </p>
