@@ -10,8 +10,8 @@ use rig::completion::{
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
-    Message as RigMessage, ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult,
-    ToolResultContent, UserContent,
+    Message as RigMessage, ReasoningContent, ToolChoice as RigToolChoice, ToolFunction,
+    ToolResult as RigToolResult, ToolResultContent, UserContent,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -586,10 +586,16 @@ fn extract_response(
                 });
             }
             AssistantContent::Reasoning(reasoning) => {
-                // Capture extended thinking / reasoning content
-                for part in &reasoning.reasoning {
-                    if !part.is_empty() {
-                        thinking_parts.push(part.clone());
+                // Capture extended thinking / reasoning content. Encrypted
+                // and redacted blocks are opaque payloads, not display text.
+                for part in &reasoning.content {
+                    let text = match part {
+                        ReasoningContent::Text { text, .. } => text,
+                        ReasoningContent::Summary(text) => text,
+                        _ => continue,
+                    };
+                    if !text.is_empty() {
+                        thinking_parts.push(text.clone());
                     }
                 }
             }
@@ -655,6 +661,11 @@ fn build_rig_request(
     let preamble = merge_ephemeral_context_into_preamble(preamble, context_documents);
 
     Ok(RigRequest {
+        // The target model is carried by the provider client we build the
+        // request against, matching pre-0.33 behavior where the request had
+        // no model field.
+        model: None,
+        output_schema: None,
         preamble,
         chat_history,
         documents: Vec::new(),
@@ -1545,7 +1556,17 @@ where
                     }
                 }
                 Ok(StreamedAssistantContent::Reasoning(reasoning)) => {
-                    let combined: String = reasoning.reasoning.join("");
+                    let combined: String = reasoning
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            rig::message::ReasoningContent::Text { text, .. } => {
+                                Some(text.as_str())
+                            }
+                            rig::message::ReasoningContent::Summary(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
                     if !combined.is_empty() {
                         yield Ok(StreamChunk::ReasoningDelta(combined));
                     }

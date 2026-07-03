@@ -186,7 +186,7 @@ ed25519-dalek = { version = "2", features = ["std"] }
 hex = "0.4"
 
 # Multi-provider LLM support
-rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
+rig-core = { version = "0.33", default-features = false, features = ["reqwest-rustls"] }
 
 # Docker sandbox
 bollard = { version = "0.18", optional = true }
