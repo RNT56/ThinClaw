@@ -247,7 +247,7 @@ zbus = "4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = "0.8"
-windows-sys = { version = "0.52", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security_Credentials",
     "Win32_Security_Cryptography",
