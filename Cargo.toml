@@ -179,7 +179,7 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 blake3 = "1"
-rand = "0.8"
+rand = "0.10"
 subtle = "2"  # Constant-time comparisons for token validation
 hmac = "0.12"  # HMAC-SHA256 for webhook signing
 ed25519-dalek = { version = "2", features = ["std"] }

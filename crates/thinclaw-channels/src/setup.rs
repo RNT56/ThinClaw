@@ -1,6 +1,6 @@
 //! Pure setup helpers shared by root setup adapters.
 
-use rand::RngCore;
+use rand::Rng;
 use uuid::Uuid;
 
 pub const WEBHOOK_SECRET_BYTES: usize = 32;
@@ -170,7 +170,7 @@ pub fn generate_webhook_secret() -> String {
 }
 
 pub fn generate_secret_with_length(length: usize) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut bytes = vec![0u8; length];
     rng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()

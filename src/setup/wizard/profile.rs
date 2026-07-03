@@ -157,9 +157,9 @@ impl SetupWizard {
             return;
         }
 
-        use rand::Rng;
-        let token: String = rand::thread_rng()
-            .sample_iter(&rand::distributions::Alphanumeric)
+        use rand::RngExt;
+        let token: String = rand::rng()
+            .sample_iter(&rand::distr::Alphanumeric)
             .take(48)
             .map(char::from)
             .collect();
