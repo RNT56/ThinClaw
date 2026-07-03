@@ -18,7 +18,7 @@ thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "macros", "time"] }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 tracing = { workspace = true }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
