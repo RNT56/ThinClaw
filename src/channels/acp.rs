@@ -641,7 +641,7 @@ async fn run_stdio_inner(
     // just before a turn completes can never be overtaken by that turn's
     // prompt response. A second queue bridged into this one (the previous
     // design) reordered exactly that pair under CI load.
-    let (writer_tx, mut writer_rx) = outbound.unwrap_or_else(|| mpsc::unbounded_channel::<Value>());
+    let (writer_tx, mut writer_rx) = outbound.unwrap_or_else(mpsc::unbounded_channel::<Value>);
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(message) = writer_rx.recv().await {
