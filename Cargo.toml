@@ -189,7 +189,7 @@ hex = "0.4"
 rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
 
 # Docker sandbox
-bollard = { version = "0.18", optional = true }
+bollard = { version = "0.21", optional = true }
 
 # Archive extraction for WASM extension bundles
 flate2 = "1"
