@@ -44,7 +44,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
 wasmtime-wasi = { version = "36", optional = true }
 dirs = "6"
-lru = "0.16.3"
+lru = "0.18.0"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
 
 [features]
