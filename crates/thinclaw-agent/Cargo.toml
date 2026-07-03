@@ -15,6 +15,7 @@ chrono = { workspace = true }
 chrono-tz = "0.10"
 cron = "0.13"
 dirs = "6"
+futures = "0.3"
 mime_guess = "2.0.5"
 rand = "0.8"
 regex = "1"

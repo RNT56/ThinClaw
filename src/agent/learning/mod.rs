@@ -32,6 +32,23 @@ mod trajectory;
 mod types;
 
 pub use orchestrator::*;
+
+/// Invalidate the process-global ready-provider cache for `user_id` after a
+/// settings write that may have touched `learning.*` keys.
+///
+/// The learning orchestrator's own configure/disable paths invalidate
+/// internally; this entry point exists for the GENERIC settings surfaces
+/// (gateway settings endpoints, desktop config RPCs, settings import) which
+/// otherwise leave a stale provider resolution serving recall/sync for up to
+/// the cache TTL after an operator changes providers through the UI.
+pub async fn invalidate_provider_ready_cache(
+    store: &std::sync::Arc<dyn crate::db::Database>,
+    user_id: &str,
+) {
+    providers::ready_cache_epoch().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let key = providers::ready_cache_key(store, user_id);
+    providers::global_ready_cache().write().await.remove(&key);
+}
 pub use providers::*;
 pub use trajectory::*;
 pub use types::*;

@@ -388,7 +388,10 @@ impl AppBuilder {
             if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
                 tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
             }
-            match db_cleanup.cleanup_stale_routine_runs().await {
+            match db_cleanup
+                .cleanup_stale_routine_runs(crate::db::DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS)
+                .await
+            {
                 Ok(0) => {}
                 Ok(n) => tracing::info!("Cleaned up {} orphaned RUNNING routine runs", n),
                 Err(e) => tracing::warn!("Failed to cleanup stale routine runs: {}", e),

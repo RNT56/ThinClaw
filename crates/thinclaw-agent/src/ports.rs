@@ -16,7 +16,6 @@ use thinclaw_types::error::{ChannelError, DatabaseError, RoutineError, ToolError
 use thinclaw_types::{ActionRecord, JobContext};
 use uuid::Uuid;
 
-use crate::prompt_assembly::PromptAssemblyResult;
 use crate::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
     RoutineTriggerDecision, RunStatus,
@@ -194,6 +193,18 @@ pub struct ThreadRuntimeSnapshot {
     pub prompt_segment_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_context_refs: Vec<String>,
+    /// Watermark of how many oldest-first conversation rows in the DB are
+    /// still "active" for this thread. `/clear` sets this to `Some(0)`;
+    /// `/undo` and `/redo` set it to the restored turn count so hydration
+    /// truncates resurrected history instead of rebuilding every DB row.
+    /// `None` means the full persisted history is active (the common case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_message_row_count: Option<i64>,
+    /// Capped snapshot of the undo stack (newest checkpoints only), so
+    /// `/undo` keeps working across a process restart instead of silently
+    /// losing all undo history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo_checkpoints: Vec<crate::undo::Checkpoint>,
 }
 
 /// Target used for status, proactive messages, and broadcasts.
@@ -440,21 +451,17 @@ pub struct SkillContext {
     pub active_skill_block: Option<String>,
 }
 
-/// Request for workspace/provider prompt assembly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspacePromptRequest {
-    pub scope: AgentScope,
-    pub user_input: String,
-    pub channel: String,
-    pub routed_workspace_id: Option<Uuid>,
-    pub agent_system_prompt: Option<String>,
-    pub session_freeze_enabled: bool,
-    pub existing_runtime: Option<ThreadRuntimeSnapshot>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-}
-
 /// Workspace prompt inputs after loading and sanitation.
+///
+/// Consumed by `thinclaw_agent::prompt_assembly::assemble_workspace_prompt_materials`.
+/// Note: the higher-level `WorkspacePromptAssemblyPort` trait that used to sit
+/// on top of this DTO (and its `WorkspacePromptRequest`/`WorkspacePromptAssembly`
+/// counterparts) was removed as dead scaffolding — it had no production caller
+/// and its root implementation (`RootWorkspacePromptAssemblyPort`) always
+/// returned empty materials. The live prompt-assembly path for the dispatcher
+/// is `assemble_dispatcher_prompt_materials` / `DispatcherPromptMaterials` in
+/// `prompt_assembly.rs`, wired directly from
+/// `src/agent/dispatcher/prompt_context.rs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkspacePromptMaterials {
     pub workspace_prompt: Option<String>,
@@ -465,14 +472,6 @@ pub struct WorkspacePromptMaterials {
     pub channel_formatting_hints: Option<String>,
     pub runtime_capability_hint: Option<String>,
     pub post_compaction_context: Option<String>,
-}
-
-/// Fully assembled prompt payload for the dispatcher.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspacePromptAssembly {
-    pub materials: WorkspacePromptMaterials,
-    pub skill_context: SkillContext,
-    pub assembly: PromptAssemblyResult,
 }
 
 /// Generic learning event shape used by agent-runtime adapters.
@@ -764,22 +763,6 @@ pub trait RoutineExecutionPort: Send + Sync {
         &self,
         request: RoutineExecutionRequest,
     ) -> Result<RoutineExecutionOutcome, RoutineError>;
-}
-
-/// Workspace prompt material loading and final assembly surface.
-#[async_trait]
-pub trait WorkspacePromptAssemblyPort: Send + Sync {
-    async fn load_prompt_materials(
-        &self,
-        request: &WorkspacePromptRequest,
-    ) -> Result<WorkspacePromptMaterials, WorkspaceError>;
-
-    async fn assemble_workspace_prompt(
-        &self,
-        request: WorkspacePromptRequest,
-        materials: WorkspacePromptMaterials,
-        skills: SkillContext,
-    ) -> Result<WorkspacePromptAssembly, WorkspaceError>;
 }
 
 /// Shared model override state used by runtime LLM routing.

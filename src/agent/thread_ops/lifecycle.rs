@@ -22,38 +22,26 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        let mut mgr = undo_mgr.lock().await;
-
-        let mut sess = session.lock().await;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
-        let outcome = thinclaw_agent::thread_ops::restore_thread_from_undo(thread, &mut mgr);
-        match &outcome {
-            UndoRedoOutcome::Restored { .. } => {
-                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                drop(mgr);
-                drop(sess);
-                self.clear_thread_runtime_transients(thread_id).await;
-                self.record_context_pressure_state(thread_id, usage_percent)
-                    .await;
-            }
-            UndoRedoOutcome::NothingAvailable | UndoRedoOutcome::Failed => {}
-        }
-
-        match thinclaw_agent::thread_ops::undo_redo_message(UndoRedoAction::Undo, &outcome) {
-            ThreadOperationMessage::Ok(message) => Ok(SubmissionResult::ok_with_message(message)),
-            ThreadOperationMessage::Error(message) => Ok(SubmissionResult::error(message)),
-        }
+        self.process_undo_or_redo(session, thread_id, UndoRedoAction::Undo)
+            .await
     }
 
     pub(in crate::agent) async fn process_redo(
         &self,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
+    ) -> Result<SubmissionResult, Error> {
+        self.process_undo_or_redo(session, thread_id, UndoRedoAction::Redo)
+            .await
+    }
+
+    /// Shared /undo and /redo driver — the two commands differ only in
+    /// which restore function runs and which action labels the result.
+    async fn process_undo_or_redo(
+        &self,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        action: UndoRedoAction,
     ) -> Result<SubmissionResult, Error> {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
@@ -64,20 +52,39 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        let outcome = thinclaw_agent::thread_ops::restore_thread_from_redo(thread, &mut mgr);
+        let outcome = match action {
+            UndoRedoAction::Undo => {
+                thinclaw_agent::thread_ops::restore_thread_from_undo(thread, &mut mgr)
+            }
+            UndoRedoAction::Redo => {
+                thinclaw_agent::thread_ops::restore_thread_from_redo(thread, &mut mgr)
+            }
+        };
         match &outcome {
             UndoRedoOutcome::Restored { .. } => {
-                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                drop(mgr);
+                let usage_percent = self
+                    .effective_context_monitor()
+                    .usage_percent(&thread.messages());
+                // Row-count watermark for the thread as it stands *after*
+                // the mutation above, so hydration truncates DB history to
+                // match what was just restored in memory.
+                let active_message_row_count = thread.messages().len() as i64;
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
+                self.persist_active_watermark_and_undo_stack(
+                    thread_id,
+                    active_message_row_count,
+                    &mgr,
+                )
+                .await;
+                drop(mgr);
                 self.record_context_pressure_state(thread_id, usage_percent)
                     .await;
             }
             UndoRedoOutcome::NothingAvailable | UndoRedoOutcome::Failed => {}
         }
 
-        match thinclaw_agent::thread_ops::undo_redo_message(UndoRedoAction::Redo, &outcome) {
+        match thinclaw_agent::thread_ops::undo_redo_message(action, &outcome) {
             ThreadOperationMessage::Ok(message) => Ok(SubmissionResult::ok_with_message(message)),
             ThreadOperationMessage::Error(message) => Ok(SubmissionResult::error(message)),
         }
@@ -124,13 +131,11 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         let messages = thread.messages();
-        let usage = self.context_monitor.usage_percent(&messages);
-        let strategy = self
-            .context_monitor
-            .suggest_compaction(&messages)
-            .unwrap_or(
-                crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
-            );
+        let monitor = self.effective_context_monitor();
+        let usage = monitor.usage_percent(&messages);
+        let strategy = monitor.suggest_compaction(&messages).unwrap_or(
+            crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
+        );
 
         let mut compactor = ContextCompactor::new(self.llm().clone());
         if let Some(ref tracker) = self.deps.cost_tracker {
@@ -141,7 +146,8 @@ impl Agent {
             .await
         {
             Ok(result) => {
-                let usage_after = self.context_monitor.usage_percent(&thread.messages());
+                let compaction_summary = result.summary.clone();
+                let usage_after = monitor.usage_percent(&thread.messages());
                 let session_extract_artifact = crate::agent::AgentRunArtifact::new(
                     "thread_compaction",
                     crate::agent::AgentRunStatus::Completed,
@@ -200,12 +206,14 @@ impl Agent {
                     raw_sender_id: actor_id.clone(),
                     stable_external_conversation_key: String::new(),
                 };
-                let fragment = self
+                let base_fragment = self
                     .build_post_compaction_context_fragment(
                         last_user_query,
                         Some(&compaction_identity),
                     )
                     .await;
+                let fragment =
+                    super::input::merge_summary_into_fragment(compaction_summary, base_fragment);
                 self.update_post_compaction_context(thread_id, fragment)
                     .await;
                 self.record_context_pressure_state(thread_id, usage_after)
@@ -233,7 +241,12 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
         thinclaw_agent::thread_ops::clear_thread(thread);
-        let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+        let usage_percent = self
+            .effective_context_monitor()
+            .usage_percent(&thread.messages());
+        // /clear empties the in-memory thread, so the watermark drops to 0:
+        // hydration must not resurrect the cleared DB rows after a restart.
+        let active_message_row_count = thread.messages().len() as i64;
         let mut session_extract_artifact = crate::agent::AgentRunArtifact::new(
             "thread_clear",
             crate::agent::AgentRunStatus::Completed,
@@ -256,7 +269,12 @@ impl Agent {
 
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        undo_mgr.lock().await.clear();
+        {
+            let mut mgr = undo_mgr.lock().await;
+            mgr.clear();
+            self.persist_active_watermark_and_undo_stack(thread_id, active_message_row_count, &mgr)
+                .await;
+        }
         drop(sess);
         if let Some(store) = self.store().map(Arc::clone) {
             let manager = crate::agent::learning::MemoryProviderManager::new(store);
@@ -326,22 +344,28 @@ impl Agent {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
-        let description = {
+        let outcome = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thinclaw_agent::thread_ops::restore_thread_from_checkpoint(
+            let description = thinclaw_agent::thread_ops::restore_thread_from_checkpoint(
                 thread,
                 &mut mgr,
                 checkpoint_id,
-            )
+            );
+            // Row-count watermark for the thread as it stands *after* the
+            // checkpoint restore above, so hydration truncates DB history to
+            // match what /resume just restored in memory.
+            description.map(|description| (description, thread.messages().len() as i64))
         };
 
-        if let Some(description) = description {
-            drop(mgr);
+        if let Some((description, active_message_row_count)) = outcome {
             self.clear_thread_runtime_transients(thread_id).await;
+            self.persist_active_watermark_and_undo_stack(thread_id, active_message_row_count, &mgr)
+                .await;
+            drop(mgr);
             Ok(SubmissionResult::ok_with_message(format!(
                 "Resumed from checkpoint: {}",
                 description

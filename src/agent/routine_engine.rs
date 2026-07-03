@@ -27,13 +27,14 @@ use thinclaw_agent::routine_engine::{
     increment_decision_count, lightweight_routine_messages, render_trigger_payload_block,
     routine_cooldown_allows, routine_event_evaluation_details, routine_event_owner_matches,
     routine_requests_desktop_capabilities, routine_runtime_update_for_run, sanitize_routine_name,
-    scheduled_run_trigger_key, should_continue_queue_drain, should_refresh_event_cache,
-    summarize_runtime_capabilities, truncate,
+    scheduled_run_trigger_key, should_continue_queue_drain, should_jitter_trigger_type,
+    should_refresh_event_cache, summarize_runtime_capabilities, truncate,
 };
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::agent::Scheduler;
+use crate::agent::cron_stagger::StaggerConfig;
 use crate::agent::outcomes;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventDecision,
@@ -92,6 +93,12 @@ pub struct RoutineEngine {
 
 const EVENT_QUEUE_BATCH_LIMIT: i64 = 64;
 const TRIGGER_QUEUE_BATCH_LIMIT: i64 = 64;
+
+/// Initial DB lease window (seconds) set on a routine run at spawn time,
+/// before the worker/subagent (or lightweight inline execution) has had a
+/// chance to renew it. Generous enough to cover engine scheduling jitter
+/// and job-dispatch latency without masking a genuinely dead run for long.
+const INITIAL_ROUTINE_RUN_LEASE_SECS: i64 = 300;
 
 #[derive(Clone)]
 struct CachedEventRoutine {
@@ -1070,6 +1077,24 @@ impl RoutineEngine {
                 reason: format!("failed to create run record: {error}"),
             })?;
 
+        // Set an initial lease immediately at spawn so the run is protected
+        // from the zombie reaper from the moment it's created — lightweight
+        // and immediate runs may otherwise sit with no lease for a moment
+        // before the worker/subagent takes over and starts renewing it.
+        // `INITIAL_ROUTINE_RUN_LEASE_SECS` only needs to cover the window
+        // until the first renewal; workers/subagents extend it from there.
+        if let Err(error) = self
+            .store
+            .renew_routine_run_lease(run.id, INITIAL_ROUTINE_RUN_LEASE_SECS)
+            .await
+        {
+            tracing::warn!(
+                routine = %routine.name,
+                run_id = %run.id,
+                "Failed to set initial routine run lease: {}", error
+            );
+        }
+
         let engine = EngineContext {
             store: self.store.clone(),
             llm: self.llm.clone(),
@@ -1085,7 +1110,19 @@ impl RoutineEngine {
         let routine_name = routine.name.clone();
         let run_id = run.id;
         let run_for_task = run.clone();
+        // IC-CRON-STAGGER: add random jitter before cron-triggered fires so a
+        // post-downtime backlog of due cron routines doesn't thundering-herd
+        // the LLM backend the moment the engine catches up. Other trigger
+        // kinds (event, manual, system_event) fire immediately as before.
+        let cron_jitter = if should_jitter_trigger_type(trigger_type) {
+            StaggerConfig::from_env().jitter_delay()
+        } else {
+            std::time::Duration::ZERO
+        };
         self.spawn_tracked_task(&routine_name, async move {
+            if !cron_jitter.is_zero() {
+                tokio::time::sleep(cron_jitter).await;
+            }
             execute_routine(engine, routine, run_for_task).await;
         })
         .map_err(|reason| RoutineError::ExecutionFailed { reason })?;
@@ -1102,13 +1139,23 @@ impl RoutineEngine {
         tracing::info!("Aborted all running routine tasks");
     }
 
-    /// IC-006: Reap zombie routine runs that have exceeded the 10-minute TTL.
+    /// IC-006: Reap zombie routine runs whose lease has expired.
     ///
     /// Pure DB cleanup — marks stale `running` rows as `failed`. No in-memory
     /// counter manipulation needed because the DB is the single source of
     /// truth for global concurrency gating.
+    ///
+    /// Runs with a live lease are never reaped regardless of age — workers
+    /// and subagents renew the lease while actively executing. Legacy rows
+    /// with no lease at all fall back to
+    /// [`crate::db::DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS`] instead of the old
+    /// hardcoded 10-minute cutoff.
     pub async fn reap_zombie_runs(&self) {
-        match self.store.cleanup_stale_routine_runs().await {
+        match self
+            .store
+            .cleanup_stale_routine_runs(crate::db::DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS)
+            .await
+        {
             Ok(reaped) => {
                 if reaped > 0 {
                     tracing::info!("IC-006: Reaped {} zombie routine runs", reaped);
@@ -1147,6 +1194,26 @@ impl RoutineEngine {
                 routine_name
             )
         })?;
+        // Drain finished entries first: a JoinSet retains completed-task
+        // slots until joined, so an always-on engine would otherwise
+        // accumulate one entry per run for the process lifetime. Joining is
+        // also the only place a panicked routine task becomes visible —
+        // surface it instead of silently discarding the JoinError.
+        while let Some(joined) = guard.try_join_next() {
+            if let Err(join_error) = joined
+                && join_error.is_panic()
+            {
+                // The JoinSet is shared by all routines, so the panicked
+                // task's own routine name is unknown at drain time — do NOT
+                // attribute it to `routine_name` (the routine currently
+                // spawning), which would misdirect debugging.
+                tracing::error!(
+                    "A previously-spawned routine task panicked (drained while spawning '{}'): {}",
+                    routine_name,
+                    join_error
+                );
+            }
+        }
         guard.spawn(task);
         Ok(())
     }
@@ -1200,7 +1267,10 @@ pub(crate) async fn persist_routine_runtime_update(
             )
             .await
         {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                auto_disable_failing_routine(store, routine_id, consecutive_failures).await;
+                return Ok(());
+            }
             Err(error) => {
                 last_error = Some(error);
                 if attempt < 3 {
@@ -1219,8 +1289,88 @@ pub(crate) async fn persist_routine_runtime_update(
         .unwrap_or_else(|| DatabaseError::Query("unknown runtime update failure".to_string())))
 }
 
+/// Renew a routine run's reaper lease if enough of the window has elapsed.
+///
+/// Execution-loop iterations can be sub-second, and a DB write per iteration
+/// is wasted I/O for a lease measured in minutes — renewal is gated to once
+/// per third of the lease window. The lease is padded past `timeout_secs` so
+/// a slow-but-alive iteration never races the reaper. Shared by the worker
+/// and subagent execution loops so the formula and gating cannot drift.
+pub(crate) async fn renew_routine_run_lease_if_due(
+    store: &Arc<dyn Database>,
+    run_id: Uuid,
+    timeout_secs: u64,
+    last_renewed: &std::sync::Mutex<Option<std::time::Instant>>,
+) {
+    let lease_secs = (timeout_secs as i64).saturating_add(120).max(120);
+    let renew_every = Duration::from_secs(lease_secs as u64 / 3);
+    {
+        let last = last_renewed.lock().unwrap_or_else(|p| p.into_inner());
+        if last.is_some_and(|at| at.elapsed() < renew_every) {
+            return;
+        }
+    }
+    match store.renew_routine_run_lease(run_id, lease_secs).await {
+        Ok(()) => {
+            *last_renewed.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(std::time::Instant::now());
+        }
+        Err(e) => {
+            tracing::debug!(run_id = %run_id, "Failed to renew routine run lease: {}", e);
+        }
+    }
+}
+
+/// Disable a routine that has crossed the consecutive-failure threshold.
+/// Runs after every runtime update so all finalization paths (engine,
+/// worker, subagent) share the same policy; before this, a routine whose
+/// runs failed every time kept firing at full cadence forever.
+async fn auto_disable_failing_routine(
+    store: &Arc<dyn Database>,
+    routine_id: Uuid,
+    consecutive_failures: u32,
+) {
+    if !thinclaw_agent::routine_engine::routine_should_auto_disable(consecutive_failures) {
+        return;
+    }
+    // Reload rather than reusing a caller-held copy: update_routine writes the
+    // full row and a stale copy would clobber the runtime fields just written.
+    match store.get_routine(routine_id).await {
+        Ok(Some(mut routine)) if routine.enabled => {
+            routine.enabled = false;
+            match store.update_routine(&routine).await {
+                Ok(()) => {
+                    tracing::warn!(
+                        routine = %routine.name,
+                        consecutive_failures,
+                        "Routine auto-disabled after repeated consecutive failures; \
+                         re-enable it via routine_update once the cause is fixed"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        routine = %routine.name,
+                        "Failed to auto-disable repeatedly failing routine: {}",
+                        error
+                    );
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::error!(
+                routine_id = %routine_id,
+                "Failed to load routine for auto-disable check: {}",
+                error
+            );
+        }
+    }
+}
+
 /// IC-006: Spawn a periodic zombie reaper for routine runs.
-/// Checks every 2 minutes for runs that have exceeded the 10-minute TTL.
+/// Checks every 2 minutes for runs whose renewable lease has expired
+/// (legacy NULL-lease rows fall back to a fixed TTL — see
+/// `DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS`).
 pub fn spawn_zombie_reaper(engine: Arc<RoutineEngine>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(120));

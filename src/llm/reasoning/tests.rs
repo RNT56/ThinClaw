@@ -579,7 +579,7 @@ async fn select_tools_routes_current_time_to_required_time_tool() {
 }
 
 #[tokio::test]
-async fn respond_with_tools_refuses_current_time_when_authoritative_tool_missing() {
+async fn respond_with_tools_keeps_other_tools_when_authoritative_tool_missing() {
     let llm = Arc::new(RoutingCaptureLlm {
         last_completion: Arc::new(tokio::sync::Mutex::new(None)),
         last_tool_completion: Arc::new(tokio::sync::Mutex::new(None)),
@@ -594,23 +594,65 @@ async fn respond_with_tools_refuses_current_time_when_authoritative_tool_missing
             parameters: serde_json::json!({"type":"object"}),
         }]);
 
-    let output = reasoning
+    reasoning
         .respond_with_tools(&context)
         .await
         .expect("response should succeed");
 
-    assert!(matches!(output.result, RespondResult::Text(_)));
-    assert!(llm.last_tool_completion.lock().await.is_none());
+    // The preferred time tool is missing, but the model keeps its other
+    // tools and receives a no-fabrication note instead of losing the
+    // whole toolset for the turn.
     let request = llm
-        .last_completion
+        .last_tool_completion
         .lock()
         .await
         .clone()
-        .expect("text request should be captured");
+        .expect("tool request should be captured");
+    assert_eq!(request.tool_choice.as_deref(), Some("auto"));
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0].name, "memory_search");
     assert!(
         request
             .messages
             .iter()
-            .any(|message| message.content.contains("Do not guess or fabricate"))
+            .any(|message| message.content.contains("do not guess or fabricate"))
     );
+}
+
+#[tokio::test]
+async fn unrelated_right_now_message_does_not_hijack_tool_routing() {
+    let llm = Arc::new(RoutingCaptureLlm {
+        last_completion: Arc::new(tokio::sync::Mutex::new(None)),
+        last_tool_completion: Arc::new(tokio::sync::Mutex::new(None)),
+    });
+    let reasoning = Reasoning::new(llm.clone());
+
+    let context = ReasoningContext::new()
+        .with_messages(vec![ChatMessage::user("Deploy the app right now")])
+        .with_tools(vec![
+            ToolDefinition {
+                name: "memory_search".to_string(),
+                description: "Search memory".to_string(),
+                parameters: serde_json::json!({"type":"object"}),
+            },
+            ToolDefinition {
+                name: "time".to_string(),
+                description: "Current time".to_string(),
+                parameters: serde_json::json!({"type":"object"}),
+            },
+        ]);
+
+    reasoning
+        .respond_with_tools(&context)
+        .await
+        .expect("response should succeed");
+
+    let request = llm
+        .last_tool_completion
+        .lock()
+        .await
+        .clone()
+        .expect("tool request should be captured");
+    assert_eq!(request.tool_choice.as_deref(), Some("auto"));
+    assert_eq!(request.tools.len(), 2);
 }

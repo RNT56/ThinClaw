@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Subcommand;
 use serde::Serialize;
@@ -12,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::agent::learning::{
     TrajectoryLogger, TrajectoryOutcome, TrajectoryTurnRecord, TrajectoryTurnStatus,
+    hydrate_trajectory_record,
 };
 use crate::agent::{AgentRunArtifact, AgentRunArtifactLogger};
 
@@ -46,9 +48,27 @@ pub enum TrajectoryCommand {
 }
 
 /// Run a trajectory command.
+///
+/// Best-effort connects to the database so exported/summarized records can be
+/// hydrated with explicit learning feedback and outcome evaluations (see
+/// `hydrate_trajectory_record`). If the database is not reachable, records
+/// fall back to label derivation purely from turn status, matching prior
+/// behavior.
 pub async fn run_trajectory_command(cmd: TrajectoryCommand) -> anyhow::Result<()> {
     let logger = TrajectoryLogger::new();
     let artifact_logger = AgentRunArtifactLogger::new();
+
+    let db: Option<Arc<dyn crate::db::Database>> = match connect_db().await {
+        Ok(db) => Some(db),
+        Err(err) => {
+            eprintln!(
+                "Warning: Could not connect to database ({}), trajectory records will not be \
+                 hydrated with stored feedback/evaluations",
+                err
+            );
+            None
+        }
+    };
 
     match cmd {
         TrajectoryCommand::Export {
@@ -58,7 +78,9 @@ pub async fn run_trajectory_command(cmd: TrajectoryCommand) -> anyhow::Result<()
             max_records,
             with_manifest,
         } => {
-            let records = sort_records(load_archive_records(&logger, &artifact_logger)?)?;
+            let records = load_archive_records(&logger, &artifact_logger)?;
+            let records = hydrate_records(records, db.as_ref()).await;
+            let records = sort_records(records)?;
             let options = ExportOptions {
                 min_score,
                 max_records,
@@ -89,15 +111,41 @@ pub async fn run_trajectory_command(cmd: TrajectoryCommand) -> anyhow::Result<()
             }
         }
         TrajectoryCommand::Stats => {
-            let stats = summarize_records(
-                logger.log_root().to_path_buf(),
-                &load_archive_records(&logger, &artifact_logger)?,
-            );
+            let records = load_archive_records(&logger, &artifact_logger)?;
+            let records = hydrate_records(records, db.as_ref()).await;
+            let stats = summarize_records(logger.log_root().to_path_buf(), &records);
             print_stats(&stats);
         }
     }
 
     Ok(())
+}
+
+/// Bootstrap a DB connection for trajectory commands (backend-agnostic).
+///
+/// Mirrors the best-effort connect pattern used by other DB-backed CLI
+/// commands (e.g. `src/cli/config.rs`, `src/cli/mcp.rs`).
+async fn connect_db() -> anyhow::Result<Arc<dyn crate::db::Database>> {
+    let config = crate::config::Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    crate::db::connect_from_config(&config.database)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Hydrate each record with store-backed feedback/evaluations when a database
+/// handle is available. When `db` is `None`, this still normalizes each
+/// record's assessment via `hydrate_trajectory_record`'s no-store fallback
+/// path, preserving current status-derived labeling behavior.
+async fn hydrate_records(
+    mut records: Vec<TrajectoryTurnRecord>,
+    db: Option<&Arc<dyn crate::db::Database>>,
+) -> Vec<TrajectoryTurnRecord> {
+    for record in &mut records {
+        hydrate_trajectory_record(record, db).await;
+    }
+    records
 }
 
 fn load_archive_records(

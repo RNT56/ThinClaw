@@ -2,6 +2,7 @@ use crate::llm::ToolSelection;
 use crate::util::llm_signals_completion;
 #[cfg(feature = "libsql")]
 use chrono::Utc;
+use thinclaw_agent::worker_runtime::WORKER_COMPLETE_JOB_TOOL_DESCRIPTION;
 
 use super::*;
 #[cfg(feature = "libsql")]
@@ -453,4 +454,162 @@ async fn finalize_routine_run_resolves_routine_by_id_when_name_changes() {
         .next()
         .unwrap();
     assert_eq!(completed_run.status, RunStatus::Ok);
+}
+
+// ── complete_job tool interception ──────────────────────────────────
+
+#[tokio::test]
+async fn execution_loop_injects_complete_job_tool_definition() {
+    // execution_loop appends complete_job_tool_definition() to
+    // reason_ctx.available_tools after the registry + policy + profile
+    // filter chain, at both the initial setup and the per-iteration
+    // refresh sites. Reproduce that chain against an empty registry
+    // (mirrors make_worker's ToolRegistry) and assert the synthetic
+    // tool survives it, since it is appended after — not looked up
+    // through — the real registry.
+    let worker = make_worker(Vec::new()).await;
+
+    let mut defs = worker
+        .tools()
+        .tool_definitions_for_autonomous_capabilities(None, None, None)
+        .await;
+    defs.push(complete_job_tool_definition());
+
+    let complete_job_def = defs
+        .iter()
+        .find(|d| d.name == WORKER_COMPLETE_JOB_TOOL_NAME)
+        .expect("complete_job tool definition should be present in the worker's tool list");
+    assert_eq!(
+        complete_job_def.description,
+        WORKER_COMPLETE_JOB_TOOL_DESCRIPTION
+    );
+}
+
+#[tokio::test]
+async fn complete_job_tool_call_marks_job_completed() {
+    let worker = make_worker(Vec::new()).await;
+    worker
+        .context_manager()
+        .update_context(worker.job_id, |ctx| {
+            ctx.transition_to(JobState::InProgress, Some("started".to_string()))
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    let mut reason_ctx = ReasoningContext::new().with_job("test job");
+
+    let selection = ToolSelection {
+        tool_name: WORKER_COMPLETE_JOB_TOOL_NAME.to_string(),
+        parameters: serde_json::json!({ "summary": "Finished the task" }),
+        reasoning: String::new(),
+        alternatives: vec![],
+        tool_call_id: "call_complete".to_string(),
+    };
+
+    // execute_tool_inner short-circuits complete_job by echoing back its
+    // own arguments — mirrors what the real execution_loop path does
+    // before handing the result to process_tool_result.
+    let echoed = Ok(selection.parameters.to_string());
+    let job_finished = worker
+        .process_tool_result(&mut reason_ctx, &selection, echoed)
+        .await
+        .expect("process_tool_result should not error");
+
+    assert!(
+        job_finished,
+        "complete_job should signal the execution loop to stop"
+    );
+
+    let ctx = worker
+        .context_manager()
+        .get_context(worker.job_id)
+        .await
+        .expect("job context should exist");
+    assert_eq!(ctx.state, JobState::Completed);
+    assert_eq!(
+        worker.take_last_output().as_deref(),
+        Some("Finished the task")
+    );
+}
+
+#[tokio::test]
+async fn complete_job_tool_call_with_success_false_marks_job_failed() {
+    let worker = make_worker(Vec::new()).await;
+    worker
+        .context_manager()
+        .update_context(worker.job_id, |ctx| {
+            ctx.transition_to(JobState::InProgress, Some("started".to_string()))
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    let mut reason_ctx = ReasoningContext::new().with_job("test job");
+
+    let selection = ToolSelection {
+        tool_name: WORKER_COMPLETE_JOB_TOOL_NAME.to_string(),
+        parameters: serde_json::json!({
+            "summary": "Could not finish, blocked on missing credentials",
+            "success": false,
+        }),
+        reasoning: String::new(),
+        alternatives: vec![],
+        tool_call_id: "call_complete".to_string(),
+    };
+    let echoed = Ok(selection.parameters.to_string());
+
+    let job_finished = worker
+        .process_tool_result(&mut reason_ctx, &selection, echoed)
+        .await
+        .expect("process_tool_result should not error");
+    assert!(job_finished);
+
+    let ctx = worker
+        .context_manager()
+        .get_context(worker.job_id)
+        .await
+        .expect("job context should exist");
+    assert_eq!(ctx.state, JobState::Failed);
+}
+
+#[tokio::test]
+async fn non_complete_job_tool_call_does_not_finish_the_job() {
+    let worker = make_worker(Vec::new()).await;
+    let mut reason_ctx = ReasoningContext::new().with_job("test job");
+
+    let selection = ToolSelection {
+        tool_name: "emit_user_message".to_string(),
+        parameters: serde_json::json!({}),
+        reasoning: String::new(),
+        alternatives: vec![],
+        tool_call_id: "call_other".to_string(),
+    };
+
+    let job_finished = worker
+        .process_tool_result(
+            &mut reason_ctx,
+            &selection,
+            Ok(serde_json::json!({"message": "", "message_type": "progress"}).to_string()),
+        )
+        .await
+        .expect("process_tool_result should not error");
+
+    assert!(
+        !job_finished,
+        "only complete_job should signal the loop to stop"
+    );
+}
+
+#[tokio::test]
+async fn execute_tool_inner_short_circuits_complete_job_without_hitting_registry() {
+    // complete_job is never registered with the real ToolRegistry — an
+    // empty registry proves execute_tool_inner doesn't dispatch to it.
+    let worker = make_worker(Vec::new()).await;
+    let params = serde_json::json!({ "summary": "done", "success": true });
+
+    let result = Worker::execute_tool_inner(&worker.deps, worker.job_id, "complete_job", &params)
+        .await
+        .expect("complete_job should short-circuit rather than fail with tool-not-found");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed, params);
 }

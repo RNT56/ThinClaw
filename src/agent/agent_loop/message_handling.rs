@@ -6,6 +6,7 @@ impl Agent {
     pub(crate) async fn handle_message(
         &self,
         message: &IncomingMessage,
+        parsed: Option<Submission>,
     ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
         self.observer()
             .record_event(&crate::observability::ObserverEvent::ChannelMessage {
@@ -13,8 +14,9 @@ impl Agent {
                 direction: "inbound".to_string(),
             });
 
-        // Parse submission type first
-        let mut submission = SubmissionParser::parse(&message.content);
+        // Parse submission type first (reusing the dispatch loop's parse
+        // when it already did the work for control-command routing).
+        let mut submission = parsed.unwrap_or_else(|| SubmissionParser::parse(&message.content));
 
         // Hook: BeforeInbound — allow hooks to modify or reject user input
         if submission.runs_inbound_hooks()
@@ -208,8 +210,25 @@ impl Agent {
                 .await
             }
             Submission::ApprovalResponse { approved, always } => {
-                self.process_approval(message, session, thread_id, None, approved, always)
-                    .await
+                // Bare conversational words ("ok", "yes", "no", "cancel")
+                // parse as approval responses, but outside an approval prompt
+                // they are normal replies — e.g. answering a yes/no question
+                // the agent just asked. Explicit slash commands (/approve,
+                // /deny, ...) keep approval semantics either way.
+                let bare_word = !message.content.trim_start().starts_with('/');
+                let awaiting_approval = {
+                    let sess = session.lock().await;
+                    sess.threads.get(&thread_id).is_some_and(|thread| {
+                        thread.state == crate::agent::session::ThreadState::AwaitingApproval
+                    })
+                };
+                if bare_word && !awaiting_approval {
+                    self.process_user_input(message, session, thread_id, message.content.trim())
+                        .await
+                } else {
+                    self.process_approval(message, session, thread_id, None, approved, always)
+                        .await
+                }
             }
         };
 
@@ -266,6 +285,19 @@ impl Agent {
         &self,
         message: &IncomingMessage,
     ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
+        self.handle_message_payload_external_parsed(message, None)
+            .await
+    }
+
+    /// Like [`Self::handle_message_payload_external`], but accepts an
+    /// already-parsed submission so the standalone dispatch loop (which
+    /// parses once for control-command routing) doesn't parse every message
+    /// twice.
+    pub(crate) async fn handle_message_payload_external_parsed(
+        &self,
+        message: &IncomingMessage,
+        parsed: Option<Submission>,
+    ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
         let run_driver = AgentRunDriver::new();
         if let Some(ref external_thread_id) = message.thread_id {
             self.maybe_hydrate_thread(message, external_thread_id).await;
@@ -285,7 +317,7 @@ impl Agent {
                 .unwrap_or(0)
         };
 
-        let result = self.handle_message(message).await;
+        let result = self.handle_message(message, parsed).await;
 
         self.record_trajectory_turn(
             message,
@@ -299,6 +331,11 @@ impl Agent {
         result
     }
 
+    /// Record the completed turn for trajectory/learning purposes.
+    ///
+    /// Snapshots the session under the lock, then runs the heavy tail
+    /// (artifact JSONL append, provider memory sync, generated-skill review)
+    /// in a detached task — none of it needs to block the user's response.
     pub(crate) async fn record_trajectory_turn(
         &self,
         message: &IncomingMessage,
@@ -320,49 +357,64 @@ impl Agent {
             return;
         }
 
-        let Some(turn) = thread_snapshot.turns.last() else {
+        if thread_snapshot.turns.last().is_none() {
             return;
-        };
-
-        let harness = crate::agent::AgentRunHarness::with_driver(
-            run_driver.clone(),
-            self.store().map(Arc::clone),
-        );
-        match harness
-            .record_chat_turn(
-                &self.config.name,
-                &self.llm().active_model_name(),
-                &session_snapshot,
-                thread_id,
-                message,
-                turn,
-            )
-            .await
-        {
-            Ok(_artifact) => {}
-            Err(err) => {
-                tracing::debug!(
-                    thread = %thread_id,
-                    error = %err,
-                    "Canonical run artifact logging failed"
-                );
-            }
         }
 
-        if let Some(store) = self.store().map(Arc::clone) {
-            let orchestrator = crate::agent::learning::LearningOrchestrator::new(
-                store,
-                self.workspace().cloned(),
-                self.skill_registry().cloned(),
+        let run_driver = run_driver.clone();
+        let harness_store = self.store().map(Arc::clone);
+        let harness_memory_manager = self
+            .learning_orchestrator()
+            .map(|orchestrator| orchestrator.memory_provider_manager());
+        let agent_name = self.config.name.clone();
+        let model_name = self.llm().active_model_name();
+        let message = message.clone();
+        // Clone the shared orchestrator handle (cheap: a few `Arc` clones) so
+        // the detached task reuses the same `MemoryProviderManager` — and
+        // therefore the same readiness cache and pooled HTTP client — instead
+        // of constructing a fresh one.
+        let orchestrator = self.learning_orchestrator().cloned();
+
+        tokio::spawn(async move {
+            let Some(turn) = thread_snapshot.turns.last() else {
+                return;
+            };
+
+            let harness = crate::agent::AgentRunHarness::with_driver_and_memory_manager(
+                run_driver,
+                harness_store,
+                harness_memory_manager,
             );
-            if let Err(err) = orchestrator
-                .review_completed_turn_for_generated_skill(
+            match harness
+                .record_chat_turn(
+                    &agent_name,
+                    &model_name,
                     &session_snapshot,
                     thread_id,
-                    message,
+                    &message,
                     turn,
                 )
                 .await
+            {
+                Ok(_artifact) => {}
+                Err(err) => {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        error = %err,
+                        "Canonical run artifact logging failed"
+                    );
+                }
+            }
+
+            if let Some(orchestrator) = orchestrator
+                && let Err(err) = orchestrator
+                    .review_completed_turn_for_generated_skill(
+                        &session_snapshot,
+                        thread_id,
+                        &message,
+                        turn,
+                    )
+                    .await
             {
                 tracing::debug!(
                     thread = %thread_id,
@@ -370,7 +422,7 @@ impl Agent {
                     "Generated skill reviewer skipped turn"
                 );
             }
-        }
+        });
     }
 
     /// Inject a message into session history without triggering a turn.

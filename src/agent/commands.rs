@@ -10,7 +10,9 @@ use uuid::Uuid;
 
 use crate::agent::checkpoint;
 use crate::agent::command_catalog::{self, agent_display_name, rollback_usage};
-use crate::agent::personality::{available_personality_names, preview, resolve_personality};
+use crate::agent::personality::{
+    SessionPersonalityOverlay, available_personality_names, preview, resolve_personality,
+};
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{Agent, MessageIntent};
 use crate::agent::{mutate_thread_runtime, session::Session};
@@ -19,6 +21,70 @@ use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
 use crate::tools::builtin::llm_tools::{ModelOverride, model_override_scope_key_from_metadata};
 use crate::tui::skin::CliSkin;
+
+/// Conversation-metadata key used to persist the temporary `/personality`
+/// session overlay so it survives a process restart. Stored as a sibling
+/// key to `thinclaw_agent::thread_runtime::THREAD_RUNTIME_METADATA_KEY`
+/// (the `/model` override envelope) rather than as a new field on
+/// `ThreadRuntimeSnapshot`/`ThreadRuntimeState`, because those structs are
+/// constructed with every field listed explicitly at call sites outside
+/// this module's edit scope (notably `src/agent/thread_ops/persistence.rs`
+/// and `crates/thinclaw-agent/src/thread_ops.rs`), so widening them here
+/// would break compilation in files this change must not touch.
+const PERSONALITY_OVERLAY_METADATA_KEY: &str = "personality_overlay";
+
+/// Encode a session personality overlay as the JSON value stored under
+/// `PERSONALITY_OVERLAY_METADATA_KEY`. `None` clears the overlay (stored as
+/// `Value::Null`, mirroring how `/model reset` clears its own key).
+fn overlay_to_metadata_value(overlay: Option<&SessionPersonalityOverlay>) -> serde_json::Value {
+    // serde derives on SessionPersonalityOverlay keep this codec in sync
+    // with the struct: a future field is round-tripped automatically instead
+    // of silently dropped by hand-written extraction.
+    overlay
+        .and_then(|overlay| serde_json::to_value(overlay).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Decode a session personality overlay back out of a conversation-metadata
+/// JSON blob (the full metadata object, keyed by
+/// `PERSONALITY_OVERLAY_METADATA_KEY`). Returns `None` for missing/null/
+/// malformed entries so a corrupt or absent key never fails hydration.
+fn overlay_from_metadata_value(metadata: &serde_json::Value) -> Option<SessionPersonalityOverlay> {
+    let entry = metadata.get(PERSONALITY_OVERLAY_METADATA_KEY)?;
+    if entry.is_null() {
+        return None;
+    }
+    serde_json::from_value(entry.clone()).ok()
+}
+
+/// Persist the session personality overlay for `thread_id` so hydration can
+/// restore it after a restart. Mirrors the `/model` command's use of
+/// `mutate_thread_runtime`, but writes a dedicated conversation-metadata key
+/// instead of a `ThreadRuntimeSnapshot` field (see
+/// `PERSONALITY_OVERLAY_METADATA_KEY` for why).
+pub(super) async fn persist_personality_overlay(
+    store: &Arc<dyn crate::db::Database>,
+    thread_id: Uuid,
+    overlay: Option<&SessionPersonalityOverlay>,
+) -> Result<(), crate::error::DatabaseError> {
+    store
+        .update_conversation_metadata_field(
+            thread_id,
+            PERSONALITY_OVERLAY_METADATA_KEY,
+            &overlay_to_metadata_value(overlay),
+        )
+        .await
+}
+
+/// Read back a persisted session personality overlay from conversation
+/// metadata, if one was ever set for `thread_id`.
+pub(super) async fn load_personality_overlay(
+    store: &Arc<dyn crate::db::Database>,
+    thread_id: Uuid,
+) -> Option<SessionPersonalityOverlay> {
+    let metadata = store.get_conversation_metadata(thread_id).await.ok()??;
+    overlay_from_metadata_value(&metadata)
+}
 
 impl Agent {
     /// Handle job-related intents without turn tracking.
@@ -221,6 +287,11 @@ impl Agent {
         };
 
         let heartbeat_cfg = self.heartbeat_config.clone().unwrap_or_default();
+        if !heartbeat_cfg.enabled {
+            return Ok(SubmissionResult::ok_with_message(
+                "Heartbeat skipped: heartbeat is disabled in settings.",
+            ));
+        }
         let runtime_heartbeat = crate::agent::HeartbeatConfig {
             interval: std::time::Duration::from_secs(heartbeat_cfg.interval_secs),
             enabled: heartbeat_cfg.enabled,
@@ -479,6 +550,16 @@ impl Agent {
 
                 if args.len() == 1 && args[0].eq_ignore_ascii_case("reset") {
                     session.active_personality = None;
+                    drop(session);
+                    if let Some(store) = self.store()
+                        && let Err(err) = persist_personality_overlay(store, thread_id, None).await
+                    {
+                        tracing::warn!(
+                            thread = %thread_id,
+                            error = %err,
+                            "Failed to clear persisted personality overlay"
+                        );
+                    }
                     return Ok(SubmissionResult::ok_with_message(
                         "Session personality cleared. Back to your base identity.",
                     ));
@@ -488,7 +569,18 @@ impl Agent {
                 let personality = resolve_personality(&requested);
                 let preview_text = preview(&personality).into_owned();
                 let personality_name = personality.name.clone();
-                session.active_personality = Some(personality);
+                session.active_personality = Some(personality.clone());
+                drop(session);
+                if let Some(store) = self.store()
+                    && let Err(err) =
+                        persist_personality_overlay(store, thread_id, Some(&personality)).await
+                {
+                    tracing::warn!(
+                        thread = %thread_id,
+                        error = %err,
+                        "Failed to persist personality overlay"
+                    );
+                }
                 Ok(SubmissionResult::response(format!(
                     "Session personality set: {}\n\n{}",
                     personality_name, preview_text
@@ -958,5 +1050,58 @@ impl Agent {
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             _ => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod personality_overlay_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn overlay_round_trips_through_metadata_value() {
+        let overlay = SessionPersonalityOverlay::new("flow_state", "electric calm");
+
+        let value = overlay_to_metadata_value(Some(&overlay));
+        let metadata = serde_json::json!({ PERSONALITY_OVERLAY_METADATA_KEY: value });
+
+        let decoded = overlay_from_metadata_value(&metadata).expect("overlay decodes");
+        assert_eq!(decoded, overlay);
+    }
+
+    #[test]
+    fn clearing_overlay_encodes_as_null() {
+        let value = overlay_to_metadata_value(None);
+        assert!(value.is_null());
+
+        let metadata = serde_json::json!({ PERSONALITY_OVERLAY_METADATA_KEY: value });
+        assert_eq!(overlay_from_metadata_value(&metadata), None);
+    }
+
+    #[test]
+    fn missing_key_decodes_to_none() {
+        let metadata = serde_json::json!({});
+        assert_eq!(overlay_from_metadata_value(&metadata), None);
+    }
+
+    #[test]
+    fn malformed_entry_decodes_to_none_instead_of_panicking() {
+        let metadata = serde_json::json!({
+            PERSONALITY_OVERLAY_METADATA_KEY: { "name": "flow_state" /* missing prompt_patch */ }
+        });
+        assert_eq!(overlay_from_metadata_value(&metadata), None);
+
+        let metadata = serde_json::json!({ PERSONALITY_OVERLAY_METADATA_KEY: "not an object" });
+        assert_eq!(overlay_from_metadata_value(&metadata), None);
+    }
+
+    #[test]
+    fn custom_freeform_personality_round_trips() {
+        let overlay = resolve_personality("noir detective");
+
+        let value = overlay_to_metadata_value(Some(&overlay));
+        let metadata = serde_json::json!({ PERSONALITY_OVERLAY_METADATA_KEY: value });
+
+        let decoded = overlay_from_metadata_value(&metadata).expect("overlay decodes");
+        assert_eq!(decoded, overlay);
     }
 }

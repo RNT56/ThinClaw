@@ -30,9 +30,11 @@ pub fn spawn_job_monitor(
                         SseEvent::JobSessionResult { .. } => JobMonitorEvent::SessionResult,
                         _ => JobMonitorEvent::Other,
                     };
-                    if adapter_tx.send((event_job_id, monitor_event)).is_err()
-                        && event_job_id == adapter_job_id
-                    {
+                    if adapter_tx.send((event_job_id, monitor_event)).is_err() {
+                        // The inner monitor dropped the sole receiver (the
+                        // monitored job finished); nothing will consume
+                        // events again, so exit instead of draining the
+                        // global job stream forever.
                         break;
                     }
                 }

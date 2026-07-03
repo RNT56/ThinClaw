@@ -10094,6 +10094,7 @@ dependencies = [
  "chrono-tz",
  "cron",
  "dirs",
+ "futures",
  "mime_guess",
  "rand 0.8.6",
  "regex",

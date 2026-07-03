@@ -16,7 +16,7 @@ use crate::postgres_workspace::Repository;
 use crate::{
     AgentRegistryStore, AgentWorkspaceRecord, ConversationStore, Database, ExperimentStore,
     IdentityRegistryStore, JobStore, RepoProjectStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    SubagentRunStore, ToolFailureStore, WorkspaceStore,
 };
 use thinclaw_experiments::{
     ExperimentArtifactRef, ExperimentCampaign, ExperimentLease, ExperimentModelUsageRecord,
@@ -44,6 +44,7 @@ use thinclaw_types::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
     RoutineTriggerDecision, RunStatus,
 };
+use thinclaw_types::subagent::SubagentRunRecord;
 use thinclaw_types::{ActionRecord, JobContext, JobState, SandboxJobRecord, SandboxJobSummary};
 use thinclaw_workspace::{MemoryChunk, MemoryDocument, SearchConfig, SearchResult, WorkspaceEntry};
 /// Minimal configuration required to construct a PostgreSQL backend.
@@ -230,5 +231,6 @@ mod repo_project_store;
 mod routine_store;
 mod sandbox_store;
 mod settings_store;
+mod subagent_run_store;
 mod tool_failure_store;
 mod workspace_store;

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::agent::Agent;
+use crate::agent::mutate_thread_runtime;
 use crate::agent::session::{PersistedSubagentState, ThreadRuntimeStateExt};
-use crate::agent::{load_thread_runtime, mutate_thread_runtime};
 use crate::channels::IncomingMessage;
 use crate::db::Database;
 use crate::history::ConversationKind as HistoryConversationKind;
@@ -403,22 +403,37 @@ impl Agent {
             None
         };
 
+        // Decode the runtime from the metadata already fetched above —
+        // `load_thread_runtime` would refetch the identical row.
+        let runtime: Option<crate::agent::ThreadRuntimeState> =
+            conversation_metadata.as_ref().and_then(|metadata| {
+                thinclaw_agent::thread_runtime::decode_thread_runtime(metadata).unwrap_or(None)
+            });
+
         let db_messages = if let Some(ref store) = store {
-            let db_messages = store
+            let mut db_messages = store
                 .list_conversation_messages(thread_uuid)
                 .await
                 .unwrap_or_default();
+            // Truncate resurrected history to the active-message watermark
+            // recorded by `/undo`, `/redo`, `/clear`, or checkpoint resume.
+            // Rows are returned oldest-first, so keeping the first N rows
+            // matches what the user actually saw at that point — the DB
+            // rows past the watermark stay intact as audit history, they
+            // are just not replayed into the in-memory thread. `None`
+            // (no watermark recorded, e.g. pre-existing threads) keeps
+            // every row, preserving prior behavior.
+            if let Some(watermark) = runtime
+                .as_ref()
+                .and_then(|runtime| runtime.active_message_row_count)
+            {
+                let keep = usize::try_from(watermark.max(0)).unwrap_or(usize::MAX);
+                db_messages.truncate(keep);
+            }
             msg_count = db_messages.len();
             Some(db_messages)
         } else {
             msg_count = 0;
-            None
-        };
-        let runtime = if let Some(ref store) = store {
-            load_thread_runtime(store, thread_uuid)
-                .await
-                .unwrap_or(None)
-        } else {
             None
         };
 
@@ -495,6 +510,20 @@ impl Agent {
                     .set(format!("thread:{thread_uuid}"), model_override)
                     .await;
             }
+            // Restore the capped undo-stack snapshot so `/undo` keeps
+            // working after a restart instead of finding an empty,
+            // freshly-created `UndoManager` (Problem B). Only restore when
+            // there is something to restore: an empty persisted list can
+            // legitimately mean "no undo history yet", and overwriting a
+            // manager that already exists in memory (e.g. this thread was
+            // already active) with an empty one would erase live undo state.
+            if !runtime.undo_checkpoints.is_empty() {
+                let mut undo = thinclaw_agent::undo::UndoManager::new();
+                undo.restore_from_checkpoints(runtime.undo_checkpoints.clone());
+                self.session_manager
+                    .restore_undo_manager(thread_uuid, undo)
+                    .await;
+            }
             self.resume_persisted_subagents(
                 message,
                 &identity,
@@ -502,6 +531,25 @@ impl Agent {
                 &runtime.active_subagents,
             )
             .await;
+        }
+
+        // Restore a persisted `/personality` session overlay so it survives
+        // a process restart, the same way `model_override` does above. This
+        // is stored under a dedicated conversation-metadata key rather than
+        // on `ThreadRuntimeSnapshot` (see
+        // `crate::agent::commands::PERSONALITY_OVERLAY_METADATA_KEY`), so it
+        // is restored independently of `runtime`. Only applied when the
+        // session doesn't already carry an active overlay, so an
+        // already-active in-memory session (or a personality set after this
+        // thread was hydrated) is never clobbered by stale persisted state.
+        if let Some(ref store) = store
+            && let Some(overlay) =
+                crate::agent::commands::load_personality_overlay(store, thread_uuid).await
+        {
+            let mut sess = session.lock().await;
+            if sess.active_personality.is_none() {
+                sess.active_personality = Some(overlay);
+            }
         }
 
         tracing::debug!(

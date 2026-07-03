@@ -97,6 +97,33 @@ pub struct SubagentInfo {
     pub spawned_at: String,
 }
 
+// The durable `subagent_runs` ledger row and its status-string constants
+// live in `thinclaw_types::subagent` so `thinclaw-db` can reference them
+// without depending on this crate; re-export them under the historical path.
+pub use thinclaw_types::subagent::{
+    SUBAGENT_RUN_ORPHANED_REASON, SUBAGENT_RUN_STATUS_CANCELLED, SUBAGENT_RUN_STATUS_COMPLETED,
+    SUBAGENT_RUN_STATUS_FAILED, SUBAGENT_RUN_STATUS_RUNNING, SUBAGENT_RUN_STATUS_TIMED_OUT,
+    SubagentRunRecord,
+};
+
+/// Map a [`SubagentStatus`] to the coarse status string stored in the
+/// `subagent_runs.status` column, plus the error text (if any) to persist
+/// in the `error` column.
+pub fn subagent_run_status_for_completion(
+    status: &SubagentStatus,
+) -> (&'static str, Option<String>) {
+    match status {
+        SubagentStatus::Running => (SUBAGENT_RUN_STATUS_RUNNING, None),
+        SubagentStatus::Completed => (SUBAGENT_RUN_STATUS_COMPLETED, None),
+        SubagentStatus::Failed(reason) => (SUBAGENT_RUN_STATUS_FAILED, Some(reason.clone())),
+        SubagentStatus::TimedOut => (
+            SUBAGENT_RUN_STATUS_TIMED_OUT,
+            Some("Sub-agent timed out".to_string()),
+        ),
+        SubagentStatus::Cancelled => (SUBAGENT_RUN_STATUS_CANCELLED, None),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubagentLearningCompletion {
     pub summary: &'static str,
@@ -208,6 +235,7 @@ pub enum SubagentCompletionOutcome {
     Success { response: String, iterations: usize },
     Error(String),
     TimedOut,
+    Cancelled,
 }
 
 /// Request to spawn a sub-agent.
@@ -620,6 +648,16 @@ pub fn subagent_result_from_completion(
             success: false,
             error: Some("Timed out".to_string()),
         },
+        // The literal "Cancelled" is what subagent_status_from_result keys on.
+        SubagentCompletionOutcome::Cancelled => SubagentResult {
+            agent_id,
+            name: name.into(),
+            response: String::new(),
+            iterations: 0,
+            duration_ms,
+            success: false,
+            error: Some("Cancelled".to_string()),
+        },
     }
 }
 
@@ -634,6 +672,81 @@ pub fn subagent_completion_status_response(result: &SubagentResult) -> String {
     }
 }
 
+/// Lower bound for derived subagent learning confidence.
+///
+/// Even a maximally-hard success or a hard failure should never collapse to
+/// zero: the learning system still needs a nonzero signal to weight against.
+const SUBAGENT_CONFIDENCE_FLOOR: f32 = 0.05;
+
+/// Upper bound for derived subagent learning confidence.
+///
+/// Reserves headroom above "certain" so genuinely verified/human-confirmed
+/// outcomes elsewhere in the learning pipeline can still be rated higher.
+const SUBAGENT_CONFIDENCE_CEILING: f32 = 0.95;
+
+/// Neutral confidence used for outcomes that are not quality signals at all
+/// (timeouts, cancellations): the subagent may have been on track, so this
+/// should neither reward nor penalize like a real success/failure would.
+const SUBAGENT_CONFIDENCE_NEUTRAL: f32 = 0.5;
+
+/// Iteration count above which additional iterations no longer move
+/// confidence, expressed as a fraction of `SUBAGENT_MAX_ITERATIONS`. Chosen
+/// so a subagent that used the full iteration budget is treated as
+/// "maximally hard" rather than driving confidence further down.
+const SUBAGENT_CONFIDENCE_ITERATION_SCALE: f64 = SUBAGENT_MAX_ITERATIONS as f64;
+
+/// Duration above which additional wall-clock time no longer moves
+/// confidence. Long-running-but-successful subagents are still discounted a
+/// little (they likely struggled), but the discount saturates rather than
+/// growing without bound.
+const SUBAGENT_CONFIDENCE_DURATION_SCALE_MS: f64 = (DEFAULT_TIMEOUT_SECS * 1000) as f64;
+
+/// Whether a failed subagent's error reflects an execution/environment
+/// interruption rather than a judgment about task quality.
+fn is_non_quality_failure(error: Option<&str>) -> bool {
+    matches!(error, Some("Timed out") | Some("Cancelled"))
+}
+
+/// Derive a `[0.05, 0.95]` confidence score for subagent learning signals
+/// purely from observables on `SubagentResult`.
+///
+/// The formula is monotonic in each input taken independently:
+/// - More iterations never increases confidence (harder task -> less sure).
+/// - Longer duration never increases confidence (struggled longer -> less sure).
+/// - Timeouts/cancellations are treated as neutral (~0.5): they say nothing
+///   about whether the subagent's approach was good, so they should not be
+///   punished as hard as a genuine failure.
+/// - Ordinary failures are rated below neutral, ordinary successes above it.
+fn subagent_learning_confidence(result: &SubagentResult) -> f32 {
+    // How much of the "iterations" and "duration" budget was consumed,
+    // clamped to [0, 1]. Harder/slower runs push the discount toward 1.0.
+    let iteration_load =
+        (result.iterations as f64 / SUBAGENT_CONFIDENCE_ITERATION_SCALE).clamp(0.0, 1.0);
+    let duration_load =
+        (result.duration_ms as f64 / SUBAGENT_CONFIDENCE_DURATION_SCALE_MS).clamp(0.0, 1.0);
+    // Blend the two load signals; iterations dominate since they more
+    // directly reflect how much the subagent had to fight the task.
+    let effort_load = (0.7 * iteration_load + 0.3 * duration_load).clamp(0.0, 1.0);
+
+    let base: f64 = if result.success {
+        // Successes start high and lose a modest amount of confidence as
+        // effort load increases (a hard-won success is still a success, but
+        // slightly less certain than an easy one).
+        0.90 - 0.20 * effort_load
+    } else if is_non_quality_failure(result.error.as_deref()) {
+        // Timeouts/cancellations are not a quality signal: stay neutral,
+        // nudged only slightly by how much effort was already spent.
+        SUBAGENT_CONFIDENCE_NEUTRAL as f64 - 0.05 * effort_load
+    } else {
+        // Ordinary failures start low and lose further confidence the more
+        // effort was burned before failing (more evidence the task was
+        // genuinely hard/wrong, not a fluke).
+        0.35 - 0.15 * effort_load
+    };
+
+    (base as f32).clamp(SUBAGENT_CONFIDENCE_FLOOR, SUBAGENT_CONFIDENCE_CEILING)
+}
+
 pub fn subagent_learning_completion(result: &SubagentResult) -> SubagentLearningCompletion {
     SubagentLearningCompletion {
         summary: if result.success {
@@ -641,7 +754,7 @@ pub fn subagent_learning_completion(result: &SubagentResult) -> SubagentLearning
         } else {
             "Sub-agent failed to complete task"
         },
-        confidence: if result.success { 0.82 } else { 0.38 },
+        confidence: subagent_learning_confidence(result),
         correction_count: if result.success { 0 } else { 1 },
         repeated_failures: if result.success { 0 } else { 1 },
         metadata: serde_json::json!({
@@ -1096,7 +1209,12 @@ mod tests {
             subagent_routine_completion(&success).lifecycle_event,
             "completed"
         );
-        assert_eq!(subagent_learning_completion(&success).confidence, 0.82);
+        // Quick, low-iteration success: near the top of the success range.
+        let confidence = subagent_learning_completion(&success).confidence;
+        assert!(
+            confidence > 0.85 && confidence <= 0.90,
+            "expected near-ceiling success confidence, got {confidence}"
+        );
 
         let timeout = SubagentResult {
             success: false,
@@ -1228,6 +1346,131 @@ mod tests {
         assert_eq!(
             subagent_learning_risk_tier(&failure),
             SubagentLearningRiskTier::Medium
+        );
+    }
+
+    fn confidence_result(
+        success: bool,
+        iterations: usize,
+        duration_ms: u64,
+        error: Option<&str>,
+    ) -> SubagentResult {
+        SubagentResult {
+            agent_id: Uuid::new_v4(),
+            name: "worker".to_string(),
+            response: "done".to_string(),
+            iterations,
+            duration_ms,
+            success,
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn subagent_learning_confidence_stays_within_bounds() {
+        let cases = [
+            confidence_result(true, 1, 10, None),
+            confidence_result(true, SUBAGENT_MAX_ITERATIONS, 10, None),
+            confidence_result(false, 5, 100, Some("boom")),
+            confidence_result(false, 1, 10, Some("Timed out")),
+            confidence_result(false, 1, 10, Some("Cancelled")),
+        ];
+        for result in &cases {
+            let confidence = subagent_learning_completion(result).confidence;
+            assert!(
+                (SUBAGENT_CONFIDENCE_FLOOR..=SUBAGENT_CONFIDENCE_CEILING).contains(&confidence),
+                "confidence {confidence} out of bounds for {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subagent_learning_confidence_quick_success_is_high() {
+        let quick_success = confidence_result(true, 1, 50, None);
+        let confidence = subagent_learning_completion(&quick_success).confidence;
+        assert!(
+            confidence > 0.8,
+            "expected high confidence for a quick success, got {confidence}"
+        );
+    }
+
+    #[test]
+    fn subagent_learning_confidence_many_iteration_success_is_lower_than_quick_success() {
+        let quick_success = confidence_result(true, 1, 50, None);
+        let hard_success = confidence_result(true, SUBAGENT_MAX_ITERATIONS, 50, None);
+
+        let quick_confidence = subagent_learning_completion(&quick_success).confidence;
+        let hard_confidence = subagent_learning_completion(&hard_success).confidence;
+
+        assert!(
+            hard_confidence < quick_confidence,
+            "many-iteration success ({hard_confidence}) should be less confident than a quick \
+             success ({quick_confidence})"
+        );
+        // Still a success: should stay above the neutral timeout/cancel band.
+        assert!(hard_confidence > SUBAGENT_CONFIDENCE_NEUTRAL);
+    }
+
+    #[test]
+    fn subagent_learning_confidence_generic_failure_is_low() {
+        let quick_failure = confidence_result(false, 1, 50, Some("tool exploded"));
+        let hard_failure = confidence_result(
+            false,
+            SUBAGENT_MAX_ITERATIONS,
+            DEFAULT_TIMEOUT_SECS * 1000,
+            Some("tool exploded"),
+        );
+
+        let quick_confidence = subagent_learning_completion(&quick_failure).confidence;
+        let hard_confidence = subagent_learning_completion(&hard_failure).confidence;
+
+        assert!(
+            quick_confidence < SUBAGENT_CONFIDENCE_NEUTRAL,
+            "generic failure should be rated below neutral, got {quick_confidence}"
+        );
+        assert!(
+            hard_confidence <= quick_confidence,
+            "a failure reached after more effort should not be rated more confident"
+        );
+    }
+
+    #[test]
+    fn subagent_learning_confidence_timeout_is_neutral_not_punitive() {
+        let timeout = confidence_result(false, 5, 60_000, Some("Timed out"));
+        let generic_failure = confidence_result(false, 5, 60_000, Some("tool exploded"));
+
+        let timeout_confidence = subagent_learning_completion(&timeout).confidence;
+        let failure_confidence = subagent_learning_completion(&generic_failure).confidence;
+
+        assert!(
+            (timeout_confidence - SUBAGENT_CONFIDENCE_NEUTRAL).abs() < 0.15,
+            "timeout confidence {timeout_confidence} should stay near neutral \
+             ({SUBAGENT_CONFIDENCE_NEUTRAL})"
+        );
+        assert!(
+            timeout_confidence > failure_confidence,
+            "timeout ({timeout_confidence}) should not be punished as hard as a generic \
+             failure ({failure_confidence})"
+        );
+    }
+
+    #[test]
+    fn subagent_learning_confidence_cancelled_is_neutral_not_punitive() {
+        let cancelled = confidence_result(false, 2, 5_000, Some("Cancelled"));
+        let generic_failure = confidence_result(false, 2, 5_000, Some("tool exploded"));
+
+        let cancelled_confidence = subagent_learning_completion(&cancelled).confidence;
+        let failure_confidence = subagent_learning_completion(&generic_failure).confidence;
+
+        assert!(
+            (cancelled_confidence - SUBAGENT_CONFIDENCE_NEUTRAL).abs() < 0.15,
+            "cancelled confidence {cancelled_confidence} should stay near neutral \
+             ({SUBAGENT_CONFIDENCE_NEUTRAL})"
+        );
+        assert!(
+            cancelled_confidence > failure_confidence,
+            "cancellation ({cancelled_confidence}) should not be punished as hard as a generic \
+             failure ({failure_confidence})"
         );
     }
 

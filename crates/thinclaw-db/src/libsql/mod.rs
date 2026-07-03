@@ -16,6 +16,7 @@ mod repo_projects;
 mod routines;
 mod sandbox;
 mod settings;
+mod subagent_runs;
 mod tool_failures;
 mod workspace;
 
@@ -36,6 +37,7 @@ use thinclaw_types::routine::{
     RoutineEventEvaluation, RoutineEventStatus, RoutineGuardrails, RoutinePolicy, RoutineRun,
     RoutineTrigger, RunStatus, Trigger,
 };
+use thinclaw_types::subagent::SubagentRunRecord;
 use thinclaw_workspace::MemoryDocument;
 
 use crate::libsql_migrations;
@@ -53,6 +55,10 @@ pub(crate) const ROUTINE_COLUMNS: &str = "\
 pub(crate) const ROUTINE_RUN_COLUMNS: &str = "\
     id, routine_id, trigger_type, trigger_detail, trigger_key, started_at, \
     status, completed_at, result_summary, tokens_used, job_id, created_at";
+
+/// Explicit column list for subagent_runs table (matches positional access in `row_to_subagent_run_libsql`).
+pub(crate) const SUBAGENT_RUN_COLUMNS: &str = "\
+    id, name, task, status, parent_thread_id, routine_run_id, spawned_at, completed_at, error";
 
 pub(crate) const ROUTINE_EVENT_COLUMNS: &str = "\
     id, principal_id, actor_id, channel, event_type, raw_sender_id, conversation_scope_id, \
@@ -561,6 +567,22 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
         tokens_used: row.get::<i64>(9).ok().map(|v| v as i32),
         job_id: get_opt_text(row, 10).and_then(|s| s.parse().ok()),
         created_at: get_ts(row, 11),
+    })
+}
+
+pub(crate) fn row_to_subagent_run_libsql(
+    row: &libsql::Row,
+) -> Result<SubagentRunRecord, DatabaseError> {
+    Ok(SubagentRunRecord {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        name: get_text(row, 1),
+        task: get_text(row, 2),
+        status: get_text(row, 3),
+        parent_thread_id: get_opt_text(row, 4),
+        routine_run_id: get_opt_text(row, 5),
+        spawned_at: get_ts(row, 6),
+        completed_at: get_opt_ts(row, 7),
+        error: get_opt_text(row, 8),
     })
 }
 

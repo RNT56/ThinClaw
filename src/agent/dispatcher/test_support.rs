@@ -732,6 +732,7 @@ pub(super) async fn make_test_agent_with_channel(
             max_context_messages: 200,
             thinking_enabled,
             thinking_budget_tokens: 128,
+            adaptive_thinking_enabled: false,
             auto_approve_tools: false,
             main_tool_profile: crate::tools::ToolProfile::Standard,
             worker_tool_profile: crate::tools::ToolProfile::Restricted,

@@ -216,6 +216,26 @@ pub(super) async fn execute_routine(ctx: EngineContext, routine: Routine, run: R
         tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
     }
 
+    // IC-CRON-STAGGER: notify an optional external webhook that this run
+    // finished, if CRON_FINISHED_WEBHOOK is configured. Fire-and-forget —
+    // webhook delivery failures are logged but never affect run outcome.
+    if let Some(webhook_url) = StaggerConfig::from_env().finished_webhook_url {
+        let payload = crate::agent::cron_stagger::FinishedRunPayload {
+            routine_id: routine.id.to_string(),
+            routine_name: routine.name.clone(),
+            success: status != RunStatus::Failed,
+            duration_ms: Utc::now()
+                .signed_duration_since(run.started_at)
+                .num_milliseconds()
+                .max(0) as u64,
+            error: summary.clone().filter(|_| status == RunStatus::Failed),
+            completed_at: Utc::now().to_rfc3339(),
+        };
+        tokio::spawn(async move {
+            crate::agent::cron_stagger::notify_finished_run(&webhook_url, &payload).await;
+        });
+    }
+
     let mut completed_run = run.clone();
     completed_run.status = status;
     completed_run.result_summary = summary.clone();
@@ -661,11 +681,19 @@ async fn execute_heartbeat(
                 "Injected heartbeat into main session — dispatcher will process with full context"
             );
 
-            // Return Running — the dispatcher handles completion.
-            // The main session will produce the response (HEARTBEAT_OK or findings).
+            // Complete the run now, as `Ok`. This run's job is delivering the
+            // heartbeat prompt into the main session — that delivery just
+            // succeeded. The dispatcher turn that follows is a normal
+            // conversational turn on the main session, not part of this
+            // routine run, and nothing else ever calls complete_routine_run
+            // for it. Previously this returned `RunStatus::Running` on the
+            // (incorrect) assumption that "the dispatcher handles
+            // completion" — it doesn't, so every main-session heartbeat run
+            // was eventually reaped as a failure by the zombie cleanup,
+            // poisoning run history and downstream learning signals.
             return Ok((
-                RunStatus::Running,
-                Some("Injected into main session — awaiting agent response".to_string()),
+                RunStatus::Ok,
+                Some("Injected into main session".to_string()),
                 None,
             ));
         } else {

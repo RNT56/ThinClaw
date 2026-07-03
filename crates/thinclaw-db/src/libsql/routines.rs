@@ -486,26 +486,60 @@ impl RoutineStore for LibSqlBackend {
         Ok(())
     }
 
-    async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
+    async fn renew_routine_run_lease(
+        &self,
+        run_id: Uuid,
+        lease_secs: i64,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let now = Utc::now();
+        let lease_expires_at = fmt_ts(
+            &(now
+                + chrono::Duration::try_seconds(lease_secs.max(0))
+                    .unwrap_or_else(|| chrono::Duration::seconds(0))),
+        );
+        conn.execute(
+            r#"
+                UPDATE routine_runs SET
+                    lease_expires_at = ?1
+                WHERE id = ?2
+                  AND status = 'running'
+            "#,
+            params![lease_expires_at, run_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn cleanup_stale_routine_runs(&self, legacy_ttl_secs: i64) -> Result<u64, DatabaseError> {
         let conn = self.connect().await?;
         let now = Utc::now();
         let now_str = fmt_ts(&now);
-        let cutoff = fmt_ts(
+        let legacy_cutoff = fmt_ts(
             &(now
-                - chrono::Duration::try_minutes(10)
-                    .expect("10 minutes is a valid chrono::Duration")),
+                - chrono::Duration::try_seconds(legacy_ttl_secs.max(0))
+                    .unwrap_or_else(|| chrono::Duration::seconds(0))),
         );
+        // Reap runs whose lease has explicitly expired, OR legacy rows with
+        // no lease at all that have been running longer than the fallback
+        // TTL. Runs with a live (non-expired) lease are never reaped, no
+        // matter how long they've been running — that's the whole point of
+        // the renewable lease replacing the old fixed 10-minute TTL.
         let count = conn
             .execute(
                 r#"
                     UPDATE routine_runs SET
                         status = 'failed',
                         completed_at = ?1,
-                        result_summary = 'Orphaned: routine exceeded 10-minute TTL'
+                        result_summary = 'Orphaned: routine run lease expired'
                     WHERE status = 'running'
-                      AND started_at < ?2
+                      AND (
+                          (lease_expires_at IS NOT NULL AND lease_expires_at < ?1)
+                          OR (lease_expires_at IS NULL AND started_at < ?2)
+                      )
                 "#,
-                params![now_str, cutoff],
+                params![now_str, legacy_cutoff],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1257,5 +1291,234 @@ impl RoutineStore for LibSqlBackend {
             triggers.push(row_to_routine_trigger_libsql(&row)?);
         }
         Ok(triggers)
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    use crate::Database;
+    use crate::libsql::LibSqlBackend;
+    use crate::libsql::get_opt_text;
+
+    /// Build a migrated, file-backed test backend.
+    ///
+    /// Deliberately NOT `LibSqlBackend::new_memory()`: each `connect()` call
+    /// against a `:memory:` libSQL database yields an independent, unshared
+    /// in-memory database, so a connection opened after `run_migrations()`
+    /// (which uses its own internal connection) sees no tables at all. A
+    /// tempfile-backed database persists across connections like production
+    /// use does.
+    async fn new_test_backend() -> (LibSqlBackend, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("routine_lease_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create local backend");
+        backend.run_migrations().await.expect("run migrations");
+        (backend, dir)
+    }
+
+    /// Insert a bare `routine_runs` row (plus a minimal parent `routines`
+    /// row to satisfy the FK constraint, which this backend enforces on
+    /// file-backed connections) with an optional `lease_expires_at`.
+    async fn insert_run(
+        conn: &libsql::Connection,
+        id: Uuid,
+        started_at: DateTime<Utc>,
+        lease_expires_at: Option<DateTime<Utc>>,
+    ) {
+        let routine_id = Uuid::new_v4();
+        conn.execute(
+            r#"
+                INSERT INTO routines (
+                    id, name, user_id, trigger_type, trigger_config,
+                    action_type, action_config
+                ) VALUES (?1, ?2, 'default', 'manual', '{}', 'lightweight', '{}')
+            "#,
+            params![routine_id.to_string(), format!("lease-test-{routine_id}")],
+        )
+        .await
+        .expect("insert parent routines row");
+
+        conn.execute(
+            r#"
+                INSERT INTO routine_runs (
+                    id, routine_id, trigger_type, started_at, status, lease_expires_at
+                ) VALUES (?1, ?2, 'cron', ?3, 'running', ?4)
+            "#,
+            params![
+                id.to_string(),
+                routine_id.to_string(),
+                fmt_ts(&started_at),
+                fmt_opt_ts(&lease_expires_at),
+            ],
+        )
+        .await
+        .expect("insert routine_runs row");
+    }
+
+    async fn run_status(conn: &libsql::Connection, id: Uuid) -> String {
+        let mut rows = conn
+            .query(
+                "SELECT status FROM routine_runs WHERE id = ?1",
+                params![id.to_string()],
+            )
+            .await
+            .expect("query status");
+        let row = rows.next().await.expect("row result").expect("row present");
+        get_text(&row, 0)
+    }
+
+    #[tokio::test]
+    async fn cleanup_reaps_legacy_null_lease_past_fallback_ttl() {
+        let (backend, _dir) = new_test_backend().await;
+        let conn = backend.connect().await.unwrap();
+
+        let old_run = Uuid::new_v4();
+        // Legacy row: no lease at all, started well over an hour ago.
+        insert_run(
+            &conn,
+            old_run,
+            Utc::now() - chrono::Duration::try_hours(2).unwrap(),
+            None,
+        )
+        .await;
+
+        let reaped = backend.cleanup_stale_routine_runs(3600).await.unwrap();
+        assert_eq!(reaped, 1);
+        assert_eq!(run_status(&conn, old_run).await, "failed");
+    }
+
+    #[tokio::test]
+    async fn cleanup_spares_legacy_null_lease_within_fallback_ttl() {
+        let (backend, _dir) = new_test_backend().await;
+        let conn = backend.connect().await.unwrap();
+
+        let recent_run = Uuid::new_v4();
+        // Legacy row with no lease, but started recently — within the
+        // fallback TTL, so it must NOT be reaped even though it has no
+        // lease. This is the exact false-positive the fixed 10-minute TTL
+        // used to produce for long-running full-job routine runs.
+        insert_run(
+            &conn,
+            recent_run,
+            Utc::now() - chrono::Duration::try_minutes(30).unwrap(),
+            None,
+        )
+        .await;
+
+        let reaped = backend.cleanup_stale_routine_runs(3600).await.unwrap();
+        assert_eq!(reaped, 0);
+        assert_eq!(run_status(&conn, recent_run).await, "running");
+    }
+
+    #[tokio::test]
+    async fn cleanup_reaps_only_expired_lease_not_fresh_lease() {
+        let (backend, _dir) = new_test_backend().await;
+        let conn = backend.connect().await.unwrap();
+
+        let expired_run = Uuid::new_v4();
+        let fresh_run = Uuid::new_v4();
+
+        // Started 2 hours ago (well past the old fixed 10-minute TTL), but
+        // its lease expired 1 minute ago — should be reaped.
+        insert_run(
+            &conn,
+            expired_run,
+            Utc::now() - chrono::Duration::try_hours(2).unwrap(),
+            Some(Utc::now() - chrono::Duration::try_minutes(1).unwrap()),
+        )
+        .await;
+
+        // Also started 2 hours ago, but has a lease that's still valid for
+        // another hour (renewed recently by an actively-executing worker).
+        // Must survive the reaper no matter how old `started_at` is — this
+        // is the core fix for the false-positive "Orphaned" bug.
+        insert_run(
+            &conn,
+            fresh_run,
+            Utc::now() - chrono::Duration::try_hours(2).unwrap(),
+            Some(Utc::now() + chrono::Duration::try_hours(1).unwrap()),
+        )
+        .await;
+
+        let reaped = backend.cleanup_stale_routine_runs(3600).await.unwrap();
+        assert_eq!(reaped, 1);
+        assert_eq!(run_status(&conn, expired_run).await, "failed");
+        assert_eq!(run_status(&conn, fresh_run).await, "running");
+    }
+
+    #[tokio::test]
+    async fn renew_routine_run_lease_extends_expiry_and_survives_reap() {
+        let (backend, _dir) = new_test_backend().await;
+        let conn = backend.connect().await.unwrap();
+
+        let run_id = Uuid::new_v4();
+        // Started long ago with an already-expired lease.
+        insert_run(
+            &conn,
+            run_id,
+            Utc::now() - chrono::Duration::try_hours(2).unwrap(),
+            Some(Utc::now() - chrono::Duration::try_minutes(5).unwrap()),
+        )
+        .await;
+
+        // Renew for another hour — simulating a worker/subagent keepalive tick.
+        backend.renew_routine_run_lease(run_id, 3600).await.unwrap();
+
+        let reaped = backend.cleanup_stale_routine_runs(3600).await.unwrap();
+        assert_eq!(reaped, 0, "renewed lease must protect the run from reaping");
+        assert_eq!(run_status(&conn, run_id).await, "running");
+    }
+
+    #[tokio::test]
+    async fn renew_routine_run_lease_is_noop_for_non_running_run() {
+        let (backend, _dir) = new_test_backend().await;
+        let conn = backend.connect().await.unwrap();
+
+        let routine_id = Uuid::new_v4();
+        conn.execute(
+            r#"
+                INSERT INTO routines (
+                    id, name, user_id, trigger_type, trigger_config,
+                    action_type, action_config
+                ) VALUES (?1, ?2, 'default', 'manual', '{}', 'lightweight', '{}')
+            "#,
+            params![routine_id.to_string(), format!("lease-test-{routine_id}")],
+        )
+        .await
+        .unwrap();
+
+        let run_id = Uuid::new_v4();
+        conn.execute(
+            r#"
+                INSERT INTO routine_runs (
+                    id, routine_id, trigger_type, started_at, status, completed_at
+                ) VALUES (?1, ?2, 'cron', ?3, 'ok', ?3)
+            "#,
+            params![
+                run_id.to_string(),
+                routine_id.to_string(),
+                fmt_ts(&Utc::now())
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Renewing a completed run should not resurrect it into a lease
+        // that could confuse future queries — the WHERE status = 'running'
+        // guard should make this a no-op.
+        backend.renew_routine_run_lease(run_id, 3600).await.unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT lease_expires_at FROM routine_runs WHERE id = ?1",
+                params![run_id.to_string()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert!(get_opt_text(&row, 0).is_none());
     }
 }

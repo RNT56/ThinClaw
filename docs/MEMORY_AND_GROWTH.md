@@ -44,6 +44,8 @@ ThinClaw now freezes the project/workspace prompt block at session runtime by de
 
 This keeps project guidance cache-friendly while leaving ephemeral recall, channel hints, and post-compaction fragments free to change turn by turn.
 
+When context compaction summarizes older turns (automatically or via `/compress`), the generated summary is folded into the post-compaction fragment under a `## Summary of Earlier Conversation` heading, so the model keeps the gist of the dropped turns instead of resuming with no memory of them. The fragment persists in the thread runtime and survives rehydration.
+
 ## External Memory Providers
 
 The external memory layer still supports active-provider recall/export flows, but it now also supports:

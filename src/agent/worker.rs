@@ -7,14 +7,15 @@ use crate::llm::cost_tracker::CostTracker;
 use chrono::Utc;
 
 use thinclaw_agent::worker_runtime::{
-    DEFAULT_WORKER_ITERATIONS, RoutineFinalizationOutcome, WORKER_DIRECT_LOOP_DELAY_MS,
-    WORKER_TASK_FAILED_DURING_EXECUTION_REASON, WORKER_TOOL_KEEPALIVE_SECS,
-    WorkerActivityKeepalive, WorkerLoopMetadata, build_worker_system_prompt, compact_post_plan,
+    DEFAULT_WORKER_ITERATIONS, RoutineFinalizationOutcome, WORKER_COMPLETE_JOB_TOOL_NAME,
+    WORKER_DIRECT_LOOP_DELAY_MS, WORKER_TASK_FAILED_DURING_EXECUTION_REASON,
+    WORKER_TOOL_KEEPALIVE_SECS, WorkerActivityKeepalive, WorkerLoopMetadata,
+    build_worker_system_prompt, compact_post_plan, complete_job_tool_definition,
     heartbeat_completion_critique, heartbeat_iteration_exhausted_critique,
     heartbeat_iteration_exhausted_summary, heartbeat_iteration_exhausted_user_message,
-    is_worker_terminal_state, order_parallel_worker_results, should_finish_heartbeat_after_output,
-    should_nudge_worker, should_persist_heartbeat_completion_critique, touch_worker_activity,
-    worker_iteration_exceeded,
+    is_worker_terminal_state, order_parallel_worker_results, parse_complete_job_arguments,
+    should_finish_heartbeat_after_output, should_nudge_worker,
+    should_persist_heartbeat_completion_critique, touch_worker_activity, worker_iteration_exceeded,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -197,6 +198,33 @@ impl Worker {
 
     fn timeout(&self) -> Duration {
         self.deps.timeout
+    }
+
+    /// Renew the DB lease on this worker's routine run, if it was dispatched
+    /// from a routine. Called on every execution-loop iteration so a
+    /// long-running full-job routine (up to `AGENT_JOB_TIMEOUT_SECS`) is
+    /// never falsely reaped by the zombie cleanup as long as the worker is
+    /// still actively making progress. The lease window is padded beyond
+    /// the worker's own inactivity timeout so a slow-but-alive iteration
+    /// doesn't race the reaper.
+    async fn renew_routine_lease(
+        &self,
+        last_renewed: &std::sync::Mutex<Option<std::time::Instant>>,
+    ) {
+        let (Some(store), Some(run_id_str)) = (self.store(), self.deps.routine_run_id.as_deref())
+        else {
+            return;
+        };
+        let Ok(run_id) = run_id_str.parse::<Uuid>() else {
+            return;
+        };
+        crate::agent::routine_engine::renew_routine_run_lease_if_due(
+            store,
+            run_id,
+            self.timeout().as_secs(),
+            last_renewed,
+        )
+        .await;
     }
 
     fn use_planning(&self) -> bool {
@@ -390,6 +418,9 @@ impl Worker {
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
         touch_worker_activity(activity_tx);
+        // Shared across the plan phase and the direct-selection loop so the
+        // plan->direct fallthrough doesn't reset the lease-renewal throttle.
+        let routine_lease_renewed_at = std::sync::Mutex::new(None);
         let job_context = self.context_manager().get_context(self.job_id).await.ok();
         let capability_metadata = job_context
             .as_ref()
@@ -440,6 +471,9 @@ impl Worker {
                 &capability_metadata,
             )
             .await;
+        reason_ctx
+            .available_tools
+            .push(complete_job_tool_definition());
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -492,8 +526,15 @@ impl Worker {
         // If we have a plan, execute it — but fall through to direct
         // selection if the plan didn't finish the job.
         if let Some(ref plan) = plan {
-            self.execute_plan(rx, reasoning, reason_ctx, plan, activity_tx)
-                .await?;
+            self.execute_plan(
+                &routine_lease_renewed_at,
+                rx,
+                reasoning,
+                reason_ctx,
+                plan,
+                activity_tx,
+            )
+            .await?;
 
             // Check whether the job reached a terminal state.
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
@@ -555,6 +596,7 @@ impl Worker {
 
             iteration += 1;
             touch_worker_activity(activity_tx);
+            self.renew_routine_lease(&routine_lease_renewed_at).await;
             if worker_iteration_exceeded(iteration, max_iterations) {
                 if is_heartbeat {
                     let stuck_reason = heartbeat_iteration_exhausted_summary(max_iterations);
@@ -608,6 +650,9 @@ impl Worker {
                     &capability_metadata,
                 )
                 .await;
+            reason_ctx
+                .available_tools
+                .push(complete_job_tool_definition());
 
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
@@ -701,9 +746,17 @@ impl Worker {
                             .collect();
 
                         let results = self.execute_tools_parallel(&selections, activity_tx).await;
+                        let mut job_finished = false;
                         for (selection, result) in selections.iter().zip(results) {
-                            self.process_tool_result(reason_ctx, selection, result.result)
-                                .await?;
+                            if self
+                                .process_tool_result(reason_ctx, selection, result.result)
+                                .await?
+                            {
+                                job_finished = true;
+                            }
+                        }
+                        if job_finished {
+                            return Ok(());
                         }
                     }
                 }
@@ -721,8 +774,12 @@ impl Worker {
                     .execute_tool(&selection.tool_name, &selection.parameters, activity_tx)
                     .await;
 
-                self.process_tool_result(reason_ctx, selection, result)
-                    .await?;
+                if self
+                    .process_tool_result(reason_ctx, selection, result)
+                    .await?
+                {
+                    return Ok(());
+                }
             } else {
                 // Multiple tools: execute in parallel
                 tracing::debug!(
@@ -734,9 +791,17 @@ impl Worker {
                 let results = self.execute_tools_parallel(&selections, activity_tx).await;
 
                 // Process all results
+                let mut job_finished = false;
                 for (selection, result) in selections.iter().zip(results) {
-                    self.process_tool_result(reason_ctx, selection, result.result)
-                        .await?;
+                    if self
+                        .process_tool_result(reason_ctx, selection, result.result)
+                        .await?
+                    {
+                        job_finished = true;
+                    }
+                }
+                if job_finished {
+                    return Ok(());
                 }
             }
 
@@ -885,6 +950,17 @@ impl Worker {
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, Error> {
+        // `complete_job` is a synthetic tool injected into the worker's tool
+        // list (see execution_loop) — it is never registered with the real
+        // tool registry. Short-circuit here so it doesn't hit
+        // prepare_tool_call and fail with "tool not found". The actual
+        // completion side-effect (marking the job done) is handled by the
+        // caller via process_tool_result, which inspects the tool name and
+        // the echoed params below.
+        if tool_name == WORKER_COMPLETE_JOB_TOOL_NAME {
+            return Ok(params.to_string());
+        }
+
         // Fetch job context early so we have the real user_id for hooks and rate limiting
         let job_ctx = deps.context_manager.get_context(job_id).await?;
         if job_ctx.state == JobState::Cancelled {
@@ -1115,9 +1191,32 @@ impl Worker {
                     });
                 }
 
+                // ── complete_job interception ────────────────────────────
+                // `complete_job` is a synthetic tool (see execution_loop) —
+                // it never reaches the real tool registry. execute_tool_inner
+                // short-circuits it by echoing back the call's own arguments
+                // as the "output", which we parse here to end the job. This
+                // is the structured counterpart to llm_signals_completion:
+                // it lets the model unambiguously signal completion instead
+                // of relying on free-text phrase matching, while still only
+                // ever being triggered by the LLM's own tool call (never by
+                // arbitrary tool output — the same trust boundary called out
+                // below).
+                if selection.tool_name == WORKER_COMPLETE_JOB_TOOL_NAME {
+                    let outcome = parse_complete_job_arguments(&selection.parameters);
+                    self.set_last_output(&outcome.summary);
+                    if outcome.success {
+                        self.mark_completed().await?;
+                    } else {
+                        self.mark_failed(&outcome.summary).await?;
+                    }
+                    return Ok(true);
+                }
+
                 // Tool output never drives job completion. A malicious tool could
                 // emit "TASK_COMPLETE" to force premature completion. Only the LLM's
-                // own structured response (in execution_loop) can mark a job done.
+                // own structured response (in execution_loop) or an explicit
+                // complete_job call (handled above) can mark a job done.
                 Ok(false)
             }
             Err(e) => {
@@ -1164,6 +1263,7 @@ impl Worker {
     /// Execute a pre-generated plan.
     async fn execute_plan(
         &self,
+        routine_lease_renewed_at: &std::sync::Mutex<Option<std::time::Instant>>,
         rx: &mut mpsc::Receiver<WorkerMessage>,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
@@ -1190,6 +1290,7 @@ impl Worker {
             }
 
             touch_worker_activity(activity_tx);
+            self.renew_routine_lease(&routine_lease_renewed_at).await;
             tracing::debug!(
                 "Job {} executing planned action {}/{}: {} - {}",
                 self.job_id,

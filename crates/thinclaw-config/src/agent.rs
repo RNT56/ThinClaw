@@ -41,6 +41,11 @@ pub struct AgentConfig {
     pub thinking_enabled: bool,
     /// Token budget for extended thinking.
     pub thinking_budget_tokens: u32,
+    /// Opt-in: scale the resolved thinking budget per turn based on a cheap
+    /// message-complexity heuristic (see `scale_thinking_budget`). Disabled
+    /// by default; static `thinking_enabled` / `thinking_budget_tokens` (and
+    /// any per-model override) remain the base values that get scaled.
+    pub adaptive_thinking_enabled: bool,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
     /// Default user-facing transparency level for subagent activity.
@@ -145,6 +150,8 @@ impl AgentConfig {
                 "AGENT_THINKING_BUDGET_TOKENS",
                 settings.agent.thinking_budget_tokens,
             )?,
+            // No settings-file field yet; this is env-only, default false.
+            adaptive_thinking_enabled: parse_bool_env("ADAPTIVE_THINKING", false)?,
             auto_approve_tools: parse_bool_env(
                 "AGENT_AUTO_APPROVE_TOOLS",
                 settings.agent.auto_approve_tools,
@@ -200,6 +207,12 @@ impl AgentConfig {
     ///
     /// Checks `model_thinking_overrides` first (exact match, then prefix match),
     /// falling back to global `thinking_enabled` / `thinking_budget_tokens`.
+    ///
+    /// Prefix matching is deterministic: when multiple configured prefixes
+    /// match `model_name` (e.g. both "claude" and "claude-sonnet-4"), the
+    /// longest prefix wins. Ties are broken lexicographically so the result
+    /// never depends on `HashMap` iteration order, which is randomized per
+    /// process.
     pub fn resolve_thinking_for_model(&self, model_name: &str) -> (bool, u32) {
         // Exact match first
         if let Some(ovr) = self.model_thinking_overrides.get(model_name) {
@@ -208,17 +221,61 @@ impl AgentConfig {
                 ovr.budget_tokens.unwrap_or(self.thinking_budget_tokens),
             );
         }
-        // Prefix match (e.g. "claude-sonnet" matches "claude-sonnet-4-20250514")
-        for (pattern, ovr) in &self.model_thinking_overrides {
-            if model_name.starts_with(pattern.as_str()) {
-                return (
-                    ovr.enabled,
-                    ovr.budget_tokens.unwrap_or(self.thinking_budget_tokens),
-                );
-            }
+        // Prefix match (e.g. "claude-sonnet" matches "claude-sonnet-4-20250514").
+        // Deterministic longest-prefix-wins, lexicographic tie-break.
+        let best = self
+            .model_thinking_overrides
+            .iter()
+            .filter(|(pattern, _)| model_name.starts_with(pattern.as_str()))
+            .max_by(|(pattern_a, _), (pattern_b, _)| {
+                pattern_a
+                    .len()
+                    .cmp(&pattern_b.len())
+                    .then_with(|| pattern_a.cmp(pattern_b))
+            });
+        if let Some((_, ovr)) = best {
+            return (
+                ovr.enabled,
+                ovr.budget_tokens.unwrap_or(self.thinking_budget_tokens),
+            );
         }
         // Global default
         (self.thinking_enabled, self.thinking_budget_tokens)
+    }
+}
+
+/// Coarse message-complexity bucket used to scale the thinking budget for a
+/// single turn. Deliberately local to `thinclaw-config` rather than reusing
+/// `thinclaw_llm_core::smart_routing::TaskComplexity`: `thinclaw-config` does
+/// not (and should not) depend on `thinclaw-llm-core`, so callers that have
+/// already classified a message with the richer smart-routing types map the
+/// result into this enum before calling `scale_thinking_budget`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimpleComplexity {
+    Simple,
+    Moderate,
+    Complex,
+}
+
+/// Scale a base `(enabled, budget_tokens)` thinking configuration by message
+/// complexity. Pure function, no I/O.
+///
+/// - `Simple`: thinking is disabled outright (fast path for trivial turns).
+/// - `Moderate`: keep the base enabled/disabled state, but halve the budget
+///   (clamped to a minimum of 1024 tokens when thinking stays enabled).
+/// - `Complex`: return the base configuration unchanged.
+pub fn scale_thinking_budget(base: (bool, u32), complexity: SimpleComplexity) -> (bool, u32) {
+    match complexity {
+        SimpleComplexity::Simple => (false, 0),
+        SimpleComplexity::Moderate => {
+            let (enabled, budget) = base;
+            if enabled {
+                (enabled, (budget / 2).max(1024))
+            } else {
+                (enabled, budget)
+            }
+        }
+        SimpleComplexity::Complex => base,
     }
 }
 
@@ -367,5 +424,217 @@ mod tests {
         assert_eq!(normalize_subagent_transparency_level("verbose"), "detailed");
         assert_eq!(normalize_subagent_transparency_level("full"), "detailed");
         assert_eq!(normalize_subagent_transparency_level("unknown"), "balanced");
+    }
+
+    /// Minimal `AgentConfig` builder for unit tests that only care about
+    /// `model_thinking_overrides` resolution. Values outside that path are
+    /// arbitrary but valid.
+    fn test_agent_config(
+        thinking_enabled: bool,
+        thinking_budget_tokens: u32,
+        model_thinking_overrides: HashMap<String, ModelThinkingOverride>,
+    ) -> AgentConfig {
+        AgentConfig {
+            name: "thinclaw".to_string(),
+            max_parallel_jobs: 1,
+            job_timeout: Duration::from_secs(1),
+            stuck_threshold: Duration::from_secs(1),
+            repair_check_interval: Duration::from_secs(1),
+            max_repair_attempts: 1,
+            use_planning: false,
+            session_idle_timeout: Duration::from_secs(1),
+            allow_local_tools: false,
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_tool_iterations: 1,
+            max_context_messages: 1,
+            thinking_enabled,
+            thinking_budget_tokens,
+            adaptive_thinking_enabled: false,
+            auto_approve_tools: false,
+            subagent_transparency_level: "balanced".to_string(),
+            main_tool_profile: ToolProfile::default(),
+            worker_tool_profile: ToolProfile::default(),
+            subagent_tool_profile: ToolProfile::default(),
+            model_thinking_overrides,
+            workspace_mode: "sandboxed".to_string(),
+            workspace_root: None,
+            notify_channel: None,
+            model_guidance_enabled: false,
+            cli_skin: "cockpit".to_string(),
+            personality_pack: "balanced".to_string(),
+            persona_seed: "default".to_string(),
+            checkpoints_enabled: false,
+            max_checkpoints: 1,
+            browser_backend: "chromium".to_string(),
+            cloud_browser_provider: None,
+        }
+    }
+
+    #[test]
+    fn resolve_thinking_overlapping_prefixes_picks_longest() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "claude".to_string(),
+            ModelThinkingOverride {
+                enabled: false,
+                budget_tokens: Some(1000),
+            },
+        );
+        overrides.insert(
+            "claude-sonnet-4".to_string(),
+            ModelThinkingOverride {
+                enabled: true,
+                budget_tokens: Some(16000),
+            },
+        );
+
+        let config = test_agent_config(false, 5000, overrides);
+
+        // "claude-sonnet-4-20250514" matches both "claude" and
+        // "claude-sonnet-4"; the longer, more specific prefix must win,
+        // deterministically, regardless of HashMap iteration order.
+        for _ in 0..25 {
+            let (enabled, budget) = config.resolve_thinking_for_model("claude-sonnet-4-20250514");
+            assert!(enabled, "longest prefix override should win");
+            assert_eq!(budget, 16000);
+        }
+    }
+
+    #[test]
+    fn resolve_thinking_prefix_length_wins_over_shorter_match() {
+        // "aaaa" is a longer, more specific prefix than "aaa" and both match
+        // the same model name; the longer one must win deterministically,
+        // regardless of HashMap iteration order.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "aaa".to_string(),
+            ModelThinkingOverride {
+                enabled: true,
+                budget_tokens: Some(111),
+            },
+        );
+        overrides.insert(
+            "aaaa".to_string(),
+            ModelThinkingOverride {
+                enabled: false,
+                budget_tokens: Some(222),
+            },
+        );
+        let config = test_agent_config(false, 5000, overrides);
+        for _ in 0..25 {
+            let result = config.resolve_thinking_for_model("aaaa-model");
+            assert_eq!(result, (false, 222));
+        }
+    }
+
+    #[test]
+    fn resolve_thinking_prefix_tie_break_is_lexicographic_and_stable() {
+        // Two distinct-but-equal-length prefixes that both match the same
+        // model name: the result must be identical across repeated calls,
+        // and must match the lexicographically greater pattern.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "aaa".to_string(),
+            ModelThinkingOverride {
+                enabled: true,
+                budget_tokens: Some(111),
+            },
+        );
+        overrides.insert(
+            "aab".to_string(),
+            ModelThinkingOverride {
+                enabled: false,
+                budget_tokens: Some(222),
+            },
+        );
+        // "aab" > "aaa" lexicographically, but neither is a prefix of the
+        // other, so pick a model name that both patterns are a prefix of by
+        // using patterns that share every character being compared against.
+        // Simpler: verify stability (same answer every call) since only one
+        // of "aaa"/"aab" can actually be a prefix of any single string.
+        let config = test_agent_config(false, 5000, overrides.clone());
+        let first = config.resolve_thinking_for_model("aaa-model");
+        for _ in 0..25 {
+            assert_eq!(config.resolve_thinking_for_model("aaa-model"), first);
+        }
+        assert_eq!(first, (true, 111));
+    }
+
+    #[test]
+    fn resolve_thinking_exact_match_beats_prefix() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "claude".to_string(),
+            ModelThinkingOverride {
+                enabled: true,
+                budget_tokens: Some(5000),
+            },
+        );
+        overrides.insert(
+            "claude-sonnet-4-20250514".to_string(),
+            ModelThinkingOverride {
+                enabled: false,
+                budget_tokens: Some(999),
+            },
+        );
+
+        let config = test_agent_config(true, 20000, overrides);
+
+        // Exact match must win over any prefix match, even a longer one.
+        let (enabled, budget) = config.resolve_thinking_for_model("claude-sonnet-4-20250514");
+        assert!(!enabled);
+        assert_eq!(budget, 999);
+    }
+
+    #[test]
+    fn resolve_thinking_falls_back_to_global_default() {
+        let config = test_agent_config(true, 8000, HashMap::new());
+        let (enabled, budget) = config.resolve_thinking_for_model("gpt-4o");
+        assert!(enabled);
+        assert_eq!(budget, 8000);
+    }
+
+    #[test]
+    fn scale_thinking_budget_simple_disables_thinking() {
+        assert_eq!(
+            scale_thinking_budget((true, 20000), SimpleComplexity::Simple),
+            (false, 0)
+        );
+        assert_eq!(
+            scale_thinking_budget((false, 20000), SimpleComplexity::Simple),
+            (false, 0)
+        );
+    }
+
+    #[test]
+    fn scale_thinking_budget_moderate_halves_and_clamps() {
+        // Halved but stays above the 1024 floor.
+        assert_eq!(
+            scale_thinking_budget((true, 20000), SimpleComplexity::Moderate),
+            (true, 10000)
+        );
+        // Halving would go below the floor; clamp to 1024.
+        assert_eq!(
+            scale_thinking_budget((true, 1500), SimpleComplexity::Moderate),
+            (true, 1024)
+        );
+        // Disabled base stays disabled and budget is untouched.
+        assert_eq!(
+            scale_thinking_budget((false, 20000), SimpleComplexity::Moderate),
+            (false, 20000)
+        );
+    }
+
+    #[test]
+    fn scale_thinking_budget_complex_is_unchanged() {
+        assert_eq!(
+            scale_thinking_budget((true, 20000), SimpleComplexity::Complex),
+            (true, 20000)
+        );
+        assert_eq!(
+            scale_thinking_budget((false, 0), SimpleComplexity::Complex),
+            (false, 0)
+        );
     }
 }

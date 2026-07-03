@@ -29,13 +29,9 @@ impl MemoryProvider for ZepProvider {
             .ok_or_else(|| "Zep base_url not configured".to_string())?;
         let token = provider_token(&settings.providers.zep.config);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        let mut req = client
+        let mut req = shared_http_client()
             .post(format!("{}/api/v1/search", base_url.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_secs(8))
             .json(&serde_json::json!({
                 "user_id": user_id,
                 "query": query,
@@ -87,13 +83,9 @@ impl MemoryProvider for ZepProvider {
             .ok_or_else(|| "Zep base_url not configured".to_string())?;
         let token = provider_token(&settings.providers.zep.config);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        let mut req = client
+        let mut req = shared_http_client()
             .post(format!("{}/api/v1/events", base_url.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_secs(8))
             .json(&serde_json::json!({
                 "user_id": user_id,
                 "payload": payload,

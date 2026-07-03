@@ -63,6 +63,7 @@ pub async fn set_setting(
         .set_setting(user_id, key, value)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    invalidate_learning_cache_if_needed(store, user_id, key).await;
     Ok(())
 }
 
@@ -72,7 +73,17 @@ pub async fn delete_setting(store: &Arc<dyn Database>, user_id: &str, key: &str)
         .delete_setting(user_id, key)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    invalidate_learning_cache_if_needed(store, user_id, key).await;
     Ok(())
+}
+
+/// Generic settings writes that touch `learning.*` must invalidate the
+/// ready-provider cache, or the pre-change provider keeps serving recall and
+/// sync for up to the cache TTL after an operator changes it via the UI.
+async fn invalidate_learning_cache_if_needed(store: &Arc<dyn Database>, user_id: &str, key: &str) {
+    if key.starts_with("learning.") {
+        crate::agent::learning::invalidate_provider_ready_cache(store, user_id).await;
+    }
 }
 
 /// Export all settings.
@@ -97,6 +108,9 @@ pub async fn import_settings(
         .set_all_settings(user_id, settings)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if settings.keys().any(|key| key.starts_with("learning.")) {
+        crate::agent::learning::invalidate_provider_ready_cache(store, user_id).await;
+    }
     Ok(())
 }
 

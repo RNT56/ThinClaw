@@ -24,22 +24,24 @@ impl Agent {
         &self,
         content: Option<String>,
         tool_calls: Vec<crate::llm::ToolCall>,
-        context_messages: &mut Vec<ChatMessage>,
+        turn: &mut TurnState,
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
         message: &IncomingMessage,
         job_ctx: &JobContext,
         advisor_call_budget: &crate::tools::builtin::advisor::AdvisorCallBudget,
-        advisor_state: &mut AdvisorTurnState,
         identity: &crate::identity::ResolvedIdentity,
         routed_agent_workspace_id: Option<Uuid>,
         routed_allowed_tools: Option<&[String]>,
         routed_allowed_skills: Option<&[String]>,
         blocked_signature: Option<u64>,
-        last_call_signature: &mut Option<u64>,
-        consecutive_same_calls: &mut u32,
-        generated_attachments: &mut Vec<thinclaw_media::MediaContent>,
     ) -> Result<Option<AgenticLoopResult>, Error> {
+        let context_messages = &mut turn.context_messages;
+        let advisor_state = &mut turn.advisor_state;
+        let last_call_signature = &mut turn.last_call_signature;
+        let consecutive_same_calls = &mut turn.consecutive_same_calls;
+        let generated_attachments = &mut turn.generated_attachments;
+
         // Add the assistant message with tool_calls to context.
         // OpenAI protocol requires this before tool-result messages.
         context_messages.push(ChatMessage::assistant_with_tool_calls(

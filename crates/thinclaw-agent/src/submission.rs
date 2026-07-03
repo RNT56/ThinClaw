@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use thinclaw_types::MediaContent;
 use uuid::Uuid;
 
+use crate::command_registry;
+
 /// Parses user input into Submission types.
 pub struct SubmissionParser;
 
@@ -16,100 +18,12 @@ impl SubmissionParser {
         let trimmed = content.trim();
         let lower = trimmed.to_lowercase();
 
-        // Control commands (exact match or prefix)
-        if lower == "/undo" {
-            return Submission::Undo;
-        }
-        if lower == "/redo" {
-            return Submission::Redo;
-        }
-        if lower == "/interrupt" || lower == "/stop" {
-            return Submission::Interrupt;
-        }
-        if lower == "/compact" || lower == "/compress" {
-            return Submission::Compact;
-        }
-        if lower == "/clear" {
-            return Submission::Clear;
-        }
-        if lower == "/heartbeat" {
-            return Submission::Heartbeat;
-        }
-        if lower == "/summarize" || lower == "/summary" {
-            return Submission::Summarize;
-        }
-        if lower == "/suggest" {
-            return Submission::Suggest;
-        }
-        if lower == "/thread new" || lower == "/new" {
-            return Submission::NewThread;
-        }
-        // System commands (bypass thread-state checks)
-        if lower == "/help" || lower == "/?" {
-            return Submission::SystemCommand {
-                command: "help".to_string(),
-                args: vec![],
-            };
-        }
-        if lower == "/version" {
-            return Submission::SystemCommand {
-                command: "version".to_string(),
-                args: vec![],
-            };
-        }
-        if lower == "/tools" {
-            return Submission::SystemCommand {
-                command: "tools".to_string(),
-                args: vec![],
-            };
-        }
-        if lower == "/identity" {
-            return Submission::SystemCommand {
-                command: "identity".to_string(),
-                args: vec![],
-            };
-        }
-        if lower == "/memory" {
-            return Submission::SystemCommand {
-                command: "memory".to_string(),
-                args: vec![],
-            };
-        }
-        if lower == "/skills" {
-            return Submission::SystemCommand {
-                command: "skills".to_string(),
-                args: vec![],
-            };
-        }
-        if lower.starts_with("/skills ") {
-            let args: Vec<String> = trimmed
-                .split_whitespace()
-                .skip(1)
-                .map(|s| s.to_string())
-                .collect();
-            return Submission::SystemCommand {
-                command: "skills".to_string(),
-                args,
-            };
-        }
-        if lower == "/ping" {
-            return Submission::SystemCommand {
-                command: "ping".to_string(),
-                args: vec![],
-            };
-        }
-        if lower == "/debug" {
-            return Submission::SystemCommand {
-                command: "debug".to_string(),
-                args: vec![],
-            };
-        }
-        if lower == "/status" {
-            return Submission::SystemCommand {
-                command: "status".to_string(),
-                args: vec![],
-            };
-        }
+        // `/context` has bespoke sub-command parsing: `/context` and
+        // `/context list` both mean "list", and `/context detail` means
+        // "detail". Anything else (e.g. `/context foo`) is not a context
+        // command and falls through to plain chat, so this is handled ahead
+        // of the registry lookup rather than through its generic
+        // exact-or-space-delimited-args matching.
         if lower == "/context" || lower == "/context list" {
             return Submission::SystemCommand {
                 command: "context".to_string(),
@@ -122,60 +36,62 @@ impl SubmissionParser {
                 args: vec!["detail".to_string()],
             };
         }
-        if lower.starts_with("/model") {
-            let args: Vec<String> = trimmed
-                .split_whitespace()
-                .skip(1)
-                .map(|s| s.to_string())
-                .collect();
-            return Submission::SystemCommand {
-                command: "model".to_string(),
-                args,
-            };
-        }
-        if lower == "/rollback" || lower.starts_with("/rollback ") {
-            let args: Vec<String> = trimmed
-                .split_whitespace()
-                .skip(1)
-                .map(|s| s.to_string())
-                .collect();
-            return Submission::SystemCommand {
-                command: "rollback".to_string(),
-                args,
-            };
-        }
-        if lower == "/vibe"
-            || lower.starts_with("/vibe ")
-            || lower == "/personality"
-            || lower.starts_with("/personality ")
-        {
-            let args: Vec<String> = trimmed
-                .split_whitespace()
-                .skip(1)
-                .map(|s| s.to_string())
-                .collect();
-            return Submission::SystemCommand {
-                command: "personality".to_string(),
-                args,
-            };
-        }
-        if lower == "/skin" || lower.starts_with("/skin ") {
-            let args: Vec<String> = trimmed
-                .split_whitespace()
-                .skip(1)
-                .map(|s| s.to_string())
-                .collect();
-            return Submission::SystemCommand {
-                command: "skin".to_string(),
-                args,
-            };
+
+        // `/thread new` and `/new` both start a fresh thread. Handled ahead
+        // of the registry lookup because they are intertwined with the
+        // `/thread <uuid>` switch-thread parsing below, not with the
+        // SystemCommand vocabulary.
+        if lower == "/thread new" || lower == "/new" {
+            return Submission::NewThread;
         }
 
-        if lower == "/quit" || lower == "/exit" || lower == "/shutdown" {
-            return Submission::Quit;
-        }
-        if lower == "/restart" {
-            return Submission::Restart;
+        // Registry-backed command vocabulary: commands that map to a
+        // `Submission::SystemCommand` (help, version, tools, identity,
+        // memory, skills, ping, debug, status, model, rollback,
+        // personality/vibe, skin) or to a dedicated `Submission` variant
+        // (undo, redo, interrupt/stop, compact/compress, clear, heartbeat,
+        // summarize/summary, suggest, quit/exit/shutdown, restart).
+        if let Some(spec) = command_registry::match_command(&lower) {
+            let args: Vec<String> = match spec.arg_style {
+                command_registry::ArgStyle::ExactOnly => vec![],
+                command_registry::ArgStyle::ExactOrSpaceDelimitedArgs => trimmed
+                    .split_whitespace()
+                    .skip(1)
+                    .map(|s| s.to_string())
+                    .collect(),
+            };
+
+            if let Some(system_command) = spec.system_command {
+                return Submission::SystemCommand {
+                    command: system_command.to_string(),
+                    args,
+                };
+            }
+
+            return match spec.name {
+                "/undo" => Submission::Undo,
+                "/redo" => Submission::Redo,
+                "/interrupt" => Submission::Interrupt,
+                "/compress" => Submission::Compact,
+                "/clear" => Submission::Clear,
+                "/heartbeat" => Submission::Heartbeat,
+                "/summarize" => Submission::Summarize,
+                "/suggest" => Submission::Suggest,
+                "/quit" => Submission::Quit,
+                "/restart" => Submission::Restart,
+                // A parser must never panic on user input: a registry entry
+                // without a mapping falls through to plain chat.
+                other => {
+                    tracing::warn!(
+                        command = other,
+                        "Registry entry has no system_command and no Submission mapping; \
+                         treating input as chat"
+                    );
+                    Submission::UserInput {
+                        content: content.to_string(),
+                    }
+                }
+            };
         }
 
         // /thread <uuid> - switch thread
@@ -607,6 +523,40 @@ mod tests {
         assert!(
             matches!(submission, Submission::UserInput { content } if content == "Hello, how are you?")
         );
+    }
+
+    #[test]
+    fn test_parser_literal_placeholder_input_is_chat_not_panic() {
+        // "/thread <id>" appears verbatim in /help output; a user pasting it
+        // must get plain chat, not a parser panic (display-only registry
+        // entries are excluded from matching).
+        for input in ["/thread <id>", "/resume <id>"] {
+            let submission = SubmissionParser::parse(input);
+            assert!(
+                matches!(submission, Submission::UserInput { ref content } if content == input),
+                "expected UserInput for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parser_model_requires_exact_or_space_delimited() {
+        let submission = SubmissionParser::parse("/model gpt-4o");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "model" && args == vec!["gpt-4o"])
+        );
+
+        let submission = SubmissionParser::parse("/models");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "model" && args.is_empty())
+        );
+
+        // "/modelling ideas" is chat, not a model switch.
+        let submission = SubmissionParser::parse("/modelling ideas");
+        assert!(!matches!(
+            submission,
+            Submission::SystemCommand { ref command, .. } if command == "model"
+        ));
     }
 
     #[test]

@@ -160,6 +160,14 @@ pub struct Agent {
     pub(super) active_turn_cancellations: TurnCancellationRegistry,
     /// Root-backed implementations of extracted agent-runtime ports.
     pub(super) runtime_ports: Arc<RootAgentRuntimePorts>,
+    /// Shared learning orchestrator, built once per `Agent` instance instead
+    /// of per call site. Every learning-provider path (prompt-context
+    /// prefetch, trajectory recording, pre-compaction nudges, outcome
+    /// routing) previously constructed its own `LearningOrchestrator` — and
+    /// therefore its own `MemoryProviderManager` — discarding the provider
+    /// readiness cache and pooled HTTP client on every call. `None` when no
+    /// store is configured (matches `deps.store`).
+    pub(super) learning_orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
 }
 
 impl Agent {
@@ -228,6 +236,18 @@ impl Agent {
         });
         crate::agent::checkpoint::configure(config.checkpoints_enabled, config.max_checkpoints);
 
+        // Built once here instead of per call site (dispatcher prompt prep,
+        // trajectory recording, pre-compaction nudges, outcome routing) so
+        // its MemoryProviderManager's readiness cache and pooled HTTP client
+        // are actually shared across the agent's lifetime.
+        let learning_orchestrator = deps.store.as_ref().map(|store| {
+            Arc::new(crate::agent::learning::LearningOrchestrator::new(
+                Arc::clone(store),
+                deps.workspace.clone(),
+                deps.skill_registry.clone(),
+            ))
+        });
+
         Self {
             config,
             deps,
@@ -244,6 +264,7 @@ impl Agent {
             subagent_executor,
             latest_token_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_turn_cancellations: TurnCancellationRegistry::new(),
+            learning_orchestrator,
             runtime_ports,
         }
     }
@@ -351,6 +372,16 @@ impl Agent {
         .into()
     }
 
+    /// Recognize the error produced by [`Self::turn_interrupted_error`]. Kept
+    /// adjacent so the constructor and the check cannot drift apart.
+    pub(super) fn is_turn_interrupted_error(err: &Error) -> bool {
+        matches!(
+            err,
+            Error::Job(crate::error::JobError::ContextError { reason, .. })
+                if reason == "Interrupted"
+        )
+    }
+
     pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
         &self.deps.safety
     }
@@ -369,6 +400,19 @@ impl Agent {
     /// Get the workspace (public for Tauri/API integration).
     pub fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.deps.workspace.as_ref()
+    }
+
+    /// Get the shared learning orchestrator, if a store is configured.
+    ///
+    /// Built once in [`Self::new`] and reused by every learning-provider call
+    /// site (dispatcher prompt prep, trajectory recording, pre-compaction
+    /// nudges, outcome routing) so its `MemoryProviderManager` readiness
+    /// cache and pooled HTTP client stay effective instead of being rebuilt
+    /// per call.
+    pub(super) fn learning_orchestrator(
+        &self,
+    ) -> Option<&Arc<crate::agent::learning::LearningOrchestrator>> {
+        self.learning_orchestrator.as_ref()
     }
 
     /// Get the hook registry (public for Tauri/API integration).
@@ -1309,155 +1353,130 @@ impl Agent {
         // BOOTSTRAP.md while bootstrap is still pending.
         // before entering the main message loop. Responses are routed to the
         // user's preferred notification channel (e.g., Telegram).
-        self.run_startup_hooks().await;
+        //
+        // The agent is shared from here on: startup hooks may be raced by
+        // Ctrl+C, and per-conversation worker tasks hold clones during the
+        // message loop (independent conversations proceed concurrently while
+        // messages within one conversation stay strictly ordered).
+        let agent = Arc::new(self);
 
-        loop {
-            let message = tokio::select! {
-                biased;
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Ctrl+C received, shutting down...");
-                    break;
-                }
-                msg = message_stream.next() => {
-                    match msg {
-                        Some(m) => m,
-                        None => {
-                            tracing::info!("All channel streams ended, shutting down...");
-                            break;
+        // Startup hooks run full agent turns and can take a long time when
+        // the provider is slow or down. Nothing awaits `ctrl_c()` before the
+        // message loop's select, and a SIGINT that arrives while no listener
+        // is registered is not redelivered to one created later — so without
+        // this race the process appears to ignore Ctrl+C until the message
+        // loop starts.
+        let startup_interrupted = tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Ctrl+C received during startup hooks, shutting down...");
+                true
+            }
+            _ = agent.run_startup_hooks() => false,
+        };
+
+        let conversation_workers: Arc<
+            Mutex<std::collections::HashMap<Uuid, tokio::sync::mpsc::Sender<IncomingMessage>>>,
+        > = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        // JoinSet (not a bare Vec<JoinHandle>): joining is the only place a
+        // panicked worker becomes visible, and the shutdown drain needs a
+        // single ordered join point.
+        let worker_tasks: Arc<Mutex<tokio::task::JoinSet<()>>> =
+            Arc::new(Mutex::new(tokio::task::JoinSet::new()));
+        let turn_permits = Arc::new(tokio::sync::Semaphore::new(
+            Self::MAIN_LOOP_MAX_CONCURRENT_TURNS,
+        ));
+        // Worker tasks signal /quit//restart back to this loop; capacity 1
+        // is enough because a single signal ends the loop.
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        if !startup_interrupted {
+            loop {
+                let message = tokio::select! {
+                    biased;
+                    _ = tokio::signal::ctrl_c() => {
+                        tracing::info!("Ctrl+C received, shutting down...");
+                        break;
+                    }
+                    Some(()) = shutdown_rx.recv() => {
+                        tracing::info!("Shutdown command received, exiting...");
+                        break;
+                    }
+                    msg = message_stream.next() => {
+                        match msg {
+                            Some(m) => m,
+                            None => {
+                                tracing::info!("All channel streams ended, shutting down...");
+                                break;
+                            }
                         }
                     }
-                }
-                // System events (heartbeat messages) — processed when idle.
-                // Uses biased; so channel messages take priority (heartbeat only fires
-                // when the message_stream has nothing queued).
-                Some(m) = async {
-                    match system_event_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
+                    // System events (heartbeat messages) — processed when idle.
+                    // Uses biased; so channel messages take priority (heartbeat only fires
+                    // when the message_stream has nothing queued).
+                    Some(m) = async {
+                        match system_event_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        tracing::info!(
+                            source = %m.channel,
+                            "Processing system event (heartbeat) in main session"
+                        );
+                        m
                     }
-                } => {
-                    tracing::info!(
-                        source = %m.channel,
-                        "Processing system event (heartbeat) in main session"
-                    );
-                    m
+                };
+
+                Self::dispatch_incoming_message(
+                    &agent,
+                    &conversation_workers,
+                    &worker_tasks,
+                    &turn_permits,
+                    &shutdown_tx,
+                    routine_engine_for_loop.clone(),
+                    message,
+                )
+                .await;
+            }
+        }
+
+        // Drain in-flight conversation turns before tearing channels down:
+        // dropping the senders lets each worker finish its queue and exit,
+        // and the bounded join keeps shutdown from hanging on a stuck turn.
+        conversation_workers.lock().await.clear();
+        {
+            let mut tasks = worker_tasks.lock().await;
+            let drain = async {
+                while let Some(joined) = tasks.join_next().await {
+                    if let Err(join_error) = joined
+                        && join_error.is_panic()
+                    {
+                        tracing::error!("A conversation worker panicked: {}", join_error);
+                    }
                 }
             };
-
-            // Increment received counter for this channel.
-            self.channels.record_received(&message.channel).await;
-
-            match self.handle_message_payload_external(&message).await {
-                Ok(Some(mut response)) if !response.is_empty() => {
-                    // Suppress HEARTBEAT_OK responses from heartbeat messages
-                    if should_suppress_outbound_response(&message.channel, &response.content) {
-                        tracing::debug!("Heartbeat returned HEARTBEAT_OK — suppressing response");
-                        continue;
-                    }
-
-                    // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
-                    let event = crate::hooks::HookEvent::Outbound {
-                        user_id: message.user_id.clone(),
-                        channel: message.channel.clone(),
-                        content: response.content.clone(),
-                        thread_id: message.thread_id.clone(),
-                    };
-                    match self.hooks().run(&event).await {
-                        Err(err) => {
-                            tracing::warn!("BeforeOutbound hook blocked response: {}", err);
-                        }
-                        Ok(crate::hooks::HookOutcome::Continue {
-                            modified: Some(new_content),
-                        }) => {
-                            response.content = new_content;
-                            if let Err(e) = self
-                                .channels
-                                .respond(
-                                    &message,
-                                    OutgoingResponse::text(response.content)
-                                        .with_attachments(response.attachments),
-                                )
-                                .await
-                            {
-                                tracing::error!(
-                                    channel = %message.channel,
-                                    error = %e,
-                                    "Failed to send response to channel"
-                                );
-                            }
-                        }
-                        _ => {
-                            if let Err(e) = self
-                                .channels
-                                .respond(
-                                    &message,
-                                    OutgoingResponse::text(response.content)
-                                        .with_attachments(response.attachments),
-                                )
-                                .await
-                            {
-                                tracing::error!(
-                                    channel = %message.channel,
-                                    error = %e,
-                                    "Failed to send response to channel"
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(Some(empty)) => {
-                    // Empty response, nothing to send (e.g. approval handled via send_status)
-                    tracing::debug!(
-                        channel = %message.channel,
-                        user = %message.user_id,
-                        empty_len = empty.content.len(),
-                        "Suppressed empty response (not sent to channel)"
-                    );
-                }
-                Ok(None) => {
-                    // Shutdown signal received (/quit, /exit, /shutdown)
-                    tracing::info!("Shutdown command received, exiting...");
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!("Error handling message: {}", e);
-                    self.observer()
-                        .record_event(&crate::observability::ObserverEvent::Error {
-                            component: "agent_loop".to_string(),
-                            message: e.to_string(),
-                        });
-                    if let Err(send_err) = self
-                        .channels
-                        .respond(&message, OutgoingResponse::text(format!("Error: {}", e)))
-                        .await
-                    {
-                        tracing::error!(
-                            channel = %message.channel,
-                            error = %send_err,
-                            "Failed to send error response to channel"
-                        );
-                    }
-                }
-            }
-
-            // Check event triggers (cheap in-memory regex, fires async if matched)
-            if let Some(ref engine) = routine_engine_for_loop {
-                let fired = engine.check_event_triggers(&message).await;
-                if fired > 0 {
-                    tracing::debug!("Fired {} event-triggered routines", fired);
-                }
+            if tokio::time::timeout(Self::SHUTDOWN_DRAIN_TIMEOUT, drain)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    timeout_secs = Self::SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+                    "Conversation workers did not drain before shutdown timeout;                      in-flight turns may be dropped"
+                );
             }
         }
 
         // F-11: emit the agent-lifecycle end (uptime + cumulative tokens) before teardown.
-        let tokens_used = match self.deps.cost_tracker {
+        let tokens_used = match agent.deps.cost_tracker {
             Some(ref tracker) => {
                 let tracker = tracker.lock().await;
                 Some(tracker.total_input_tokens() + tracker.total_output_tokens())
             }
             None => None,
         };
-        self.observer()
+        agent
+            .observer()
             .record_event(&crate::observability::ObserverEvent::AgentEnd {
                 duration: agent_started_at.elapsed(),
                 tokens_used,
@@ -1467,13 +1486,303 @@ impl Agent {
         if let Some(ref watcher) = config_watcher {
             watcher.stop().await;
         }
-        self.shutdown_background(bg).await;
-        self.channels.shutdown_all().await?;
+        agent.shutdown_background(bg).await;
+        agent.channels.shutdown_all().await?;
 
         Ok(())
     }
 
-    // ── Proactive startup hooks ────────────────────────────────────────
+    // ── Standalone-loop message dispatch ───────────────────────────────
+    //
+    // Extraction note (CLAUDE.md architecture hygiene): this block is a
+    // cohesive phase that belongs in its own submodule, but it is left here
+    // for now because it is tightly coupled to `run()`'s locals and to
+    // private helpers in this file (`should_suppress_outbound_response`,
+    // shutdown plumbing) whose visibility a move would have to widen mid-
+    // stabilization. Extract to `src/agent/conversation_dispatch.rs` once
+    // the dispatch protocol has settled (tracked follow-up).
+
+    /// Bound on turns processed concurrently across all conversations in
+    /// the standalone `run()` loop.
+    const MAIN_LOOP_MAX_CONCURRENT_TURNS: usize = 8;
+    /// Idle time before a conversation worker exits and removes itself
+    /// from the dispatch map.
+    const CONVERSATION_WORKER_IDLE_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(300);
+    /// Per-conversation queue depth before dispatch applies backpressure.
+    const CONVERSATION_WORKER_QUEUE_DEPTH: usize = 64;
+    /// Bound on how long shutdown waits for in-flight conversation turns to
+    /// finish before proceeding with channel teardown.
+    const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// Route one incoming message to its conversation's ordered worker.
+    ///
+    /// Messages within a conversation scope stay strictly ordered (one
+    /// worker per scope, processing serially); different conversations run
+    /// concurrently up to `MAIN_LOOP_MAX_CONCURRENT_TURNS`. Control
+    /// submissions (/interrupt, /quit, /restart) bypass the queue entirely
+    /// — an interrupt must reach a conversation whose worker is mid-turn,
+    /// and quit must work while every worker is busy.
+    async fn dispatch_incoming_message(
+        agent: &Arc<Agent>,
+        workers: &Arc<
+            Mutex<std::collections::HashMap<Uuid, tokio::sync::mpsc::Sender<IncomingMessage>>>,
+        >,
+        worker_tasks: &Arc<Mutex<tokio::task::JoinSet<()>>>,
+        turn_permits: &Arc<tokio::sync::Semaphore>,
+        shutdown_tx: &tokio::sync::mpsc::Sender<()>,
+        routine_engine: Option<Arc<RoutineEngine>>,
+        message: IncomingMessage,
+    ) {
+        let preview = SubmissionParser::parse(&message.content);
+        if matches!(
+            preview,
+            Submission::Interrupt | Submission::Quit | Submission::Restart
+        ) {
+            let agent = Arc::clone(agent);
+            let shutdown_tx = shutdown_tx.clone();
+            Self::spawn_tracked(worker_tasks, async move {
+                if agent
+                    .handle_and_respond(&message, Some(preview), routine_engine.as_ref())
+                    .await
+                {
+                    let _ = shutdown_tx.try_send(());
+                }
+            })
+            .await;
+            return;
+        }
+
+        let key = message.resolved_identity().conversation_scope_id;
+        let mut pending = message;
+        loop {
+            // Fast path: hand to the existing worker for this conversation.
+            {
+                let senders = workers.lock().await;
+                if let Some(tx) = senders.get(&key) {
+                    let tx = tx.clone();
+                    drop(senders);
+                    match tx.send(pending).await {
+                        Ok(()) => return,
+                        Err(tokio::sync::mpsc::error::SendError(msg)) => {
+                            // Worker exited between lookup and send; retry
+                            // against a fresh worker.
+                            pending = msg;
+                        }
+                    }
+                }
+            }
+
+            // Slow path: install a worker for this conversation, then loop
+            // back to the fast path to enqueue.
+            let mut senders = workers.lock().await;
+            if let std::collections::hash_map::Entry::Vacant(entry) = senders.entry(key) {
+                let (tx, rx) = tokio::sync::mpsc::channel(Self::CONVERSATION_WORKER_QUEUE_DEPTH);
+                entry.insert(tx);
+                Self::spawn_conversation_worker(
+                    Arc::clone(agent),
+                    Arc::clone(workers),
+                    Arc::clone(turn_permits),
+                    shutdown_tx.clone(),
+                    routine_engine.clone(),
+                    key,
+                    rx,
+                    worker_tasks,
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Spawn a future into the shared worker JoinSet, draining any finished
+    /// entries first (joining is also where a panicked worker is surfaced).
+    async fn spawn_tracked(
+        worker_tasks: &Arc<Mutex<tokio::task::JoinSet<()>>>,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let mut tasks = worker_tasks.lock().await;
+        while let Some(joined) = tasks.try_join_next() {
+            if let Err(join_error) = joined
+                && join_error.is_panic()
+            {
+                tracing::error!("A conversation worker panicked: {}", join_error);
+            }
+        }
+        tasks.spawn(task);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_conversation_worker(
+        agent: Arc<Agent>,
+        workers: Arc<
+            Mutex<std::collections::HashMap<Uuid, tokio::sync::mpsc::Sender<IncomingMessage>>>,
+        >,
+        turn_permits: Arc<tokio::sync::Semaphore>,
+        shutdown_tx: tokio::sync::mpsc::Sender<()>,
+        routine_engine: Option<Arc<RoutineEngine>>,
+        key: Uuid,
+        mut rx: tokio::sync::mpsc::Receiver<IncomingMessage>,
+        worker_tasks: &Arc<Mutex<tokio::task::JoinSet<()>>>,
+    ) {
+        Self::spawn_tracked(worker_tasks, async move {
+            loop {
+                let message =
+                    match tokio::time::timeout(Self::CONVERSATION_WORKER_IDLE_TIMEOUT, rx.recv())
+                        .await
+                    {
+                        Ok(Some(message)) => message,
+                        Ok(None) => break,
+                        Err(_) => {
+                            // Idle: remove ourselves under the map lock, then
+                            // drain any message that raced in before removal.
+                            // Dispatch holds the same lock to look up senders,
+                            // so after removal it can only see a fresh worker.
+                            let mut senders = workers.lock().await;
+                            match rx.try_recv() {
+                                Ok(message) => {
+                                    drop(senders);
+                                    message
+                                }
+                                Err(_) => {
+                                    senders.remove(&key);
+                                    break;
+                                }
+                            }
+                        }
+                    };
+
+                // Bound total concurrent turns across all conversations.
+                let Ok(_permit) = turn_permits.acquire().await else {
+                    break;
+                };
+                if agent
+                    .handle_and_respond(&message, None, routine_engine.as_ref())
+                    .await
+                {
+                    let _ = shutdown_tx.try_send(());
+                }
+            }
+        })
+        .await;
+    }
+
+    /// Process one incoming message end to end: run it through the agent,
+    /// deliver the response through the channel (BeforeOutbound hook
+    /// applied), then check event triggers. Returns `true` when the message
+    /// requested shutdown (/quit, /exit, /shutdown, /restart).
+    async fn handle_and_respond(
+        &self,
+        message: &IncomingMessage,
+        parsed: Option<Submission>,
+        routine_engine: Option<&Arc<RoutineEngine>>,
+    ) -> bool {
+        // Increment received counter for this channel.
+        self.channels.record_received(&message.channel).await;
+
+        match self
+            .handle_message_payload_external_parsed(message, parsed)
+            .await
+        {
+            Ok(Some(mut response)) if !response.is_empty() => {
+                // Suppress HEARTBEAT_OK responses from heartbeat messages
+                if should_suppress_outbound_response(&message.channel, &response.content) {
+                    tracing::debug!("Heartbeat returned HEARTBEAT_OK — suppressing response");
+                    return false;
+                }
+
+                // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
+                let event = crate::hooks::HookEvent::Outbound {
+                    user_id: message.user_id.clone(),
+                    channel: message.channel.clone(),
+                    content: response.content.clone(),
+                    thread_id: message.thread_id.clone(),
+                };
+                match self.hooks().run(&event).await {
+                    Err(err) => {
+                        tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                    }
+                    Ok(crate::hooks::HookOutcome::Continue {
+                        modified: Some(new_content),
+                    }) => {
+                        response.content = new_content;
+                        if let Err(e) = self
+                            .channels
+                            .respond(
+                                message,
+                                OutgoingResponse::text(response.content)
+                                    .with_attachments(response.attachments),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                channel = %message.channel,
+                                error = %e,
+                                "Failed to send response to channel"
+                            );
+                        }
+                    }
+                    _ => {
+                        if let Err(e) = self
+                            .channels
+                            .respond(
+                                message,
+                                OutgoingResponse::text(response.content)
+                                    .with_attachments(response.attachments),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                channel = %message.channel,
+                                error = %e,
+                                "Failed to send response to channel"
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(Some(empty)) => {
+                // Empty response, nothing to send (e.g. approval handled via send_status)
+                tracing::debug!(
+                    channel = %message.channel,
+                    user = %message.user_id,
+                    empty_len = empty.content.len(),
+                    "Suppressed empty response (not sent to channel)"
+                );
+            }
+            Ok(None) => {
+                // Shutdown signal received (/quit, /exit, /shutdown)
+                return true;
+            }
+            Err(e) => {
+                tracing::error!("Error handling message: {}", e);
+                self.observer()
+                    .record_event(&crate::observability::ObserverEvent::Error {
+                        component: "agent_loop".to_string(),
+                        message: e.to_string(),
+                    });
+                if let Err(send_err) = self
+                    .channels
+                    .respond(message, OutgoingResponse::text(format!("Error: {}", e)))
+                    .await
+                {
+                    tracing::error!(
+                        channel = %message.channel,
+                        error = %send_err,
+                        "Failed to send error response to channel"
+                    );
+                }
+            }
+        }
+
+        // Check event triggers (cheap in-memory regex, fires async if matched)
+        if let Some(engine) = routine_engine {
+            let fired = engine.check_event_triggers(message).await;
+            if fired > 0 {
+                tracing::debug!("Fired {} event-triggered routines", fired);
+            }
+        }
+        false
+    }
 }
 
 /// Register (or update) the heartbeat as a routine in the DB.

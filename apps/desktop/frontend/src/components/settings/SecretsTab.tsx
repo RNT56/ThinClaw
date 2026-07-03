@@ -7,6 +7,17 @@ import { SecretCard } from './SecretCard';
 import { BedrockCredentialsCard } from './BedrockCredentialsCard';
 import { AddSecretForm } from './AddSecretForm';
 
+// Typed bridge gate (BridgeError): render the reason (+ remediation) instead
+// of "[object Object]". thinclawSaveBraveKey returns BridgeError while the
+// other secret commands still return plain strings.
+function bridgeErrorMessage(err: import('../../lib/bindings').BridgeError): string {
+    if (err.kind === 'unavailable') {
+        const head = [err.capability, err.reason].filter(Boolean).join(': ');
+        return err.remediation ? `${head} — ${err.remediation}` : head || 'Unavailable';
+    }
+    return err.message;
+}
+
 export function SecretsTab() {
     const [status, setStatus] = useState<ThinClawStatus | null>(null);
     const { config, updateConfig } = useConfig();
@@ -63,7 +74,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -169,7 +180,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 

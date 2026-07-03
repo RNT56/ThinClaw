@@ -128,7 +128,9 @@ impl RoutineStorePort for RootRoutineStorePort {
     }
 
     async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
-        self.store.cleanup_stale_routine_runs().await
+        self.store
+            .cleanup_stale_routine_runs(crate::db::DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS)
+            .await
     }
 
     async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError> {

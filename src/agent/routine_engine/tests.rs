@@ -280,7 +280,114 @@ async fn system_event_does_not_advance_runtime_when_enqueue_fails() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn main_session_heartbeat_run_completes_ok_after_injection() {
+    // Regression test for the "every main-session heartbeat run is
+    // eventually reaped as a failure" bug: execute_heartbeat's
+    // light_context=false path used to inject the prompt into the main
+    // session and return RunStatus::Running with a comment claiming
+    // "the dispatcher handles completion" — but nothing ever called
+    // complete_routine_run for these runs, so the zombie reaper marked
+    // every one of them as failed once its TTL elapsed. The fix
+    // completes the run immediately as Ok (delivery of the prompt is
+    // this run's job), independent of however the dispatcher later
+    // processes that injected message.
+    let (db, _tmp) = test_db().await;
+    let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+        "default",
+        Arc::clone(&db),
+    ));
+    // Seed a non-empty HEARTBEAT.md so execute_heartbeat doesn't take
+    // the "checklist empty — skip" early-return path.
+    workspace
+        .write("HEARTBEAT.md", "- Check server status\n")
+        .await
+        .unwrap();
+
+    let (notify_tx, _notify_rx) = mpsc::channel(4);
+    let (system_event_tx, mut system_event_rx) = mpsc::channel(4);
+
+    let engine = RoutineEngine::new(
+        RoutineConfig::default(),
+        Arc::clone(&db),
+        Arc::new(StubLlm::new(
+            "unused — main-session injection short-circuits",
+        )),
+        workspace,
+        notify_tx,
+        None,
+    )
+    .with_system_event_tx(system_event_tx);
+
+    let routine = make_test_routine(
+        "main-session-heartbeat",
+        Trigger::Manual,
+        RoutineAction::Heartbeat {
+            light_context: false,
+            prompt: None,
+            include_reasoning: false,
+            active_start_hour: None,
+            active_end_hour: None,
+            target: "chat".to_string(),
+            max_iterations: 5,
+            interval_secs: None,
+        },
+    );
+    db.create_routine(&routine).await.unwrap();
+
+    let run_id = engine.fire_manual(routine.id).await.unwrap();
+
+    // The heartbeat prompt should have been injected into the main
+    // session via system_event_tx.
+    let injected = tokio::time::timeout(Duration::from_secs(2), system_event_rx.recv())
+        .await
+        .expect("heartbeat message should be injected")
+        .expect("system_event_tx should not be closed");
+    assert_eq!(
+        injected
+            .metadata
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .unwrap(),
+        run_id.to_string()
+    );
+
+    // The routine run must reach a terminal `Ok` state on its own —
+    // nothing else (no dispatcher turn) completes it in this test.
+    let mut completed = None;
+    for _ in 0..20 {
+        let runs = db.list_routine_runs(routine.id, 5).await.unwrap();
+        if let Some(run) = runs.into_iter().find(|r| r.id == run_id)
+            && run.status != RunStatus::Running
+        {
+            completed = Some(run);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let completed = completed.expect("heartbeat run should reach a terminal state");
+    assert_eq!(completed.status, RunStatus::Ok);
+    assert_eq!(
+        completed.result_summary.as_deref(),
+        Some("Injected into main session")
+    );
+    assert!(completed.completed_at.is_some());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cron_ticker_checks_due_routines_immediately_on_startup() {
+    // Cron-triggered fires now go through IC-CRON-STAGGER jitter
+    // (`StaggerConfig::from_env().jitter_delay()`), which defaults to up
+    // to 30s. Pin it to 0 for this test so the short polling window
+    // below stays meaningful — `lock_env` serializes against any other
+    // test in the process that also mutates env vars.
+    let _env_guard = thinclaw_config::helpers::lock_env();
+    unsafe {
+        std::env::set_var("CRON_STAGGER_SECS", "0");
+    }
+
     let (db, _tmp) = test_db().await;
     let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
         "default",
@@ -324,6 +431,9 @@ async fn cron_ticker_checks_due_routines_immediately_on_startup() {
     }
 
     handle.abort();
+    unsafe {
+        std::env::remove_var("CRON_STAGGER_SECS");
+    }
     assert!(
         fired,
         "due cron routine should be checked immediately without waiting for the first interval"

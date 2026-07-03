@@ -225,7 +225,14 @@ impl Agent {
         thread_id: Uuid,
     ) {
         let (thread, auto_approved_tools) = {
-            let sess = session.lock().await;
+            let mut sess = session.lock().await;
+            // Runtime snapshots are persisted on every turn transition
+            // (start, approval, completion), so this is the narrowest choke
+            // point that reliably runs while the session lock is held for
+            // an in-progress conversation. Without this, `last_active_at`
+            // only moved on thread creation/switch/hydration, so long
+            // conversations could be pruned as idle mid-turn.
+            sess.touch_last_active();
             (
                 sess.threads.get(&thread_id).cloned(),
                 Some(sess.auto_approved_tools.iter().cloned().collect::<Vec<_>>()),
@@ -303,6 +310,8 @@ impl Agent {
                     ephemeral_overlay_hash: runtime.ephemeral_overlay_hash.clone(),
                     prompt_segment_order: runtime.prompt_segment_order.clone(),
                     provider_context_refs: runtime.provider_context_refs.clone(),
+                    active_message_row_count: runtime.active_message_row_count,
+                    undo_checkpoints: runtime.undo_checkpoints.clone(),
                 }
             });
             let snapshot = thinclaw_agent::thread_ops::runtime_snapshot_for_persistence(
@@ -328,6 +337,47 @@ impl Agent {
                 thread = %thread_id,
                 error = %err,
                 "Failed to persist thread runtime snapshot"
+            );
+        }
+    }
+
+    /// Persist the active-message watermark and a capped undo-stack
+    /// snapshot for `thread_id`.
+    ///
+    /// Called right after `/undo`, `/redo`, `/clear`, and checkpoint resume
+    /// mutate the in-memory thread and its `UndoManager`, so:
+    /// - a restart truncates rehydrated DB history to the watermark instead
+    ///   of resurrecting turns the user just undid/cleared (Problem A), and
+    /// - `/undo` keeps working across a restart instead of losing its
+    ///   in-memory-only checkpoint stack (Problem B).
+    ///
+    /// `active_message_row_count` should be the number of durable
+    /// conversation rows (oldest-first) that correspond to the
+    /// already-mutated in-memory thread, i.e. `thread.messages().len()`.
+    pub(in crate::agent) async fn persist_active_watermark_and_undo_stack(
+        &self,
+        thread_id: Uuid,
+        active_message_row_count: i64,
+        undo: &thinclaw_agent::undo::UndoManager,
+    ) {
+        let Some(store) = self.runtime_ports().threads.as_ref().map(Arc::clone) else {
+            return;
+        };
+
+        let checkpoints =
+            undo.persisted_checkpoints(thinclaw_agent::undo::MAX_PERSISTED_CHECKPOINTS);
+        if let Err(err) = thinclaw_agent::thread_ops::set_active_watermark_and_undo_stack(
+            store.as_ref(),
+            thread_id,
+            active_message_row_count,
+            checkpoints,
+        )
+        .await
+        {
+            tracing::debug!(
+                thread = %thread_id,
+                error = %err,
+                "Failed to persist active-message watermark and undo stack"
             );
         }
     }

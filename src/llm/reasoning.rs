@@ -300,7 +300,10 @@ fn detect_authoritative_intent(messages: &[ChatMessage]) -> Option<Authoritative
         "what date is tomorrow",
         "what day was yesterday",
         "what date was yesterday",
-        "right now",
+        // Keep "right now" anchored to a time word: a bare "right now"
+        // needle hijacks unrelated requests like "deploy the app right now".
+        "time right now",
+        "date right now",
         "local time",
     ];
     if current_time.iter().any(|needle| text.contains(needle)) {
@@ -362,6 +365,13 @@ fn detect_authoritative_intent(messages: &[ChatMessage]) -> Option<Authoritative
 fn authoritative_unavailable_instruction(intent: AuthoritativeIntent) -> String {
     format!(
         "The user is asking about {}. No authoritative tool for that intent is available in this turn. Do not guess or fabricate the answer; explain that the required tool is unavailable.",
+        intent.label()
+    )
+}
+
+fn authoritative_shortlist_missing_instruction(intent: AuthoritativeIntent) -> String {
+    format!(
+        "The user is asking about {}. The preferred authoritative tool for that intent is not available in this turn. Use another available tool only if it can provide authoritative data; do not guess or fabricate the answer.",
         intent.label()
     )
 }
@@ -907,10 +917,12 @@ impl Reasoning {
             .collect::<Vec<_>>();
 
         if shortlisted.is_empty() {
+            // Keep the full tool list: a missing preferred tool must not strip
+            // the model of every other capability for the turn.
             ToolRoutingDecision {
-                available_tools: Vec::new(),
-                tool_choice: "none",
-                unavailable_instruction: Some(authoritative_unavailable_instruction(intent)),
+                available_tools: context.available_tools.clone(),
+                tool_choice: "auto",
+                unavailable_instruction: Some(authoritative_shortlist_missing_instruction(intent)),
             }
         } else {
             ToolRoutingDecision {

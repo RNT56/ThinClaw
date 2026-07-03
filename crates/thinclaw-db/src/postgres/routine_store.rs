@@ -105,8 +105,16 @@ impl RoutineStore for PgBackend {
         self.store.link_routine_run_to_job(run_id, job_id).await
     }
 
-    async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
-        self.store.cleanup_stale_routine_runs().await
+    async fn renew_routine_run_lease(
+        &self,
+        run_id: Uuid,
+        lease_secs: i64,
+    ) -> Result<(), DatabaseError> {
+        self.store.renew_routine_run_lease(run_id, lease_secs).await
+    }
+
+    async fn cleanup_stale_routine_runs(&self, legacy_ttl_secs: i64) -> Result<u64, DatabaseError> {
+        self.store.cleanup_stale_routine_runs(legacy_ttl_secs).await
     }
 
     async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError> {

@@ -32,6 +32,7 @@ use thinclaw_types::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
     RoutineTriggerDecision, RunStatus,
 };
+use thinclaw_types::subagent::SubagentRunRecord;
 use thinclaw_types::{
     ActionRecord, BrokenTool, JobContext, JobState, SandboxJobRecord, SandboxJobSummary,
 };
@@ -515,6 +516,11 @@ pub trait SandboxStore: Send + Sync {
     ) -> Result<Vec<JobEventRecord>, DatabaseError>;
 }
 
+/// Fallback TTL (seconds) applied to legacy `routine_runs` rows with a NULL
+/// `lease_expires_at` when reaping zombie runs. Callers that don't have a
+/// more specific value (e.g. `AGENT_JOB_TIMEOUT_SECS`) should use this.
+pub const DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS: i64 = 3600;
+
 #[async_trait]
 pub trait RoutineStore: Send + Sync {
     async fn create_routine(&self, routine: &Routine) -> Result<(), DatabaseError>;
@@ -586,17 +592,34 @@ pub trait RoutineStore: Send + Sync {
         job_id: Uuid,
     ) -> Result<(), DatabaseError>;
 
-    /// Mark RUNNING routine runs older than 10 minutes as failed.
+    /// Renew (or set) the lease on a RUNNING routine run.
+    ///
+    /// Workers and subagents call this periodically (on each iteration or
+    /// keepalive tick) while actively executing a routine run, and the
+    /// engine sets an initial lease at spawn time for lightweight/immediate
+    /// runs. `lease_secs` is the duration from now until the new expiry.
+    ///
+    /// This is what lets [`RoutineStore::cleanup_stale_routine_runs`] reap
+    /// only genuinely orphaned runs instead of any run older than a fixed
+    /// wall-clock cutoff — full-job routine runs can legitimately stay
+    /// RUNNING for up to `AGENT_JOB_TIMEOUT_SECS` (default 3600s).
+    async fn renew_routine_run_lease(
+        &self,
+        run_id: Uuid,
+        lease_secs: i64,
+    ) -> Result<(), DatabaseError>;
+
+    /// Mark RUNNING routine runs with an expired lease as failed.
     ///
     /// Used by the zombie reaper to clean up orphaned runs whose worker
-    /// crashed, hung, or was killed mid-execution. The 10-minute TTL
-    /// prevents the reaper from killing actively-executing worker jobs
-    /// that were dispatched recently.
+    /// crashed, hung, or was killed mid-execution. A run is reaped only
+    /// when its `lease_expires_at` has passed. Legacy rows with a NULL
+    /// lease (e.g. from before this column existed, or runs that never
+    /// renewed) fall back to `legacy_ttl_secs` measured from `started_at`
+    /// instead of a fixed 10-minute cutoff.
     ///
     /// At startup, this is called to clean up runs from a previous process.
-    /// Runs started less than 10 minutes before a crash will be caught on
-    /// the next reaper cycle after the TTL window passes.
-    async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError>;
+    async fn cleanup_stale_routine_runs(&self, legacy_ttl_secs: i64) -> Result<u64, DatabaseError>;
 
     /// Delete all run records for a specific routine.
     async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError>;
@@ -702,6 +725,38 @@ pub trait RoutineStore: Send + Sync {
         routine_id: Uuid,
         limit: i64,
     ) -> Result<Vec<RoutineTrigger>, DatabaseError>;
+}
+
+/// Durable ledger for in-process sub-agent runs (`SubagentExecutor`).
+///
+/// Running sub-agents previously lived only in an in-memory map, so a
+/// process restart silently dropped in-flight delegated work — including
+/// any routine run a sub-agent was finalizing. This store gives the
+/// executor a durable record: written on spawn, updated on completion, and
+/// reconciled at startup for rows orphaned by a crash.
+#[async_trait]
+pub trait SubagentRunStore: Send + Sync {
+    /// Record a sub-agent run starting.
+    async fn insert_subagent_run(&self, run: &SubagentRunRecord) -> Result<(), DatabaseError>;
+
+    /// Mark a sub-agent run as finished (success, failure, timeout, or
+    /// cancellation). `status` should be one of the `SUBAGENT_RUN_STATUS_*`
+    /// constants in `thinclaw_types::subagent`.
+    /// First-write-wins: only a row still in `running` is updated, so a
+    /// racing second completion (e.g. grace-abort fallback vs the task's own
+    /// finalization) cannot overwrite the first recorded terminal outcome.
+    async fn complete_subagent_run(
+        &self,
+        id: Uuid,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+
+    /// List all sub-agent runs still marked `running`.
+    ///
+    /// Used at startup to reconcile rows left behind by a crash — see
+    /// `reconcile_orphaned_subagent_runs` in `src/agent/subagent_executor.rs`.
+    async fn list_incomplete_subagent_runs(&self) -> Result<Vec<SubagentRunRecord>, DatabaseError>;
 }
 
 #[async_trait]
@@ -1151,6 +1206,7 @@ pub trait Database:
     + JobStore
     + SandboxStore
     + RoutineStore
+    + SubagentRunStore
     + IdentityRegistryStore
     + ToolFailureStore
     + ExperimentStore

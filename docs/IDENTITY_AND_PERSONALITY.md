@@ -11,7 +11,7 @@ ThinClaw now separates durable identity from temporary session tone.
 3. `SOUL.local.md` is an explicit-only workspace overlay for rare cases where a workspace genuinely needs narrower tone adjustments or stricter boundaries.
 4. `IDENTITY.md`, `USER.md`, and `AGENTS.md` remain workspace-scoped.
 5. `agent.personality_pack` defines the initial seed pack used when the canonical soul is first created.
-6. `/personality` applies a temporary session-only overlay without rewriting the durable identity files.
+6. `/personality` applies a temporary overlay without rewriting the durable identity files. The overlay persists across restart (stored under a dedicated conversation-metadata key and restored on hydration) but remains a lightweight tone overlay, not a rewrite of the canonical soul.
 
 `/vibe` remains available as a compatibility alias, but `/personality` is the primary user-facing command.
 
@@ -37,9 +37,9 @@ Built-in packs:
 
 The pack chosen during onboarding seeds the first canonical `THINCLAW_HOME/SOUL.md` and is stored in `agent.personality_pack`. Later pack changes do not silently rewrite an already-authored soul.
 
-## Temporary Session Personalities
+## Temporary Personality Overlays
 
-Use `/personality` to inspect, set, or reset a session-only overlay:
+Use `/personality` to inspect, set, or reset a temporary overlay. The overlay persists across restart (it is stored under a dedicated conversation-metadata key and restored on hydration, mirroring how `/model` restores its own runtime override), but it never rewrites the durable soul files:
 
 ```text
 /personality

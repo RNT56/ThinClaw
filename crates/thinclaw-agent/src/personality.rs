@@ -7,6 +7,8 @@
 
 use std::borrow::Cow;
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersonalityPack {
     pub key: &'static str,
@@ -14,7 +16,12 @@ pub struct PersonalityPack {
     pub prompt_patch: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A temporary `/personality` session overlay. Derives `Serialize`/
+/// `Deserialize` so it can round-trip through durable storage (see the root
+/// `crate::agent::commands::persist_personality_overlay` /
+/// `load_personality_overlay` helpers, which persist this as JSON under a
+/// dedicated conversation-metadata key) and survive a restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionPersonalityOverlay {
     pub name: String,
     pub prompt_patch: String,
@@ -194,6 +201,39 @@ mod tests {
     fn canonical_pack_maps_legacy_default() {
         assert_eq!(canonical_personality_pack_name("default"), "balanced");
         assert_eq!(canonical_personality_pack_name("MENTOR"), "mentor");
+    }
+
+    #[test]
+    fn session_personality_overlay_serde_round_trips() {
+        let overlay = resolve_personality("flow_state");
+
+        let encoded = serde_json::to_string(&overlay).expect("serialize overlay");
+        let decoded: SessionPersonalityOverlay =
+            serde_json::from_str(&encoded).expect("deserialize overlay");
+
+        assert_eq!(decoded, overlay);
+    }
+
+    #[test]
+    fn freeform_session_personality_overlay_serde_round_trips() {
+        let overlay = resolve_personality("noir detective");
+
+        let encoded = serde_json::to_string(&overlay).expect("serialize overlay");
+        let decoded: SessionPersonalityOverlay =
+            serde_json::from_str(&encoded).expect("deserialize overlay");
+
+        assert_eq!(decoded, overlay);
+        assert_eq!(decoded.name, "noir detective");
+    }
+
+    #[test]
+    fn format_overlay_emits_exactly_one_header() {
+        let overlay = resolve_personality("technical");
+        let formatted = format_overlay(&overlay);
+        // Consumers must not re-wrap this output in another
+        // "## Temporary Personality" header (the prompt would carry it twice).
+        assert_eq!(formatted.matches("## Temporary Personality").count(), 1);
+        assert!(formatted.starts_with("## Temporary Personality\n\n"));
     }
 
     #[test]

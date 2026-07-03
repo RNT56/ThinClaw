@@ -34,19 +34,19 @@ pub use thinclaw_agent::subagent::{
     SubagentInfo, SubagentResult, SubagentResultMessage, SubagentSpawnRequest, SubagentStatus,
 };
 use thinclaw_agent::subagent::{
-    SubagentCompletionOutcome, SubagentConcurrency, SubagentJobMetadataInput,
-    SubagentLearningRiskTier, SubagentSpawnAdmission, SubagentSystemPromptSections,
-    extract_subagent_message, llm_metadata_from_json, normalize_subagent_progress_category,
-    render_subagent_system_prompt, resolve_parent_thread_id, should_cancel_subagent,
-    should_emit_subagent_heartbeat, should_force_subagent_text, should_reinject_subagent_result,
-    subagent_activity_category, subagent_allows_skill, subagent_cancelled_status,
-    subagent_completion_status_response, subagent_default_system_prompt, subagent_execution_grants,
-    subagent_heartbeat_message, subagent_identity_defaults, subagent_iteration_limit_reason,
-    subagent_job_metadata, subagent_learning_completion, subagent_learning_risk_tier,
-    subagent_parent_message, subagent_result_from_completion, subagent_routine_actor,
-    subagent_routine_completion, subagent_spawned_response, subagent_status_after_mark_completed,
-    subagent_status_from_result, subagent_tool_activity_message, subagent_tool_warning_message,
-    subagent_warning_category, with_subagent_thread_metadata,
+    SUBAGENT_RUN_ORPHANED_REASON, SubagentCompletionOutcome, SubagentConcurrency,
+    SubagentJobMetadataInput, SubagentLearningRiskTier, SubagentRunRecord, SubagentSpawnAdmission,
+    SubagentSystemPromptSections, extract_subagent_message, llm_metadata_from_json,
+    normalize_subagent_progress_category, render_subagent_system_prompt, resolve_parent_thread_id,
+    should_cancel_subagent, should_emit_subagent_heartbeat, should_force_subagent_text,
+    should_reinject_subagent_result, subagent_activity_category, subagent_allows_skill,
+    subagent_cancelled_status, subagent_completion_status_response, subagent_default_system_prompt,
+    subagent_execution_grants, subagent_heartbeat_message, subagent_identity_defaults,
+    subagent_iteration_limit_reason, subagent_job_metadata, subagent_learning_completion,
+    subagent_learning_risk_tier, subagent_parent_message, subagent_result_from_completion,
+    subagent_routine_actor, subagent_routine_completion, subagent_run_status_for_completion,
+    subagent_spawned_response, subagent_status_from_result, subagent_tool_activity_message,
+    subagent_tool_warning_message, subagent_warning_category, with_subagent_thread_metadata,
 };
 pub use thinclaw_types::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
@@ -76,6 +76,12 @@ use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 use crate::workspace::Workspace;
 
 const SUBAGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a cancelled sub-agent gets to exit cooperatively (and run its
+/// finalization) before the task is hard-aborted.
+const SUBAGENT_CANCEL_GRACE: Duration = Duration::from_secs(20);
+/// How long finished sub-agent handles stay visible in list() before being
+/// evicted from the active map.
+const SUBAGENT_HANDLE_RETENTION: Duration = Duration::from_secs(3600);
 
 /// Shared heartbeat task for a running sub-agent.
 struct SubagentHeartbeat {
@@ -161,6 +167,11 @@ pub struct SubagentHandle {
     pub task: String,
     pub status: SubagentStatus,
     pub spawned_at: chrono::DateTime<chrono::Utc>,
+    /// When the subagent reached a terminal status. Retention eviction
+    /// measures from here, not from `spawned_at`, so a long-running
+    /// subagent's result stays visible for the full retention window after
+    /// it finishes.
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     cancel_tx: watch::Sender<bool>,
     join_handle: Option<JoinHandle<SubagentResult>>,
     /// Send messages from the parent to this sub-agent.
@@ -314,8 +325,18 @@ impl SubagentExecutor {
 
         // Check concurrency limit AND insert tracking entry under a single
         // write lock to prevent TOCTOU races (Bug 37 fix).
+        let spawned_at = chrono::Utc::now();
         {
             let mut active = self.active.write().await;
+            // Evict aged terminal handles here — no background task calls
+            // cleanup(), so without this the map grows for the process
+            // lifetime, one entry per subagent ever spawned.
+            let cutoff = chrono::Utc::now()
+                - chrono::Duration::from_std(SUBAGENT_HANDLE_RETENTION).unwrap_or_default();
+            active.retain(|_, h| {
+                h.status == SubagentStatus::Running
+                    || h.completed_at.unwrap_or(h.spawned_at) > cutoff
+            });
             let running = active
                 .values()
                 .filter(|h| h.status == SubagentStatus::Running)
@@ -337,12 +358,42 @@ impl SubagentExecutor {
                     name: request.name.clone(),
                     task: request.task.clone(),
                     status: SubagentStatus::Running,
-                    spawned_at: chrono::Utc::now(),
+                    spawned_at,
+                    completed_at: None,
                     cancel_tx: cancel_tx.clone(),
                     join_handle: None, // filled in after tokio::spawn
                     parent_to_sub_tx: parent_to_sub_tx.clone(),
                 },
             );
+        }
+
+        // ── Durable ledger: record the run BEFORE spawning ──────────────
+        // Without this, a running sub-agent lives only in the in-memory
+        // `active` map above, so a process restart silently drops it and
+        // leaks any routine run it was finalizing. Best-effort: a ledger
+        // write failure does not block the sub-agent from running — the
+        // in-memory tracking above is still authoritative for this process.
+        let resolved_parent_thread_id =
+            resolve_parent_thread_id(parent_thread_id, channel_metadata);
+        let routine_run_id_for_ledger = channel_metadata
+            .get("routine_run_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(ref store) = self.store {
+            let run = SubagentRunRecord::new_running(
+                id,
+                request.name.clone(),
+                request.task.clone(),
+                Some(resolved_parent_thread_id.clone()),
+                routine_run_id_for_ledger.clone(),
+                spawned_at,
+            );
+            if let Err(e) = store.insert_subagent_run(&run).await {
+                tracing::warn!(
+                    agent_id = %id,
+                    "Failed to persist subagent run ledger entry: {}", e
+                );
+            }
         }
 
         let timeout = Duration::from_secs(
@@ -401,8 +452,8 @@ impl SubagentExecutor {
         let skill_registry = self.skill_registry.clone();
         let skills_config = self.skills_config.clone();
 
-        // For the result injection message
-        let parent_thread_id = resolve_parent_thread_id(parent_thread_id, channel_metadata);
+        // For the result injection message (already resolved above for the ledger write)
+        let parent_thread_id = resolved_parent_thread_id;
         let ch_meta =
             with_subagent_thread_metadata(channel_metadata, &parent_thread_id, channel_name);
 
@@ -445,6 +496,7 @@ impl SubagentExecutor {
             let start = Instant::now();
             let (activity_tx, activity_rx) = watch::channel(Instant::now());
             let store_for_subagent_loop = store_for_task.clone();
+            let cancel_watch_outer = cancel_rx.clone();
             let heartbeat = SubagentHeartbeat::spawn(
                 channels.clone(),
                 ch_name.clone(),
@@ -471,6 +523,7 @@ impl SubagentExecutor {
                     cancel_rx,
                     parent_to_sub_rx,
                     max_iterations,
+                    timeout.as_secs(),
                     allowed.as_deref(),
                     allowed_skills.as_deref(),
                     &task_packet,
@@ -506,12 +559,16 @@ impl SubagentExecutor {
                         iterations,
                     },
                 ),
-                Ok(Err(e)) => subagent_result_from_completion(
-                    id,
-                    agent_name.clone(),
-                    duration_ms,
-                    SubagentCompletionOutcome::Error(e.to_string()),
-                ),
+                Ok(Err(e)) => {
+                    // A cancel signal makes the loop exit with an error; report
+                    // it as a cancellation, not a failure.
+                    let outcome = if *cancel_watch_outer.borrow() {
+                        SubagentCompletionOutcome::Cancelled
+                    } else {
+                        SubagentCompletionOutcome::Error(e.to_string())
+                    };
+                    subagent_result_from_completion(id, agent_name.clone(), duration_ms, outcome)
+                }
                 Err(_timeout) => subagent_result_from_completion(
                     id,
                     agent_name.clone(),
@@ -719,11 +776,34 @@ impl SubagentExecutor {
                 }
             }
 
+            let ledger_status = subagent_status_from_result(&subagent_result);
+
             {
                 let mut active = active_for_task.write().await;
                 if let Some(handle) = active.get_mut(&id) {
-                    handle.status = subagent_status_from_result(&subagent_result);
+                    handle.status = ledger_status.clone();
+                    handle.completed_at = Some(chrono::Utc::now());
                     handle.join_handle = None;
+                }
+            }
+
+            // ── Durable ledger: record completion (success, failure, ──────
+            // timeout, or cancellation). This finalization block runs for
+            // every exit path, including cancellation (two-phase cancel
+            // routes back through the normal completion path), so the
+            // ledger row is always closed out alongside the in-memory
+            // status update above.
+            if let Some(ref store) = store_for_task {
+                let (ledger_status_str, ledger_error) =
+                    subagent_run_status_for_completion(&ledger_status);
+                if let Err(e) = store
+                    .complete_subagent_run(id, ledger_status_str, ledger_error.as_deref())
+                    .await
+                {
+                    tracing::warn!(
+                        agent_id = %id,
+                        "Failed to update subagent run ledger entry: {}", e
+                    );
                 }
             }
 
@@ -788,6 +868,12 @@ impl SubagentExecutor {
     }
 
     /// Cancel a running sub-agent.
+    ///
+    /// Two-phase: the cooperative cancel watch fires first so the loop exits
+    /// through its normal completion path — running finalization (completion
+    /// event, learning event, routine-run completion, result reinjection).
+    /// The task is hard-aborted only if it fails to exit within the grace
+    /// period, since an abort skips all of that.
     pub async fn cancel(&self, agent_id: Uuid) -> bool {
         let mut active = self.active.write().await;
         if let Some(handle) = active.get_mut(&agent_id)
@@ -795,9 +881,42 @@ impl SubagentExecutor {
         {
             let _ = handle.cancel_tx.send(true);
             handle.status = subagent_cancelled_status();
-            // Abort the task if we have a handle
+            handle.completed_at = Some(chrono::Utc::now());
             if let Some(jh) = handle.join_handle.take() {
-                jh.abort();
+                let abort_handle = jh.abort_handle();
+                let ledger_store = self.store.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = jh => {}
+                        _ = tokio::time::sleep(SUBAGENT_CANCEL_GRACE) => {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                grace_secs = SUBAGENT_CANCEL_GRACE.as_secs(),
+                                "Sub-agent did not exit within cancel grace period — aborting"
+                            );
+                            abort_handle.abort();
+                            // The abort skips the task's finalization block,
+                            // so close the ledger row here — otherwise it
+                            // stays 'running' until the next restart's
+                            // reconciliation sweep.
+                            if let Some(store) = ledger_store
+                                && let Err(e) = store
+                                    .complete_subagent_run(
+                                        agent_id,
+                                        "cancelled",
+                                        Some("aborted after cancel grace period"),
+                                    )
+                                    .await
+                            {
+                                tracing::debug!(
+                                    agent_id = %agent_id,
+                                    "Failed to close subagent ledger row after abort: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                });
             }
             tracing::info!(agent_id = %agent_id, "Sub-agent cancelled");
             return true;
@@ -833,14 +952,98 @@ impl SubagentExecutor {
     pub async fn cleanup(&self, max_age: Duration) {
         let cutoff = chrono::Utc::now() - chrono::Duration::from_std(max_age).unwrap_or_default();
         let mut active = self.active.write().await;
-        active.retain(|_, h| h.status == SubagentStatus::Running || h.spawned_at > cutoff);
+        active.retain(|_, h| {
+            h.status == SubagentStatus::Running || h.completed_at.unwrap_or(h.spawned_at) > cutoff
+        });
     }
+}
 
-    /// Mark a sub-agent as completed (called when the join handle resolves).
-    pub async fn mark_completed(&self, agent_id: Uuid, success: bool, error: Option<String>) {
-        let mut active = self.active.write().await;
-        if let Some(h) = active.get_mut(&agent_id) {
-            h.status = subagent_status_after_mark_completed(success, error.as_deref());
+/// Startup reconciliation for the durable sub-agent run ledger.
+///
+/// Sub-agents only exist as live tokio tasks — a process restart drops them
+/// without ever reaching `SubagentExecutor`'s completion finalization block,
+/// which is what normally closes out a `subagent_runs` row. This leaves any
+/// row still `running` from a previous process, and (transitively) leaks
+/// the routine run it may have been finalizing, since nothing will ever
+/// call `complete_routine_run` for it either.
+///
+/// This walks every row [`crate::db::Database::list_incomplete_subagent_runs`]
+/// returns and:
+/// - marks the `subagent_runs` row as `failed` with
+///   [`SUBAGENT_RUN_ORPHANED_REASON`], and
+/// - when the row carries a `routine_run_id`, also completes that routine
+///   run as failed via [`crate::db::Database::complete_routine_run`], so the
+///   routine's run history and concurrency counters aren't left stuck on a
+///   phantom `running` entry.
+///
+/// Wired into startup in `src/main.rs` (immediately after the executor's
+/// store is attached, before new spawns are accepted).
+pub async fn reconcile_orphaned_subagent_runs(store: Arc<dyn crate::db::Database>) {
+    let orphaned = match store.list_incomplete_subagent_runs().await {
+        Ok(runs) => runs,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to list incomplete subagent runs for reconciliation: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    for run in orphaned {
+        tracing::warn!(
+            subagent_run_id = %run.id,
+            name = %run.name,
+            "Reconciling orphaned subagent run left running by a previous process"
+        );
+
+        if let Err(e) = store
+            .complete_subagent_run(
+                run.id,
+                thinclaw_agent::subagent::SUBAGENT_RUN_STATUS_FAILED,
+                Some(SUBAGENT_RUN_ORPHANED_REASON),
+            )
+            .await
+        {
+            tracing::warn!(
+                subagent_run_id = %run.id,
+                "Failed to mark orphaned subagent run as failed: {}", e
+            );
+            continue;
+        }
+
+        let Some(routine_run_id) = run.routine_run_id.as_deref() else {
+            continue;
+        };
+        let Ok(routine_run_uuid) = routine_run_id.parse::<Uuid>() else {
+            tracing::warn!(
+                subagent_run_id = %run.id,
+                routine_run_id = %routine_run_id,
+                "Orphaned subagent run has an unparsable routine_run_id, skipping routine finalization"
+            );
+            continue;
+        };
+
+        if let Err(e) = store
+            .complete_routine_run(
+                routine_run_uuid,
+                crate::agent::routine::RunStatus::Failed,
+                Some(SUBAGENT_RUN_ORPHANED_REASON),
+                None,
+            )
+            .await
+        {
+            tracing::warn!(
+                subagent_run_id = %run.id,
+                routine_run_id = %routine_run_id,
+                "Failed to finalize routine run for orphaned subagent: {}", e
+            );
+        } else {
+            tracing::info!(
+                subagent_run_id = %run.id,
+                routine_run_id = %routine_run_id,
+                "Finalized routine run as failed for orphaned subagent"
+            );
         }
     }
 }
@@ -863,6 +1066,7 @@ async fn run_subagent_loop(
     cancel_rx: watch::Receiver<bool>,
     mut parent_rx: mpsc::Receiver<String>,
     max_iterations: usize,
+    timeout_secs: u64,
     allowed_tools: Option<&[String]>,
     allowed_skills: Option<&[String]>,
     task_packet: &SubagentTaskPacket,
@@ -897,6 +1101,18 @@ async fn run_subagent_loop(
         allowed_skills,
         tool_profile,
     });
+
+    // If this subagent was spawned by a routine (see `execute_as_subagent` in
+    // routine_engine.rs), keep a store handle + parsed run id around so the
+    // iteration loop below can renew the routine run's DB lease. This is what
+    // lets the zombie reaper distinguish an actively-executing subagent-run
+    // routine from a genuinely orphaned one, instead of relying on a fixed
+    // wall-clock TTL.
+    let routine_lease_run_id = channel_metadata
+        .get("routine_run_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<Uuid>().ok());
+    let store_for_lease = store.clone();
 
     let provider_tool_extensions = if let Some(store) = store {
         let orchestrator =
@@ -946,13 +1162,26 @@ async fn run_subagent_loop(
         reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
     }
 
+    let routine_lease_renewed_at = std::sync::Mutex::new(None);
     for iteration in 0..max_iterations {
         // Check cancellation
         if *cancel_rx.borrow() {
-            return Err(Error::Tool(crate::error::ToolError::ExecutionFailed {
-                name: "subagent".to_string(),
-                reason: "Cancelled".to_string(),
-            }));
+            return Err(subagent_cancelled_error());
+        }
+
+        // Renew the routine run's DB lease (time-gated inside the helper) so
+        // a long-running subagent-executed routine isn't falsely reaped by
+        // the zombie cleanup while it's still actively making progress. Uses
+        // the spawn request's REAL timeout: a fixed default here let leases
+        // expire mid-iteration for subagents configured with longer budgets.
+        if let (Some(run_id), Some(store)) = (routine_lease_run_id, store_for_lease.as_ref()) {
+            crate::agent::routine_engine::renew_routine_run_lease_if_due(
+                store,
+                run_id,
+                timeout_secs,
+                &routine_lease_renewed_at,
+            )
+            .await;
         }
 
         // Check for messages from the parent (non-blocking)
@@ -998,7 +1227,20 @@ async fn run_subagent_loop(
             max_output_tokens: None,
         };
 
-        let output = reasoning.respond_with_tools(&ctx).await?;
+        // Race the LLM call against cancellation so a cancel is observed
+        // within one await point instead of only at the next iteration —
+        // the loop then exits through the normal completion path and
+        // finalization (events, learning, routine-run completion) runs.
+        let output = {
+            let mut cancel_watch = cancel_rx.clone();
+            tokio::select! {
+                biased;
+                _ = wait_for_subagent_cancel(&mut cancel_watch) => {
+                    return Err(subagent_cancelled_error());
+                }
+                output = reasoning.respond_with_tools(&ctx) => output?,
+            }
+        };
 
         match output.result {
             RespondResult::Text(text) => {
@@ -1151,28 +1393,33 @@ async fn run_subagent_loop(
                         }
                     };
 
-                    let result_str =
-                        match execution::execute_tool_call(&prepared, &safety, &job_ctx).await {
-                            Ok(output) => output.sanitized_content,
-                            Err(err) => {
-                                let warning = err.to_string();
-                                let _ = channels
-                                    .send_status(
-                                        channel_name,
-                                        StatusUpdate::SubagentProgress {
-                                            agent_id: agent_id.to_string(),
-                                            message: subagent_tool_warning_message(
-                                                &tc.name, &warning,
-                                            ),
-                                            category: subagent_warning_category().to_string(),
-                                        },
-                                        channel_metadata,
-                                    )
-                                    .await;
-                                touch_subagent_activity(&activity_tx);
-                                format!("Error: {}", warning)
-                            }
-                        };
+                    let mut cancel_watch = cancel_rx.clone();
+                    let execution_result = tokio::select! {
+                        biased;
+                        _ = wait_for_subagent_cancel(&mut cancel_watch) => {
+                            return Err(subagent_cancelled_error());
+                        }
+                        result = execution::execute_tool_call(&prepared, &safety, &job_ctx) => result,
+                    };
+                    let result_str = match execution_result {
+                        Ok(output) => output.sanitized_content,
+                        Err(err) => {
+                            let warning = err.to_string();
+                            let _ = channels
+                                .send_status(
+                                    channel_name,
+                                    StatusUpdate::SubagentProgress {
+                                        agent_id: agent_id.to_string(),
+                                        message: subagent_tool_warning_message(&tc.name, &warning),
+                                        category: subagent_warning_category().to_string(),
+                                    },
+                                    channel_metadata,
+                                )
+                                .await;
+                            touch_subagent_activity(&activity_tx);
+                            format!("Error: {}", warning)
+                        }
+                    };
 
                     context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_str));
                 }
@@ -1184,6 +1431,27 @@ async fn run_subagent_loop(
         name: "subagent".to_string(),
         reason: subagent_iteration_limit_reason(max_iterations),
     }))
+}
+
+fn subagent_cancelled_error() -> Error {
+    Error::Tool(crate::error::ToolError::ExecutionFailed {
+        name: "subagent".to_string(),
+        reason: "Cancelled".to_string(),
+    })
+}
+
+/// Resolve when the cancel watch flips to `true`. If the sender is gone,
+/// cancellation can no longer be signalled, so pend forever instead of
+/// resolving spuriously and killing a healthy loop.
+async fn wait_for_subagent_cancel(rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 async fn build_subagent_system_prompt(
@@ -1342,428 +1610,4 @@ async fn build_subagent_skill_context(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::SafetyConfig;
-    use crate::testing::StubLlm;
-
-    #[test]
-    fn test_subagent_config_defaults() {
-        let config = SubagentConfig::default();
-        assert_eq!(config.max_concurrent, 5);
-        assert_eq!(config.default_timeout_secs, 300);
-        assert!(!config.allow_nested);
-        assert_eq!(config.max_tool_iterations, 30);
-    }
-
-    #[test]
-    fn test_subagent_status_equality() {
-        assert_eq!(SubagentStatus::Running, SubagentStatus::Running);
-        assert_ne!(SubagentStatus::Running, SubagentStatus::Completed);
-        assert_eq!(
-            SubagentStatus::Failed("err".to_string()),
-            SubagentStatus::Failed("err".to_string())
-        );
-    }
-
-    #[test]
-    fn test_subagent_result_serialization() {
-        let result = SubagentResult {
-            agent_id: Uuid::new_v4(),
-            name: "researcher".to_string(),
-            response: "Found 3 papers".to_string(),
-            iterations: 5,
-            duration_ms: 3200,
-            success: true,
-            error: None,
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("researcher"));
-        assert!(json.contains("Found 3 papers"));
-
-        let deserialized: SubagentResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.name, "researcher");
-        assert_eq!(deserialized.iterations, 5);
-    }
-
-    #[test]
-    fn test_spawn_request_with_defaults() {
-        let req = SubagentSpawnRequest {
-            name: "test".to_string(),
-            task: "do something".to_string(),
-            system_prompt: None,
-            model: None,
-            task_packet: None,
-            memory_mode: None,
-            tool_mode: None,
-            skill_mode: None,
-            tool_profile: None,
-            allowed_tools: None,
-            allowed_skills: None,
-            principal_id: None,
-            actor_id: None,
-            agent_workspace_id: None,
-            timeout_secs: None,
-            wait: true,
-        };
-        assert_eq!(req.name, "test");
-        assert!(req.wait);
-        assert!(req.allowed_tools.is_none());
-    }
-
-    #[test]
-    fn test_spawn_request_serialization() {
-        let request = SubagentSpawnRequest {
-            name: "researcher".to_string(),
-            task: "Find papers about AI".to_string(),
-            system_prompt: None,
-            model: None,
-            task_packet: None,
-            memory_mode: None,
-            tool_mode: None,
-            skill_mode: None,
-            tool_profile: None,
-            allowed_tools: Some(vec!["http".to_string(), "read_file".to_string()]),
-            allowed_skills: None,
-            principal_id: None,
-            actor_id: None,
-            agent_workspace_id: None,
-            timeout_secs: Some(120),
-            wait: true,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("researcher"));
-        assert!(json.contains("Find papers about AI"));
-
-        let deserialized: SubagentSpawnRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.name, "researcher");
-        assert_eq!(deserialized.allowed_tools.unwrap().len(), 2);
-    }
-
-    #[test]
-    fn test_spawn_request_defaults() {
-        let json = r#"{"name":"test","task":"do work"}"#;
-        let request: SubagentSpawnRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(request.name, "test");
-        assert!(request.system_prompt.is_none());
-        assert!(request.model.is_none());
-        assert!(request.task_packet.is_none());
-        assert!(request.allowed_tools.is_none());
-        assert!(request.timeout_secs.is_none());
-        assert!(!request.wait);
-    }
-
-    #[test]
-    fn normalize_strict_inherits_parent_tool_and_skill_ceilings() {
-        let mut request = SubagentSpawnRequest {
-            name: "researcher".to_string(),
-            task: "Inspect the repo".to_string(),
-            system_prompt: None,
-            model: None,
-            task_packet: None,
-            memory_mode: None,
-            tool_mode: None,
-            skill_mode: None,
-            tool_profile: None,
-            allowed_tools: None,
-            allowed_skills: None,
-            principal_id: None,
-            actor_id: None,
-            agent_workspace_id: None,
-            timeout_secs: None,
-            wait: false,
-        };
-
-        request.normalize_strict(
-            Some(&["time".to_string(), "json".to_string()]),
-            Some(&["github".to_string(), "openai-docs".to_string()]),
-            ToolProfile::Restricted,
-        );
-
-        assert_eq!(
-            request.allowed_tools,
-            Some(vec!["json".to_string(), "time".to_string()])
-        );
-        assert_eq!(
-            request.allowed_skills,
-            Some(vec!["github".to_string(), "openai-docs".to_string()])
-        );
-        assert_eq!(request.tool_profile, Some(ToolProfile::Restricted));
-    }
-
-    #[test]
-    fn normalize_strict_intersects_requested_tools_with_parent_ceiling() {
-        let mut request = SubagentSpawnRequest {
-            name: "researcher".to_string(),
-            task: "Inspect the repo".to_string(),
-            system_prompt: None,
-            model: None,
-            task_packet: None,
-            memory_mode: None,
-            tool_mode: None,
-            skill_mode: None,
-            tool_profile: None,
-            allowed_tools: Some(vec!["json".to_string(), "shell".to_string()]),
-            allowed_skills: Some(vec!["github".to_string(), "skill-creator".to_string()]),
-            principal_id: None,
-            actor_id: None,
-            agent_workspace_id: None,
-            timeout_secs: None,
-            wait: false,
-        };
-
-        request.normalize_strict(
-            Some(&["time".to_string(), "json".to_string()]),
-            Some(&["github".to_string(), "openai-docs".to_string()]),
-            ToolProfile::Restricted,
-        );
-
-        assert_eq!(request.allowed_tools, Some(vec!["json".to_string()]));
-        assert_eq!(request.allowed_skills, Some(vec!["github".to_string()]));
-    }
-
-    #[test]
-    fn extract_subagent_message_prefers_message_and_falls_back_to_content() {
-        let from_message = serde_json::json!({
-            "message": "Checking the docs",
-            "content": "older field"
-        });
-        let from_content = serde_json::json!({
-            "content": "Legacy progress payload"
-        });
-
-        assert_eq!(
-            extract_subagent_message(&from_message).as_deref(),
-            Some("Checking the docs")
-        );
-        assert_eq!(
-            extract_subagent_message(&from_content).as_deref(),
-            Some("Legacy progress payload")
-        );
-    }
-
-    #[test]
-    fn with_subagent_thread_metadata_inserts_thread_id_for_non_object_metadata() {
-        let metadata = serde_json::json!("legacy");
-        let merged = with_subagent_thread_metadata(&metadata, "thread-123", "web");
-
-        assert_eq!(merged["thread_id"], serde_json::json!("thread-123"));
-    }
-
-    #[test]
-    fn with_subagent_thread_metadata_overrides_existing_thread_id() {
-        let metadata = serde_json::json!({
-            "thread_id": "stale-thread",
-            "channel": "web"
-        });
-        let merged = with_subagent_thread_metadata(&metadata, "thread-fresh", "web");
-
-        assert_eq!(merged["thread_id"], serde_json::json!("thread-fresh"));
-        assert_eq!(merged["channel"], serde_json::json!("web"));
-    }
-
-    #[test]
-    fn normalize_subagent_progress_category_maps_known_message_types() {
-        assert_eq!(
-            normalize_subagent_progress_category("progress"),
-            "milestone"
-        );
-        assert_eq!(
-            normalize_subagent_progress_category("interim_result"),
-            "finding"
-        );
-        assert_eq!(normalize_subagent_progress_category("question"), "question");
-        assert_eq!(normalize_subagent_progress_category("warning"), "warning");
-        assert_eq!(normalize_subagent_progress_category("tool"), "activity");
-        assert_eq!(normalize_subagent_progress_category("other"), "update");
-    }
-
-    #[test]
-    fn subagent_tool_activity_message_uses_argument_hints() {
-        let path_message = subagent_tool_activity_message(
-            "read_file",
-            &serde_json::json!({ "path": "/tmp/demo.txt" }),
-        );
-        let query_message = subagent_tool_activity_message(
-            "web_search",
-            &serde_json::json!({ "query": "Rust async channels" }),
-        );
-
-        assert_eq!(path_message, "Running read file on /tmp/demo.txt");
-        assert_eq!(query_message, "Running web search for Rust async channels");
-    }
-
-    #[tokio::test]
-    async fn subagent_heartbeat_emits_progress_and_stops_on_cancel() {
-        use crate::channels::Channel;
-        use futures::stream;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        struct CaptureChannel {
-            progress_count: Arc<AtomicUsize>,
-            tx: tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
-        }
-
-        #[async_trait::async_trait]
-        impl Channel for CaptureChannel {
-            fn name(&self) -> &str {
-                "capture"
-            }
-
-            async fn start(
-                &self,
-            ) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
-                Ok(Box::pin(stream::empty()))
-            }
-
-            async fn respond(
-                &self,
-                _msg: &crate::channels::IncomingMessage,
-                _response: crate::channels::OutgoingResponse,
-            ) -> Result<(), crate::error::ChannelError> {
-                Ok(())
-            }
-
-            async fn send_status(
-                &self,
-                status: StatusUpdate,
-                _metadata: &serde_json::Value,
-            ) -> Result<(), crate::error::ChannelError> {
-                if matches!(status, StatusUpdate::SubagentProgress { .. }) {
-                    self.progress_count.fetch_add(1, Ordering::SeqCst);
-                }
-                let _ = self.tx.send(status);
-                Ok(())
-            }
-
-            async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
-                Ok(())
-            }
-        }
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let progress_count = Arc::new(AtomicUsize::new(0));
-        let channel = CaptureChannel {
-            progress_count: Arc::clone(&progress_count),
-            tx,
-        };
-
-        let channels = Arc::new(ChannelManager::new());
-        channels.add(Box::new(channel)).await;
-
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        let (activity_tx, activity_rx) = watch::channel(
-            Instant::now()
-                .checked_sub(SUBAGENT_HEARTBEAT_INTERVAL)
-                .unwrap_or_else(Instant::now),
-        );
-
-        let heartbeat = SubagentHeartbeat::spawn(
-            Arc::clone(&channels),
-            "capture".to_string(),
-            serde_json::json!({"thread_id": "thread-1"}),
-            "agent-1".to_string(),
-            "researcher".to_string(),
-            activity_tx.clone(),
-            activity_rx,
-            cancel_tx.clone(),
-            cancel_rx,
-        );
-
-        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("heartbeat should emit")
-            .expect("status channel should remain open");
-        assert!(matches!(first, StatusUpdate::SubagentProgress { .. }));
-        assert_eq!(progress_count.load(Ordering::SeqCst), 1);
-
-        touch_subagent_activity(&activity_tx);
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        assert!(
-            rx.try_recv().is_err(),
-            "activity reset should suppress immediate re-heartbeat"
-        );
-
-        let _ = cancel_tx.send(true);
-        drop(heartbeat);
-
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        assert!(
-            rx.try_recv().is_err(),
-            "heartbeat task should stop after cancellation"
-        );
-    }
-
-    #[tokio::test]
-    async fn completed_subagent_is_marked_completed_and_not_running() {
-        let llm = Arc::new(StubLlm::new("done"));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-            redact_pii_in_prompts: true,
-            smart_approval_mode: "off".to_string(),
-            external_scanner_mode: "off".to_string(),
-            external_scanner_path: None,
-            external_scanner_require_verified: false,
-        }));
-        let tools = Arc::new(ToolRegistry::new());
-        let channels = Arc::new(ChannelManager::new());
-        let (executor, mut result_rx) =
-            SubagentExecutor::new(llm, safety, tools, channels, SubagentConfig::default());
-
-        let spawned = executor
-            .spawn(
-                SubagentSpawnRequest {
-                    name: "test".to_string(),
-                    task: "say done".to_string(),
-                    system_prompt: None,
-                    model: None,
-                    task_packet: None,
-                    memory_mode: None,
-                    tool_mode: None,
-                    skill_mode: None,
-                    tool_profile: None,
-                    allowed_tools: None,
-                    allowed_skills: None,
-                    principal_id: None,
-                    actor_id: None,
-                    agent_workspace_id: None,
-                    timeout_secs: Some(5),
-                    wait: false,
-                },
-                "web",
-                &serde_json::json!({ "thread_id": "agent:main" }),
-                "default",
-                None,
-                Some("agent:main"),
-            )
-            .await
-            .expect("subagent should spawn");
-
-        let completed = tokio::time::timeout(Duration::from_secs(2), result_rx.recv())
-            .await
-            .expect("result should arrive")
-            .expect("channel should stay open");
-        assert_eq!(completed.result.agent_id, spawned.agent_id);
-        assert!(completed.result.success);
-
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if executor.running_count().await == 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("running count should drop after completion");
-
-        let info = executor
-            .list()
-            .await
-            .into_iter()
-            .find(|entry| entry.id == spawned.agent_id)
-            .expect("spawned agent should stay listed");
-        assert_eq!(info.status, SubagentStatus::Completed);
-    }
-}
+mod tests;

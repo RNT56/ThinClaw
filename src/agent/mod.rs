@@ -67,7 +67,6 @@ pub mod tool_execution_port;
 pub mod undo;
 pub mod vibe;
 pub mod worker;
-pub mod workspace_prompt_assembly;
 
 pub use agent_loop::{Agent, AgentDeps, BackgroundTasksHandle};
 pub use agent_registry::{AgentRegistry, AgentRegistryError};
@@ -106,7 +105,7 @@ pub use settings_store::RootSettingsPort;
 pub use skill_context_store::RootSkillContextPort;
 pub use subagent_executor::{
     SubagentConfig, SubagentExecutor, SubagentInfo, SubagentResult, SubagentSpawnRequest,
-    SubagentStatus,
+    SubagentStatus, reconcile_orphaned_subagent_runs,
 };
 pub use submission::{Submission, SubmissionParser, SubmissionResult};
 pub use task::{Task, TaskContext, TaskHandler, TaskOutput};
@@ -115,4 +114,3 @@ pub use thread_store::RootThreadStorePort;
 pub use tool_execution_port::RootToolExecutionPort;
 pub use undo::{Checkpoint, UndoManager};
 pub use worker::{Worker, WorkerDeps};
-pub use workspace_prompt_assembly::RootWorkspacePromptAssemblyPort;

@@ -34,6 +34,7 @@ const ACP_CHANNEL_NAME: &str = "acp";
 const ACP_USER_ID: &str = "local_user";
 
 type OutboundTx = mpsc::UnboundedSender<Value>;
+pub type AcpOutboundTx = mpsc::UnboundedSender<Value>;
 pub type AcpOutboundRx = mpsc::UnboundedReceiver<Value>;
 pub type AcpSharedState = Arc<AcpConnectionState>;
 
@@ -545,6 +546,15 @@ impl AcpChannel {
         Self { outbound_tx, state }
     }
 
+    /// Sender feeding the channel's outbound queue. `run_stdio` uses this as
+    /// the single stdout writer feed so status updates and JSON-RPC
+    /// responses share one FIFO — a separate response queue would let a
+    /// prompt response overtake a status (e.g. `usage_update`) emitted just
+    /// before the turn completed.
+    pub fn outbound_sender(&self) -> AcpOutboundTx {
+        self.outbound_tx.clone()
+    }
+
     pub fn shared_state(&self) -> AcpSharedState {
         Arc::clone(&self.state)
     }
@@ -609,10 +619,11 @@ impl Channel for AcpChannel {
 
 pub async fn run_stdio(
     agent: Arc<Agent>,
+    outbound_tx: AcpOutboundTx,
     outbound_rx: AcpOutboundRx,
     state: AcpSharedState,
 ) -> anyhow::Result<()> {
-    run_stdio_inner(Some(agent), Some(outbound_rx), state).await
+    run_stdio_inner(Some(agent), Some((outbound_tx, outbound_rx)), state).await
 }
 
 pub async fn run_stdio_without_agent(state: AcpSharedState) -> anyhow::Result<()> {
@@ -621,13 +632,25 @@ pub async fn run_stdio_without_agent(state: AcpSharedState) -> anyhow::Result<()
 
 async fn run_stdio_inner(
     agent: Option<Arc<Agent>>,
-    outbound_rx: Option<AcpOutboundRx>,
+    outbound: Option<(AcpOutboundTx, AcpOutboundRx)>,
     state: AcpSharedState,
 ) -> anyhow::Result<()> {
-    let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<Value>();
+    // In agent mode the channel's own outbound queue IS the writer queue:
+    // status updates (sent by the dispatcher through `AcpChannel`) and
+    // JSON-RPC responses enqueue into one FIFO, so a `usage_update` emitted
+    // just before a turn completes can never be overtaken by that turn's
+    // prompt response. A second queue bridged into this one (the previous
+    // design) reordered exactly that pair under CI load.
+    let (writer_tx, mut writer_rx) = outbound.unwrap_or_else(mpsc::unbounded_channel::<Value>);
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(message) = writer_rx.recv().await {
+            // `AcpChannel` keeps a sender alive for the process lifetime, so
+            // the queue never closes on its own — a JSON `null` is the
+            // shutdown sentinel (never a valid JSON-RPC message).
+            if message.is_null() {
+                break;
+            }
             match thinclaw_channels::acp::serialize_json_rpc_line(&message) {
                 Ok(bytes) => {
                     if stdout.write_all(&bytes).await.is_err() {
@@ -640,17 +663,6 @@ async fn run_stdio_inner(
                 }
             }
         }
-    });
-
-    let bridge = outbound_rx.map(|mut outbound_rx| {
-        let bridge_tx = writer_tx.clone();
-        tokio::spawn(async move {
-            while let Some(message) = outbound_rx.recv().await {
-                if bridge_tx.send(message).is_err() {
-                    break;
-                }
-            }
-        })
     });
 
     let stdin = BufReader::new(tokio::io::stdin());
@@ -691,10 +703,10 @@ async fn run_stdio_inner(
     }
 
     ACP_CLIENT_BRIDGES.write().await.clear();
+    // Sentinel-based shutdown: everything already queued (including a final
+    // prompt response) flushes to stdout before the writer exits.
+    let _ = writer_tx.send(Value::Null);
     drop(writer_tx);
-    if let Some(bridge) = bridge {
-        bridge.abort();
-    }
     let _ = writer.await;
     Ok(())
 }

@@ -499,6 +499,7 @@ async fn agent_env_terminal_bench_completion_writes_metrics_and_artifact() {
 
     let completion = super::execute_agent_env_benchmark_trial(
         super::AgentEnvBenchmarkConfig::TerminalBench {
+            live_agent: false,
             cases: vec![crate::agent::env::TerminalBenchCase {
                 name: "echo".to_string(),
                 command: "printf agent-env-ok".to_string(),
@@ -581,6 +582,7 @@ async fn agent_env_skill_bench_completion_writes_metrics_and_artifact() {
 
     let completion = super::execute_agent_env_benchmark_trial(
         super::AgentEnvBenchmarkConfig::SkillBench {
+            live_agent: false,
             cases: vec![crate::agent::env::SkillBenchCase {
                 name: "minimal-skill".to_string(),
                 skill_content: "# Skill\n\nUse this skill carefully.".to_string(),

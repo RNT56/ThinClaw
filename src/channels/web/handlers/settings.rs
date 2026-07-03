@@ -132,6 +132,13 @@ pub(crate) async fn settings_set_handler(
             tracing::error!("Failed to set setting '{}': {}", key, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    if key.starts_with("learning.") {
+        crate::agent::learning::invalidate_provider_ready_cache(
+            &store,
+            &request_identity.principal_id,
+        )
+        .await;
+    }
 
     if let (Some(jm), Some(update)) = (state.job_manager.clone(), cc_update) {
         tokio::spawn(async move {
@@ -263,6 +270,13 @@ pub(crate) async fn settings_delete_handler(
             tracing::error!("Failed to delete setting '{}': {}", key, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    if key.starts_with("learning.") {
+        crate::agent::learning::invalidate_provider_ready_cache(
+            &store,
+            &request_identity.principal_id,
+        )
+        .await;
+    }
 
     if let Some(cm) = state.channel_manager.clone() {
         if is_telegram_transport_mode_key(&key) {
@@ -401,6 +415,18 @@ pub(crate) async fn settings_import_handler(
             tracing::error!("Failed to import settings: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    // Bulk imports can change/activate/deactivate a memory provider; the
+    // single-key set/delete handlers above already invalidate on learning.*
+    // writes — the import path must too, or the pre-import provider keeps
+    // serving recall/sync for up to the ready-cache TTL.
+    if settings.keys().any(|key| key.starts_with("learning.")) {
+        crate::agent::learning::invalidate_provider_ready_cache(
+            store,
+            &request_identity.principal_id,
+        )
+        .await;
+    }
 
     if settings.contains_key("user_timezone") {
         crate::timezone::apply_user_timezone_change(

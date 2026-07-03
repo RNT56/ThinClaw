@@ -167,7 +167,7 @@ impl Agent {
             }),
         );
 
-        match self.handle_message(&message).await {
+        match self.handle_message(&message, None).await {
             Ok(Some(response)) if !response.is_empty() => {
                 let web_thread_synced = if let Some(target) = gateway_target {
                     self.sync_startup_hook_to_gateway_assistant(

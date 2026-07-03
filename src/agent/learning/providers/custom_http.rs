@@ -98,11 +98,13 @@ pub(super) async fn provider_json_request(
     url: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut request = apply_provider_auth(client.request(method, url), config, default_auth_scheme);
+    let mut request = apply_provider_auth(
+        shared_http_client()
+            .request(method, url)
+            .timeout(std::time::Duration::from_secs(15)),
+        config,
+        default_auth_scheme,
+    );
     if let Some(headers) = config.get("headers_json") {
         let parsed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(headers)
             .map_err(|error| format!("invalid headers_json: {error}"))?;
@@ -172,11 +174,9 @@ pub(super) async fn custom_http_request(
     url: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut request = client.request(method, url);
+    let mut request = shared_http_client()
+        .request(method, url)
+        .timeout(std::time::Duration::from_secs(15));
     if let Some(token) = provider_token(config) {
         request = request.bearer_auth(token);
     }
