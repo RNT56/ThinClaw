@@ -13,7 +13,7 @@ base64 = "0.22.1"
 blake3 = "1"
 chrono = { workspace = true }
 chrono-tz = "0.10"
-cron = "0.13"
+cron = "0.17"
 dirs = "6"
 futures = "0.3"
 mime_guess = "2.0.5"
