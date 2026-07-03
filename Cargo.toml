@@ -146,7 +146,7 @@ regex = "1"
 aho-corasick = "1"
 unicode-normalization = "0.1"
 jsonschema = "0.18"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 
 # YAML parsing for SKILL.md frontmatter
 serde_yaml_ng = "0.10"
