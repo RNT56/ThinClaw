@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
 
 use chrono::{DateTime, Utc};
-use rand::Rng;
+use rand::RngExt;
 use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
-use rand::Rng;
+use rand::RngExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -156,17 +156,17 @@ fn is_expired(req: &PairingRequest, now_secs: u64) -> bool {
 }
 
 fn random_code() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..PAIRING_CODE_LENGTH)
         .map(|_| {
-            let idx = rng.gen_range(0..PAIRING_ALPHABET.len());
+            let idx = rng.random_range(0..PAIRING_ALPHABET.len());
             PAIRING_ALPHABET[idx] as char
         })
         .collect()
 }
 
 fn generate_unique_code(existing: &HashSet<String>) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     for _ in 0..500 {
         let code = random_code();
         if !existing.contains(&code) {
@@ -174,7 +174,7 @@ fn generate_unique_code(existing: &HashSet<String>) -> String {
         }
     }
     // Fallback: add suffix
-    format!("{}{:04}", random_code(), rng.gen_range(0..10000))
+    format!("{}{:04}", random_code(), rng.random_range(0..10000))
 }
 
 fn parse_json_or_default<T>(content: &str, default: T) -> Result<T, PairingStoreError>
