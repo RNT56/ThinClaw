@@ -93,7 +93,7 @@ export function ThinClawPairing() {
                     <ThinClawModeBadge status={runtimeStatus} />
                     <button
                         onClick={fetchPairings}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 transition-all"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 transition-all"
                     >
                         <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
                         Refresh
@@ -117,7 +117,7 @@ export function ThinClawPairing() {
                             "px-3 py-1.5 rounded-lg text-xs font-medium capitalize transition-all",
                             selectedChannel === ch
                                 ? "bg-primary/15 text-primary"
-                                : "bg-white/[0.03] text-muted-foreground hover:text-foreground hover:bg-white/5"
+                                : "bg-white/3 text-muted-foreground hover:text-foreground hover:bg-white/5"
                         )}
                     >
                         {ch}
@@ -133,7 +133,7 @@ export function ThinClawPairing() {
                     onChange={e => setApproveCode(e.target.value.toUpperCase())}
                     placeholder="Enter pairing code..."
                     onKeyDown={e => e.key === 'Enter' && handleApprove()}
-                    className="flex-1 px-3 py-2 rounded-lg bg-white/[0.03] text-foreground text-sm font-mono tracking-wider placeholder:text-muted-foreground/40 outline-none focus:ring-1 focus:ring-primary/30 transition-all"
+                    className="flex-1 px-3 py-2 rounded-lg bg-white/3 text-foreground text-sm font-mono tracking-wider placeholder:text-muted-foreground/40 outline-hidden focus:ring-1 focus:ring-primary/30 transition-all"
                 />
                 <button
                     onClick={handleApprove}
@@ -142,7 +142,7 @@ export function ThinClawPairing() {
                         "flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all",
                         approveCode.trim()
                             ? "bg-primary/15 text-primary hover:bg-primary/25"
-                            : "bg-white/[0.03] text-muted-foreground/30 cursor-default"
+                            : "bg-white/3 text-muted-foreground/30 cursor-default"
                     )}
                 >
                     {approving ? (

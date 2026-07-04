@@ -330,8 +330,8 @@ function HookCard({ hook, onRemove }: { hook: thinclaw.HookInfoItem; onRemove: (
             layout
             className={cn(
                 "rounded-2xl border transition-all duration-300",
-                "bg-white/[0.02] border-white/5 hover:border-border/40",
-                "shadow-sm hover:shadow-md"
+                "bg-white/2 border-white/5 hover:border-border/40",
+                "shadow-xs hover:shadow-md"
             )}
         >
             <button
@@ -400,7 +400,7 @@ function HookCard({ hook, onRemove }: { hook: thinclaw.HookInfoItem; onRemove: (
                     >
                         <div className="px-5 pb-5 pt-0 border-t border-white/5">
                             <div className="mt-4 grid grid-cols-2 gap-3">
-                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                <div className="p-3 rounded-lg bg-white/3 border border-white/5">
                                     <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1">
                                         <Clock className="w-3 h-3" />
                                         Timeout
@@ -411,7 +411,7 @@ function HookCard({ hook, onRemove }: { hook: thinclaw.HookInfoItem; onRemove: (
                                             : `${hook.timeout_ms}ms`}
                                     </p>
                                 </div>
-                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                <div className="p-3 rounded-lg bg-white/3 border border-white/5">
                                     <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1">
                                         <Shield className="w-3 h-3" />
                                         Failure Mode
@@ -423,7 +423,7 @@ function HookCard({ hook, onRemove }: { hook: thinclaw.HookInfoItem; onRemove: (
                                         {hook.failure_mode.replace(/([A-Z])/g, ' $1').trim()}
                                     </p>
                                 </div>
-                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                <div className="p-3 rounded-lg bg-white/3 border border-white/5">
                                     <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1">
                                         <ArrowUpDown className="w-3 h-3" />
                                         Priority
@@ -435,7 +435,7 @@ function HookCard({ hook, onRemove }: { hook: thinclaw.HookInfoItem; onRemove: (
                                         </span>
                                     </p>
                                 </div>
-                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                <div className="p-3 rounded-lg bg-white/3 border border-white/5">
                                     <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1">
                                         <Anchor className="w-3 h-3" />
                                         Hook Points
@@ -480,7 +480,7 @@ function TemplateCard({ template, onActivate, isActive }: { template: HookTempla
             layout
             className={cn(
                 "rounded-xl border transition-all duration-200 group",
-                "bg-white/[0.02] border-white/5 hover:border-white/15",
+                "bg-white/2 border-white/5 hover:border-white/15",
                 "hover:shadow-lg hover:shadow-primary/5"
             )}
         >
@@ -591,7 +591,7 @@ function CustomHookModal({ isOpen, onClose, onSubmit }: {
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs"
             onClick={onClose}>
             <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
@@ -615,7 +615,7 @@ function CustomHookModal({ isOpen, onClose, onSubmit }: {
                     <textarea
                         value={json}
                         onChange={(e) => setJson(e.target.value)}
-                        className="w-full h-64 bg-black/30 border border-border/40 rounded-xl p-4 font-mono text-xs text-gray-300 focus:outline-none focus:border-primary/50 resize-none"
+                        className="w-full h-64 bg-black/30 border border-border/40 rounded-xl p-4 font-mono text-xs text-gray-300 focus:outline-hidden focus:border-primary/50 resize-none"
                         spellCheck={false}
                     />
                     {error && (
@@ -781,7 +781,7 @@ export function ThinClawHooks() {
                                 setIsLoading(true);
                                 fetchHooks();
                             }}
-                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-sm"
+                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-xs"
                         >
                             <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
                         </button>
@@ -789,13 +789,13 @@ export function ThinClawHooks() {
                 </div>
 
                 {/* Tab Switcher */}
-                <div className="flex gap-1 bg-white/[0.03] border border-white/5 rounded-xl p-1">
+                <div className="flex gap-1 bg-white/3 border border-white/5 rounded-xl p-1">
                     <button
                         onClick={() => setActiveTab('active')}
                         className={cn(
                             "flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all",
                             activeTab === 'active'
-                                ? "bg-white/10 text-white shadow-sm"
+                                ? "bg-white/10 text-white shadow-xs"
                                 : "text-muted-foreground hover:text-white hover:bg-white/5"
                         )}
                     >
@@ -807,7 +807,7 @@ export function ThinClawHooks() {
                         className={cn(
                             "flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all",
                             activeTab === 'templates'
-                                ? "bg-white/10 text-white shadow-sm"
+                                ? "bg-white/10 text-white shadow-xs"
                                 : "text-muted-foreground hover:text-white hover:bg-white/5"
                         )}
                     >
@@ -846,7 +846,7 @@ export function ThinClawHooks() {
                             {isLoading && hooks.length === 0 ? (
                                 <div className="space-y-3">
                                     {[1, 2, 3].map(i => (
-                                        <div key={i} className="h-24 rounded-2xl border border-white/5 bg-white/[0.02] animate-pulse" />
+                                        <div key={i} className="h-24 rounded-2xl border border-white/5 bg-white/2 animate-pulse" />
                                     ))}
                                 </div>
                             ) : hooks.length > 0 ? (
@@ -932,7 +932,7 @@ export function ThinClawHooks() {
                             ))}
 
                             {/* Custom hook CTA */}
-                            <div className="p-6 rounded-2xl border border-dashed border-border/40 bg-white/[0.01] flex items-center justify-between">
+                            <div className="p-6 rounded-2xl border border-dashed border-border/40 bg-white/1 flex items-center justify-between">
                                 <div>
                                     <h4 className="text-sm font-semibold">Need something custom?</h4>
                                     <p className="text-xs text-muted-foreground mt-0.5">

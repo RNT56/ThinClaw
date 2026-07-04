@@ -135,7 +135,7 @@ export function PersonaTab() {
                 <div className="space-y-4">
                     <div className="flex items-center gap-3 px-1">
                         <div className="w-1 h-5 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]" />
-                        <h3 className="text-sm font-bold text-foreground uppercase tracking-[0.1em]">System Personas</h3>
+                        <h3 className="text-sm font-bold text-foreground uppercase tracking-widest">System Personas</h3>
                     </div>
                     <div className="grid grid-cols-1 gap-3">
                         {BUILTIN_PERSONAS.map((persona) => {
@@ -166,7 +166,7 @@ export function PersonaTab() {
                                         <div className="flex items-center gap-2">
                                             <span className="font-bold text-sm tracking-tight">{persona.name}</span>
                                             {isSelected && (
-                                                <div className={cn("text-white rounded-full p-0.5 shadow-sm", persona.checkBg)}>
+                                                <div className={cn("text-white rounded-full p-0.5 shadow-xs", persona.checkBg)}>
                                                     <Check className="w-3 h-3" />
                                                 </div>
                                             )}
@@ -185,7 +185,7 @@ export function PersonaTab() {
                 <div className="space-y-4">
                     <div className="flex items-center gap-3 px-1">
                         <div className="w-1 h-5 rounded-full bg-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.5)]" />
-                        <h3 className="text-sm font-bold text-foreground uppercase tracking-[0.1em]">Custom Extensions</h3>
+                        <h3 className="text-sm font-bold text-foreground uppercase tracking-widest">Custom Extensions</h3>
                     </div>
 
                     <div className="grid grid-cols-1 gap-3">
@@ -207,7 +207,7 @@ export function PersonaTab() {
                                             className={cn(
                                                 "w-full flex items-center gap-4 p-4 rounded-xl border transition-all text-left",
                                                 isSelected
-                                                    ? "bg-gradient-to-br from-card to-background shadow-xl border-primary/50 ring-1 ring-primary/20"
+                                                    ? "bg-linear-to-br from-card to-background shadow-xl border-primary/50 ring-1 ring-primary/20"
                                                     : "bg-muted/10 border-transparent hover:border-border/50 hover:bg-muted/20"
                                             )}
                                         >
@@ -222,7 +222,7 @@ export function PersonaTab() {
                                                 <div className="flex items-center gap-2">
                                                     <span className="font-bold text-sm tracking-tight">{persona.name}</span>
                                                     {isSelected && (
-                                                        <div className="bg-primary text-white rounded-full p-0.5 shadow-sm">
+                                                        <div className="bg-primary text-white rounded-full p-0.5 shadow-xs">
                                                             <Check className="w-3 h-3" />
                                                         </div>
                                                     )}
@@ -235,7 +235,7 @@ export function PersonaTab() {
 
                                         <button
                                             onClick={(e) => handleRemovePersona(persona.id, e)}
-                                            className="absolute top-4 right-4 p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm"
+                                            className="absolute top-4 right-4 p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all backdrop-blur-xs"
                                             title="Permanently remove"
                                         >
                                             <Trash2 className="w-4 h-4" />
@@ -297,7 +297,7 @@ export function PersonaTab() {
                                         placeholder="e.g. Senior Architect"
                                         value={newPersona.name}
                                         onChange={e => setNewPersona({ ...newPersona, name: e.target.value })}
-                                        className="w-full bg-muted/10 border-border/50 focus:border-primary focus:ring-1 focus:ring-primary h-11 px-4 rounded-xl transition-all outline-none text-sm placeholder:text-muted-foreground/50"
+                                        className="w-full bg-muted/10 border-border/50 focus:border-primary focus:ring-1 focus:ring-primary h-11 px-4 rounded-xl transition-all outline-hidden text-sm placeholder:text-muted-foreground/50"
                                     />
                                 </div>
                                 <div className="space-y-1.5">
@@ -307,7 +307,7 @@ export function PersonaTab() {
                                         placeholder="Brief objective statement"
                                         value={newPersona.description}
                                         onChange={e => setNewPersona({ ...newPersona, description: e.target.value })}
-                                        className="w-full bg-muted/10 border-border/50 focus:border-primary focus:ring-1 focus:ring-primary h-11 px-4 rounded-xl transition-all outline-none text-sm placeholder:text-muted-foreground/50"
+                                        className="w-full bg-muted/10 border-border/50 focus:border-primary focus:ring-1 focus:ring-primary h-11 px-4 rounded-xl transition-all outline-hidden text-sm placeholder:text-muted-foreground/50"
                                     />
                                 </div>
                             </div>
@@ -319,7 +319,7 @@ export function PersonaTab() {
                                     value={newPersona.instructions}
                                     onChange={e => setNewPersona({ ...newPersona, instructions: e.target.value })}
                                     rows={4}
-                                    className="w-full bg-muted/10 border-border/50 focus:border-primary focus:ring-1 focus:ring-primary p-4 rounded-xl transition-all outline-none text-sm resize-none scrollbar-thin placeholder:text-muted-foreground/50"
+                                    className="w-full bg-muted/10 border-border/50 focus:border-primary focus:ring-1 focus:ring-primary p-4 rounded-xl transition-all outline-hidden text-sm resize-none scrollbar-thin placeholder:text-muted-foreground/50"
                                 />
                             </div>
 

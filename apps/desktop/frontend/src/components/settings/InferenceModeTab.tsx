@@ -182,7 +182,7 @@ function TtsVoiceSelector() {
                                             className={cn(
                                                 "text-[10px] px-2.5 py-1 rounded-lg border transition-all duration-200 font-medium",
                                                 isSelected
-                                                    ? "bg-primary/10 text-primary border-primary/30 ring-1 ring-primary/20 shadow-sm"
+                                                    ? "bg-primary/10 text-primary border-primary/30 ring-1 ring-primary/20 shadow-xs"
                                                     : "bg-muted/30 text-muted-foreground border-border/20 hover:bg-muted/60 hover:text-foreground"
                                             )}
                                             title={[v.name, v.gender, v.language].filter(Boolean).join(' · ')}
@@ -233,10 +233,10 @@ function ModalitySection({
     }, [open]);
 
     return (
-        <div className="group relative overflow-hidden rounded-2xl border border-border/50 bg-card/40 hover:bg-card/60 transition-all duration-300 shadow-sm hover:shadow-md">
+        <div className="group relative overflow-hidden rounded-2xl border border-border/50 bg-card/40 hover:bg-card/60 transition-all duration-300 shadow-xs hover:shadow-md">
             {/* Gradient accent */}
             <div className={cn(
-                "absolute inset-0 bg-gradient-to-br opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none",
+                "absolute inset-0 bg-linear-to-br opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none",
                 meta.gradient
             )} />
 
@@ -246,7 +246,7 @@ function ModalitySection({
                     <div className="flex items-center gap-3">
                         <div className={cn(
                             "p-2.5 rounded-xl transition-all duration-300",
-                            active ? "bg-gradient-to-br " + meta.gradient : "bg-muted"
+                            active ? "bg-linear-to-br " + meta.gradient : "bg-muted"
                         )}>
                             <Icon className={cn("w-5 h-5", active ? meta.color : "text-muted-foreground")} />
                         </div>
@@ -305,7 +305,7 @@ function ModalitySection({
                             onClick={() => setOpen(!open)}
                             disabled={isSwitching}
                             className={cn(
-                                "flex items-center gap-2 px-4 h-9 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border shadow-sm",
+                                "flex items-center gap-2 px-4 h-9 rounded-xl text-xs font-bold uppercase tracking-wider transition-all border shadow-xs",
                                 "bg-background/80 border-border/50 hover:border-primary/30 hover:bg-accent/50",
                                 isSwitching && "opacity-50 cursor-wait"
                             )}

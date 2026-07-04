@@ -103,7 +103,7 @@ export function CredentialPromptCard({
                         if (event.key === 'Enter') submit();
                     }}
                     placeholder={`${secretName} value`}
-                    className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-amber-500/40"
+                    className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-amber-500/40"
                 />
                 <button
                     onClick={submit}

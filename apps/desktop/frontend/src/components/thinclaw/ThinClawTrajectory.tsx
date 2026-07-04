@@ -92,7 +92,7 @@ export function ThinClawTrajectory() {
                 </div>
                 <button
                     onClick={fetchData}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                 >
                     <RefreshCw className="w-3.5 h-3.5" />
                 </button>
@@ -109,7 +109,7 @@ export function ThinClawTrajectory() {
             {/* Outcome breakdown */}
             <div className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-6">
                 <h3 className="text-sm font-bold text-muted-foreground mb-4">Outcome Distribution</h3>
-                <div className="h-6 bg-white/[0.03] rounded-full overflow-hidden border border-white/5 flex">
+                <div className="h-6 bg-white/3 rounded-full overflow-hidden border border-white/5 flex">
                     <motion.div initial={{ width: 0 }} animate={{ width: `${scored ? (success / scored) * 100 : 0}%` }} transition={{ duration: 0.7, ease: 'easeOut' }} className="h-full bg-emerald-500/70" />
                     <motion.div initial={{ width: 0 }} animate={{ width: `${scored ? (neutral / scored) * 100 : 0}%` }} transition={{ duration: 0.7, ease: 'easeOut' }} className="h-full bg-white/15" />
                     <motion.div initial={{ width: 0 }} animate={{ width: `${scored ? (failure / scored) * 100 : 0}%` }} transition={{ duration: 0.7, ease: 'easeOut' }} className="h-full bg-red-500/70" />
@@ -134,7 +134,7 @@ export function ThinClawTrajectory() {
                             const model = field(r, 'model', 'llm_model');
                             const score = field(r, 'outcome_score', 'score', 'heuristic_score');
                             return (
-                                <div key={i} className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2">
+                                <div key={i} className="rounded-lg border border-white/5 bg-white/2 px-3 py-2">
                                     <div className="flex items-center justify-between gap-2">
                                         <p className="text-xs truncate text-foreground/90">{user || '(no user message)'}</p>
                                         {score && <span className="text-[10px] tabular-nums text-muted-foreground shrink-0">{Number(score).toFixed(2)}</span>}

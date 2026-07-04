@@ -64,7 +64,7 @@ export function FleetGraph({ nodes: initialNodes, edges: initialEdges, onNodeCli
                 }}
             >
                 <Background color="#333" gap={20} size={1} />
-                <Controls className="!bg-zinc-900 !border-zinc-800 !fill-zinc-400" />
+                <Controls className="bg-zinc-900! border-zinc-800! fill-zinc-400!" />
             </ReactFlow>
         </div>
     );

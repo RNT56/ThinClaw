@@ -175,7 +175,7 @@ export function ThinClawExperiments() {
                 </div>
                 <button
                     onClick={load}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                     title="Refresh experiments"
                 >
                     <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
@@ -252,7 +252,7 @@ export function ThinClawExperiments() {
                                                         event.stopPropagation();
                                                         if (id) runAction(`${action} campaign`, () => thinclaw.runExperimentCampaignAction(id, action));
                                                     }}
-                                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-white/[0.03] hover:bg-white/[0.06] border border-white/5"
+                                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-white/3 hover:bg-white/6 border border-white/5"
                                                 >
                                                     {action === 'cancel' ? <XCircle className="w-3 h-3" /> : action === 'resume' ? <Play className="w-3 h-3" /> : <RotateCw className="w-3 h-3" />}
                                                     {action}
@@ -280,7 +280,7 @@ export function ThinClawExperiments() {
                                             </div>
                                             <button
                                                 onClick={() => id && runAction('Validating runner', () => thinclaw.validateExperimentRunner(id))}
-                                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/[0.03] hover:bg-white/[0.06] border border-white/5"
+                                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/3 hover:bg-white/6 border border-white/5"
                                             >
                                                 <ShieldCheck className="w-3 h-3" />
                                                 Validate
@@ -311,11 +311,11 @@ export function ThinClawExperiments() {
                                             </span>
                                         </div>
                                         <div className="mt-3 flex gap-2">
-                                            <button onClick={() => slug && runAction('Validating GPU cloud', () => thinclaw.validateExperimentGpuCloud(slug))} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/[0.03] hover:bg-white/[0.06] border border-white/5">
+                                            <button onClick={() => slug && runAction('Validating GPU cloud', () => thinclaw.validateExperimentGpuCloud(slug))} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/3 hover:bg-white/6 border border-white/5">
                                                 <ShieldCheck className="w-3 h-3" />
                                                 Validate
                                             </button>
-                                            <button onClick={() => slug && runAction('Launching test', () => thinclaw.launchExperimentGpuCloudTest(slug))} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/[0.03] hover:bg-white/[0.06] border border-white/5">
+                                            <button onClick={() => slug && runAction('Launching test', () => thinclaw.launchExperimentGpuCloudTest(slug))} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/3 hover:bg-white/6 border border-white/5">
                                                 <Play className="w-3 h-3" />
                                                 Test
                                             </button>

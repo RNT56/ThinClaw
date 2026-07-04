@@ -95,10 +95,10 @@ export function ThinClawEventInspector() {
     return (
         <div className="flex flex-col h-full overflow-hidden">
             {/* Header */}
-            <div className="flex-shrink-0 px-5 pt-5 pb-3">
+            <div className="shrink-0 px-5 pt-5 pb-3">
                 <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 flex items-center justify-center">
+                        <div className="w-9 h-9 rounded-xl bg-linear-to-br from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 flex items-center justify-center">
                             <Activity className="w-4.5 h-4.5 text-primary" />
                         </div>
                         <div>
@@ -144,7 +144,7 @@ export function ThinClawEventInspector() {
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         placeholder="Filter events..."
-                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50"
+                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-hidden focus:border-cyan-500/50"
                     />
                 </div>
 
@@ -212,15 +212,15 @@ export function ThinClawEventInspector() {
                             <motion.div
                                 key={evt.id}
                                 layout
-                                className="rounded border border-white/[0.04] hover:border-border/40 transition-all cursor-pointer"
+                                className="rounded border border-white/4 hover:border-border/40 transition-all cursor-pointer"
                                 onClick={() => setExpandedId(expanded ? null : evt.id)}
                             >
                                 <div className="flex items-center gap-2 px-2 py-1.5">
-                                    <span className="text-zinc-600 w-16 flex-shrink-0">
+                                    <span className="text-zinc-600 w-16 shrink-0">
                                         {evt.timestamp.toLocaleTimeString('en', { hour12: false, fractionalSecondDigits: 3 } as any)}
                                     </span>
-                                    <EvtIcon className={`w-3 h-3 ${cfg.color} flex-shrink-0`} />
-                                    <span className={`${cfg.color} w-28 flex-shrink-0 truncate`}>{evt.kind}</span>
+                                    <EvtIcon className={`w-3 h-3 ${cfg.color} shrink-0`} />
+                                    <span className={`${cfg.color} w-28 shrink-0 truncate`}>{evt.kind}</span>
                                     <span className="text-zinc-600 truncate flex-1">
                                         {evt.session_key ? `session:${evt.session_key.substring(0, 8)}` : ''}
                                     </span>

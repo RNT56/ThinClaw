@@ -78,7 +78,7 @@ export function LiveAgentStatus({ run, persistent = false }: LiveAgentStatusProp
         >
             <div className={cn(
                 "backdrop-blur-md rounded-xl border shadow-2xl overflow-hidden",
-                persistent ? "bg-black/40 border-white/5" : "bg-gradient-to-br from-black/80 to-zinc-900/80 border-border/40"
+                persistent ? "bg-black/40 border-white/5" : "bg-linear-to-br from-black/80 to-zinc-900/80 border-border/40"
             )}>
                 {/* Header / Status Bar */}
                 <div

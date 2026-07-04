@@ -115,7 +115,7 @@ export function ThinClawChannelConfig() {
                 </div>
                 <button
                     onClick={load}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                 >
                     <RefreshCw className="w-3.5 h-3.5" />
                 </button>
@@ -164,13 +164,13 @@ export function ThinClawChannelConfig() {
                                             onChange={(e) => setField(schema.channel_id, field.id, e.target.value)}
                                             rows={3}
                                             placeholder={field.help_text ?? ''}
-                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-none focus:border-primary/40"
+                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40"
                                         />
                                     ) : field.field_type === 'select' ? (
                                         <select
                                             value={String(val)}
                                             onChange={(e) => setField(schema.channel_id, field.id, e.target.value)}
-                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-none focus:border-primary/40"
+                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40"
                                         >
                                             {(field.options ?? []).map((o) => (
                                                 <option key={o.value} value={o.value}>{o.label}</option>
@@ -182,7 +182,7 @@ export function ThinClawChannelConfig() {
                                             value={String(val)}
                                             onChange={(e) => setField(schema.channel_id, field.id, e.target.value)}
                                             placeholder={field.help_text ?? ''}
-                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-none focus:border-primary/40"
+                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40"
                                         />
                                     )}
                                     {field.field_type !== 'checkbox' && field.help_text && (

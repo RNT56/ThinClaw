@@ -208,7 +208,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                     ) : (
                         <ChevronRight className="h-4 w-4 text-muted-foreground" />
                     )}
-                    <div className="rounded-md border border-white/10 bg-white/[0.04] p-1.5">
+                    <div className="rounded-md border border-white/10 bg-white/4 p-1.5">
                         <FolderGit2 className="h-4 w-4 text-foreground" />
                     </div>
                     <div>
@@ -238,7 +238,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                             'flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors disabled:opacity-50',
                             enabled
                                 ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20'
-                                : 'border-white/10 bg-white/[0.03] text-muted-foreground hover:bg-white/5 hover:text-foreground',
+                                : 'border-white/10 bg-white/3 text-muted-foreground hover:bg-white/5 hover:text-foreground',
                         )}
                         title={enabled ? 'Disable supervisor' : 'Enable supervisor'}
                     >
@@ -251,7 +251,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                     </button>
                     <button
                         onClick={loadReadiness}
-                        className="rounded-lg border border-white/5 bg-white/[0.03] p-1.5 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+                        className="rounded-lg border border-white/5 bg-white/3 p-1.5 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
                         title="Refresh connector status"
                     >
                         <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
@@ -314,7 +314,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                         value={cred.name}
                                         onChange={(event) => setCred((current) => ({ ...current, name: event.target.value }))}
                                         placeholder="Secret name (e.g. github_token)"
-                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs font-mono outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs font-mono outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                     />
                                     <input
                                         type="password"
@@ -322,7 +322,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                         onChange={(event) => setCred((current) => ({ ...current, value: event.target.value }))}
                                         placeholder="Paste token or PEM key — stored encrypted"
                                         autoComplete="off"
-                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                     />
                                     <button
                                         onClick={saveCredential}
@@ -356,7 +356,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                             onChange={(event) => setAppForm((current) => ({ ...current, app_id: event.target.value }))}
                                             placeholder="App ID"
                                             inputMode="numeric"
-                                            className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                            className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                         />
                                         <input
                                             value={appForm.installation_id}
@@ -365,14 +365,14 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                             }
                                             placeholder="Installation ID"
                                             inputMode="numeric"
-                                            className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                            className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                         />
                                     </div>
                                     <input
                                         value={appForm.app_slug}
                                         onChange={(event) => setAppForm((current) => ({ ...current, app_slug: event.target.value }))}
                                         placeholder="App slug (for the install link)"
-                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                     />
                                     <input
                                         value={appForm.private_key_secret}
@@ -380,13 +380,13 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                             setAppForm((current) => ({ ...current, private_key_secret: event.target.value }))
                                         }
                                         placeholder="Private key secret name"
-                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs font-mono outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs font-mono outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                     />
                                     <div className="flex items-center gap-2">
                                         <button
                                             onClick={saveApp}
                                             disabled={busy === 'app'}
-                                            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5 disabled:opacity-50"
+                                            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/3 px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5 disabled:opacity-50"
                                         >
                                             {busy === 'app' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
                                             Save App config
@@ -416,7 +416,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                         <button
                                             onClick={discover}
                                             disabled={busy === 'discover'}
-                                            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[11px] font-medium transition-colors hover:bg-white/5 disabled:opacity-50"
+                                            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/3 px-2.5 py-1 text-[11px] font-medium transition-colors hover:bg-white/5 disabled:opacity-50"
                                         >
                                             {busy === 'discover' ? (
                                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -441,7 +441,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                         value={filter}
                                         onChange={(event) => setFilter(event.target.value)}
                                         placeholder="Filter repositories…"
-                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                        className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                     />
                                 )}
 
@@ -462,7 +462,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                                 <label
                                                     key={key}
                                                     className={cn(
-                                                        'flex cursor-pointer items-center gap-3 border-b border-border/20 px-3 py-2 last:border-b-0 transition-colors hover:bg-white/[0.03]',
+                                                        'flex cursor-pointer items-center gap-3 border-b border-border/20 px-3 py-2 last:border-b-0 transition-colors hover:bg-white/3',
                                                         repo.enrolled && 'cursor-default opacity-60 hover:bg-transparent',
                                                     )}
                                                 >

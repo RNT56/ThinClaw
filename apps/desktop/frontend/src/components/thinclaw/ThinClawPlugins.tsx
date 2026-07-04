@@ -94,8 +94,8 @@ function ExtensionCard({
             className={cn(
                 "rounded-2xl border transition-all duration-300",
                 ext.active
-                    ? "bg-primary/[0.03] border-primary/20 shadow-sm shadow-primary/5"
-                    : "bg-white/[0.02] border-white/5",
+                    ? "bg-primary/3 border-primary/20 shadow-xs shadow-primary/5"
+                    : "bg-white/2 border-white/5",
                 "hover:border-border/40"
             )}
         >
@@ -241,7 +241,7 @@ function ExtensionCard({
                     >
                         <div className="px-5 pb-5 pt-0 border-t border-white/5">
                             <div className="mt-4 grid grid-cols-3 gap-3">
-                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                <div className="p-3 rounded-lg bg-white/3 border border-white/5">
                                     <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1 flex items-center gap-1">
                                         <Shield className="w-3 h-3" />
                                         Auth
@@ -254,7 +254,7 @@ function ExtensionCard({
                                     </p>
                                     <p className="text-[10px] text-muted-foreground mt-1">{ext.auth_mode} · {ext.auth_status}</p>
                                 </div>
-                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                <div className="p-3 rounded-lg bg-white/3 border border-white/5">
                                     <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1 flex items-center gap-1">
                                         <Wrench className="w-3 h-3" />
                                         Setup
@@ -269,7 +269,7 @@ function ExtensionCard({
                                         <p className="text-[10px] text-muted-foreground mt-1">{ext.shared_auth_provider}</p>
                                     )}
                                 </div>
-                                <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
+                                <div className="p-3 rounded-lg bg-white/3 border border-white/5">
                                     <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1 flex items-center gap-1">
                                         <Puzzle className="w-3 h-3" />
                                         Tools
@@ -294,7 +294,7 @@ function ExtensionCard({
                                 </div>
                             )}
                             {ext.channel_diagnostics && (
-                                <pre className="mt-3 p-3 rounded-lg bg-white/[0.03] border border-white/5 text-[10px] text-muted-foreground overflow-auto max-h-32">
+                                <pre className="mt-3 p-3 rounded-lg bg-white/3 border border-white/5 text-[10px] text-muted-foreground overflow-auto max-h-32">
                                     {JSON.stringify(ext.channel_diagnostics, null, 2)}
                                 </pre>
                             )}
@@ -559,7 +559,7 @@ export function ThinClawPlugins() {
                                 setIsLoading(true);
                                 fetchExtensions();
                             }}
-                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-sm"
+                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-xs"
                         >
                             <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
                         </button>
@@ -567,7 +567,7 @@ export function ThinClawPlugins() {
                 </div>
 
                 {/* Tabs */}
-                <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.03] border border-white/5 w-fit">
+                <div className="flex items-center gap-1 p-1 rounded-xl bg-white/3 border border-white/5 w-fit">
                     {(['installed', 'clawhub', 'lifecycle'] as const).map(tab => (
                         <button
                             key={tab}
@@ -626,7 +626,7 @@ export function ThinClawPlugins() {
                             {isLoading && extensions.length === 0 ? (
                                 <div className="space-y-3">
                                     {[1, 2, 3].map(i => (
-                                        <div key={i} className="h-28 rounded-2xl border border-white/5 bg-white/[0.02] animate-pulse" />
+                                        <div key={i} className="h-28 rounded-2xl border border-white/5 bg-white/2 animate-pulse" />
                                     ))}
                                 </div>
                             ) : extensions.length > 0 ? (
@@ -740,16 +740,16 @@ export function ThinClawPlugins() {
                                         onChange={(e) => setRegistryQuery(e.target.value)}
                                         onKeyDown={(e) => e.key === 'Enter' && handleRegistrySearch()}
                                         placeholder="Search registry..."
-                                        className="flex-1 px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30"
+                                        className="flex-1 px-3 py-2 rounded-xl bg-white/3 border border-border/40 text-sm outline-hidden focus:ring-1 focus:ring-primary/30"
                                     />
-                                    <button onClick={handleRegistrySearch} className="px-4 py-2 rounded-xl bg-white/[0.04] border border-border/40 text-xs font-medium hover:bg-white/[0.07]">
+                                    <button onClick={handleRegistrySearch} className="px-4 py-2 rounded-xl bg-white/4 border border-border/40 text-xs font-medium hover:bg-white/[0.07]">
                                         Search
                                     </button>
                                 </div>
                                 {registryResults.length > 0 && (
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                                         {registryResults.slice(0, 8).map(entry => (
-                                            <div key={`${entry.name}-${entry.kind}`} className="p-3 rounded-xl bg-white/[0.03] border border-white/5 flex items-start gap-3">
+                                            <div key={`${entry.name}-${entry.kind}`} className="p-3 rounded-xl bg-white/3 border border-white/5 flex items-start gap-3">
                                                 <Plug className="w-4 h-4 text-primary mt-0.5 shrink-0" />
                                                 <div className="flex-1 min-w-0">
                                                     <div className="flex items-center gap-2">
@@ -774,9 +774,9 @@ export function ThinClawPlugins() {
                             <div className="p-4 rounded-2xl border border-border/40 bg-card/30 space-y-3">
                                 <h3 className="text-sm font-semibold">Direct Install</h3>
                                 <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_150px_auto] gap-2">
-                                    <input value={manualName} onChange={(e) => setManualName(e.target.value)} placeholder="name" className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30" />
-                                    <input value={manualUrl} onChange={(e) => setManualUrl(e.target.value)} placeholder="https://..." className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30" />
-                                    <select value={manualKind} onChange={(e) => setManualKind(e.target.value)} className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none">
+                                    <input value={manualName} onChange={(e) => setManualName(e.target.value)} placeholder="name" className="px-3 py-2 rounded-xl bg-white/3 border border-border/40 text-sm outline-hidden focus:ring-1 focus:ring-primary/30" />
+                                    <input value={manualUrl} onChange={(e) => setManualUrl(e.target.value)} placeholder="https://..." className="px-3 py-2 rounded-xl bg-white/3 border border-border/40 text-sm outline-hidden focus:ring-1 focus:ring-primary/30" />
+                                    <select value={manualKind} onChange={(e) => setManualKind(e.target.value)} className="px-3 py-2 rounded-xl bg-white/3 border border-border/40 text-sm outline-hidden">
                                         <option value="mcp_server">MCP Server</option>
                                         <option value="wasm_tool">WASM Tool</option>
                                         <option value="wasm_channel">WASM Channel</option>
@@ -799,7 +799,7 @@ export function ThinClawPlugins() {
                                         onChange={(e) => setHubQuery(e.target.value)}
                                         onKeyDown={(e) => e.key === 'Enter' && handleSearchClawHub()}
                                         placeholder="Search ClawHub for plugins..."
-                                        className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30 placeholder:text-muted-foreground/50"
+                                        className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white/3 border border-border/40 text-sm outline-hidden focus:ring-1 focus:ring-primary/30 placeholder:text-muted-foreground/50"
                                     />
                                 </div>
                                 <button
@@ -899,7 +899,7 @@ export function ThinClawPlugins() {
                                                 {/* Dot */}
                                                 <div className={cn("absolute left-[19px] w-3 h-3 rounded-full border-2 border-background", dotColor)} />
 
-                                                <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
+                                                <div className="p-3 rounded-xl bg-white/2 border border-white/5">
                                                     <div className="flex items-center justify-between">
                                                         <span className="font-medium text-sm">{event.plugin_id}</span>
                                                         <span className={cn(
@@ -948,7 +948,7 @@ export function ThinClawPlugins() {
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
                                 exit={{ opacity: 0 }}
-                                className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+                                className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-6"
                                 onClick={() => setSetupTarget(null)}
                             >
                                 <div className="w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-2xl border border-border bg-background shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -968,7 +968,7 @@ export function ThinClawPlugins() {
                                                 {(setupSchema.auth_url || setupSchema.setup_url) && (
                                                     <div className="flex gap-2">
                                                         {setupSchema.auth_url && <button onClick={() => window.open(setupSchema.auth_url, '_blank')} className="px-3 py-2 rounded-lg bg-primary/15 text-primary text-xs font-medium border border-primary/20">Open Auth</button>}
-                                                        {setupSchema.setup_url && <button onClick={() => window.open(setupSchema.setup_url, '_blank')} className="px-3 py-2 rounded-lg bg-white/[0.04] text-xs font-medium border border-border/40">Open Setup</button>}
+                                                        {setupSchema.setup_url && <button onClick={() => window.open(setupSchema.setup_url, '_blank')} className="px-3 py-2 rounded-lg bg-white/4 text-xs font-medium border border-border/40">Open Setup</button>}
                                                     </div>
                                                 )}
                                                 {(setupSchema.fields || []).map((field: any) => (
@@ -979,7 +979,7 @@ export function ThinClawPlugins() {
                                                             value={setupSecrets[field.name] || ''}
                                                             onChange={(e) => setSetupSecrets(prev => ({ ...prev, [field.name]: e.target.value }))}
                                                             placeholder={field.provided ? 'Already saved' : field.auto_generate ? 'Auto-generated if empty' : field.name}
-                                                            className="w-full px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30"
+                                                            className="w-full px-3 py-2 rounded-xl bg-white/3 border border-border/40 text-sm outline-hidden focus:ring-1 focus:ring-primary/30"
                                                         />
                                                     </label>
                                                 ))}

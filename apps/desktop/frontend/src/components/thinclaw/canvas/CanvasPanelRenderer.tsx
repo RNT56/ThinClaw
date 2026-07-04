@@ -116,7 +116,7 @@ function TableRenderer({ headers, rows }: { headers: string[]; rows: string[][] 
                 </thead>
                 <tbody>
                     {rows.map((row, ri) => (
-                        <tr key={ri} className="border-b border-white/5 hover:bg-white/[0.03] transition-colors">
+                        <tr key={ri} className="border-b border-white/5 hover:bg-white/3 transition-colors">
                             {row.map((cell, ci) => (
                                 <td key={ci} className="px-3 py-2 text-zinc-400">{cell}</td>
                             ))}
@@ -174,7 +174,7 @@ function ProgressRenderer({ label, value, max }: { label?: string; value: number
             {label && <div className="text-xs text-zinc-400 mb-1">{label}</div>}
             <div className="h-2 rounded-full bg-white/5 overflow-hidden">
                 <div
-                    className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-cyan-500 transition-all duration-500"
+                    className="h-full rounded-full bg-linear-to-r from-indigo-500 to-cyan-500 transition-all duration-500"
                     style={{ width: `${pct}%` }}
                 />
             </div>
@@ -270,10 +270,10 @@ function FormRenderer({ formId, fields, submitLabel, sessionKey, runId }: {
         }
     }, [sessionKey, formId, values, runId]);
 
-    const inputCls = 'w-full h-9 rounded-lg border border-white/10 bg-white/[0.03] px-3 text-xs font-mono text-zinc-200 focus:ring-1 focus:ring-indigo-500/30 outline-none transition-all';
+    const inputCls = 'w-full h-9 rounded-lg border border-white/10 bg-white/3 px-3 text-xs font-mono text-zinc-200 focus:ring-1 focus:ring-indigo-500/30 outline-hidden transition-all';
 
     return (
-        <form onSubmit={handleSubmit} className="space-y-3 p-3 rounded-lg border border-white/10 bg-white/[0.02]">
+        <form onSubmit={handleSubmit} className="space-y-3 p-3 rounded-lg border border-white/10 bg-white/2">
             {fields.map((field) => (
                 <div key={field.name} className="space-y-1">
                     <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">

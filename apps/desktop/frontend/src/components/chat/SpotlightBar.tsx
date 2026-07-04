@@ -384,7 +384,7 @@ export function SpotlightBar() {
         window.addEventListener('focus', handleFocus);
 
         return () => {
-            window.removeEventListener('blur', handleBlur);
+            window.removeEventListener('blur-sm', handleBlur);
             window.removeEventListener('focus', handleFocus);
             if (blurTimeoutRef.current) {
                 clearTimeout(blurTimeoutRef.current);
@@ -597,7 +597,7 @@ export function SpotlightBar() {
                         className="flex items-end gap-3 px-5 py-4 min-h-[64px]"
                     >
                         {/* Status Indicator with Provider Badge */}
-                        <div className="flex items-center gap-2 pb-2 flex-shrink-0">
+                        <div className="flex items-center gap-2 pb-2 shrink-0">
                             <div
                                 className={cn(
                                     "w-2 h-2 rounded-full transition-all duration-500",
@@ -617,7 +617,7 @@ export function SpotlightBar() {
                             onKeyDown={handleInputKeyDown}
                             placeholder="Whisper something..."
                             rows={1}
-                            className="flex-1 bg-transparent text-foreground text-[15px] outline-none placeholder:text-muted-foreground/40 resize-none min-h-[24px] max-h-[120px] py-1"
+                            className="flex-1 bg-transparent text-foreground text-[15px] outline-hidden placeholder:text-muted-foreground/40 resize-none min-h-[24px] max-h-[120px] py-1"
                             aria-label="Spotlight chat input"
                         />
 
@@ -632,7 +632,7 @@ export function SpotlightBar() {
                                         : "text-muted-foreground/40 hover:text-muted-foreground hover:bg-muted/50"
                                 )}
                                 aria-label={isPinned ? "Unpin spotlight" : "Pin spotlight"}
-                                title={isPinned ? "Click to auto-hide on blur" : "Click to keep visible"}
+                                title={isPinned ? "Click to auto-hide on blur-sm" : "Click to keep visible"}
                             >
                                 {isPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
                             </button>

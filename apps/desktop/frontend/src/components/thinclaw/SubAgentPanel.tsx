@@ -138,17 +138,17 @@ function FeedMessageRow({ msg }: { msg: FeedMessage }) {
     return (
         <div className="flex items-start gap-1.5 py-0.5 group/feed animate-in fade-in slide-in-from-left-2 duration-300">
             {/* Branch line connector */}
-            <div className="flex flex-col items-center flex-shrink-0 pt-0.5">
+            <div className="flex flex-col items-center shrink-0 pt-0.5">
                 <div className="w-px h-0.5 bg-zinc-700/50" />
                 <span className="text-[9px] leading-none">{categoryIcon}</span>
                 <div className="w-px flex-1 bg-zinc-700/50" />
             </div>
             <div className="flex-1 min-w-0">
-                <p className="text-[10px] text-zinc-400 leading-relaxed break-words">
+                <p className="text-[10px] text-zinc-400 leading-relaxed wrap-break-word">
                     {msg.content}
                 </p>
             </div>
-            <span className="text-[8px] text-zinc-600 flex-shrink-0 pt-0.5 opacity-0 group-hover/feed:opacity-100 transition-opacity">
+            <span className="text-[8px] text-zinc-600 shrink-0 pt-0.5 opacity-0 group-hover/feed:opacity-100 transition-opacity">
                 {timeStr}
             </span>
         </div>
@@ -236,7 +236,7 @@ function ChildRow({ child, onViewSession, onCancel, onArchive }: ChildRowProps) 
                 className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left"
             >
                 {/* Branch icon */}
-                <GitBranch className={`w-3 h-3 flex-shrink-0 ${isActive ? 'text-blue-400 animate-pulse' : 'text-zinc-500'
+                <GitBranch className={`w-3 h-3 shrink-0 ${isActive ? 'text-blue-400 animate-pulse' : 'text-zinc-500'
                     }`} />
 
                 <div className="flex-1 min-w-0">
@@ -293,8 +293,8 @@ function ChildRow({ child, onViewSession, onCancel, onArchive }: ChildRowProps) 
 
                 {(child.feed.length > 0 || child.result_summary) && (
                     expanded
-                        ? <ChevronUp className="w-2.5 h-2.5 text-zinc-500 flex-shrink-0" />
-                        : <ChevronDown className="w-2.5 h-2.5 text-zinc-500 flex-shrink-0" />
+                        ? <ChevronUp className="w-2.5 h-2.5 text-zinc-500 shrink-0" />
+                        : <ChevronDown className="w-2.5 h-2.5 text-zinc-500 shrink-0" />
                 )}
             </button>
 
@@ -592,7 +592,7 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
     ).length;
 
     return (
-        <div className="flex flex-col h-full bg-zinc-950/50 backdrop-blur-sm">
+        <div className="flex flex-col h-full bg-zinc-950/50 backdrop-blur-xs">
             {/* Panel Header */}
             <div className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-700/40 shrink-0">
                 <div className="flex items-center gap-2">
@@ -662,7 +662,7 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
                                             if (e.key === 'Escape') { setSpawning(false); setSpawnTask(''); setSpawnError(null); }
                                         }}
                                         placeholder="Describe the task..."
-                                        className="flex-1 bg-transparent text-[11px] text-zinc-200 placeholder-zinc-500 border-none outline-none"
+                                        className="flex-1 bg-transparent text-[11px] text-zinc-200 placeholder-zinc-500 border-none outline-hidden"
                                     />
                                     <button
                                         onClick={handleSpawn}

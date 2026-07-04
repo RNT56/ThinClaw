@@ -145,7 +145,7 @@ export function ThinClawRoutineAudit({ routineKey }: Props) {
                             </button>
                             <button
                                 onClick={handleToggleSelected}
-                                className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground transition-all hover:text-foreground"
+                                className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/3 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground transition-all hover:text-foreground"
                             >
                                 {selectedJob.enabled === false ? <ToggleLeft className="h-3.5 w-3.5" /> : <ToggleRight className="h-3.5 w-3.5 text-emerald-400" />}
                                 {selectedJob.enabled === false ? 'Enable' : 'Disable'}
@@ -181,7 +181,7 @@ export function ThinClawRoutineAudit({ routineKey }: Props) {
                         <button
                             onClick={() => setConfirmClear(true)}
                             disabled={entries.length === 0}
-                            className="p-2 rounded-lg text-muted-foreground hover:text-red-400 bg-white/[0.03] hover:bg-red-500/10 border border-white/5 hover:border-red-500/20 transition-all disabled:opacity-30 disabled:pointer-events-none"
+                            className="p-2 rounded-lg text-muted-foreground hover:text-red-400 bg-white/3 hover:bg-red-500/10 border border-white/5 hover:border-red-500/20 transition-all disabled:opacity-30 disabled:pointer-events-none"
                             title="Clear history"
                         >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -189,7 +189,7 @@ export function ThinClawRoutineAudit({ routineKey }: Props) {
                     )}
                     <button
                         onClick={fetchAudit}
-                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                     >
                         <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
                     </button>
@@ -203,7 +203,7 @@ export function ThinClawRoutineAudit({ routineKey }: Props) {
                     <select
                         value={selectedKey}
                         onChange={(e) => setSelectedKey(e.target.value)}
-                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white/[0.03] border border-white/5 text-foreground outline-none focus:ring-1 focus:ring-primary/30"
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white/3 border border-white/5 text-foreground outline-hidden focus:ring-1 focus:ring-primary/30"
                     >
                         {cronJobs.map(job => (
                             <option key={job.key} value={job.key}>{job.key}</option>
@@ -212,7 +212,7 @@ export function ThinClawRoutineAudit({ routineKey }: Props) {
                 )}
 
                 {/* Outcome filter */}
-                <div className="flex items-center gap-1 p-0.5 rounded-lg bg-white/[0.03] border border-white/5">
+                <div className="flex items-center gap-1 p-0.5 rounded-lg bg-white/3 border border-white/5">
                     {(['all', 'success', 'failure'] as const).map(f => (
                         <button
                             key={f}
@@ -264,8 +264,8 @@ export function ThinClawRoutineAudit({ routineKey }: Props) {
                                     animate={{ opacity: 1, x: 0 }}
                                     transition={{ delay: i * 0.02 }}
                                     className={cn(
-                                        "border-b border-white/[0.03] hover:bg-white/[0.02]",
-                                        isFailed && "bg-red-500/[0.04]"
+                                        "border-b border-white/3 hover:bg-white/2",
+                                        isFailed && "bg-red-500/4"
                                     )}
                                 >
                                     <td className="px-4 py-3 font-mono text-muted-foreground">{entry.routine_key}</td>

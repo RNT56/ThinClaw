@@ -86,8 +86,8 @@ function SkillCard({
         <div className={cn(
             "p-5 rounded-2xl border transition-all duration-300 flex flex-col h-full",
             enabled
-                ? "bg-primary/[0.03] border-primary/20 shadow-sm shadow-primary/5"
-                : "bg-white/[0.02] border-white/5 opacity-80"
+                ? "bg-primary/3 border-primary/20 shadow-xs shadow-primary/5"
+                : "bg-white/2 border-white/5 opacity-80"
         )}>
             <div className="flex items-start justify-between mb-4">
                 <div className={cn(
@@ -371,7 +371,7 @@ export function ThinClawSkills() {
                         <button
                             onClick={() => setShowMarketplace(!showMarketplace)}
                             className={cn(
-                                "flex items-center gap-2 px-4 py-2 rounded-xl border transition-all text-sm font-bold shadow-sm",
+                                "flex items-center gap-2 px-4 py-2 rounded-xl border transition-all text-sm font-bold shadow-xs",
                                 showMarketplace
                                     ? "bg-primary text-primary-foreground border-primary"
                                     : "bg-card border-border/40 hover:bg-white/5"
@@ -387,7 +387,7 @@ export function ThinClawSkills() {
                         </div>
                         <button
                             onClick={handleReloadAll}
-                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-sm"
+                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-xs"
                             title="Reload all skills"
                         >
                             <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
@@ -435,7 +435,7 @@ export function ThinClawSkills() {
                                     {catalogResults.length > 0 && (
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                             {catalogResults.slice(0, 6).map((entry: any) => (
-                                                <div key={entry.slug || entry.name} className="p-3 rounded-xl bg-white/[0.03] border border-white/5 flex items-start gap-3">
+                                                <div key={entry.slug || entry.name} className="p-3 rounded-xl bg-white/3 border border-white/5 flex items-start gap-3">
                                                     <Package className="w-4 h-4 text-primary mt-0.5 shrink-0" />
                                                     <div className="flex-1 min-w-0">
                                                         <div className="flex items-center gap-2">
@@ -510,7 +510,7 @@ export function ThinClawSkills() {
                     {isLoading && skills.length === 0 ? (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                             {[1, 2, 3, 4, 5, 6].map(i => (
-                                <div key={i} className="h-44 rounded-2xl border border-white/5 bg-white/[0.02] animate-pulse" />
+                                <div key={i} className="h-44 rounded-2xl border border-white/5 bg-white/2 animate-pulse" />
                             ))}
                         </div>
                     ) : filteredSkills.length > 0 ? (
@@ -571,7 +571,7 @@ export function ThinClawSkills() {
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
                                 exit={{ opacity: 0 }}
-                                className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+                                className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-6"
                                 onClick={() => setInspectName(null)}
                             >
                                 <div className="w-full max-w-4xl max-h-[80vh] overflow-hidden rounded-2xl border border-border bg-background shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -596,7 +596,7 @@ export function ThinClawSkills() {
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
                                 exit={{ opacity: 0 }}
-                                className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+                                className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-6"
                                 onClick={() => setPublishName(null)}
                             >
                                 <div className="w-full max-w-3xl max-h-[80vh] overflow-hidden rounded-2xl border border-border bg-background shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -624,7 +624,7 @@ export function ThinClawSkills() {
                                                 Dry Run
                                             </button>
                                         </div>
-                                        <pre className="p-3 rounded-xl bg-white/[0.03] border border-white/5 overflow-auto max-h-[48vh] text-xs font-mono whitespace-pre-wrap">
+                                        <pre className="p-3 rounded-xl bg-white/3 border border-white/5 overflow-auto max-h-[48vh] text-xs font-mono whitespace-pre-wrap">
                                             {publishResult ? JSON.stringify(publishResult, null, 2) : 'No publish dry-run yet.'}
                                         </pre>
                                     </div>
