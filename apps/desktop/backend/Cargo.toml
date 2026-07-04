@@ -87,7 +87,8 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
 tokio-stream = "0.1.18"
-sha2 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 tungstenite = "0.26"
 futures-util = "0.3"
@@ -104,7 +105,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 # Cloud storage (Work Stream A)
 opendal = { version = "0.55", features = ["services-s3", "services-webdav", "services-sftp"] }
 aes-gcm = "0.10"
-hkdf = "0.12"
+hkdf = "0.13"
 zstd = "0.13"
 
 # ThinClaw agent engine (root crate; runtime DB backend is selected by features)

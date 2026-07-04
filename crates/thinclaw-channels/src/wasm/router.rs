@@ -15,7 +15,7 @@ use axum::{
     routing::{any, get},
 };
 use base64::{Engine as _, engine::general_purpose};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use tokio::sync::RwLock;
@@ -248,7 +248,7 @@ impl RouterState {
 }
 
 fn verify_signature(secret: &[u8], payload: &[u8], signature: &str) -> bool {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     use subtle::ConstantTimeEq;
 
@@ -263,7 +263,7 @@ fn verify_signature(secret: &[u8], payload: &[u8], signature: &str) -> bool {
 
 fn verify_base64_signature(secret: &[u8], payload: &[u8], signature: &str) -> bool {
     use base64::{Engine as _, engine::general_purpose};
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     use subtle::ConstantTimeEq;
 
@@ -821,7 +821,7 @@ mod tests {
     use crate::wasm::wrapper::WasmChannel;
 
     fn sign_payload(secret: &[u8], payload: &[u8]) -> String {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
 
         type HmacSha256 = Hmac<Sha256>;
@@ -1123,7 +1123,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_base64_hmac_validation() {
         use base64::{Engine as _, engine::general_purpose};
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
 
         let router = Arc::new(WasmChannelRouter::new());
@@ -1236,7 +1236,7 @@ mod tests {
     #[tokio::test]
     async fn test_twilio_request_signature_validation() {
         use base64::{Engine as _, engine::general_purpose};
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha1::Sha1;
 
         let router = Arc::new(WasmChannelRouter::new());

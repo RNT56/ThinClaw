@@ -13,7 +13,8 @@ pdf-extract = { version = "0.12", optional = true }
 regex = { version = "1", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
 thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 thiserror = { workspace = true }

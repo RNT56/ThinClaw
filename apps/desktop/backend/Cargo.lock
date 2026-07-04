@@ -629,7 +629,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sha1",
+ "sha1 0.10.6",
  "sync_wrapper 1.0.2",
  "tokio",
  "tokio-tungstenite 0.28.0",
@@ -3733,6 +3733,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
  "hmac 0.12.1",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac 0.13.0",
 ]
 
 [[package]]
@@ -7654,7 +7663,7 @@ dependencies = [
  "rust-ini",
  "serde",
  "serde_json",
- "sha1",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "tokio",
 ]
@@ -8293,7 +8302,7 @@ dependencies = [
  "cbc",
  "futures-util",
  "generic-array",
- "hkdf",
+ "hkdf 0.12.4",
  "num",
  "once_cell",
  "rand 0.8.6",
@@ -8629,6 +8638,17 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -9091,7 +9111,7 @@ dependencies = [
  "futures-util",
  "generic-array",
  "hex",
- "hkdf",
+ "hkdf 0.12.4",
  "hmac 0.12.1",
  "itoa",
  "log",
@@ -9102,7 +9122,7 @@ dependencies = [
  "rand 0.8.6",
  "rsa",
  "serde",
- "sha1",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "smallvec",
  "sqlx-core",
@@ -9129,7 +9149,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
- "hkdf",
+ "hkdf 0.12.4",
  "hmac 0.12.1",
  "home",
  "itoa",
@@ -10043,8 +10063,8 @@ dependencies = [
  "fs4",
  "futures",
  "hex",
- "hkdf",
- "hmac 0.12.1",
+ "hkdf 0.13.0",
+ "hmac 0.13.0",
  "http-body-util",
  "hyper 1.8.1",
  "hyper-util",
@@ -10077,7 +10097,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "subtle",
  "sysinfo",
  "tar",
@@ -10145,6 +10165,7 @@ dependencies = [
  "cron",
  "dirs",
  "futures",
+ "hex",
  "mime_guess",
  "rand 0.10.1",
  "regex",
@@ -10153,7 +10174,7 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thinclaw-channels-core",
  "thinclaw-history",
  "thinclaw-identity",
@@ -10211,7 +10232,7 @@ dependencies = [
  "fs4",
  "futures",
  "hex",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "jsonwebtoken",
  "lru 0.18.0",
  "rand 0.10.1",
@@ -10220,8 +10241,8 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha1",
- "sha2 0.10.9",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
  "subtle",
  "thinclaw-channels-core",
  "thinclaw-media",
@@ -10332,7 +10353,8 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "futures-util",
- "hkdf",
+ "hex",
+ "hkdf 0.13.0",
  "html2text",
  "image",
  "ndarray",
@@ -10351,7 +10373,7 @@ dependencies = [
  "security-framework 3.6.0",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "specta",
  "specta-typescript",
  "sqlx",
@@ -10433,7 +10455,7 @@ dependencies = [
  "ipnet",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "subtle",
  "thinclaw-channels-core",
  "thinclaw-experiments",
@@ -10484,6 +10506,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "hex",
  "rand 0.10.1",
  "regex",
  "reqwest 0.12.28",
@@ -10493,7 +10516,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thinclaw-config",
  "thinclaw-experiments",
  "thinclaw-llm-core",
@@ -10523,13 +10546,14 @@ name = "thinclaw-media"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "hex",
  "mime_guess",
  "pdf-extract",
  "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thinclaw-platform",
  "thinclaw-types",
  "thiserror 2.0.17",
@@ -10586,7 +10610,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thinclaw-types",
  "thiserror 2.0.17",
  "tokio",
@@ -10603,14 +10627,14 @@ dependencies = [
  "async-trait",
  "chrono",
  "deadpool-postgres",
- "hkdf",
+ "hkdf 0.13.0",
  "libsql",
  "rand 0.10.1",
  "secrecy",
  "secret-service",
  "security-framework 3.6.0",
  "serde",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror 2.0.17",
  "tokio",
  "tokio-postgres",
@@ -10668,7 +10692,7 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "subtle",
  "sysinfo",
  "tempfile",
@@ -11562,7 +11586,7 @@ dependencies = [
  "log",
  "native-tls",
  "rand 0.8.6",
- "sha1",
+ "sha1 0.10.6",
  "thiserror 1.0.69",
  "url",
  "utf-8",
@@ -11583,7 +11607,7 @@ dependencies = [
  "rand 0.8.6",
  "rustls",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.10.6",
  "thiserror 1.0.69",
  "utf-8",
 ]
@@ -11600,7 +11624,7 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.4",
- "sha1",
+ "sha1 0.10.6",
  "thiserror 2.0.17",
  "utf-8",
 ]
@@ -11618,7 +11642,7 @@ dependencies = [
  "log",
  "native-tls",
  "rand 0.9.4",
- "sha1",
+ "sha1 0.10.6",
  "thiserror 2.0.17",
  "utf-8",
 ]
@@ -11637,7 +11661,7 @@ dependencies = [
  "rand 0.9.4",
  "rustls",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.10.6",
  "thiserror 2.0.17",
 ]
 
@@ -13401,7 +13425,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_repr",
- "sha1",
+ "sha1 0.10.6",
  "static_assertions",
  "tokio",
  "tracing",
@@ -13628,7 +13652,7 @@ dependencies = [
  "flate2",
  "hmac 0.12.1",
  "pbkdf2",
- "sha1",
+ "sha1 0.10.6",
  "time",
  "zstd 0.11.2+zstd.1.5.2",
 ]

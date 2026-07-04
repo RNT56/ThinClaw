@@ -19,7 +19,8 @@ rust_decimal_macros = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
 thinclaw-config = { version = "0.1.0", path = "../thinclaw-config" }
 thinclaw-experiments = { version = "0.1.0", path = "../thinclaw-experiments" }
 thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }

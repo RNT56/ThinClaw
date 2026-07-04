@@ -458,7 +458,7 @@ fn limited_len(len: usize, max_records: Option<usize>) -> usize {
 fn content_hash(payload: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(payload.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn manifest_path_for_output(output: &Path) -> PathBuf {

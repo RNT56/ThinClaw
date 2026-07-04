@@ -126,7 +126,7 @@ impl WellKnownSkillSource {
                 .await?;
             let normalized = crate::skills::normalize_line_endings(&raw);
             let parsed = crate::skills::parser::parse_skill_md(&normalized)?;
-            let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+            let digest = hex::encode(Sha256::digest(normalized.as_bytes()));
             discovered.push(RemoteSkill {
                 slug: format!("well_known:{}#{}", registry.url, parsed.manifest.name),
                 name: parsed.manifest.name,

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rust_decimal::Decimal;
 use sha2::Sha256;
 use thinclaw::agent::routine::RunStatus;
