@@ -66,7 +66,7 @@ function ChannelStatusCard({
         <motion.div
             layout
             className={cn(
-                "rounded-2xl bg-card/30 backdrop-blur-md shadow-sm transition-all",
+                "rounded-2xl bg-card/30 backdrop-blur-md shadow-xs transition-all",
                 entry.enabled ? "shadow-primary/5" : ""
             )}
         >
@@ -97,15 +97,15 @@ function ChannelStatusCard({
 
                 {/* Metrics row */}
                 <div className="grid grid-cols-3 gap-3 mt-4">
-                    <div className="text-center p-2 rounded-lg bg-white/[0.02]">
+                    <div className="text-center p-2 rounded-lg bg-white/2">
                         <p className="text-lg font-bold tabular-nums">{entry.messages_sent}</p>
                         <p className="text-[9px] text-muted-foreground uppercase tracking-widest">Sent</p>
                     </div>
-                    <div className="text-center p-2 rounded-lg bg-white/[0.02]">
+                    <div className="text-center p-2 rounded-lg bg-white/2">
                         <p className="text-lg font-bold tabular-nums">{entry.messages_received}</p>
                         <p className="text-[9px] text-muted-foreground uppercase tracking-widest">Received</p>
                     </div>
-                    <div className="text-center p-2 rounded-lg bg-white/[0.02]">
+                    <div className="text-center p-2 rounded-lg bg-white/2">
                         <p className="text-lg font-bold tabular-nums">
                             {entry.uptime_secs != null ? formatUptime(entry.uptime_secs) : '—'}
                         </p>
@@ -164,7 +164,7 @@ function ChannelStatusCard({
                                             "px-3 py-2 rounded-lg text-xs font-medium transition-all",
                                             (entry.stream_mode || '') === mode
                                                 ? "bg-primary/15 text-primary"
-                                                : "bg-white/[0.03] text-muted-foreground hover:bg-white/5"
+                                                : "bg-white/3 text-muted-foreground hover:bg-white/5"
                                         )}
                                     >
                                         {STREAM_MODE_LABELS[mode]}
@@ -298,14 +298,14 @@ export function ThinClawChannelStatus() {
                     <ThinClawModeBadge status={runtimeStatus} />
                     <button
                         onClick={() => setSortBy(s => s === 'name' ? 'state' : 'name')}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 transition-all"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 transition-all"
                     >
                         <ArrowUpDown className="w-3.5 h-3.5" />
                         Sort: {sortBy === 'name' ? 'Name' : 'Status'}
                     </button>
                     <button
                         onClick={fetchData}
-                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 transition-all"
+                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 transition-all"
                     >
                         <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
                     </button>

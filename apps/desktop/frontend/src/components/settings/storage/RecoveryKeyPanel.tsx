@@ -108,10 +108,10 @@ export function RecoveryKeyPanel() {
                     <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
                         <div className="flex gap-2 pt-2">
                             <input type="text" value={importKey} onChange={e => setImportKey(e.target.value)} placeholder="Paste your recovery key here…"
-                                className="flex-1 h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
+                                className="flex-1 h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all" />
                             <button onClick={handleImport} disabled={importing || !importKey.trim()} className={cn(
                                 'px-4 h-10 rounded-xl bg-primary text-primary-foreground text-xs font-bold uppercase tracking-wider',
-                                'hover:bg-primary/90 transition-all shadow-sm',
+                                'hover:bg-primary/90 transition-all shadow-xs',
                                 (importing || !importKey.trim()) && 'opacity-50 cursor-not-allowed'
                             )}>
                                 {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Import'}

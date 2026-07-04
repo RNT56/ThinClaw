@@ -274,10 +274,10 @@ export function ThinClawConfig() {
     return (
         <div className="flex flex-col h-full overflow-hidden">
             {/* Header */}
-            <div className="flex-shrink-0 px-5 pt-5 pb-3">
+            <div className="shrink-0 px-5 pt-5 pb-3">
                 <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500/20 to-orange-500/20 border border-amber-500/30 flex items-center justify-center">
+                        <div className="w-9 h-9 rounded-xl bg-linear-to-br from-amber-500/20 to-orange-500/20 border border-amber-500/30 flex items-center justify-center">
                             <Settings2 className="w-4.5 h-4.5 text-amber-400" />
                         </div>
                         <div>
@@ -316,7 +316,7 @@ export function ThinClawConfig() {
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         placeholder="Search settings..."
-                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-amber-500/50"
+                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-amber-500/50"
                     />
                 </div>
             </div>
@@ -336,14 +336,14 @@ export function ThinClawConfig() {
                                 value={newKey}
                                 onChange={e => setNewKey(e.target.value)}
                                 placeholder="Key name"
-                                className="w-full px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-amber-500/50"
+                                className="w-full px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-amber-500/50"
                             />
                             <textarea
                                 value={newValue}
                                 onChange={e => setNewValue(e.target.value)}
                                 placeholder="Value (JSON or string)"
                                 rows={2}
-                                className="w-full px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-amber-500/50 font-mono resize-none"
+                                className="w-full px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-amber-500/50 font-mono resize-none"
                             />
                             <div className="flex justify-end gap-2">
                                 <button onClick={() => setShowAddForm(false)} className="px-3 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
@@ -360,7 +360,7 @@ export function ThinClawConfig() {
 
             {/* Agent Identity — Quick Access to workspace files */}
             <div className="px-5 space-y-3 mb-3">
-                <div className="p-4 rounded-lg bg-gradient-to-br from-violet-500/5 to-indigo-500/5 border border-violet-500/15">
+                <div className="p-4 rounded-lg bg-linear-to-br from-violet-500/5 to-indigo-500/5 border border-violet-500/15">
                     <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
                             <Brain className="w-3.5 h-3.5 text-violet-400" />
@@ -417,7 +417,7 @@ export function ThinClawConfig() {
                             value={urlAllowlist}
                             onChange={e => { setUrlAllowlist(e.target.value); setUrlDirty(true); }}
                             placeholder="api.example.com, docs.example.com"
-                            className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500/50 font-mono"
+                            className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-emerald-500/50 font-mono"
                         />
                         <button
                             onClick={handleSaveUrlAllowlist}
@@ -483,7 +483,7 @@ export function ThinClawConfig() {
                             value={fallbackModel}
                             onChange={e => { setFallbackModel(e.target.value); setFallbackDirty(true); }}
                             placeholder="e.g. gpt-4o, claude-3-haiku-20240307"
-                            className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-blue-500/50 font-mono"
+                            className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-blue-500/50 font-mono"
                         />
                         <button
                             onClick={handleSaveFallback}
@@ -516,7 +516,7 @@ export function ThinClawConfig() {
                                     value={ccModel}
                                     onChange={e => { setCcModel(e.target.value); setCcModelDirty(true); }}
                                     placeholder='sonnet, opus, claude-sonnet-4-20250514'
-                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-orange-500/50 font-mono"
+                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-orange-500/50 font-mono"
                                 />
                                 <button
                                     onClick={handleSaveCcModel}
@@ -539,7 +539,7 @@ export function ThinClawConfig() {
                                     value={ccMaxTurns}
                                     onChange={e => { setCcMaxTurns(e.target.value); setCcMaxTurnsDirty(true); }}
                                     placeholder="10"
-                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-orange-500/50 font-mono"
+                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-orange-500/50 font-mono"
                                 />
                                 <button
                                     onClick={handleSaveCcMaxTurns}
@@ -575,7 +575,7 @@ export function ThinClawConfig() {
                                     value={amAllowFrom}
                                     onChange={e => { setAmAllowFrom(e.target.value); setAmAllowFromDirty(true); }}
                                     placeholder="user@example.com, other@example.com"
-                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-sky-500/50 font-mono"
+                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-sky-500/50 font-mono"
                                 />
                                 <button
                                     onClick={() => handleSaveAppleMail('channels.apple_mail_allow_from', amAllowFrom.trim())}
@@ -602,7 +602,7 @@ export function ThinClawConfig() {
                                     value={amPollInterval}
                                     onChange={e => { setAmPollInterval(e.target.value); setAmPollDirty(true); }}
                                     placeholder="10"
-                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-sky-500/50 font-mono"
+                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-sky-500/50 font-mono"
                                 />
                                 <button
                                     onClick={() => handleSaveAppleMail('channels.apple_mail_poll_interval', amPollInterval.trim() ? parseInt(amPollInterval.trim(), 10) : null)}
@@ -637,7 +637,7 @@ export function ThinClawConfig() {
                                     value={codexModel}
                                     onChange={e => { setCodexModel(e.target.value); setCodexModelDirty(true); }}
                                     placeholder='gpt-5.3-codex'
-                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-green-500/50 font-mono"
+                                    className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-green-500/50 font-mono"
                                 />
                                 <button
                                     onClick={handleSaveCodexModel}
@@ -655,7 +655,7 @@ export function ThinClawConfig() {
                 </div>
 
                 {/* Desktop Autonomy */}
-                <div className="p-3 rounded-lg bg-gradient-to-br from-red-500/5 to-rose-500/5 border border-red-500/20">
+                <div className="p-3 rounded-lg bg-linear-to-br from-red-500/5 to-rose-500/5 border border-red-500/20">
                     <div className="flex items-center gap-2 mb-2">
                         <Monitor className="w-3.5 h-3.5 text-red-400" />
                         <span className="text-xs font-semibold text-red-600 dark:text-red-300 uppercase tracking-wider">Desktop Autonomy</span>
@@ -686,7 +686,7 @@ export function ThinClawConfig() {
                                         disabled={genericSaving === item.key}
                                         className={`relative w-9 h-5 rounded-full transition-colors ${val ? 'bg-red-500/60' : 'bg-muted/40 border border-border/40'}`}
                                     >
-                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${val ? 'translate-x-4' : ''}`} />
+                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-xs transition-transform ${val ? 'translate-x-4' : ''}`} />
                                     </button>
                                 </div>
                             );
@@ -730,7 +730,7 @@ export function ThinClawConfig() {
                                             disabled={genericSaving === item.key}
                                             className={`relative w-9 h-5 rounded-full transition-colors ${val ? 'bg-indigo-500/60' : 'bg-muted/40 border border-border/40'}`}
                                         >
-                                            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${val ? 'translate-x-4' : ''}`} />
+                                            <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-xs transition-transform ${val ? 'translate-x-4' : ''}`} />
                                         </button>
                                     </div>
                                 );
@@ -743,7 +743,7 @@ export function ThinClawConfig() {
                                         defaultValue={typeof setting?.value === 'string' ? setting.value : ''}
                                         placeholder={item.placeholder}
                                         onBlur={e => { if (e.target.value !== (setting?.value ?? '')) handleGenericSave(item.key, e.target.value.trim() || null, item.label); }}
-                                        className="w-full mt-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-indigo-500/50 font-mono"
+                                        className="w-full mt-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-indigo-500/50 font-mono"
                                     />
                                 </div>
                             );
@@ -774,7 +774,7 @@ export function ThinClawConfig() {
                                         defaultValue={typeof setting?.value === 'string' ? setting.value : ''}
                                         placeholder={item.placeholder}
                                         onBlur={e => { if (e.target.value !== (setting?.value ?? '')) handleGenericSave(item.key, e.target.value.trim() || null, item.label); }}
-                                        className="w-full mt-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-pink-500/50 font-mono"
+                                        className="w-full mt-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-pink-500/50 font-mono"
                                     />
                                 </div>
                             );
@@ -810,7 +810,7 @@ export function ThinClawConfig() {
                                         disabled={genericSaving === item.key}
                                         className={`relative w-9 h-5 rounded-full transition-colors ${val ? 'bg-cyan-500/60' : 'bg-muted/40 border border-border/40'}`}
                                     >
-                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${val ? 'translate-x-4' : ''}`} />
+                                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-xs transition-transform ${val ? 'translate-x-4' : ''}`} />
                                     </button>
                                 </div>
                             );
@@ -854,7 +854,7 @@ export function ThinClawConfig() {
                                                     s.key === setting.key ? { ...s, editValue: e.target.value } : s
                                                 ))}
                                                 rows={3}
-                                                className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-amber-500/30 text-sm text-foreground font-mono resize-none focus:outline-none focus:border-amber-500/50"
+                                                className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-amber-500/30 text-sm text-foreground font-mono resize-none focus:outline-hidden focus:border-amber-500/50"
                                                 autoFocus
                                             />
                                             <div className="flex flex-col gap-1">

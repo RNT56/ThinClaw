@@ -260,7 +260,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-xs">
             <div className="w-full max-w-lg bg-card border border-border rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
                 <div className="flex items-center justify-between p-4 border-b border-border bg-muted/30">
                     <div className="flex items-center gap-3">
@@ -497,7 +497,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                                             value={customLlmConfig.url || ''}
                                             onChange={e => setCustomLlmConfig((p: thinclaw.CustomLlmConfigInput) => ({ ...p, url: e.target.value }))}
                                             placeholder="https://api.example.com/v1"
-                                            className="w-full bg-muted/50 border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-primary/50 transition-colors"
+                                            className="w-full bg-muted/50 border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-hidden focus:border-primary/50 transition-colors"
                                         />
                                     </div>
                                 </div>
@@ -511,7 +511,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                                             value={customLlmConfig.key || ''}
                                             onChange={e => setCustomLlmConfig((p: thinclaw.CustomLlmConfigInput) => ({ ...p, key: e.target.value }))}
                                             placeholder="sk-..."
-                                            className="w-full bg-muted/50 border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-primary/50 transition-colors"
+                                            className="w-full bg-muted/50 border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-hidden focus:border-primary/50 transition-colors"
                                         />
                                     </div>
                                 </div>
@@ -525,7 +525,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                                             value={customLlmConfig.model || ''}
                                             onChange={e => setCustomLlmConfig((p: thinclaw.CustomLlmConfigInput) => ({ ...p, model: e.target.value }))}
                                             placeholder="llama-3-70b"
-                                            className="w-full bg-muted/50 border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-primary/50 transition-colors"
+                                            className="w-full bg-muted/50 border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-hidden focus:border-primary/50 transition-colors"
                                         />
                                     </div>
                                 </div>

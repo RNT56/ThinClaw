@@ -124,7 +124,7 @@ export function MemoryEditor() {
                         value={content}
                         onChange={handleChange}
                         onKeyDown={handleKeyDown}
-                        className="w-full h-full bg-transparent resize-none p-4 focus:outline-none font-mono text-xs leading-relaxed text-gray-300 selection:bg-purple-500/30"
+                        className="w-full h-full bg-transparent resize-none p-4 focus:outline-hidden font-mono text-xs leading-relaxed text-gray-300 selection:bg-purple-500/30"
                         spellCheck={false}
                         placeholder="// Agent memory is empty..."
                     />

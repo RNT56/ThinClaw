@@ -144,7 +144,7 @@ export function ThinClawAutonomy() {
                 </div>
                 <button
                     onClick={load}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                 >
                     <RefreshCw className={cn('w-4 h-4', isLoading && 'animate-spin')} />
                 </button>
@@ -192,7 +192,7 @@ export function ThinClawAutonomy() {
                         <button
                             disabled={!canMutate || isMutating || status?.paused}
                             onClick={() => runMutation('Pause', () => thinclaw.pauseAutonomy('Paused from ThinClaw Desktop'))}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/[0.03] border border-white/5 hover:bg-white/5 disabled:opacity-40"
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/3 border border-white/5 hover:bg-white/5 disabled:opacity-40"
                         >
                             <Pause className="w-3.5 h-3.5" />
                             Pause
@@ -200,7 +200,7 @@ export function ThinClawAutonomy() {
                         <button
                             disabled={!canMutate || isMutating || !status?.paused}
                             onClick={() => runMutation('Resume', thinclaw.resumeAutonomy)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/[0.03] border border-white/5 hover:bg-white/5 disabled:opacity-40"
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/3 border border-white/5 hover:bg-white/5 disabled:opacity-40"
                         >
                             <Play className="w-3.5 h-3.5" />
                             Resume
@@ -267,7 +267,7 @@ export function ThinClawAutonomy() {
                             <div key={build.build_id} className="rounded-lg border border-white/5 bg-black/10 p-3">
                                 <div className="flex items-center justify-between gap-2">
                                     <p className="text-sm font-semibold truncate">{build.title}</p>
-                                    <span className={cn('text-[10px] px-2 py-1 rounded-md border', build.promoted ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-muted-foreground bg-white/[0.03] border-white/5')}>
+                                    <span className={cn('text-[10px] px-2 py-1 rounded-md border', build.promoted ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-muted-foreground bg-white/3 border-white/5')}>
                                         {build.promoted ? 'promoted' : 'candidate'}
                                     </span>
                                 </div>

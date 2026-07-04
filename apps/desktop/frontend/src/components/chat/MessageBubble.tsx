@@ -181,7 +181,7 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
 
     if (id === "pending_generation") {
         return (
-            <div className="w-64 h-64 bg-card rounded-xl flex flex-col items-center justify-center gap-4 border border-border/50 relative overflow-hidden shadow-sm">
+            <div className="w-64 h-64 bg-card rounded-xl flex flex-col items-center justify-center gap-4 border border-border/50 relative overflow-hidden shadow-xs">
                 <div className="absolute inset-0 bg-muted/10" />
                 <div className="relative w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center border border-primary/20 shadow-inner group-hover:scale-110 transition-transform duration-500">
                     <ImageIcon className="w-6 h-6 text-primary animate-pulse" />
@@ -203,13 +203,13 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
     // Ready-to-View State (Safety Wall)
     if (isReadyToView && !userRequestedView) {
         return (
-            <div className="w-64 h-64 bg-card rounded-xl flex flex-col items-center justify-center gap-4 border border-border/50 relative overflow-hidden shadow-sm animate-in fade-in zoom-in-95 duration-300">
+            <div className="w-64 h-64 bg-card rounded-xl flex flex-col items-center justify-center gap-4 border border-border/50 relative overflow-hidden shadow-xs animate-in fade-in zoom-in-95 duration-300">
                 <div className="absolute inset-0 bg-muted/10" />
                 <div className="relative mb-2">
                     <div className="absolute inset-0 bg-green-500/20 blur-2xl rounded-full animate-pulse" />
-                    <div className="relative bg-gradient-to-br from-green-400 to-emerald-600 p-4 rounded-2xl shadow-lg ring-1 ring-white/20 animate-in zoom-in-50 duration-500">
+                    <div className="relative bg-linear-to-br from-green-400 to-emerald-600 p-4 rounded-2xl shadow-lg ring-1 ring-white/20 animate-in zoom-in-50 duration-500">
                         <Sparkles className="w-8 h-8 text-white" />
-                        <div className="absolute -bottom-1 -right-1 bg-white rounded-full p-0.5 shadow-sm">
+                        <div className="absolute -bottom-1 -right-1 bg-white rounded-full p-0.5 shadow-xs">
                             <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                         </div>
                     </div>
@@ -217,7 +217,7 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
                 <p className="text-sm font-medium text-foreground">Generation Complete</p>
                 <button
                     onClick={handleViewClick}
-                    className="px-4 py-2 bg-primary text-primary-foreground text-xs font-bold rounded-md shadow hover:bg-primary/90 transition-colors cursor-pointer z-50"
+                    className="px-4 py-2 bg-primary text-primary-foreground text-xs font-bold rounded-md shadow-sm hover:bg-primary/90 transition-colors cursor-pointer z-50"
                 >
                     View Image
                 </button>
@@ -257,7 +257,7 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
                     src={src}
                     alt="attachment"
                     onError={() => setError(true)}
-                    className="max-w-sm rounded-lg border border-border/50 shadow-sm transition-transform cursor-pointer bg-black/5"
+                    className="max-w-sm rounded-lg border border-border/50 shadow-xs transition-transform cursor-pointer bg-black/5"
                     onClick={() => setIsFullscreen(true)}
                 />
                 <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-50 pointer-events-auto">
@@ -290,7 +290,7 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
             </div>
             {isFullscreen && createPortal(
                 <div
-                    className="fixed inset-0 z-[9999] bg-black/90 backdrop-blur-md flex items-center justify-center p-8 animate-in fade-in duration-200"
+                    className="fixed inset-0 z-9999 bg-black/90 backdrop-blur-md flex items-center justify-center p-8 animate-in fade-in duration-200"
                     onClick={() => setIsFullscreen(false)}
                 >
                     <div className="relative max-w-full max-h-full" onClick={e => e.stopPropagation()}>
@@ -461,7 +461,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
     if (message.is_summary) {
         return (
             <div className="w-full flex flex-col items-center my-6 group animate-in fade-in duration-500">
-                <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground/70 bg-muted/20 px-4 py-1.5 rounded-full border border-border/30 backdrop-blur-sm transition-all hover:bg-muted/40 hover:text-foreground hover:border-border/50 shadow-sm">
+                <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground/70 bg-muted/20 px-4 py-1.5 rounded-full border border-border/30 backdrop-blur-xs transition-all hover:bg-muted/40 hover:text-foreground hover:border-border/50 shadow-xs">
                     <Sparkles className="w-3 h-3 text-amber-500" />
                     <span>{message.content}</span>
                     {message.original_messages && message.original_messages.length > 0 && (
@@ -478,8 +478,8 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                 </div>
                 {showOriginals && message.original_messages && (
                     <div className="w-full mt-6 flex flex-col gap-4 pl-4 md:pl-8 border-l-2 border-primary/10 relative">
-                        <div className="absolute top-0 left-[-1px] w-full h-8 bg-gradient-to-b from-background to-transparent z-10" />
-                        <div className="absolute bottom-0 left-[-1px] w-full h-8 bg-gradient-to-t from-background to-transparent z-10" />
+                        <div className="absolute top-0 -left-px w-full h-8 bg-linear-to-b from-background to-transparent z-10" />
+                        <div className="absolute bottom-0 -left-px w-full h-8 bg-linear-to-t from-background to-transparent z-10" />
 
                         {message.original_messages.map((m, i) => (
                             <MessageBubble
@@ -506,7 +506,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
     return (
         <div className={cn("flex flex-col w-full", !skipAnimation && "animate-in fade-in slide-in-from-bottom-2 duration-300", isUser ? "items-end" : "items-start", isLastUser && "mb-8")}>
             <div className={cn(
-                "group relative max-w-[85%] md:max-w-[75%] rounded-2xl px-5 py-4 shadow-sm overflow-visible",
+                "group relative max-w-[85%] md:max-w-[75%] rounded-2xl px-5 py-4 shadow-xs overflow-visible",
                 isUser ? "bg-primary text-primary-foreground rounded-br-sm" : "bg-card border border-border/50 rounded-bl-sm"
             )}>
                 {thoughts.length > 0 && !isUser && (
@@ -542,7 +542,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                             {message.attached_docs.map((doc, i) => {
                                 return (
                                     <div key={i} className="flex items-center gap-2 p-2 rounded-lg bg-secondary/50 border border-border/50 transition-colors hover:bg-secondary">
-                                        <div className="p-1.5 bg-background rounded-md shadow-sm">
+                                        <div className="p-1.5 bg-background rounded-md shadow-xs">
                                             <Paperclip className="w-3.5 h-3.5 text-orange-500" />
                                         </div>
                                         <span className="text-xs font-medium max-w-[200px] truncate" title={doc.name}>
@@ -571,7 +571,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                                 <textarea
                                     value={editContent}
                                     onChange={(e) => setEditContent(e.target.value)}
-                                    className="bg-transparent text-primary-foreground rounded-lg p-2 min-h-[100px] resize-y focus:outline-none border border-white/20 text-sm font-normal"
+                                    className="bg-transparent text-primary-foreground rounded-lg p-2 min-h-[100px] resize-y focus:outline-hidden border border-white/20 text-sm font-normal"
                                     autoFocus
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter' && !e.shiftKey) {
@@ -597,7 +597,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                                             const targetId = message.realId || message.id;
                                             if (targetId) onResend?.(targetId, editContent);
                                         }}
-                                        className="p-1 px-3 rounded bg-primary-foreground text-primary font-semibold text-xs hover:opacity-90 transition-opacity shadow-sm flex items-center gap-1"
+                                        className="p-1 px-3 rounded bg-primary-foreground text-primary font-semibold text-xs hover:opacity-90 transition-opacity shadow-xs flex items-center gap-1"
                                     >
                                         <span>Send</span>
                                         <div className="w-3 h-3 text-primary rotate-90">
@@ -612,7 +612,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                             </div>
                         )
                     ) : (
-                        <div className="prose prose-sm max-w-none break-words dark:prose-invert
+                        <div className="prose prose-sm max-w-none wrap-break-word dark:prose-invert
                             text-foreground prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-li:text-foreground
                             prose-headings:font-semibold prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-h1:mt-6 prose-h2:mt-5
                             prose-p:leading-loose prose-p:my-4
@@ -695,13 +695,13 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
 
                 {!isUser && (!message.images || message.images.length === 0) && (
                     <div className="absolute -bottom-6 right-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex gap-1">
-                        <CopyButton content={sanitizedContent} className="border-border/50 shadow-sm" />
+                        <CopyButton content={sanitizedContent} className="border-border/50 shadow-xs" />
                         <button
                             id={`tts-btn-${message.id ?? 'msg'}`}
                             onClick={handleReadAloud}
                             disabled={isSpeaking}
                             className={cn(
-                                "p-1.5 rounded-md transition-all duration-200 bg-background/50 backdrop-blur-md hover:bg-accent hover:text-accent-foreground border-border/50 shadow-sm flex items-center gap-1",
+                                "p-1.5 rounded-md transition-all duration-200 bg-background/50 backdrop-blur-md hover:bg-accent hover:text-accent-foreground border-border/50 shadow-xs flex items-center gap-1",
                                 isSpeaking && "text-primary"
                             )}
                             title={isSpeaking ? 'Playing…' : `Read Aloud${ttsBackend ? ` (${ttsBackend.displayName})` : ''}`}
@@ -726,7 +726,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                     <div className="absolute -bottom-8 right-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-20">
                         <button
                             onClick={() => { setIsEditing(true); setEditContent(message.content); }}
-                            className="bg-card border border-border text-muted-foreground hover:text-foreground p-1.5 rounded-full shadow-sm transition-colors hover:bg-accent"
+                            className="bg-card border border-border text-muted-foreground hover:text-foreground p-1.5 rounded-full shadow-xs transition-colors hover:bg-accent"
                             title="Edit Message"
                         >
                             <Pencil className="w-3.5 h-3.5" />

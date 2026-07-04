@@ -103,7 +103,7 @@ export function ChatView() {
             >
                 {/* Drag Overlay: Scoped to Chat Area */}
                 {(isDragActive || isGlobalDrag) && (canSee || isRagCapable) && (
-                    <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex flex-col items-center justify-center p-8 animate-in fade-in duration-200">
+                    <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur-xs flex flex-col items-center justify-center p-8 animate-in fade-in duration-200">
                         <div className="w-full h-full border-4 border-primary/50 border-dashed rounded-3xl flex flex-col items-center justify-center gap-4 bg-primary/5">
                             {canSee ? <ImageIcon className="w-16 h-16 text-primary animate-bounce" /> : <Paperclip className="w-16 h-16 text-primary animate-bounce" />}
                             <p className="text-2xl font-bold text-primary">Drop files to upload</p>
@@ -121,7 +121,7 @@ export function ChatView() {
                         className="absolute top-0 left-0 right-0 z-20 flex justify-center p-4 pointer-events-none"
                     >
                         <div className="pointer-events-auto flex items-center gap-3 relative z-10">
-                            <div className="shadow-sm">
+                            <div className="shadow-xs">
                                 <ModelSelector onManageClick={() => setActiveTab('models')} isAutoMode={autoMode} toggleAutoMode={setAutoMode} />
                             </div>
 
@@ -129,7 +129,7 @@ export function ChatView() {
                             {tokenUsage && (() => {
                                 const totalTokens = tokenUsage.total_tokens ?? tokenUsage.totalTokens;
                                 return (
-                                <div className="flex items-center gap-2 bg-background/60 backdrop-blur-xl px-2 py-1.5 rounded-full border border-input/50 shadow-sm animate-in fade-in transition-all">
+                                <div className="flex items-center gap-2 bg-background/60 backdrop-blur-xl px-2 py-1.5 rounded-full border border-input/50 shadow-xs animate-in fade-in transition-all">
                                     <div className="w-16 h-1.5 bg-muted rounded-full overflow-hidden">
                                         <div
                                             className={cn("h-full transition-all duration-500 rounded-full",
@@ -222,13 +222,13 @@ export function ChatView() {
                         </div>
                     )}
 
-                    <div className="w-full bg-gradient-to-t from-background to-transparent pb-8 pt-20">
+                    <div className="w-full bg-linear-to-t from-background to-transparent pb-8 pt-20">
                         <div className="w-full max-w-4xl mx-auto px-4 md:px-6 pointer-events-auto">
                             {(attachedImages.length > 0 || ingestedFiles.length > 0) && (
                                 <div className="flex gap-3 mb-3 overflow-x-auto pb-1 px-1 scrollbar-hide">
                                     {attachedImages.map((img: any, i: number) => (
-                                        <div key={img.id} className="group relative flex items-center gap-3 p-2 pr-3 rounded-xl border border-border/40 bg-background/40 backdrop-blur-md shadow-sm hover:shadow-md hover:bg-background/60 transition-all duration-300 select-none animate-in fade-in zoom-in-95 slide-in-from-bottom-2">
-                                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/10 to-accent/10 flex items-center justify-center ring-1 ring-inset ring-white/10">
+                                        <div key={img.id} className="group relative flex items-center gap-3 p-2 pr-3 rounded-xl border border-border/40 bg-background/40 backdrop-blur-md shadow-xs hover:shadow-md hover:bg-background/60 transition-all duration-300 select-none animate-in fade-in zoom-in-95 slide-in-from-bottom-2">
+                                            <div className="w-10 h-10 rounded-lg bg-linear-to-br from-primary/10 to-accent/10 flex items-center justify-center ring-1 ring-inset ring-white/10">
                                                 <ImageIcon className="w-5 h-5 text-primary" />
                                             </div>
                                             <div className="flex flex-col gap-0.5">
@@ -241,8 +241,8 @@ export function ChatView() {
                                         </div>
                                     ))}
                                     {ingestedFiles.map((file: any) => (
-                                        <div key={file.id} className="group relative flex items-center gap-3 p-2 pr-3 rounded-xl border border-border/40 bg-background/40 backdrop-blur-md shadow-sm hover:shadow-md hover:bg-background/60 transition-all duration-300 select-none animate-in fade-in zoom-in-95 slide-in-from-bottom-2">
-                                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-emerald-500/10 to-teal-500/10 flex items-center justify-center ring-1 ring-inset ring-white/10">
+                                        <div key={file.id} className="group relative flex items-center gap-3 p-2 pr-3 rounded-xl border border-border/40 bg-background/40 backdrop-blur-md shadow-xs hover:shadow-md hover:bg-background/60 transition-all duration-300 select-none animate-in fade-in zoom-in-95 slide-in-from-bottom-2">
+                                            <div className="w-10 h-10 rounded-lg bg-linear-to-br from-emerald-500/10 to-teal-500/10 flex items-center justify-center ring-1 ring-inset ring-white/10">
                                                 <FileText className="w-5 h-5 text-emerald-500" />
                                             </div>
                                             <div className="flex flex-col gap-0.5">

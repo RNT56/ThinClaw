@@ -69,7 +69,7 @@ export function ActiveEngineChip() {
         <div
             className={cn(
                 "inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider",
-                "px-2.5 py-1 rounded-lg border shadow-sm transition-all duration-200",
+                "px-2.5 py-1 rounded-lg border shadow-xs transition-all duration-200",
                 "ring-1",
                 s.text,
                 s.bg,

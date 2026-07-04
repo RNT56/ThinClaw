@@ -196,7 +196,7 @@ function stateTone(state?: string) {
         case 'running':
             return 'text-blue-400 bg-blue-500/10 border-blue-500/20';
         default:
-            return 'text-muted-foreground bg-white/[0.03] border-white/5';
+            return 'text-muted-foreground bg-white/3 border-white/5';
     }
 }
 
@@ -591,7 +591,7 @@ export function ThinClawRepoProjects() {
                     <StateBadge state={isShellMode ? 'setup_required' : 'ready'} label={isShellMode ? 'shell' : 'live'} />
                     <button
                         onClick={loadProjects}
-                        className="rounded-lg border border-white/5 bg-white/[0.03] p-2 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
+                        className="rounded-lg border border-white/5 bg-white/3 p-2 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
                         title="Refresh repo projects"
                     >
                         <RefreshCw className={cn('h-4 w-4', isLoading && 'animate-spin')} />
@@ -633,7 +633,7 @@ export function ThinClawRepoProjects() {
                                     key={project.id}
                                     onClick={() => setSelectedProjectId(project.id)}
                                     className={cn(
-                                        'w-full border-b border-border/30 px-4 py-3 text-left transition-colors hover:bg-white/[0.03]',
+                                        'w-full border-b border-border/30 px-4 py-3 text-left transition-colors hover:bg-white/3',
                                         selectedProjectId === project.id && 'bg-primary/10',
                                     )}
                                 >
@@ -660,26 +660,26 @@ export function ThinClawRepoProjects() {
                                 value={createInput.name}
                                 onChange={(event) => setCreateInput((current) => ({ ...current, name: event.target.value }))}
                                 placeholder="Project name"
-                                className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                             />
                             <input
                                 value={createInput.repo_url}
                                 onChange={(event) => setCreateInput((current) => ({ ...current, repo_url: event.target.value }))}
                                 placeholder="github.com/owner/repo"
-                                className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs font-mono outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs font-mono outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                             />
                             <div className="grid grid-cols-2 gap-2">
                                 <input
                                     value={createInput.default_branch}
                                     onChange={(event) => setCreateInput((current) => ({ ...current, default_branch: event.target.value }))}
                                     placeholder="Branch"
-                                    className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                    className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                 />
                                 <input
                                     value={createInput.local_path}
                                     onChange={(event) => setCreateInput((current) => ({ ...current, local_path: event.target.value }))}
                                     placeholder="Local path"
-                                    className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                    className="w-full rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                                 />
                             </div>
                             <textarea
@@ -687,7 +687,7 @@ export function ThinClawRepoProjects() {
                                 onChange={(event) => setCreateInput((current) => ({ ...current, description: event.target.value }))}
                                 placeholder="Description"
                                 rows={2}
-                                className="w-full resize-none rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40"
+                                className="w-full resize-none rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40"
                             />
                             <button
                                 onClick={createProject}
@@ -734,7 +734,7 @@ export function ThinClawRepoProjects() {
                                         <button
                                             disabled={actionDisabled}
                                             onClick={() => runCommand('Pause project', () => thinclaw.pauseRepoProject(selectedProject.id))}
-                                            className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-1.5 text-xs hover:bg-white/5 disabled:opacity-40"
+                                            className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/3 px-3 py-1.5 text-xs hover:bg-white/5 disabled:opacity-40"
                                         >
                                             <Pause className="h-3.5 w-3.5" />
                                             Pause
@@ -742,7 +742,7 @@ export function ThinClawRepoProjects() {
                                         <button
                                             disabled={actionDisabled}
                                             onClick={() => runCommand('Resume project', () => thinclaw.resumeRepoProject(selectedProject.id))}
-                                            className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-1.5 text-xs hover:bg-white/5 disabled:opacity-40"
+                                            className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/3 px-3 py-1.5 text-xs hover:bg-white/5 disabled:opacity-40"
                                         >
                                             <Play className="h-3.5 w-3.5" />
                                             Resume
@@ -802,7 +802,7 @@ export function ThinClawRepoProjects() {
                                     const ok = readinessIsReady(item.state);
                                     return (
                                         <div key={item.key} className="flex items-start gap-3 border-b border-white/5 pb-2 last:border-0 last:pb-0">
-                                            <div className="mt-0.5 rounded-md bg-white/[0.03] p-1.5">
+                                            <div className="mt-0.5 rounded-md bg-white/3 p-1.5">
                                                 <Icon className="h-3.5 w-3.5 text-primary" />
                                             </div>
                                             <div className="min-w-0 flex-1">
@@ -858,13 +858,13 @@ export function ThinClawRepoProjects() {
                                 onChange={(event) => setEnqueueInput((current) => ({ ...current, title: event.target.value }))}
                                 placeholder="Backlog item"
                                 disabled={!selectedProject}
-                                className="rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40 disabled:opacity-40"
+                                className="rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40 disabled:opacity-40"
                             />
                             <select
                                 value={enqueueInput.priority}
                                 onChange={(event) => setEnqueueInput((current) => ({ ...current, priority: event.target.value }))}
                                 disabled={!selectedProject}
-                                className="rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none focus:border-primary/40 disabled:opacity-40"
+                                className="rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40 disabled:opacity-40"
                             >
                                 <option value="low">Low</option>
                                 <option value="medium">Medium</option>
@@ -876,7 +876,7 @@ export function ThinClawRepoProjects() {
                                 onChange={(event) => setEnqueueInput((current) => ({ ...current, labels: event.target.value }))}
                                 placeholder="labels"
                                 disabled={!selectedProject}
-                                className="rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary/40 disabled:opacity-40"
+                                className="rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-xs outline-hidden placeholder:text-muted-foreground focus:border-primary/40 disabled:opacity-40"
                             />
                         </div>
                         <div className="overflow-x-auto">
@@ -947,7 +947,7 @@ export function ThinClawRepoProjects() {
                         <SectionCard
                             title="Merge Gates"
                             icon={ShieldCheck}
-                            action={<button onClick={approveGate} disabled={actionDisabled || !pendingGate} className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/[0.03] px-2.5 py-1 text-xs hover:bg-white/5 disabled:opacity-40"><ShieldCheck className="h-3.5 w-3.5" /> Approve</button>}
+                            action={<button onClick={approveGate} disabled={actionDisabled || !pendingGate} className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/3 px-2.5 py-1 text-xs hover:bg-white/5 disabled:opacity-40"><ShieldCheck className="h-3.5 w-3.5" /> Approve</button>}
                         >
                             <div className="space-y-2">
                                 {mergeGates.length === 0 ? (

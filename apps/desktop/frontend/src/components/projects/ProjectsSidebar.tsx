@@ -317,7 +317,7 @@ export function ProjectsSidebar({
                                         if (e.key === 'Escape') setIsCreating(false);
                                     }}
                                     placeholder="Project Name..."
-                                    className="w-full text-xs bg-accent/50 border border-transparent rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-primary/30"
+                                    className="w-full text-xs bg-accent/50 border border-transparent rounded px-2 py-1.5 focus:outline-hidden focus:ring-1 focus:ring-primary/30"
                                 />
                             </div>
                         )}
@@ -655,7 +655,7 @@ function SortableChatItem({
             style={style}
             className={cn(
                 "group flex items-center rounded-lg text-xs py-2 transition-all duration-300",
-                isSelected ? "bg-accent text-foreground font-semibold shadow-sm ring-1 ring-primary/20" : "hover:bg-accent/40 text-muted-foreground hover:text-foreground",
+                isSelected ? "bg-accent text-foreground font-semibold shadow-xs ring-1 ring-primary/20" : "hover:bg-accent/40 text-muted-foreground hover:text-foreground",
                 isDragging && "opacity-30 z-50",
                 sidebarOpen ? "px-2 gap-2 w-full" : "justify-center px-0 bg-transparent ring-0 shadow-none hover:bg-accent/50 w-10 h-10 mx-auto"
             )}

@@ -36,7 +36,7 @@ function stateTone(state?: string) {
         case 'abandoned':
             return 'text-amber-400 bg-amber-500/10 border-amber-500/20';
         default:
-            return 'text-muted-foreground bg-white/[0.03] border-white/5';
+            return 'text-muted-foreground bg-white/3 border-white/5';
     }
 }
 
@@ -206,7 +206,7 @@ export function ThinClawJobs() {
                 </div>
                 <button
                     onClick={loadList}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                 >
                     <RefreshCw className={cn('w-4 h-4', isLoading && 'animate-spin')} />
                 </button>
@@ -250,7 +250,7 @@ export function ThinClawJobs() {
                                 key={job.id}
                                 onClick={() => setSelectedId(job.id)}
                                 className={cn(
-                                    'w-full text-left px-4 py-3 border-b border-border/30 hover:bg-white/[0.03] transition-colors',
+                                    'w-full text-left px-4 py-3 border-b border-border/30 hover:bg-white/3 transition-colors',
                                     selectedId === job.id && 'bg-primary/10',
                                 )}
                             >
@@ -308,11 +308,11 @@ export function ThinClawJobs() {
                                         <Square className="w-3.5 h-3.5" />
                                         Cancel
                                     </button>
-                                    <button onClick={() => handleAction('restart')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/[0.03] border border-white/5 hover:bg-white/5" title={unavailable.restart}>
+                                    <button onClick={() => handleAction('restart')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/3 border border-white/5 hover:bg-white/5" title={unavailable.restart}>
                                         <RotateCcw className="w-3.5 h-3.5" />
                                         Restart
                                     </button>
-                                    <button onClick={() => loadFiles(detail.id)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/[0.03] border border-white/5 hover:bg-white/5" title={unavailable.files}>
+                                    <button onClick={() => loadFiles(detail.id)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/3 border border-white/5 hover:bg-white/5" title={unavailable.files}>
                                         <Folder className="w-3.5 h-3.5" />
                                         Files
                                     </button>
@@ -351,7 +351,7 @@ export function ThinClawJobs() {
                             <textarea
                                 value={prompt}
                                 onChange={(event) => setPrompt(event.target.value)}
-                                className="w-full min-h-24 rounded-lg bg-black/20 border border-white/5 px-3 py-2 text-sm outline-none focus:border-primary/40 resize-y"
+                                className="w-full min-h-24 rounded-lg bg-black/20 border border-white/5 px-3 py-2 text-sm outline-hidden focus:border-primary/40 resize-y"
                                 placeholder={unavailable.prompt ?? 'Send a follow-up prompt to an interactive job'}
                             />
                             <div className="flex gap-2 mt-3">
@@ -359,7 +359,7 @@ export function ThinClawJobs() {
                                     <MessageSquarePlus className="w-3.5 h-3.5" />
                                     Send
                                 </button>
-                                <button onClick={() => handleAction('done')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/[0.03] border border-white/5 hover:bg-white/5">
+                                <button onClick={() => handleAction('done')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/3 border border-white/5 hover:bg-white/5">
                                     <CheckCircle2 className="w-3.5 h-3.5" />
                                     Done
                                 </button>

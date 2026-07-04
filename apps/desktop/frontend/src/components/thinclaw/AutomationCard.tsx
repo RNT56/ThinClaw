@@ -233,7 +233,7 @@ export default function AutomationCard({
             transition={{ duration: 0.3, ease: 'easeOut' }}
             className={cn(
                 'rounded-xl border overflow-hidden',
-                'bg-[var(--bg-secondary)]/60 backdrop-blur-sm',
+                'bg-(--bg-secondary)/60 backdrop-blur-xs',
                 statusCfg.borderClass,
                 statusCfg.glowClass,
                 className
@@ -244,7 +244,7 @@ export default function AutomationCard({
                 onClick={() => setExpanded(!expanded)}
                 className={cn(
                     'w-full flex items-center justify-between gap-3 px-4 py-3',
-                    'bg-gradient-to-r', variantCfg.headerGradient,
+                    'bg-linear-to-r', variantCfg.headerGradient,
                     'hover:brightness-110 transition-all duration-200',
                     'cursor-pointer'
                 )}
@@ -253,12 +253,12 @@ export default function AutomationCard({
                 <div className="flex items-center gap-2.5 min-w-0">
                     <div className={cn(
                         'flex items-center justify-center w-7 h-7 rounded-lg',
-                        'bg-[var(--bg-primary)]/40',
+                        'bg-(--bg-primary)/40',
                         variant === 'heartbeat' && status !== 'failed' && 'animate-pulse'
                     )}>
                         <VariantIcon className={cn('w-3.5 h-3.5', variantCfg.accentClass)} />
                     </div>
-                    <span className="text-[13px] font-semibold text-[var(--text-primary)] truncate">
+                    <span className="text-[13px] font-semibold text-(--text-primary) truncate">
                         {displayName}
                     </span>
                 </div>
@@ -276,7 +276,7 @@ export default function AutomationCard({
 
                     {/* Timestamp */}
                     {timestamp && (
-                        <span className="text-[10px] text-[var(--text-tertiary)] tabular-nums">
+                        <span className="text-[10px] text-(--text-tertiary) tabular-nums">
                             {formatTimestamp(timestamp)}
                         </span>
                     )}
@@ -284,7 +284,7 @@ export default function AutomationCard({
                     {/* Expand chevron */}
                     {hasFindings && (
                         <motion.div animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.2 }}>
-                            <ChevronDown className="w-3.5 h-3.5 text-[var(--text-tertiary)]" />
+                            <ChevronDown className="w-3.5 h-3.5 text-(--text-tertiary)" />
                         </motion.div>
                     )}
                 </div>
@@ -300,7 +300,7 @@ export default function AutomationCard({
                         transition={{ duration: 0.25, ease: 'easeInOut' }}
                         className="overflow-hidden"
                     >
-                        <div className="px-4 py-3 border-t border-white/[0.06] dark:border-white/[0.06]">
+                        <div className="px-4 py-3 border-t border-white/6 dark:border-white/6">
                             {/* If there are structured findings, render as a list */}
                             {findings.length > 1 ? (
                                 <div className="space-y-1.5">
@@ -312,7 +312,7 @@ export default function AutomationCard({
                                                     status === 'failed' ? 'text-red-400' :
                                                         'text-emerald-400'
                                             )} />
-                                            <span className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
+                                            <span className="text-[12px] text-(--text-secondary) leading-relaxed">
                                                 {finding}
                                             </span>
                                         </div>
@@ -320,8 +320,8 @@ export default function AutomationCard({
                                 </div>
                             ) : (
                                 /* Single block of content — render as markdown */
-                                <div className="text-[12px] text-[var(--text-secondary)] prose prose-invert prose-sm max-w-none
-                                    [&_p]:my-1 [&_ul]:my-1 [&_li]:my-0.5 [&_code]:text-[11px] [&_code]:bg-[var(--bg-primary)]/40 [&_code]:px-1 [&_code]:rounded">
+                                <div className="text-[12px] text-(--text-secondary) prose prose-invert prose-sm max-w-none
+                                    [&_p]:my-1 [&_ul]:my-1 [&_li]:my-0.5 [&_code]:text-[11px] [&_code]:bg-(--bg-primary)/40 [&_code]:px-1 [&_code]:rounded">
                                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
                                         {content}
                                     </ReactMarkdown>
@@ -330,16 +330,16 @@ export default function AutomationCard({
                         </div>
 
                         {/* Footer: stats + action buttons */}
-                        <div className="px-4 py-2 border-t border-white/[0.06] dark:border-white/[0.06] flex items-center justify-between">
+                        <div className="px-4 py-2 border-t border-white/6 dark:border-white/6 flex items-center justify-between">
                             <div className="flex items-center gap-3">
                                 {toolCount && (
-                                    <span className="inline-flex items-center gap-1 text-[10px] text-[var(--text-tertiary)]">
+                                    <span className="inline-flex items-center gap-1 text-[10px] text-(--text-tertiary)">
                                         <Activity className="w-2.5 h-2.5" />
                                         {toolCount} tools
                                     </span>
                                 )}
                                 {duration && (
-                                    <span className="inline-flex items-center gap-1 text-[10px] text-[var(--text-tertiary)]">
+                                    <span className="inline-flex items-center gap-1 text-[10px] text-(--text-tertiary)">
                                         <Clock className="w-2.5 h-2.5" />
                                         {formatDuration(duration)}
                                     </span>
@@ -353,7 +353,7 @@ export default function AutomationCard({
                                     title="Copy to clipboard"
                                     className={cn(
                                         'p-1.5 rounded-lg transition-all duration-200',
-                                        'hover:bg-[var(--bg-primary)]/60 text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]',
+                                        'hover:bg-(--bg-primary)/60 text-(--text-tertiary) hover:text-(--text-secondary)',
                                         copied && 'text-emerald-400 hover:text-emerald-400'
                                     )}
                                 >
@@ -367,7 +367,7 @@ export default function AutomationCard({
                                     <button
                                         onClick={(e) => { e.stopPropagation(); revealFile(savedPath); }}
                                         title="Reveal saved file"
-                                        className="p-1.5 rounded-lg transition-all duration-200 hover:bg-[var(--bg-primary)]/60 text-emerald-400 hover:text-emerald-300"
+                                        className="p-1.5 rounded-lg transition-all duration-200 hover:bg-(--bg-primary)/60 text-emerald-400 hover:text-emerald-300"
                                     >
                                         <FolderOpen className="w-3 h-3" />
                                     </button>
@@ -378,7 +378,7 @@ export default function AutomationCard({
                                         title="Save to agent_workspace"
                                         className={cn(
                                             'p-1.5 rounded-lg transition-all duration-200',
-                                            'hover:bg-[var(--bg-primary)]/60 text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]',
+                                            'hover:bg-(--bg-primary)/60 text-(--text-tertiary) hover:text-(--text-secondary)',
                                             saving && 'opacity-50'
                                         )}
                                     >

@@ -92,7 +92,7 @@ export function ThinClawRollback() {
                 </div>
                 <button
                     onClick={() => load()}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                 >
                     <RefreshCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} />
                 </button>
@@ -120,7 +120,7 @@ export function ThinClawRollback() {
                                         'rounded-xl border px-3 py-2.5 cursor-pointer transition-all',
                                         selected === e.commit_hash
                                             ? 'border-primary/40 bg-primary/5'
-                                            : 'border-white/5 bg-white/[0.02] hover:bg-white/[0.04]',
+                                            : 'border-white/5 bg-white/2 hover:bg-white/4',
                                     )}
                                 >
                                     <div className="flex items-center gap-2">
@@ -138,7 +138,7 @@ export function ThinClawRollback() {
                                                 'inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium border transition-all',
                                                 pendingRestore === e.commit_hash
                                                     ? 'bg-red-500/15 text-red-300 border-red-500/30'
-                                                    : 'bg-white/[0.03] text-muted-foreground hover:text-foreground border-white/5',
+                                                    : 'bg-white/3 text-muted-foreground hover:text-foreground border-white/5',
                                             )}
                                         >
                                             <RotateCcw className="w-2.5 h-2.5" />
@@ -151,9 +151,9 @@ export function ThinClawRollback() {
                     </div>
 
                     {/* Diff viewer */}
-                    <div className="lg:col-span-3 rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-4 min-h-[12rem]">
+                    <div className="lg:col-span-3 rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-4 min-h-48">
                         {selected ? (
-                            <pre className="text-[10px] leading-relaxed font-mono text-foreground/80 whitespace-pre-wrap break-words overflow-x-auto">
+                            <pre className="text-[10px] leading-relaxed font-mono text-foreground/80 whitespace-pre-wrap wrap-break-word overflow-x-auto">
                                 {diff || 'No changes vs current state.'}
                             </pre>
                         ) : (

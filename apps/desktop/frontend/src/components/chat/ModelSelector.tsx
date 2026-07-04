@@ -228,7 +228,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         <div className="relative inline-block text-left" ref={containerRef}>
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-background/60 hover:bg-background/80 text-sm font-medium transition-colors border border-input/50 backdrop-blur-xl shadow-sm"
+                className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-background/60 hover:bg-background/80 text-sm font-medium transition-colors border border-input/50 backdrop-blur-xl shadow-xs"
             >
                 <div className={cn("inline-flex items-center gap-2", isAutoMode && "text-yellow-500 font-bold")}>
                     {isAutoMode ? <Box className="w-4 h-4" /> : <Box className="w-4 h-4 text-primary" />}

@@ -120,8 +120,8 @@ const AgentNode = ({ data, selected }: NodeProps) => {
             </div>
 
             {/* Ports */}
-            <Handle type="target" position={Position.Top} className="!bg-zinc-500 !w-3 !h-1 !rounded-sm !-top-1.5" />
-            <Handle type="source" position={Position.Bottom} className="!bg-indigo-500 !w-3 !h-1 !rounded-sm !-bottom-1.5" />
+            <Handle type="target" position={Position.Top} className="bg-zinc-500! w-3! h-1! rounded-sm! -top-1.5!" />
+            <Handle type="source" position={Position.Bottom} className="bg-indigo-500! w-3! h-1! rounded-sm! -bottom-1.5!" />
         </div>
     );
 };

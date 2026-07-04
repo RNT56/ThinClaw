@@ -191,7 +191,7 @@ export function SlackTab({ className }: SlackTabProps) {
                                 value={appToken}
                                 onChange={(e) => setAppToken(e.target.value)}
                                 placeholder="xapp-1-..."
-                                className="w-full px-3 py-2 rounded-lg bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-colors"
+                                className="w-full px-3 py-2 rounded-lg bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary outline-hidden transition-colors"
                             />
                             <p className="text-xs text-muted-foreground">Create under Basic Information → App-Level Tokens with `connections:write` scope</p>
                         </div>
@@ -206,7 +206,7 @@ export function SlackTab({ className }: SlackTabProps) {
                                 value={botToken}
                                 onChange={(e) => setBotToken(e.target.value)}
                                 placeholder="xoxb-..."
-                                className="w-full px-3 py-2 rounded-lg bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-colors"
+                                className="w-full px-3 py-2 rounded-lg bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary outline-hidden transition-colors"
                             />
                             <p className="text-xs text-muted-foreground">Found under OAuth & Permissions after installing</p>
                         </div>

@@ -146,7 +146,7 @@ export function SecretCard({
                                 type="button"
                                 onClick={handleDelete}
                                 disabled={loading}
-                                className="px-2.5 py-1 bg-rose-700 text-white rounded-md text-xs font-bold uppercase tracking-wider hover:bg-rose-800 transition-colors shadow-sm flex items-center gap-1.5 cursor-pointer"
+                                className="px-2.5 py-1 bg-rose-700 text-white rounded-md text-xs font-bold uppercase tracking-wider hover:bg-rose-800 transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
                             >
                                 {loading && <Loader2 className="w-3 h-3 animate-spin" />}
                                 Confirm Delete
@@ -163,7 +163,7 @@ export function SecretCard({
                         value={key}
                         onChange={(e) => setKey(e.target.value)}
                         placeholder={hasKey ? "••••••••••••••••" : placeholder}
-                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm pr-12 font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm pr-12 font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all"
                     />
                     <button
                         onClick={() => setShowKey(!showKey)}
@@ -177,7 +177,7 @@ export function SecretCard({
                     onClick={handleSave}
                     disabled={loading || !key}
                     className={cn(
-                        "px-6 h-11 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shrink-0 shadow-sm hover:translate-y-[-1px]",
+                        "px-6 h-11 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shrink-0 shadow-xs hover:-translate-y-px",
                         (loading || !key) && "opacity-50 cursor-not-allowed transform-none"
                     )}
                 >
@@ -197,7 +197,7 @@ export function SecretCard({
                             <button
                                 onClick={() => onVisibilityToggle?.(!isVisible)}
                                 className={cn(
-                                    "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+                                    "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-hidden focus:ring-2 focus:ring-primary focus:ring-offset-2",
                                     isVisible ? "bg-emerald-500" : "bg-slate-200 dark:bg-muted"
                                 )}
                             >
@@ -219,7 +219,7 @@ export function SecretCard({
                         <button
                             onClick={() => onToggle(!granted)}
                             className={cn(
-                                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+                                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-hidden focus:ring-2 focus:ring-primary focus:ring-offset-2",
                                 granted ? "bg-primary" : "bg-slate-200 dark:bg-muted"
                             )}
                         >

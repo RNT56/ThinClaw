@@ -508,7 +508,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     };
 
     return (
-        <div className="fixed inset-0 z-50 bg-background/95 backdrop-blur-sm flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-background/95 backdrop-blur-xs flex items-center justify-center p-4">
             <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -562,13 +562,13 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             <div className="flex gap-1 p-0.5 bg-muted/20 rounded-lg border border-border/50">
                                                 <button
                                                     onClick={() => setUiTheme("light")}
-                                                    className={cn("p-1.5 rounded-md transition-all", currentMode === 'light' ? 'bg-background shadow-sm text-primary' : 'text-muted-foreground hover:text-foreground')}
+                                                    className={cn("p-1.5 rounded-md transition-all", currentMode === 'light' ? 'bg-background shadow-xs text-primary' : 'text-muted-foreground hover:text-foreground')}
                                                 >
                                                     <Sun className="w-3.5 h-3.5" />
                                                 </button>
                                                 <button
                                                     onClick={() => setUiTheme("dark")}
-                                                    className={cn("p-1.5 rounded-md transition-all", currentMode === 'dark' ? 'bg-background shadow-sm text-primary' : 'text-muted-foreground hover:text-foreground')}
+                                                    className={cn("p-1.5 rounded-md transition-all", currentMode === 'dark' ? 'bg-background shadow-xs text-primary' : 'text-muted-foreground hover:text-foreground')}
                                                 >
                                                     <Moon className="w-3.5 h-3.5" />
                                                 </button>
@@ -608,7 +608,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                     {/* Real-time Preview Area */}
                                     <div className="space-y-4">
                                         <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 px-1">Live Preview</span>
-                                        <div className="aspect-[4/3] rounded-2xl border border-border bg-card shadow-2xl overflow-hidden flex flex-col relative group">
+                                        <div className="aspect-4/3 rounded-2xl border border-border bg-card shadow-2xl overflow-hidden flex flex-col relative group">
                                             {/* Window Controls */}
                                             <div className="h-8 bg-muted/40 border-b border-border/50 flex items-center px-3 gap-1.5">
                                                 <div className="w-2.5 h-2.5 rounded-full bg-rose-500/20" />
@@ -654,7 +654,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             </div>
 
                                             {/* Hover indicator for "Great UX" feel */}
-                                            <div className="absolute inset-0 pointer-events-none bg-gradient-to-t from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+                                            <div className="absolute inset-0 pointer-events-none bg-linear-to-t from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
                                         </div>
 
                                         <div className="flex items-center gap-3 p-4 bg-primary/5 rounded-xl border border-primary/10 text-xs text-muted-foreground leading-relaxed animate-in fade-in slide-in-from-bottom-2 duration-500">
@@ -742,13 +742,13 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                 <div className="flex bg-muted p-1.5 rounded-xl">
                                     <button
                                         onClick={() => setRemoteDeployMode('existing')}
-                                        className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${remoteDeployMode === 'existing' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                                        className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${remoteDeployMode === 'existing' ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}`}
                                     >
                                         Connect Existing
                                     </button>
                                     <button
                                         onClick={() => setRemoteDeployMode('new')}
-                                        className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${remoteDeployMode === 'new' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                                        className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${remoteDeployMode === 'new' ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}`}
                                     >
                                         Deploy New Agent
                                     </button>
@@ -765,7 +765,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Agent URL / IP</label>
                                             <div className="relative">
                                                 <input type="text"
-                                                    className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
+                                                    className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
                                                     placeholder="192.168.1.50 or http://your-server.com:18789"
                                                     value={remoteExistingUrl}
                                                     onChange={(e) => setRemoteExistingUrl(e.target.value)}
@@ -778,7 +778,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                         <div className="space-y-2">
                                             <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Auth Token</label>
                                             <input type="password"
-                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                 placeholder="From GATEWAY_AUTH_TOKEN in your .env"
                                                 value={remoteExistingToken}
                                                 onChange={(e) => setRemoteExistingToken(e.target.value)}
@@ -815,7 +815,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             <div className="space-y-2">
                                                 <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Server IP Address</label>
                                                 <input type="text"
-                                                    className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                                    className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                     placeholder="e.g. 192.168.1.50 or your-server.com"
                                                     value={remoteIp}
                                                     onChange={(e) => setRemoteIp(e.target.value)}
@@ -824,7 +824,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             <div className="space-y-2">
                                                 <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">SSH User</label>
                                                 <input type="text"
-                                                    className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                                    className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                     placeholder="root"
                                                     value={remoteUser}
                                                     onChange={(e) => setRemoteUser(e.target.value)}
@@ -833,7 +833,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             <div className="space-y-2">
                                                 <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-muted-foreground/60">(optional)</span></label>
                                                 <input type="text"
-                                                    className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                                    className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                     placeholder="tskey-auth-..."
                                                     value={remoteTailscaleKey}
                                                     onChange={(e) => setRemoteTailscaleKey(e.target.value)}
@@ -1061,8 +1061,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                     onClick={engineSetup.triggerSetup}
                                                     className={cn(
                                                         "w-full py-3 px-4 rounded-xl text-sm font-bold uppercase tracking-wider",
-                                                        "flex items-center justify-center gap-2 transition-all shadow-sm",
-                                                        "hover:translate-y-[-1px] active:translate-y-0",
+                                                        "flex items-center justify-center gap-2 transition-all shadow-xs",
+                                                        "hover:-translate-y-px active:translate-y-0",
                                                         engineSetup.setupError
                                                             ? "bg-destructive/10 text-destructive border border-destructive/30 hover:bg-destructive/20"
                                                             : "bg-primary text-primary-foreground hover:opacity-90"
@@ -1140,7 +1140,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                         enabled ? "bg-primary" : "bg-muted"
                                                     )}>
                                                         <div className={cn(
-                                                            "w-4 h-4 rounded-full bg-white shadow-sm transition-transform",
+                                                            "w-4 h-4 rounded-full bg-white shadow-xs transition-transform",
                                                             enabled ? "translate-x-5" : "translate-x-0"
                                                         )} />
                                                     </div>
@@ -1171,7 +1171,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                                             placeholder={filter.placeholder}
                                                                             value={query}
                                                                             onChange={(e) => searchCategory(cat, e.target.value)}
-                                                                            className="w-full pl-8 pr-3 py-2 text-xs bg-background border border-border/50 rounded-lg focus:outline-none focus:ring-1 focus:ring-primary/20 text-foreground placeholder:text-muted-foreground/50"
+                                                                            className="w-full pl-8 pr-3 py-2 text-xs bg-background border border-border/50 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-primary/20 text-foreground placeholder:text-muted-foreground/50"
                                                                             autoFocus
                                                                         />
                                                                         {isSearching && <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground animate-spin" />}
@@ -1197,7 +1197,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                                                 className={cn(
                                                                                     "w-full p-2.5 rounded-lg border text-left transition-all text-xs flex items-center gap-3",
                                                                                     selected === model.id
-                                                                                        ? "border-primary bg-primary/10 shadow-sm"
+                                                                                        ? "border-primary bg-primary/10 shadow-xs"
                                                                                         : "border-border/50 hover:border-primary/30 bg-background/50 hover:bg-primary/5"
                                                                                 )}
                                                                             >
@@ -1241,7 +1241,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                         value={hfToken}
                                         onChange={(e) => setHfToken(e.target.value)}
                                         placeholder="hf_..."
-                                        className="w-full bg-muted/50 border border-border rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                        className="w-full bg-muted/50 border border-border rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                     />
                                 </div>
 
@@ -1302,7 +1302,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                     value={apiKeys[provider.id] || ''}
                                                     onChange={(e) => setApiKeys(prev => ({ ...prev, [provider.id]: e.target.value }))}
                                                     placeholder={provider.placeholder}
-                                                    className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-primary/20 outline-none transition-all placeholder:text-muted-foreground/40"
+                                                    className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-primary/20 outline-hidden transition-all placeholder:text-muted-foreground/40"
                                                 />
                                                 <button
                                                     onClick={() => handleSaveApiKey(provider.id)}
@@ -1447,7 +1447,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     <button
                         onClick={handleNext}
                         disabled={isLoading}
-                        className="flex items-center gap-2 bg-primary text-primary-foreground hover:bg-primary/90 px-6 py-2.5 rounded-lg font-medium transition-all shadow-sm hover:shadow"
+                        className="flex items-center gap-2 bg-primary text-primary-foreground hover:bg-primary/90 px-6 py-2.5 rounded-lg font-medium transition-all shadow-xs hover:shadow-sm"
                     >
                         {step === 'complete' ? (
                             "Get Started"
