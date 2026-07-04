@@ -133,7 +133,7 @@ patterns. **(f)** `?token=` query-param: operator startup warning (RFC 6750 log-
 
 ### A11 · Panic long-tail · P2 · S · Blocked-by: —
 Remaining specific sites (the systemic lint is B-blocked): `src/main.rs:1023` SocketAddr `expect` →
-config-validation error; `src/pairing/store.rs` `parent().expect()` ×5 → typed error;
+config-validation error; (`src/pairing/store.rs` `parent().expect()` ×5 — resolved: that orphaned file was removed in PR #197);
 `thinclaw-tools/src/builtin/shell.rs` external-scanner overlaps with A10c; `apps/desktop/backend/src/
 system.rs:50` `get_current_pid().unwrap()` → `unwrap_or`. **Verify:** `cargo check` (+ `--all-features`
 for desktop). **Guardrail:** see D-note on `unwrap_used` (B-blocked by `-D warnings`).
