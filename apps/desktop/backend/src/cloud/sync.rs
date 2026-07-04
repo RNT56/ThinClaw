@@ -259,7 +259,7 @@ async fn compute_sha256_streaming(path: &Path) -> Result<String, std::io::Error>
         hasher.update(&buf[..n]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 // ── SyncEngine ───────────────────────────────────────────────────────────

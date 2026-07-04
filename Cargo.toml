@@ -176,12 +176,12 @@ wasmparser = { version = "0.220", optional = true }  # WASM binary parsing for v
 
 # Cryptography for secrets management
 aes-gcm = "0.10"
-hkdf = "0.12"
-sha2 = "0.10"
+hkdf = "0.13"
+sha2 = "0.11"
 blake3 = "1"
 rand = "0.10"
 subtle = "2"  # Constant-time comparisons for token validation
-hmac = "0.12"  # HMAC-SHA256 for webhook signing
+hmac = "0.13"  # HMAC-SHA256 for webhook signing
 ed25519-dalek = { version = "2", features = ["std"] }
 hex = "0.4"
 

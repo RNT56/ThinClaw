@@ -120,7 +120,7 @@ pub fn package_hash(files: &[SkillPackageFile]) -> Result<String, ToolError> {
         hasher.update(&bytes);
         hasher.update(b"\0");
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 pub fn package_scan_content(files: &[SkillPackageFile]) -> String {

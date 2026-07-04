@@ -368,7 +368,7 @@ pub async fn direct_rag_ingest_document(
 
     let mut hasher = Sha256::new();
     hasher.update(&buffer);
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = hex::encode(hasher.finalize());
 
     let existing_doc: Option<(String, String)> =
         sqlx::query_as("SELECT id, status FROM documents WHERE hash = ?")

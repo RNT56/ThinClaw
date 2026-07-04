@@ -670,7 +670,7 @@ pub fn generated_workflow_digest(user_input: &str, tool_calls: &[TurnToolCall]) 
         hasher.update(b"|signature:");
         hasher.update(compact_tool_outcome_signature(call).as_bytes());
     }
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 pub fn compact_tool_outcome_signature(call: &TurnToolCall) -> String {
@@ -684,7 +684,7 @@ pub fn compact_tool_outcome_signature(call: &TurnToolCall) -> String {
 
     let mut hasher = Sha256::new();
     hasher.update(signature_input.as_bytes());
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hex::encode(hasher.finalize());
     format!("sha256:{}", &digest[..16])
 }
 
