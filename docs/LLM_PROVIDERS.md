@@ -44,7 +44,7 @@ These providers have dedicated `LLM_BACKEND` values with first-class support:
 |---|---|---|---|
 | [Anthropic](#anthropic) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-7` |
 | [OpenAI](#openai) | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
-| [Google Gemini](#google-gemini) | `gemini` | `GEMINI_API_KEY` | `gemini-3.1-flash` |
+| [Google Gemini](#google-gemini) | `gemini` | `GEMINI_API_KEY` | `gemini-2.5-flash` |
 | [Tinfoil](#tinfoil) | `tinfoil` | `TINFOIL_API_KEY` | `kimi-k2-5` |
 | [Ollama](#ollama) | `ollama` | — | `llama3` |
 | [AWS Bedrock](#aws-bedrock) | `bedrock` | `BEDROCK_API_KEY` | `anthropic.claude-3-sonnet-20240229-v1:0` |
@@ -136,13 +136,13 @@ GEMINI_API_KEY=...
 Also accepts `GOOGLE_AI_API_KEY`. Routes through Google's OpenAI-compatible
 gateway by default.
 
-Popular models: `gemini-3.1-flash`, `gemini-2.5-flash`, `gemini-2.5-pro`
+Popular models: `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`
 
 Optional overrides:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `GEMINI_MODEL` | `gemini-3.1-flash` | Model override |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Model override |
 | `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai` | Custom endpoint |
 
 ---
