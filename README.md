@@ -19,13 +19,14 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> |
-  <a href="#what-is-thinclaw">What It Is</a> |
-  <a href="#capabilities-at-a-glance">Capabilities</a> |
-  <a href="#architecture-at-a-glance">Architecture</a> |
-  <a href="#security-and-trust">Security</a> |
-  <a href="#install-options">Install</a> |
-  <a href="#documentation-map">Docs</a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-2ea44f?style=flat-square" alt="Quick Start" /></a>&nbsp;
+  <a href="#philosophy"><img src="https://img.shields.io/badge/Why_ThinClaw-8250df?style=flat-square" alt="Why ThinClaw" /></a>&nbsp;
+  <a href="#personality-that-adapts"><img src="https://img.shields.io/badge/Personality-6f42c1?style=flat-square" alt="Personality" /></a>&nbsp;
+  <a href="#what-you-can-use-it-for"><img src="https://img.shields.io/badge/Use_Cases-0969da?style=flat-square" alt="Use Cases" /></a>&nbsp;
+  <a href="#install-options"><img src="https://img.shields.io/badge/Install-f59e0b?style=flat-square" alt="Install" /></a>&nbsp;
+  <a href="#security-and-trust"><img src="https://img.shields.io/badge/Security-c2410c?style=flat-square" alt="Security" /></a>&nbsp;
+  <a href="#documentation-map"><img src="https://img.shields.io/badge/Docs-57606a?style=flat-square" alt="Docs" /></a>&nbsp;
+  <a href="#development"><img src="https://img.shields.io/badge/Development-24292f?style=flat-square" alt="Development" /></a>
 </p>
 
 ---
