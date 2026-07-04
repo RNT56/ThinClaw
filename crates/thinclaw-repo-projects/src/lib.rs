@@ -31,6 +31,10 @@ fn default_github_auth_mode() -> GitHubAuthMode {
     GitHubAuthMode::UserToken
 }
 
+fn default_repo_write_mode() -> RepoWriteMode {
+    RepoWriteMode::ForkPr
+}
+
 fn default_max_parallel_tasks() -> u32 {
     1
 }
@@ -154,6 +158,39 @@ pub enum GitHubAuthMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum RepoWriteMode {
+    ReadOnlyClone,
+    #[default]
+    ForkPr,
+    MaintainerBranchPr,
+    MaintainerAutoMerge,
+}
+
+impl RepoWriteMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnlyClone => "read_only_clone",
+            Self::ForkPr => "fork_pr",
+            Self::MaintainerBranchPr => "maintainer_branch_pr",
+            Self::MaintainerAutoMerge => "maintainer_auto_merge",
+        }
+    }
+
+    pub fn allows_sandbox_write_credentials(self) -> bool {
+        !matches!(self, Self::ReadOnlyClone)
+    }
+
+    pub fn pushes_to_upstream(self) -> bool {
+        matches!(self, Self::MaintainerBranchPr | Self::MaintainerAutoMerge)
+    }
+
+    pub fn allows_auto_merge(self) -> bool {
+        matches!(self, Self::MaintainerAutoMerge)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum RepoProjectRunState {
     #[default]
     Queued,
@@ -200,6 +237,8 @@ pub enum RepoProjectEventKind {
 pub struct ProjectPolicy {
     #[serde(default)]
     pub auto_merge: bool,
+    #[serde(default = "default_repo_write_mode")]
+    pub write_mode: RepoWriteMode,
     #[serde(default = "default_merge_method")]
     pub merge_method: MergeMethod,
     #[serde(default = "default_coding_backend")]
@@ -214,6 +253,7 @@ impl Default for ProjectPolicy {
     fn default() -> Self {
         Self {
             auto_merge: false,
+            write_mode: default_repo_write_mode(),
             merge_method: default_merge_method(),
             default_coding_backend: default_coding_backend(),
             github_auth_mode: default_github_auth_mode(),
@@ -405,6 +445,7 @@ pub struct RepoWebhookDelivery {
 #[serde(rename_all = "snake_case")]
 pub enum MergeGateDenialReason {
     AutoMergeDisabled,
+    WriteModeDisallowsMerge,
     RepoNotEnrolled,
     ChecksNotGreen,
     BranchOutOfDate,
@@ -539,6 +580,9 @@ pub fn repo_local_path(root: impl AsRef<Path>, owner: &str, repo: &str) -> Resul
 pub fn evaluate_merge_gate(policy: &ProjectPolicy, input: MergeGateInput) -> MergeGateDecision {
     let mut reasons = Vec::new();
 
+    if !policy.write_mode.allows_auto_merge() {
+        reasons.push(MergeGateDenialReason::WriteModeDisallowsMerge);
+    }
     if !policy.auto_merge {
         reasons.push(MergeGateDenialReason::AutoMergeDisabled);
     }
@@ -802,8 +846,21 @@ mod tests {
 
     #[test]
     fn merge_gate_denies_missing_requirements_and_approves_clean_input() {
+        let fork_policy = ProjectPolicy {
+            auto_merge: true,
+            write_mode: RepoWriteMode::ForkPr,
+            ..ProjectPolicy::default()
+        };
+        let denied = evaluate_merge_gate(&fork_policy, open_gate());
+        assert!(!denied.approved);
+        assert_eq!(
+            denied.reasons,
+            vec![MergeGateDenialReason::WriteModeDisallowsMerge]
+        );
+
         let mut policy = ProjectPolicy {
             auto_merge: false,
+            write_mode: RepoWriteMode::MaintainerAutoMerge,
             ..ProjectPolicy::default()
         };
         let denied = evaluate_merge_gate(&policy, open_gate());
@@ -910,6 +967,7 @@ mod tests {
 
         let policy = ProjectPolicy {
             auto_merge: true,
+            write_mode: RepoWriteMode::MaintainerAutoMerge,
             merge_method: MergeMethod::Squash,
             default_coding_backend: CodingBackend::ClaudeCode,
             github_auth_mode: GitHubAuthMode::GitHubApp,
@@ -917,10 +975,17 @@ mod tests {
         };
         let encoded_policy = serde_json::to_string(&policy).unwrap();
         assert!(encoded_policy.contains("\"merge_method\":\"squash\""));
+        assert!(encoded_policy.contains("\"write_mode\":\"maintainer_auto_merge\""));
         assert!(encoded_policy.contains("\"github_auth_mode\":\"github_app\""));
         assert_eq!(
             serde_json::from_str::<ProjectPolicy>(&encoded_policy).unwrap(),
             policy
         );
+
+        let legacy_policy: ProjectPolicy = serde_json::from_str(
+            r#"{"auto_merge":false,"merge_method":"squash","default_coding_backend":"worker","github_auth_mode":"user_token","max_parallel_tasks":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy_policy.write_mode, RepoWriteMode::ForkPr);
     }
 }

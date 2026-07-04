@@ -14,6 +14,7 @@ pub struct RepoProjectsConfig {
     pub max_concurrent_projects: usize,
     pub max_concurrent_tasks_per_project: usize,
     pub default_coding_backend: String,
+    pub default_write_mode: String,
     pub auto_merge_default: bool,
     pub watchdog_interval_secs: u64,
     pub workspace_base_dir: PathBuf,
@@ -35,6 +36,7 @@ impl Default for RepoProjectsConfig {
             max_concurrent_projects: 1,
             max_concurrent_tasks_per_project: 1,
             default_coding_backend: "worker".to_string(),
+            default_write_mode: "fork_pr".to_string(),
             auto_merge_default: false,
             watchdog_interval_secs: 60,
             workspace_base_dir: default_workspace_base_dir(),
@@ -59,6 +61,7 @@ impl RepoProjectsConfig {
                 defaults.max_concurrent_tasks_per_project,
             )?,
             default_coding_backend: resolve_coding_backend(defaults)?,
+            default_write_mode: resolve_write_mode(defaults)?,
             auto_merge_default: parse_bool_env(
                 "REPO_PROJECTS_AUTO_MERGE_DEFAULT",
                 defaults.auto_merge_default,
@@ -143,6 +146,33 @@ fn normalize_coding_backend(value: &str) -> Result<String, ConfigError> {
     }
 }
 
+fn resolve_write_mode(
+    defaults: &thinclaw_settings::RepoProjectsSettings,
+) -> Result<String, ConfigError> {
+    let value = optional_env("REPO_PROJECTS_DEFAULT_WRITE_MODE")?
+        .unwrap_or_else(|| defaults.default_write_mode.clone());
+    normalize_write_mode(&value)
+}
+
+fn normalize_write_mode(value: &str) -> Result<String, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "fork_pr" | "fork-pr" => Ok("fork_pr".to_string()),
+        "read_only_clone" | "read-only-clone" | "readonly" | "read_only" => {
+            Ok("read_only_clone".to_string())
+        }
+        "maintainer_branch_pr" | "maintainer-branch-pr" => Ok("maintainer_branch_pr".to_string()),
+        "maintainer_auto_merge" | "maintainer-auto-merge" => {
+            Ok("maintainer_auto_merge".to_string())
+        }
+        other => Err(ConfigError::InvalidValue {
+            key: "REPO_PROJECTS_DEFAULT_WRITE_MODE".to_string(),
+            message: format!(
+                "unsupported repo projects write mode '{other}' (expected read_only_clone, fork_pr, maintainer_branch_pr, or maintainer_auto_merge)"
+            ),
+        }),
+    }
+}
+
 fn parse_optional_u64_env(key: &str, default: Option<u64>) -> Result<Option<u64>, ConfigError> {
     optional_env(key)?
         .map(|value| {
@@ -190,6 +220,7 @@ mod tests {
         "REPO_PROJECTS_MAX_CONCURRENT_PROJECTS",
         "REPO_PROJECTS_MAX_CONCURRENT_TASKS_PER_PROJECT",
         "REPO_PROJECTS_DEFAULT_CODING_BACKEND",
+        "REPO_PROJECTS_DEFAULT_WRITE_MODE",
         "REPO_PROJECTS_AUTO_MERGE_DEFAULT",
         "REPO_PROJECTS_WATCHDOG_INTERVAL_SECS",
         "REPO_PROJECTS_WORKSPACE_BASE_DIR",
@@ -230,6 +261,7 @@ mod tests {
                 max_concurrent_projects: 3,
                 max_concurrent_tasks_per_project: 2,
                 default_coding_backend: "codex_code".to_string(),
+                default_write_mode: "maintainer_branch_pr".to_string(),
                 auto_merge_default: true,
                 watchdog_interval_secs: 30,
                 workspace_base_dir: Some("/tmp/thinclaw-repo-projects".to_string()),
@@ -249,6 +281,7 @@ mod tests {
         assert_eq!(cfg.max_concurrent_projects, 3);
         assert_eq!(cfg.max_concurrent_tasks_per_project, 2);
         assert_eq!(cfg.default_coding_backend, "codex_code");
+        assert_eq!(cfg.default_write_mode, "maintainer_branch_pr");
         assert!(cfg.auto_merge_default);
         assert_eq!(cfg.watchdog_interval_secs, 30);
         assert_eq!(
@@ -276,6 +309,7 @@ mod tests {
             std::env::set_var("REPO_PROJECTS_MAX_CONCURRENT_PROJECTS", "4");
             std::env::set_var("REPO_PROJECTS_MAX_CONCURRENT_TASKS_PER_PROJECT", "5");
             std::env::set_var("REPO_PROJECTS_DEFAULT_CODING_BACKEND", "claude-code");
+            std::env::set_var("REPO_PROJECTS_DEFAULT_WRITE_MODE", "maintainer-auto-merge");
             std::env::set_var("REPO_PROJECTS_AUTO_MERGE_DEFAULT", "true");
             std::env::set_var("REPO_PROJECTS_WATCHDOG_INTERVAL_SECS", "15");
             std::env::set_var("REPO_PROJECTS_WORKSPACE_BASE_DIR", "/tmp/env-repo-projects");
@@ -296,6 +330,7 @@ mod tests {
         assert_eq!(cfg.max_concurrent_projects, 4);
         assert_eq!(cfg.max_concurrent_tasks_per_project, 5);
         assert_eq!(cfg.default_coding_backend, "claude_code");
+        assert_eq!(cfg.default_write_mode, "maintainer_auto_merge");
         assert!(cfg.auto_merge_default);
         assert_eq!(cfg.watchdog_interval_secs, 15);
         assert_eq!(
@@ -340,6 +375,14 @@ mod tests {
             err.to_string()
                 .contains("REPO_PROJECTS_DEFAULT_CODING_BACKEND")
         );
+
+        clear_env();
+        unsafe {
+            std::env::set_var("REPO_PROJECTS_DEFAULT_WRITE_MODE", "unsupported");
+        }
+        let err = RepoProjectsConfig::resolve(&Settings::default())
+            .expect_err("unsupported write mode must be rejected");
+        assert!(err.to_string().contains("REPO_PROJECTS_DEFAULT_WRITE_MODE"));
 
         clear_env();
     }

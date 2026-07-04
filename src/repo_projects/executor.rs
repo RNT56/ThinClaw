@@ -13,7 +13,7 @@ use crate::sandbox_types::{ContainerJobManager, CredentialGrant, JobMode};
 use thinclaw_repo_projects::{
     CodingBackend, RepoProject, RepoProjectEvent, RepoProjectEventKind, RepoProjectRepo,
     RepoProjectRun, RepoProjectRunState, RepoProjectTask, RepoProjectTaskState, RepoWorkerRun,
-    RepoWorkerRunState, task_short_id, validate_task_state_transition,
+    RepoWorkerRunState, RepoWriteMode, task_short_id, validate_task_state_transition,
 };
 
 use tokio::sync::broadcast;
@@ -26,6 +26,8 @@ use super::workspace::RepoWorkspaceProvisioner;
 
 const SUPERVISOR_ACTOR_ID: &str = "repo_project_supervisor";
 const GITHUB_SECRET_NAME: &str = "github_token";
+const GITHUB_FORK_SECRET_NAME: &str = "github_fork_token";
+const FORK_WRITE_REMOTE: &str = "thinclaw-write";
 
 #[derive(Debug, Clone)]
 pub struct RepoProjectExecutorConfig {
@@ -157,6 +159,19 @@ impl RepoProjectExecutor {
             .clone_or_fetch(&repo.owner, &repo.repo, &remote_url, &base_branch)
             .await
             .map_err(|error| format!("workspace clone/fetch failed: {error}"))?;
+        if project.policy.write_mode == RepoWriteMode::ForkPr
+            && let Some(write_remote_url) = fork_remote_url(repo)
+        {
+            self.workspace
+                .upsert_remote(
+                    &repo.owner,
+                    &repo.repo,
+                    FORK_WRITE_REMOTE,
+                    &write_remote_url,
+                )
+                .await
+                .map_err(|error| format!("workspace fork remote setup failed: {error}"))?;
+        }
         let worktree = self
             .workspace
             .create_task_worktree(
@@ -256,6 +271,7 @@ impl RepoProjectExecutor {
                 "job_id": job_id,
                 "mode": mode.as_str(),
                 "branch": task.branch_name,
+                "write_mode": project.policy.write_mode.as_str(),
             }),
         )
         .await?;
@@ -274,8 +290,13 @@ impl RepoProjectExecutor {
             },
             task.coding_backend,
         );
-        let task_prompt =
-            wrap_packet_prompt(&task_packet.prompt, &task.base_branch, &task.branch_name);
+        let task_prompt = wrap_packet_prompt(
+            &task_packet.prompt,
+            project.policy.write_mode,
+            repo,
+            &task.base_branch,
+            &task.branch_name,
+        );
 
         let mut spec = SandboxJobSpec::new(
             format!("{}: {}", project.name, task.title),
@@ -295,12 +316,14 @@ impl RepoProjectExecutor {
             "repo": format!("{}/{}", repo.owner, repo.repo),
             "base_branch": task.base_branch,
             "branch_name": task.branch_name,
+            "write_mode": project.policy.write_mode.as_str(),
+            "write_remote": write_remote_name(project.policy.write_mode),
             "pull_request_number": task.pull_request_number,
             "source": "repo_project_supervisor",
             "task_packet": task_packet.metadata,
         });
 
-        let credential_grants = repo_project_credential_grants();
+        let credential_grants = repo_project_credential_grants(project.policy.write_mode);
         let credential_grants_json =
             serde_json::to_string(&credential_grants).unwrap_or_else(|_| "[]".to_string());
         self.db
@@ -439,9 +462,33 @@ impl RepoProjectExecutor {
             .clone_or_fetch(&repo.owner, &repo.repo, &remote_url, &task.base_branch)
             .await
             .map_err(|error| format!("workspace clone/fetch failed: {error}"))?;
+        let review_remote = if project.policy.write_mode == RepoWriteMode::ForkPr {
+            if let Some(write_remote_url) = fork_remote_url(repo) {
+                self.workspace
+                    .upsert_remote(
+                        &repo.owner,
+                        &repo.repo,
+                        FORK_WRITE_REMOTE,
+                        &write_remote_url,
+                    )
+                    .await
+                    .map_err(|error| format!("workspace fork remote setup failed: {error}"))?;
+                FORK_WRITE_REMOTE
+            } else {
+                "origin"
+            }
+        } else {
+            "origin"
+        };
         let worktree = self
             .workspace
-            .create_review_worktree(&repo.owner, &repo.repo, &short_id, &task.branch_name)
+            .create_review_worktree_from_remote(
+                &repo.owner,
+                &repo.repo,
+                &short_id,
+                &task.branch_name,
+                review_remote,
+            )
             .await
             .map_err(|error| format!("review worktree failed: {error}"))?;
 
@@ -482,6 +529,7 @@ impl RepoProjectExecutor {
             metadata: serde_json::json!({
                 "review": true,
                 "mode": mode.as_str(),
+                "review_remote": review_remote,
                 "worktree_dir": worktree.worktree_dir,
             }),
             created_at: now,
@@ -501,7 +549,12 @@ impl RepoProjectExecutor {
             Some(worker_run.id),
             RepoProjectEventKind::WorkerRunQueued,
             "Repository review worker queued",
-            serde_json::json!({ "job_id": job_id, "mode": mode.as_str(), "review": true }),
+            serde_json::json!({
+                "job_id": job_id,
+                "mode": mode.as_str(),
+                "review": true,
+                "write_mode": project.policy.write_mode.as_str(),
+            }),
         )
         .await?;
         self.emit_worker_run(&worker_run, "Review worker queued");
@@ -523,11 +576,12 @@ impl RepoProjectExecutor {
             "repo": format!("{}/{}", repo.owner, repo.repo),
             "pull_request_number": task.pull_request_number,
             "review": true,
+            "write_mode": project.policy.write_mode.as_str(),
             "source": "repo_project_supervisor",
             "task_packet": packet.metadata,
         });
 
-        let credential_grants = repo_project_credential_grants();
+        let credential_grants = repo_project_credential_grants(project.policy.write_mode);
         let credential_grants_json =
             serde_json::to_string(&credential_grants).unwrap_or_else(|_| "[]".to_string());
         self.db
@@ -883,13 +937,26 @@ pub fn build_repo_task_prompt(
         },
         task.coding_backend,
     );
-    wrap_packet_prompt(&packet.prompt, &task.base_branch, &task.branch_name)
+    wrap_packet_prompt(
+        &packet.prompt,
+        project.policy.write_mode,
+        repo,
+        &task.base_branch,
+        &task.branch_name,
+    )
 }
 
 /// Wrap a deterministic task packet prompt with the ThinClaw sandbox execution
 /// rules. Shared by the initial dispatch and CI-repair re-dispatch so both
 /// enforce identical branch/PR safety constraints.
-fn wrap_packet_prompt(packet_prompt: &str, base_branch: &str, branch_name: &str) -> String {
+fn wrap_packet_prompt(
+    packet_prompt: &str,
+    write_mode: RepoWriteMode,
+    repo: &RepoProjectRepo,
+    base_branch: &str,
+    branch_name: &str,
+) -> String {
+    let write_rules = implementation_write_rules(write_mode, repo, branch_name, base_branch);
     format!(
         r#"{packet_prompt}
 
@@ -899,8 +966,7 @@ fn wrap_packet_prompt(packet_prompt: &str, base_branch: &str, branch_name: &str)
 - Keep all autonomous code changes on branch `{branch_name}`.
 - Make focused commits with clear messages.
 - Run the relevant tests/checks you changed or can reasonably infer.
-- Push `{branch_name}` to origin when credentials are available.
-- Open or update a pull request targeting `{base_branch}` when GitHub credentials are available.
+{write_rules}
 - Report blockers explicitly in the final message when credentials, tests, or required context are missing.
 "#,
     )
@@ -924,17 +990,69 @@ fn job_mode_from_backend(backend: CodingBackend) -> JobMode {
     }
 }
 
-fn repo_project_credential_grants() -> Vec<CredentialGrant> {
+fn implementation_write_rules(
+    write_mode: RepoWriteMode,
+    repo: &RepoProjectRepo,
+    branch_name: &str,
+    base_branch: &str,
+) -> String {
+    match write_mode {
+        RepoWriteMode::ReadOnlyClone => {
+            "- Do not push commits or open pull requests; this project is in read-only clone mode."
+                .to_string()
+        }
+        RepoWriteMode::ForkPr => {
+            let fork =
+                fork_full_name(repo).unwrap_or_else(|| "<fork-owner>/<fork-repo>".to_string());
+            format!(
+                "- Push `{branch_name}` only to remote `{FORK_WRITE_REMOTE}` ({fork}); never push to `origin`.\n\
+                 - Open or update a pull request from `{fork}:{branch_name}` targeting `{base_branch}` on `origin` when GitHub credentials are available.\n\
+                 - If remote `{FORK_WRITE_REMOTE}` is missing, stop and report that fork metadata is required."
+            )
+        }
+        RepoWriteMode::MaintainerBranchPr => {
+            format!(
+                "- Push `{branch_name}` to `origin` when credentials are available.\n\
+                 - Open or update a pull request targeting `{base_branch}`.\n\
+                 - Do not merge the pull request; a human must merge it."
+            )
+        }
+        RepoWriteMode::MaintainerAutoMerge => {
+            format!(
+                "- Push `{branch_name}` to `origin` when credentials are available.\n\
+                 - Open or update a pull request targeting `{base_branch}`.\n\
+                 - Do not merge the pull request from the worker; the supervisor merge gate owns merging."
+            )
+        }
+    }
+}
+
+fn repo_project_credential_grants(write_mode: RepoWriteMode) -> Vec<CredentialGrant> {
+    let secret_name = match write_mode {
+        RepoWriteMode::ReadOnlyClone => return Vec::new(),
+        RepoWriteMode::ForkPr => GITHUB_FORK_SECRET_NAME,
+        RepoWriteMode::MaintainerBranchPr | RepoWriteMode::MaintainerAutoMerge => {
+            GITHUB_SECRET_NAME
+        }
+    };
     vec![
         CredentialGrant {
-            secret_name: GITHUB_SECRET_NAME.to_string(),
+            secret_name: secret_name.to_string(),
             env_var: "GITHUB_TOKEN".to_string(),
         },
         CredentialGrant {
-            secret_name: GITHUB_SECRET_NAME.to_string(),
+            secret_name: secret_name.to_string(),
             env_var: "GH_TOKEN".to_string(),
         },
     ]
+}
+
+fn write_remote_name(write_mode: RepoWriteMode) -> &'static str {
+    match write_mode {
+        RepoWriteMode::ForkPr => FORK_WRITE_REMOTE,
+        RepoWriteMode::MaintainerBranchPr | RepoWriteMode::MaintainerAutoMerge => "origin",
+        RepoWriteMode::ReadOnlyClone => "none",
+    }
 }
 
 fn repo_remote_url(repo: &RepoProjectRepo) -> String {
@@ -948,6 +1066,42 @@ fn repo_remote_url(repo: &RepoProjectRepo) -> String {
         })
         .map(str::to_string)
         .unwrap_or_else(|| format!("https://github.com/{}/{}.git", repo.owner, repo.repo))
+}
+
+fn fork_owner(repo: &RepoProjectRepo) -> Option<String> {
+    repo.metadata
+        .get("fork_owner")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn fork_repo(repo: &RepoProjectRepo) -> Option<String> {
+    repo.metadata
+        .get("fork_repo")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn fork_full_name(repo: &RepoProjectRepo) -> Option<String> {
+    let owner = fork_owner(repo)?;
+    let name = fork_repo(repo).unwrap_or_else(|| repo.repo.clone());
+    Some(format!("{owner}/{name}"))
+}
+
+fn fork_remote_url(repo: &RepoProjectRepo) -> Option<String> {
+    repo.metadata
+        .get("fork_clone_url")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            fork_full_name(repo).map(|full_name| format!("https://github.com/{full_name}.git"))
+        })
 }
 
 fn is_review_run(run: &RepoWorkerRun) -> bool {
@@ -1120,6 +1274,28 @@ mod tests {
         assert!(prompt.contains("task_branch: thinclaw/sample/abc123"));
         assert!(prompt.contains("Do not push directly to the base branch"));
         assert!(prompt.contains("Open or update a pull request"));
+        assert!(prompt.contains("thinclaw-write"));
+        assert!(prompt.contains("never push to `origin`"));
+    }
+
+    #[test]
+    fn credential_grants_follow_write_mode() {
+        assert!(repo_project_credential_grants(RepoWriteMode::ReadOnlyClone).is_empty());
+
+        let fork = repo_project_credential_grants(RepoWriteMode::ForkPr);
+        assert_eq!(fork.len(), 2);
+        assert!(
+            fork.iter()
+                .all(|grant| grant.secret_name == GITHUB_FORK_SECRET_NAME)
+        );
+
+        let maintainer = repo_project_credential_grants(RepoWriteMode::MaintainerBranchPr);
+        assert_eq!(maintainer.len(), 2);
+        assert!(
+            maintainer
+                .iter()
+                .all(|grant| grant.secret_name == GITHUB_SECRET_NAME)
+        );
     }
 
     #[test]

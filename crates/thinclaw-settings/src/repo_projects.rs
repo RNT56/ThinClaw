@@ -12,6 +12,10 @@ fn default_repo_projects_coding_backend() -> String {
     "worker".to_string()
 }
 
+fn default_repo_projects_write_mode() -> String {
+    "fork_pr".to_string()
+}
+
 fn default_repo_projects_watchdog_interval_secs() -> u64 {
     60
 }
@@ -31,6 +35,10 @@ pub struct RepoProjectsSettings {
     /// Preferred sandbox/coding backend: "worker", "claude_code", or "codex_code".
     #[serde(default = "default_repo_projects_coding_backend")]
     pub default_coding_backend: String,
+    /// Default repository write policy: "read_only_clone", "fork_pr",
+    /// "maintainer_branch_pr", or "maintainer_auto_merge".
+    #[serde(default = "default_repo_projects_write_mode")]
+    pub default_write_mode: String,
     /// Whether newly created projects should default to auto-merge.
     #[serde(default)]
     pub auto_merge_default: bool,
@@ -72,6 +80,7 @@ impl Default for RepoProjectsSettings {
             max_concurrent_tasks_per_project:
                 default_repo_projects_max_concurrent_tasks_per_project(),
             default_coding_backend: default_repo_projects_coding_backend(),
+            default_write_mode: default_repo_projects_write_mode(),
             auto_merge_default: false,
             watchdog_interval_secs: default_repo_projects_watchdog_interval_secs(),
             workspace_base_dir: None,

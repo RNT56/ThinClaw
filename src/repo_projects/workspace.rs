@@ -166,6 +166,19 @@ impl RepoWorkspaceProvisioner {
         })
     }
 
+    pub async fn upsert_remote(
+        &self,
+        owner: &str,
+        repo: &str,
+        remote_name: &str,
+        remote_url: &str,
+    ) -> Result<(), RepoWorkspaceError> {
+        let repo_dir = self.repo_dir(owner, repo)?;
+        validate_remote_name(remote_name).map_err(|_| RepoWorkspaceError::InvalidRepo)?;
+        let _ = run_git(&repo_dir, &["remote", "remove", remote_name]).await;
+        run_git(&repo_dir, &["remote", "add", remote_name, remote_url]).await
+    }
+
     /// Create a detached worktree at the remote tip of the task branch, for a
     /// read-only review pass. Unlike [`create_task_worktree`], this checks out
     /// the *pushed* branch content (the implementation worker's commits) rather
@@ -177,11 +190,24 @@ impl RepoWorkspaceProvisioner {
         task_short_id: &str,
         branch_name: &str,
     ) -> Result<TaskWorktree, RepoWorkspaceError> {
+        self.create_review_worktree_from_remote(owner, repo, task_short_id, branch_name, "origin")
+            .await
+    }
+
+    pub async fn create_review_worktree_from_remote(
+        &self,
+        owner: &str,
+        repo: &str,
+        task_short_id: &str,
+        branch_name: &str,
+        remote_name: &str,
+    ) -> Result<TaskWorktree, RepoWorkspaceError> {
         let repo_dir = self.repo_dir(owner, repo)?;
         let worktree_dir = self.review_worktree_dir(owner, repo, task_short_id)?;
+        validate_remote_name(remote_name).map_err(|_| RepoWorkspaceError::InvalidRepo)?;
 
         // Fetch the latest tip of the branch under review.
-        run_git(&repo_dir, &["fetch", "origin", branch_name]).await?;
+        run_git(&repo_dir, &["fetch", remote_name, branch_name]).await?;
 
         if worktree_dir.exists() {
             run_git(
@@ -199,7 +225,7 @@ impl RepoWorkspaceProvisioner {
                 "--force",
                 "--detach",
                 path_str(&worktree_dir)?,
-                &format!("origin/{branch_name}"),
+                &format!("{remote_name}/{branch_name}"),
             ],
         )
         .await?;
@@ -264,6 +290,16 @@ fn validate_branch_component(value: &str) -> Result<(), ()> {
         && !value.contains("..")
         && !value.contains('@')
         && !value.contains("//")
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    valid.then_some(()).ok_or(())
+}
+
+fn validate_remote_name(value: &str) -> Result<(), ()> {
+    let valid = !value.is_empty()
+        && !value.starts_with('.')
+        && !value.contains("..")
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));

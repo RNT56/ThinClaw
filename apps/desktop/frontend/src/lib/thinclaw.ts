@@ -2209,6 +2209,7 @@ export type ThinClawRepoProjectSetupKey =
     | 'coding_backend'
     | 'credentials'
     | 'concurrency'
+    | 'write_mode'
     | 'auto_merge_policy'
     | 'notifications'
     | string;
@@ -2289,6 +2290,7 @@ export interface ThinClawRepoProject {
     credentials: 'ready' | 'missing' | 'partial' | string;
     coding_backend?: 'worker' | 'codex_code' | 'claude_code' | string | null;
     concurrency_limit: number;
+    write_mode: ThinClawRepoWriteMode | string;
     auto_merge_policy: 'manual' | 'green_checks' | 'approved_only' | 'disabled' | string;
     notifications: 'enabled' | 'disabled' | 'partial' | string;
     updated_at?: string | null;
@@ -2310,12 +2312,21 @@ export interface ThinClawRepoProjectResponse {
     unavailable?: ThinClawFutureCommandUnavailable;
 }
 
+export type ThinClawRepoWriteMode =
+    | 'read_only_clone'
+    | 'fork_pr'
+    | 'maintainer_branch_pr'
+    | 'maintainer_auto_merge';
+
 export interface ThinClawRepoProjectCreateInput {
     name: string;
     repo_url: string;
     default_branch?: string | null;
     local_path?: string | null;
     description?: string | null;
+    write_mode?: ThinClawRepoWriteMode | null;
+    fork_owner?: string | null;
+    fork_repo?: string | null;
 }
 
 export interface ThinClawRepoBacklogEnqueueInput {
@@ -2359,6 +2370,7 @@ export interface ThinClawRepoProjectsConfigureInput {
     webhook_secret_secret?: string | null;
     app_slug?: string | null;
     default_coding_backend?: string | null;
+    default_write_mode?: ThinClawRepoWriteMode | string | null;
     auto_merge_default?: boolean | null;
     max_concurrent_projects?: number | null;
     max_concurrent_tasks_per_project?: number | null;
@@ -2377,10 +2389,12 @@ export interface ThinClawRepoProjectsReadiness {
     install_url?: string | null;
     auto_merge_default: boolean;
     default_coding_backend: string;
+    default_write_mode: ThinClawRepoWriteMode | string;
     max_concurrent_projects: number;
     max_concurrent_tasks_per_project: number;
     watchdog_interval_secs: number;
     github_token_secret_present?: boolean | null;
+    github_fork_token_secret_present?: boolean | null;
     private_key_secret_present?: boolean | null;
     webhook_secret_present?: boolean | null;
     ready_for_live_runs: boolean;
@@ -2402,12 +2416,21 @@ export interface ThinClawConnectableRepo {
     archived: boolean;
     default_branch: string;
     html_url?: string | null;
+    permissions: {
+        pull: boolean;
+        triage: boolean;
+        push: boolean;
+        maintain: boolean;
+        admin: boolean;
+    };
+    recommended_write_mode: ThinClawRepoWriteMode | string;
     enrolled: boolean;
     project_id?: string | null;
 }
 
 export interface ThinClawConnectableReposResponse {
     source: 'github_app' | 'github_token' | 'gh_cli' | string;
+    authenticated_user?: string | null;
     total: number;
     repos: ThinClawConnectableRepo[];
     unavailable?: ThinClawFutureCommandUnavailable;
@@ -2416,6 +2439,9 @@ export interface ThinClawConnectableReposResponse {
 export interface ThinClawRepoConnectInput {
     repos?: string[];
     all?: boolean;
+    write_mode?: ThinClawRepoWriteMode | null;
+    fork_owner?: string | null;
+    fork_repo?: string | null;
 }
 
 export interface ThinClawRepoConnectResponse {
@@ -2429,6 +2455,8 @@ export interface ThinClawRepoConnectResponse {
 export interface ThinClawRepoEnrollInput {
     repo_url: string;
     default_branch?: string | null;
+    fork_owner?: string | null;
+    fork_repo?: string | null;
 }
 
 function futureCommandUnavailable(command: string, err: unknown): ThinClawFutureCommandUnavailable {
@@ -2554,6 +2582,7 @@ export async function getRepoProjectsReadiness(): Promise<ThinClawRepoProjectsRe
         credential_mode: 'none',
         auto_merge_default: false,
         default_coding_backend: 'worker',
+        default_write_mode: 'fork_pr',
         max_concurrent_projects: 1,
         max_concurrent_tasks_per_project: 1,
         watchdog_interval_secs: 60,
@@ -2571,6 +2600,7 @@ export async function setupRepoProjects(
         credential_mode: 'none',
         auto_merge_default: false,
         default_coding_backend: 'worker',
+        default_write_mode: 'fork_pr',
         max_concurrent_projects: 1,
         max_concurrent_tasks_per_project: 1,
         watchdog_interval_secs: 60,

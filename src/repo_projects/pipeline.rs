@@ -20,7 +20,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use thinclaw_repo_projects::{
     CodingBackend, MergeMethod, RepoProject, RepoProjectEvent, RepoProjectEventKind,
-    RepoProjectRepo, RepoProjectTask, RepoProjectTaskState, validate_task_state_transition,
+    RepoProjectRepo, RepoProjectTask, RepoProjectTaskState, RepoWriteMode,
+    validate_task_state_transition,
 };
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -159,13 +160,28 @@ impl GitHubPipeline {
         repo: &RepoProjectRepo,
         task: &mut RepoProjectTask,
     ) -> Result<PipelineOutcome, String> {
-        let client = self.github.client_for(repo).await?;
-
-        let Some(head_sha) = self.ensure_pull_request(&client, repo, task).await? else {
+        if project.policy.write_mode == RepoWriteMode::ReadOnlyClone {
             self.block_task(
                 repo,
                 task,
-                "Task branch was not pushed to origin; a pull request cannot be opened.",
+                "Project is in read-only clone mode; ThinClaw will not push branches or open pull requests.",
+            )
+            .await?;
+            return Ok(PipelineOutcome::AwaitingHuman {
+                reason: "read-only clone mode".to_string(),
+            });
+        }
+
+        let client = self.github.client_for(repo).await?;
+
+        let Some(head_sha) = self
+            .ensure_pull_request(&client, project, repo, task)
+            .await?
+        else {
+            self.block_task(
+                repo,
+                task,
+                "Task branch was not pushed to the configured write target; a pull request cannot be opened.",
             )
             .await?;
             return Ok(PipelineOutcome::PullRequestMissing);
@@ -472,11 +488,12 @@ impl GitHubPipeline {
                 .await;
         }
 
-        // Denied. Distinguish "human will merge" (auto-merge off, otherwise clean)
-        // from a genuine blocker.
-        if is_only_auto_merge_disabled(&record.decision.reasons) {
+        // Denied. Distinguish "human will merge" (the write/auto-merge policy
+        // intentionally forbids supervisor merge, otherwise clean) from a
+        // genuine blocker.
+        if is_human_merge_hold(&record.decision.reasons) {
             return Ok(PipelineOutcome::AwaitingHuman {
-                reason: "auto-merge disabled; pull request is green and awaiting human merge"
+                reason: "supervisor auto-merge is disabled by write policy; pull request is green and awaiting human merge"
                     .to_string(),
             });
         }
@@ -641,13 +658,17 @@ impl GitHubPipeline {
     // ── PR provisioning ─────────────────────────────────────────────────────
 
     /// Ensure an open pull request exists for the task branch and return the head
-    /// SHA. Returns `Ok(None)` when the branch has not been pushed to origin.
+    /// SHA. Returns `Ok(None)` when the branch has not been pushed to the
+    /// configured write target.
     async fn ensure_pull_request(
         &self,
         client: &GitHubApiClient,
+        project: &RepoProject,
         repo: &RepoProjectRepo,
         task: &mut RepoProjectTask,
     ) -> Result<Option<String>, String> {
+        let head = pull_request_head(project, repo, task)?;
+
         // 1. Known PR number — refresh it.
         if let Some(number) = task.pull_request_number {
             match client
@@ -667,10 +688,9 @@ impl GitHubPipeline {
         }
 
         // 2. Discover an existing open PR for the head branch.
-        let head = format!("{}:{}", repo.owner, task.branch_name);
         let query = GitHubPullRequestListQuery {
             state: Some("open".to_string()),
-            head: Some(head),
+            head: Some(head.pr_head.clone()),
             per_page: Some(10),
             ..GitHubPullRequestListQuery::default()
         };
@@ -695,7 +715,7 @@ impl GitHubPipeline {
 
         // 3. No PR yet — confirm the branch exists with commits ahead of base.
         let branch_ref = match client
-            .get_branch_ref(&repo.owner, &repo.repo, &task.branch_name)
+            .get_branch_ref(&head.ref_owner, &head.ref_repo, &task.branch_name)
             .await
         {
             Ok(reference) => reference,
@@ -705,7 +725,7 @@ impl GitHubPipeline {
 
         let base_branch = task.base_branch.clone();
         let comparison = client
-            .compare_commits(&repo.owner, &repo.repo, &base_branch, &task.branch_name)
+            .compare_commits(&repo.owner, &repo.repo, &base_branch, &head.compare_head)
             .await
             .map_err(stringify_github_error)?;
         if comparison.ahead_by <= 0 {
@@ -716,11 +736,11 @@ impl GitHubPipeline {
         let body = build_pr_body(task);
         let request = GitHubCreatePullRequestRequest {
             title: redact_sensitive_text(&task.title),
-            head: task.branch_name.clone(),
+            head: head.pr_head,
             base: base_branch,
             body: Some(body),
             draft: Some(false),
-            maintainer_can_modify: Some(true),
+            maintainer_can_modify: Some(head.maintainer_can_modify),
         };
         let pr = client
             .create_pull_request(&repo.owner, &repo.repo, &request)
@@ -1307,6 +1327,50 @@ async fn client_merge(
         .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PullRequestHead {
+    pr_head: String,
+    ref_owner: String,
+    ref_repo: String,
+    compare_head: String,
+    maintainer_can_modify: bool,
+}
+
+fn pull_request_head(
+    project: &RepoProject,
+    repo: &RepoProjectRepo,
+    task: &RepoProjectTask,
+) -> Result<PullRequestHead, String> {
+    match project.policy.write_mode {
+        RepoWriteMode::ReadOnlyClone => {
+            Err("read-only clone mode does not create pull requests".to_string())
+        }
+        RepoWriteMode::ForkPr => {
+            let owner = metadata_string(&repo.metadata, "fork_owner").ok_or_else(|| {
+                "fork_pr mode requires repo metadata fork_owner so ThinClaw knows where task branches are pushed".to_string()
+            })?;
+            let fork_repo =
+                metadata_string(&repo.metadata, "fork_repo").unwrap_or_else(|| repo.repo.clone());
+            Ok(PullRequestHead {
+                pr_head: format!("{owner}:{}", task.branch_name),
+                ref_owner: owner.clone(),
+                ref_repo: fork_repo,
+                compare_head: format!("{owner}:{}", task.branch_name),
+                maintainer_can_modify: true,
+            })
+        }
+        RepoWriteMode::MaintainerBranchPr | RepoWriteMode::MaintainerAutoMerge => {
+            Ok(PullRequestHead {
+                pr_head: format!("{}:{}", repo.owner, task.branch_name),
+                ref_owner: repo.owner.clone(),
+                ref_repo: repo.repo.clone(),
+                compare_head: task.branch_name.clone(),
+                maintainer_can_modify: true,
+            })
+        }
+    }
+}
+
 fn build_pr_body(task: &RepoProjectTask) -> String {
     let mut body = String::new();
     if let Some(task_body) = task.body.as_deref() {
@@ -1344,9 +1408,14 @@ fn github_merge_method(method: MergeMethod) -> GitHubMergeMethod {
     }
 }
 
-fn is_only_auto_merge_disabled(reasons: &[thinclaw_repo_projects::MergeGateDenialReason]) -> bool {
-    use thinclaw_repo_projects::MergeGateDenialReason::AutoMergeDisabled;
-    reasons.len() == 1 && reasons[0] == AutoMergeDisabled
+fn is_human_merge_hold(reasons: &[thinclaw_repo_projects::MergeGateDenialReason]) -> bool {
+    use thinclaw_repo_projects::MergeGateDenialReason::{
+        AutoMergeDisabled, WriteModeDisallowsMerge,
+    };
+    !reasons.is_empty()
+        && reasons
+            .iter()
+            .all(|reason| matches!(reason, AutoMergeDisabled | WriteModeDisallowsMerge))
 }
 
 fn decision_signature(

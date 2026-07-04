@@ -46,6 +46,8 @@ pub enum RepoProjectCommand {
         #[arg(long)]
         default_coding_backend: Option<String>,
         #[arg(long)]
+        default_write_mode: Option<String>,
+        #[arg(long)]
         auto_merge: Option<bool>,
         #[arg(long)]
         watchdog_interval_secs: Option<u64>,
@@ -67,6 +69,12 @@ pub enum RepoProjectCommand {
         default_branch: Option<String>,
         #[arg(long)]
         description: Option<String>,
+        #[arg(long)]
+        write_mode: Option<String>,
+        #[arg(long)]
+        fork_owner: Option<String>,
+        #[arg(long)]
+        fork_repo: Option<String>,
     },
     /// Enroll an additional repository into a project.
     Enroll {
@@ -75,6 +83,10 @@ pub enum RepoProjectCommand {
         repo_url: String,
         #[arg(long)]
         default_branch: Option<String>,
+        #[arg(long)]
+        fork_owner: Option<String>,
+        #[arg(long)]
+        fork_repo: Option<String>,
     },
     /// List the GitHub repositories the connected credential can act on
     /// (the connector repo picker), marking which are already enrolled.
@@ -87,6 +99,12 @@ pub enum RepoProjectCommand {
         /// Connect every repository the credential can access.
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        write_mode: Option<String>,
+        #[arg(long)]
+        fork_owner: Option<String>,
+        #[arg(long)]
+        fork_repo: Option<String>,
     },
     /// Start a project.
     Start { project_id: String },
@@ -124,6 +142,7 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
             webhook_secret_secret,
             app_slug,
             default_coding_backend,
+            default_write_mode,
             auto_merge,
             watchdog_interval_secs,
         } => {
@@ -143,6 +162,7 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
                 webhook_secret_secret,
                 app_slug,
                 default_coding_backend,
+                default_write_mode,
                 auto_merge_default: auto_merge,
                 watchdog_interval_secs,
                 max_concurrent_projects: None,
@@ -166,6 +186,9 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
             repo_url,
             default_branch,
             description,
+            write_mode,
+            fork_owner,
+            fork_repo,
         } => print(
             api::create_project(
                 &db,
@@ -176,6 +199,9 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
                     default_branch,
                     local_path: None,
                     description,
+                    write_mode: parse_write_mode_arg(write_mode)?,
+                    fork_owner,
+                    fork_repo,
                 },
             )
             .await,
@@ -184,6 +210,8 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
             project_id,
             repo_url,
             default_branch,
+            fork_owner,
+            fork_repo,
         } => print(
             api::enroll_repo(
                 &db,
@@ -192,6 +220,8 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
                 api::RepoEnrollInput {
                     repo_url,
                     default_branch,
+                    fork_owner,
+                    fork_repo,
                 },
             )
             .await,
@@ -200,10 +230,28 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
             let secrets = crate::cli::secrets::get_secrets_store().await?;
             print(api::list_connectable_repos(&db, &secrets, USER).await)
         }
-        RepoProjectCommand::Connect { repos, all } => {
+        RepoProjectCommand::Connect {
+            repos,
+            all,
+            write_mode,
+            fork_owner,
+            fork_repo,
+        } => {
             let secrets = crate::cli::secrets::get_secrets_store().await?;
             print(
-                api::connect_repos(&db, &secrets, USER, api::RepoConnectInput { repos, all }).await,
+                api::connect_repos(
+                    &db,
+                    &secrets,
+                    USER,
+                    api::RepoConnectInput {
+                        repos,
+                        all,
+                        write_mode: parse_write_mode_arg(write_mode)?,
+                        fork_owner,
+                        fork_repo,
+                    },
+                )
+                .await,
             )
         }
         RepoProjectCommand::Start { project_id } => {
@@ -235,6 +283,32 @@ async fn connect_db() -> anyhow::Result<Arc<dyn Database>> {
 
 fn parse(id: &str) -> anyhow::Result<Uuid> {
     Uuid::parse_str(id).map_err(|_| anyhow::anyhow!("project_id must be a UUID"))
+}
+
+fn parse_write_mode_arg(
+    value: Option<String>,
+) -> anyhow::Result<Option<thinclaw_repo_projects::RepoWriteMode>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let mode = match value.trim().to_ascii_lowercase().as_str() {
+        "read_only_clone" | "read-only-clone" | "read_only" | "readonly" => {
+            thinclaw_repo_projects::RepoWriteMode::ReadOnlyClone
+        }
+        "fork_pr" | "fork-pr" | "fork" => thinclaw_repo_projects::RepoWriteMode::ForkPr,
+        "maintainer_branch_pr" | "maintainer-branch-pr" | "branch_pr" | "branch" => {
+            thinclaw_repo_projects::RepoWriteMode::MaintainerBranchPr
+        }
+        "maintainer_auto_merge" | "maintainer-auto-merge" | "auto_merge" | "auto" => {
+            thinclaw_repo_projects::RepoWriteMode::MaintainerAutoMerge
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "write mode must be one of read_only_clone, fork_pr, maintainer_branch_pr, maintainer_auto_merge"
+            ));
+        }
+    };
+    Ok(Some(mode))
 }
 
 fn print<T: serde::Serialize>(result: crate::api::ApiResult<T>) -> anyhow::Result<()> {
