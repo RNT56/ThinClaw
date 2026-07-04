@@ -286,11 +286,11 @@ pub(super) fn validate_numbers_payload(
 }
 
 pub(super) fn generate_dedicated_user_secret() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
     (0..24)
         .map(|_| {
-            let idx = rng.gen_range(0..alphabet.len());
+            let idx = rng.random_range(0..alphabet.len());
             alphabet[idx] as char
         })
         .collect()

@@ -74,7 +74,7 @@ sysinfo = "0.38"
 tempfile = "3.24.0"
 scraper = "0.25.0"
 chrono = "0.4.43"
-cron = "0.13"
+cron = "0.17"
 rig-core = "0.7.0"
 html2text = "0.13.5"
 urlencoding = "2"
@@ -88,7 +88,7 @@ tauri-plugin-process = "2"
 
 tokio-stream = "0.1.18"
 sha2 = "0.10"
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 tungstenite = "0.26"
 futures-util = "0.3"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }

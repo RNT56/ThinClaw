@@ -477,8 +477,8 @@ impl ContainerJobManager {
         };
 
         // Create the container
-        use bollard::container::{Config, CreateContainerOptions};
-        use bollard::models::HostConfig;
+        use bollard::models::{ContainerCreateBody, HostConfig};
+        use bollard::query_parameters::CreateContainerOptionsBuilder;
 
         let host_config = HostConfig {
             binds: if binds.is_empty() { None } else { Some(binds) },
@@ -500,7 +500,7 @@ impl ContainerJobManager {
         // Build CMD based on mode
         let cmd = self.container_cmd(job_id, orchestrator_url, mode).await;
 
-        let container_config = Config {
+        let container_config = ContainerCreateBody {
             image: Some(self.config.image.clone()),
             cmd: Some(cmd),
             env: Some(env_vec),
@@ -515,10 +515,9 @@ impl ContainerJobManager {
             JobMode::ClaudeCode => format!("thinclaw-claude-{}", job_id),
             JobMode::CodexCode => format!("thinclaw-codex-{}", job_id),
         };
-        let options = CreateContainerOptions {
-            name: container_name,
-            ..Default::default()
-        };
+        let options = CreateContainerOptionsBuilder::new()
+            .name(&container_name)
+            .build();
 
         let response = docker
             .create_container(Some(options), container_config)
@@ -532,7 +531,7 @@ impl ContainerJobManager {
 
         // Start the container
         docker
-            .start_container::<String>(&container_id, None)
+            .start_container(&container_id, None)
             .await
             .map_err(|e| OrchestratorError::ContainerCreationFailed {
                 job_id,
@@ -577,7 +576,11 @@ impl ContainerJobManager {
         if let Err(e) = docker
             .stop_container(
                 &container_id,
-                Some(bollard::container::StopContainerOptions { t: 10 }),
+                Some(
+                    bollard::query_parameters::StopContainerOptionsBuilder::new()
+                        .t(10)
+                        .build(),
+                ),
             )
             .await
         {
@@ -588,10 +591,11 @@ impl ContainerJobManager {
         if let Err(e) = docker
             .remove_container(
                 &container_id,
-                Some(bollard::container::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
+                Some(
+                    bollard::query_parameters::RemoveContainerOptionsBuilder::new()
+                        .force(true)
+                        .build(),
+                ),
             )
             .await
         {
@@ -640,7 +644,11 @@ impl ContainerJobManager {
                     if let Err(e) = docker
                         .stop_container(
                             &cid,
-                            Some(bollard::container::StopContainerOptions { t: 5 }),
+                            Some(
+                                bollard::query_parameters::StopContainerOptionsBuilder::new()
+                                    .t(5)
+                                    .build(),
+                            ),
                         )
                         .await
                     {
@@ -649,10 +657,11 @@ impl ContainerJobManager {
                     if let Err(e) = docker
                         .remove_container(
                             &cid,
-                            Some(bollard::container::RemoveContainerOptions {
-                                force: true,
-                                ..Default::default()
-                            }),
+                            Some(
+                                bollard::query_parameters::RemoveContainerOptionsBuilder::new()
+                                    .force(true)
+                                    .build(),
+                            ),
                         )
                         .await
                     {
@@ -719,7 +728,9 @@ impl ContainerJobManager {
             }
         };
 
-        use bollard::container::{ListContainersOptions, RemoveContainerOptions};
+        use bollard::query_parameters::{
+            ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
+        };
         use std::collections::HashMap;
 
         // List all containers (including stopped) with our name prefix
@@ -727,32 +738,35 @@ impl ContainerJobManager {
         filters.insert("name".to_string(), vec!["thinclaw-worker-".to_string()]);
 
         let worker_containers = docker
-            .list_containers(Some(ListContainersOptions {
-                all: true,
-                filters: filters.clone(),
-                ..Default::default()
-            }))
+            .list_containers(Some(
+                ListContainersOptionsBuilder::new()
+                    .all(true)
+                    .filters(&filters)
+                    .build(),
+            ))
             .await
             .unwrap_or_default();
 
         filters.insert("name".to_string(), vec!["thinclaw-claude-".to_string()]);
         let claude_containers = docker
-            .list_containers(Some(ListContainersOptions {
-                all: true,
-                filters,
-                ..Default::default()
-            }))
+            .list_containers(Some(
+                ListContainersOptionsBuilder::new()
+                    .all(true)
+                    .filters(&filters)
+                    .build(),
+            ))
             .await
             .unwrap_or_default();
 
         let mut codex_filters = HashMap::new();
         codex_filters.insert("name".to_string(), vec!["thinclaw-codex-".to_string()]);
         let codex_containers = docker
-            .list_containers(Some(ListContainersOptions {
-                all: true,
-                filters: codex_filters,
-                ..Default::default()
-            }))
+            .list_containers(Some(
+                ListContainersOptionsBuilder::new()
+                    .all(true)
+                    .filters(&codex_filters)
+                    .build(),
+            ))
             .await
             .unwrap_or_default();
 
@@ -796,10 +810,7 @@ impl ContainerJobManager {
             match docker
                 .remove_container(
                     &cid,
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
+                    Some(RemoveContainerOptionsBuilder::new().force(true).build()),
                 )
                 .await
             {

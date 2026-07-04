@@ -44,9 +44,9 @@ fn keychain_cache_enabled() -> bool {
 
 /// Generate a random 32-byte master key.
 pub fn generate_master_key() -> Vec<u8> {
-    use rand::RngCore;
+    use rand::Rng;
     let mut key = vec![0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
     key
 }
 

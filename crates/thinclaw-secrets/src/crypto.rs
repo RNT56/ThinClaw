@@ -59,7 +59,7 @@ impl SecretsCrypto {
     /// Generate a random salt for a new secret.
     pub fn generate_salt() -> Vec<u8> {
         let mut salt = vec![0u8; SALT_SIZE];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut salt);
         salt
     }
 

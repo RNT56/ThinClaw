@@ -3,7 +3,7 @@ use std::path::Path;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
-use rand::RngCore;
+use rand::Rng;
 use reqwest::redirect::Policy;
 use sha2::{Digest, Sha256};
 
@@ -770,7 +770,7 @@ pub fn build_authorization_url(
 
 pub fn generate_pkce_pair() -> OAuthPkcePair {
     let mut verifier_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut verifier_bytes);
+    rand::rng().fill_bytes(&mut verifier_bytes);
     let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
     let mut hasher = Sha256::new();

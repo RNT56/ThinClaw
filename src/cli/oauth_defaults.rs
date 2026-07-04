@@ -26,7 +26,7 @@
 
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -308,7 +308,7 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
 /// staying within typical provider `state` length limits.
 pub fn generate_oauth_state() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill(&mut bytes);
+    rand::rng().fill(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
