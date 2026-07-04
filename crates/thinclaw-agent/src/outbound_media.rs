@@ -59,7 +59,7 @@ pub fn dedupe_attachments(attachments: Vec<MediaContent>) -> Vec<MediaContent> {
 pub fn attachment_digest(attachment: &MediaContent) -> String {
     let mut hasher = Sha256::new();
     hasher.update(&attachment.data);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 pub fn safe_basename(value: &str) -> Option<String> {

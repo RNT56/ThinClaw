@@ -1,4 +1,5 @@
 use super::*;
+use hmac::KeyInit;
 
 fn signature(secret: &str, body: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();

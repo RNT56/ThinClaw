@@ -78,7 +78,7 @@ impl MediaCache {
     pub fn cache_key(url: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(url.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Get the path for a cache key.

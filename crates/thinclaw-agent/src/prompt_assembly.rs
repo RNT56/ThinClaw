@@ -120,7 +120,7 @@ fn render_segments(segments: &[(String, String)]) -> String {
 fn sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 pub fn render_available_skill_index(skills: &[SkillSummary]) -> Option<String> {

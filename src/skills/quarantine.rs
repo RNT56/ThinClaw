@@ -246,7 +246,7 @@ fn content_sha256(files: &[SkillScanFile], fallback_content: &str) -> String {
             hasher.update(b"\0");
         }
     }
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn finding_summary(findings: &[SecurityFinding]) -> FindingSummary {
