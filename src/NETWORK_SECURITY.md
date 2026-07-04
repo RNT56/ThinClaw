@@ -71,6 +71,10 @@ If `GATEWAY_AUTH_TOKEN` is not set, a random hex token is generated at startup.
 | `/` | Static HTML (embedded) | Single-page app shell |
 | `/style.css` | Static CSS (embedded) | Stylesheet |
 | `/app.js` | Static JS (embedded) | Client-side app |
+| `/hooks/routine/{id}` | Routine webhook trigger | No bearer auth — validated by a per-routine HMAC secret |
+| `/hooks/github/repo-projects` | GitHub App webhook (repo-project supervisor) | No bearer auth — verifies `X-Hub-Signature-256` (HMAC-SHA256 of the raw body) against the configured webhook secret; deliveries are deduped and stored for idempotency/audit |
+
+These `/hooks/*` routes are intentionally outside the bearer-auth layer because their callers (GitHub, external routine webhooks) cannot present the gateway token; each instead authenticates with a per-source HMAC signature verified in constant time before any work is done.
 
 ### CORS Policy
 
@@ -127,6 +131,16 @@ The gateway sets the following security headers on all responses (via `SetRespon
 Shutdown is triggered via a `oneshot::Sender` stored in `GatewayState::shutdown_tx`. The server uses `axum::serve(...).with_graceful_shutdown(...)` to drain in-flight requests before closing the listener.
 
 **Reference:** `src/channels/web/server.rs` — `shutdown_tx` / `shutdown_rx` setup
+
+### Repository Project Supervisor (default-off)
+
+The repo-project supervisor (feature-gated by `repo_projects.enabled`, off by default) adds three network surfaces, all on the existing Web Gateway listener:
+
+- **Authenticated management API** — `/api/repo-projects/*` (list/create/enroll/connect/start/pause/events/merge-gate, plus `connectable-repos` for the GitHub connector). These sit inside the bearer-auth layer like the rest of the API; no new listener or auth path.
+- **Live SSE** — `repo_project_updated`, `repo_task_updated`, `repo_worker_run_updated`, `repo_project_event`, and `repo_merge_gate_updated` events are broadcast over the gateway's existing authenticated SSE stream.
+- **Public GitHub webhook** — `/hooks/github/repo-projects` (see *Unauthenticated Routes* above): HMAC-`X-Hub-Signature-256` verified, deduped, and persisted to `repo_webhook_deliveries` for idempotency/audit.
+
+**Outbound (egress):** when enabled and enrolled, the supervisor makes authenticated calls to the GitHub REST API (App JWT signed with RS256 → installation token, or a `github_token`) for PRs, checks, reviews, merges, and repository discovery. Private keys and tokens are resolved from the encrypted secrets store, never from the network surface.
 
 ---
 

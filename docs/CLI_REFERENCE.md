@@ -161,6 +161,7 @@ handlers use.
   - `--webhook-secret-secret <NAME>`: Name of the secret holding the GitHub webhook secret.
   - `--app-slug <SLUG>`: Public GitHub App slug (used to build the install URL).
   - `--default-coding-backend <BACKEND>`: Default coding backend for new tasks.
+  - `--default-write-mode <MODE>`: Default write mode for new projects (`read_only_clone`, `fork_pr`, `maintainer_branch_pr`, `maintainer_auto_merge`).
   - `--auto-merge <BOOL>`: Whether to auto-merge passing PRs.
   - `--watchdog-interval-secs <SECS>`: Reconcile/watchdog interval in seconds.
 - `thinclaw repo-projects set-credential <NAME>`: Store a GitHub credential in the encrypted secrets store.
@@ -170,12 +171,20 @@ handlers use.
   - `--repo-url <URL>`: Repository URL.
   - `--default-branch <BRANCH>`: Default branch.
   - `--description <TEXT>`: Project description.
+  - `--write-mode <MODE>`: Write mode for the project (`read_only_clone`, `fork_pr`, `maintainer_branch_pr`, `maintainer_auto_merge`).
+  - `--fork-owner <OWNER>`: Fork owner (for `fork_pr` mode).
+  - `--fork-repo <REPO>`: Fork repository name (for `fork_pr` mode).
 - `thinclaw repo-projects enroll <PROJECT_ID>`: Enroll an additional repository into a project.
   - `--repo-url <URL>`: Repository URL.
   - `--default-branch <BRANCH>`: Default branch.
+  - `--fork-owner <OWNER>`: Fork owner (for `fork_pr` mode).
+  - `--fork-repo <REPO>`: Fork repository name (for `fork_pr` mode).
 - `thinclaw repo-projects repos`: List the GitHub repositories the connected credential can act on, marking which are already enrolled.
 - `thinclaw repo-projects connect [REPOS...]`: Bring repositories under supervision (a project is created for each). Pass one or more `owner/repo`, or `--all` for every accessible repo.
   - `--all`: Connect every repository the credential can access.
+  - `--write-mode <MODE>`: Write mode for the new projects (`read_only_clone`, `fork_pr`, `maintainer_branch_pr`, `maintainer_auto_merge`).
+  - `--fork-owner <OWNER>`: Fork owner for enrolled repositories (for `fork_pr` mode).
+  - `--fork-repo <REPO>`: Fork repository name (for `fork_pr` mode).
 - `thinclaw repo-projects start <PROJECT_ID>`: Start a project.
 - `thinclaw repo-projects pause <PROJECT_ID>`: Pause a project.
 - `thinclaw repo-projects resume <PROJECT_ID>`: Resume a paused project.
