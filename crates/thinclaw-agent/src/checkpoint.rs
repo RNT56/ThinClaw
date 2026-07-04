@@ -271,7 +271,7 @@ impl CheckpointManager {
         let mut hasher = Sha256::new();
         hasher.update(canonical.to_string_lossy().as_bytes());
         let digest = hasher.finalize();
-        let hash = format!("{:x}", digest);
+        let hash = hex::encode(digest);
         self.shadow_root.join(&hash[..16])
     }
 

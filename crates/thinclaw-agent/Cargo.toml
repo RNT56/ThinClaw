@@ -24,7 +24,8 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] 
 rust_decimal_macros = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
+hex = "0.4"
 thinclaw-channels-core = { version = "0.1.0", path = "../thinclaw-channels-core" }
 thinclaw-history = { version = "0.1.0", path = "../thinclaw-history" }
 thinclaw-identity = { version = "0.1.0", path = "../thinclaw-identity" }
