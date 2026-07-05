@@ -79,6 +79,12 @@ pub struct ToolPolicyManager {
     pub channel_policies: HashMap<String, ToolAccessPolicy>,
     /// Per-group policies (keyed by `channel:group_id`, e.g., "signal:+1234567890").
     pub group_policies: HashMap<String, ToolAccessPolicy>,
+    /// Argument-scoped rules evaluated at execution time against a call's final
+    /// arguments (e.g. allow `shell` only for `npm run *`). Distinct from the
+    /// name-based policies above, which only ever see the tool name. Evaluated
+    /// in order; the first firing rule wins. See [`crate::arg_policy`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arg_policies: Vec<crate::arg_policy::ArgScopedPolicy>,
 }
 
 impl ToolPolicyManager {
@@ -208,6 +214,7 @@ impl ToolPolicyManager {
             default_policy: ToolAccessPolicy::allow_only(std::iter::empty::<String>()),
             channel_policies: HashMap::new(),
             group_policies: HashMap::new(),
+            arg_policies: Vec::new(),
         }
     }
 
@@ -326,6 +333,17 @@ impl ToolPolicyManager {
         Some(format!(
             "Tool '{tool_name}' is blocked by the configured tool policy for {scope}."
         ))
+    }
+
+    /// Evaluate argument-scoped rules for a tool call's final arguments. Returns
+    /// [`crate::arg_policy::ArgPolicyDecision::NoMatch`] when no rule applies, so
+    /// the caller falls through to the normal approval flow.
+    pub fn evaluate_arg_policy(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> crate::arg_policy::ArgPolicyDecision {
+        crate::arg_policy::evaluate_arg_policies(&self.arg_policies, tool_name, args)
     }
 }
 
