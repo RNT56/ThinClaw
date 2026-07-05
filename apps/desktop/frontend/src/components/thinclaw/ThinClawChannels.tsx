@@ -86,7 +86,7 @@ function ChannelCard({ channel, onConfigureStream, hasStreamMode, expanded, onTo
         <motion.div
             layout
             className={cn(
-                "rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm transition-all",
+                "rounded-2xl border bg-card/30 backdrop-blur-md shadow-xs transition-all",
                 channel.enabled
                     ? "border-primary/20 shadow-primary/5"
                     : "border-border/40"
@@ -172,7 +172,7 @@ function ChannelCard({ channel, onConfigureStream, hasStreamMode, expanded, onTo
                                             "px-3 py-2 rounded-lg text-xs font-medium transition-all border",
                                             (channel.stream_mode || '') === mode
                                                 ? "bg-primary/15 text-primary border-primary/30"
-                                                : "bg-white/[0.03] text-muted-foreground hover:bg-white/5 border-white/5"
+                                                : "bg-white/3 text-muted-foreground hover:bg-white/5 border-white/5"
                                         )}
                                     >
                                         {STREAM_MODE_LABELS[mode]}
@@ -496,7 +496,7 @@ export function ThinClawChannels() {
                                                     value={gmailAllowedSenders}
                                                     onChange={e => setGmailAllowedSenders(e.target.value)}
                                                     placeholder="name@example.com, team@example.com"
-                                                    className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono outline-none transition-all focus:ring-1 focus:ring-primary/30"
+                                                    className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono outline-hidden transition-all focus:ring-1 focus:ring-primary/30"
                                                 />
                                                 <button
                                                     onClick={() => saveSetting('channels.gmail_allowed_senders', gmailAllowedSenders.trim() || null, 'Gmail senders')}
@@ -518,7 +518,7 @@ export function ThinClawChannels() {
                                                     value={gmailLabelFilter}
                                                     onChange={e => setGmailLabelFilter(e.target.value)}
                                                     placeholder="INBOX, Category:Primary"
-                                                    className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono focus:ring-1 focus:ring-primary/30 outline-none transition-all"
+                                                    className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono focus:ring-1 focus:ring-primary/30 outline-hidden transition-all"
                                                 />
                                                 <button
                                                     onClick={() => saveSetting('channels.gmail_label_filters', gmailLabelFilter.trim() || null, 'Gmail label filter')}
@@ -599,7 +599,7 @@ export function ThinClawChannels() {
                                             "flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-medium transition-all",
                                             settingBool('channels.apple_mail_enabled')
                                                 ? "border-blue-500/25 bg-blue-500/10 text-blue-400"
-                                                : "border-border/40 bg-white/[0.03] text-muted-foreground hover:text-foreground"
+                                                : "border-border/40 bg-white/3 text-muted-foreground hover:text-foreground"
                                         )}
                                     >
                                         <span>Enabled</span>
@@ -612,11 +612,11 @@ export function ThinClawChannels() {
                                             max={120}
                                             value={applePollInterval}
                                             onChange={e => setApplePollInterval(e.target.value)}
-                                            className="h-9 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono outline-none focus:ring-1 focus:ring-primary/30"
+                                            className="h-9 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono outline-hidden focus:ring-1 focus:ring-primary/30"
                                         />
                                         <button
                                             onClick={() => saveSetting('channels.apple_mail_poll_interval', Number(applePollInterval) || 10, 'Apple Mail poll interval')}
-                                            className="rounded-lg border border-border/40 bg-white/[0.03] px-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+                                            className="rounded-lg border border-border/40 bg-white/3 px-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground"
                                         >
                                             Save
                                         </button>
@@ -631,11 +631,11 @@ export function ThinClawChannels() {
                                                 value={appleAllowFrom}
                                                 onChange={e => setAppleAllowFrom(e.target.value)}
                                                 placeholder="name@example.com, team@example.com"
-                                                className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono outline-none transition-all focus:ring-1 focus:ring-primary/30"
+                                                className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono outline-hidden transition-all focus:ring-1 focus:ring-primary/30"
                                             />
                                             <button
                                                 onClick={() => saveSetting('channels.apple_mail_allow_from', appleAllowFrom.trim() || null, 'Apple Mail senders')}
-                                                className="flex h-8 items-center gap-1.5 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+                                                className="flex h-8 items-center gap-1.5 rounded-lg border border-border/40 bg-white/3 px-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground"
                                             >
                                                 <Save className="h-3.5 w-3.5" />
                                                 Save
@@ -644,14 +644,14 @@ export function ThinClawChannels() {
                                     </div>
                                     <button
                                         onClick={() => saveSetting('channels.apple_mail_unread_only', !settingBool('channels.apple_mail_unread_only', true), 'Unread-only mode')}
-                                        className="flex items-center justify-between rounded-xl border border-border/40 bg-white/[0.03] px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
+                                        className="flex items-center justify-between rounded-xl border border-border/40 bg-white/3 px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
                                     >
                                         <span>Unread only</span>
                                         {settingBool('channels.apple_mail_unread_only', true) ? <ToggleRight className="h-4 w-4 text-blue-400" /> : <ToggleLeft className="h-4 w-4" />}
                                     </button>
                                     <button
                                         onClick={() => saveSetting('channels.apple_mail_mark_as_read', !settingBool('channels.apple_mail_mark_as_read', true), 'Mark-as-read mode')}
-                                        className="flex items-center justify-between rounded-xl border border-border/40 bg-white/[0.03] px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
+                                        className="flex items-center justify-between rounded-xl border border-border/40 bg-white/3 px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
                                     >
                                         <span>Mark as read</span>
                                         {settingBool('channels.apple_mail_mark_as_read', true) ? <ToggleRight className="h-4 w-4 text-blue-400" /> : <ToggleLeft className="h-4 w-4" />}

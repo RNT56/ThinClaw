@@ -50,10 +50,10 @@ export function ThinClawDoctor() {
     return (
         <div className="flex flex-col h-full overflow-hidden">
             {/* Header */}
-            <div className="flex-shrink-0 px-5 pt-5 pb-3">
+            <div className="shrink-0 px-5 pt-5 pb-3">
                 <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-rose-500/20 to-pink-500/20 border border-rose-500/30 flex items-center justify-center">
+                        <div className="w-9 h-9 rounded-xl bg-linear-to-br from-rose-500/20 to-pink-500/20 border border-rose-500/30 flex items-center justify-center">
                             <Stethoscope className="w-4.5 h-4.5 text-rose-400" />
                         </div>
                         <div>
@@ -96,9 +96,9 @@ export function ThinClawDoctor() {
                                 initial={{ width: 0 }}
                                 animate={{ width: `${healthPercent}%` }}
                                 transition={{ duration: 0.8, ease: 'easeOut' }}
-                                className={`h-full rounded-full ${healthPercent >= 80 ? 'bg-gradient-to-r from-emerald-500 to-emerald-400' :
-                                    healthPercent >= 50 ? 'bg-gradient-to-r from-amber-500 to-amber-400' :
-                                        'bg-gradient-to-r from-red-500 to-red-400'
+                                className={`h-full rounded-full ${healthPercent >= 80 ? 'bg-linear-to-r from-emerald-500 to-emerald-400' :
+                                    healthPercent >= 50 ? 'bg-linear-to-r from-amber-500 to-amber-400' :
+                                        'bg-linear-to-r from-red-500 to-red-400'
                                     }`}
                             />
                         </div>
@@ -127,7 +127,7 @@ export function ThinClawDoctor() {
                                 className={`p-3 rounded-lg border ${cfg.bg} transition-all`}
                             >
                                 <div className="flex items-center gap-3">
-                                    <CheckIcon className={`w-4 h-4 ${cfg.color} flex-shrink-0`} />
+                                    <CheckIcon className={`w-4 h-4 ${cfg.color} shrink-0`} />
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2">
                                             <span className="text-sm font-medium text-foreground">{check.name}</span>

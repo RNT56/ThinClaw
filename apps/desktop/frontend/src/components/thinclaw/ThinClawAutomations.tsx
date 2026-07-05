@@ -77,7 +77,7 @@ function JobCard({ job, onRun, onViewHistory, onDelete, onToggle, onRefresh }: J
         }
     };
     return (
-        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40 group relative overflow-hidden">
+        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-xs border-border/40 group relative overflow-hidden">
             <div className="flex items-start justify-between mb-4">
                 <div className="flex items-center gap-3">
                     <div className={cn("p-2 rounded-lg", job.action_type === 'heartbeat' ? 'bg-rose-500/10' : 'bg-primary/10')}>
@@ -180,8 +180,8 @@ function JobCard({ job, onRun, onViewHistory, onDelete, onToggle, onRefresh }: J
                                 className={cn(
                                     'px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-all',
                                     currentInterval === p.minutes
-                                        ? 'bg-rose-500/15 text-rose-400 border-rose-500/30 shadow-sm shadow-rose-500/10'
-                                        : 'bg-white/[0.03] text-muted-foreground hover:bg-white/5 border-border/30 hover:border-rose-500/20',
+                                        ? 'bg-rose-500/15 text-rose-400 border-rose-500/30 shadow-xs shadow-rose-500/10'
+                                        : 'bg-white/3 text-muted-foreground hover:bg-white/5 border-border/30 hover:border-rose-500/20',
                                     updatingInterval && 'opacity-50 cursor-not-allowed'
                                 )}
                             >
@@ -219,7 +219,7 @@ function JobCard({ job, onRun, onViewHistory, onDelete, onToggle, onRefresh }: J
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="absolute inset-0 bg-red-950/95 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center gap-3 z-10 p-4"
+                        className="absolute inset-0 bg-red-950/95 backdrop-blur-xs rounded-2xl flex flex-col items-center justify-center gap-3 z-10 p-4"
                     >
                         <p className="text-sm font-semibold text-red-200 text-center">
                             Delete <span className="text-white font-bold">"{job.name ?? job.key}"</span>?
@@ -329,7 +329,7 @@ function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
         }
     };
 
-    const inputCls = 'w-full h-9 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-sm text-zinc-200 placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all';
+    const inputCls = 'w-full h-9 rounded-lg border border-border/40 bg-white/3 px-3 text-sm text-zinc-200 placeholder:text-muted-foreground/40 focus:outline-hidden focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all';
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -337,7 +337,7 @@ function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                className="absolute inset-0 bg-black/60 backdrop-blur-xs"
                 onClick={onClose}
             />
             <motion.div
@@ -348,7 +348,7 @@ function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                 className="relative w-full max-w-lg bg-zinc-950/95 backdrop-blur-xl border border-border/40 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
             >
                 {/* Header */}
-                <div className="flex items-center justify-between px-6 py-4 border-b border-border/40 bg-white/[0.02]">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-border/40 bg-white/2">
                     <div className="flex items-center gap-3">
                         <div className="p-2 bg-primary/10 rounded-lg">
                             <Timer className="w-4 h-4 text-primary" />
@@ -410,7 +410,7 @@ function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                                             'px-2.5 py-1 rounded-lg text-[10px] font-medium border transition-all',
                                             schedule === p.value
                                                 ? 'bg-primary/15 text-primary border-primary/30'
-                                                : 'bg-white/[0.03] text-muted-foreground hover:bg-white/5 border-border/30',
+                                                : 'bg-white/3 text-muted-foreground hover:bg-white/5 border-border/30',
                                         )}
                                     >
                                         {p.label}
@@ -492,7 +492,7 @@ function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                     </div>
 
                     {/* Footer */}
-                    <div className="px-6 py-4 border-t border-border/40 bg-white/[0.01] flex items-center justify-end gap-3">
+                    <div className="px-6 py-4 border-t border-border/40 bg-white/1 flex items-center justify-end gap-3">
                         <button
                             type="button"
                             onClick={onClose}
@@ -682,7 +682,7 @@ export function ThinClawAutomations() {
                         onChange={e => setCronExpr(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && handleLintCron()}
                         placeholder="0 */5 * * * * *  (sec min hour dom month dow year)"
-                        className="flex-1 px-4 py-2.5 rounded-xl bg-white/[0.03] border border-border/40 text-sm font-mono placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all"
+                        className="flex-1 px-4 py-2.5 rounded-xl bg-white/3 border border-border/40 text-sm font-mono placeholder:text-muted-foreground/40 focus:outline-hidden focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all"
                     />
                     <button
                         onClick={handleLintCron}
@@ -703,7 +703,7 @@ export function ThinClawAutomations() {
                             exit={{ opacity: 0, y: -5 }}
                             className="p-4 rounded-xl bg-red-500/5 border border-red-500/20 flex items-start gap-3"
                         >
-                            <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+                            <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
                             <div>
                                 <p className="text-sm font-medium text-red-400">Invalid Expression</p>
                                 <p className="text-xs text-red-400/70 font-mono mt-1">{lintError}</p>
@@ -747,7 +747,7 @@ export function ThinClawAutomations() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {isLoading && jobs.length === 0 ? (
                     [1, 2, 3, 4].map(i => (
-                        <div key={i} className="h-48 rounded-2xl border border-white/5 bg-white/[0.02] animate-pulse" />
+                        <div key={i} className="h-48 rounded-2xl border border-white/5 bg-white/2 animate-pulse" />
                     ))
                 ) : jobs.length > 0 ? (
                     jobs.map(job => (
@@ -792,7 +792,7 @@ export function ThinClawAutomations() {
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
                             onClick={() => setHistoryJob(null)}
-                            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+                            className="absolute inset-0 bg-black/40 backdrop-blur-xs"
                         />
                         <motion.div
                             initial={{ x: "100%" }}
@@ -816,7 +816,7 @@ export function ThinClawAutomations() {
                             <div className="flex-1 overflow-y-auto p-6 space-y-4">
                                 {history.length > 0 ? (
                                     history.map((entry: thinclaw.RoutineAuditEntry, idx) => (
-                                        <div key={idx} className="p-4 rounded-xl bg-white/[0.03] border border-white/5">
+                                        <div key={idx} className="p-4 rounded-xl bg-white/3 border border-white/5">
                                             <div className="flex items-center justify-between mb-2">
                                                 <span className="text-[10px] font-mono text-muted-foreground">
                                                     {entry.started_at ? new Date(entry.started_at).toLocaleString() : 'Just now'}

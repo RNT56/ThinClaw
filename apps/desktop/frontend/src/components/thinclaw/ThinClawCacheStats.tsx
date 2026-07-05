@@ -74,7 +74,7 @@ export function ThinClawCacheStats() {
                 </div>
                 <button
                     onClick={fetchData}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                 >
                     <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
                 </button>
@@ -115,12 +115,12 @@ export function ThinClawCacheStats() {
             {/* Hit rate visualisation */}
             <div className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-6">
                 <h3 className="text-sm font-bold text-muted-foreground mb-4">Cache Efficiency</h3>
-                <div className="h-6 bg-white/[0.03] rounded-full overflow-hidden border border-white/5 relative">
+                <div className="h-6 bg-white/3 rounded-full overflow-hidden border border-white/5 relative">
                     <motion.div
                         initial={{ width: 0 }}
                         animate={{ width: `${hitRate * 100}%` }}
                         transition={{ duration: 0.8, ease: 'easeOut' }}
-                        className="h-full rounded-full bg-gradient-to-r from-emerald-500/80 to-cyan-500/80"
+                        className="h-full rounded-full bg-linear-to-r from-emerald-500/80 to-cyan-500/80"
                     />
                     <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white/70">
                         {(hitRate * 100).toFixed(1)}% hit rate

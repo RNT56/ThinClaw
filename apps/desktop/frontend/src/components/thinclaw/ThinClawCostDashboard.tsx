@@ -14,7 +14,7 @@ function MiniBar({ value, max, label, color }: { value: number; max: number; lab
     return (
         <div className="flex items-center gap-3">
             <span className="text-[10px] text-muted-foreground w-28 truncate font-mono">{label}</span>
-            <div className="flex-1 h-3 bg-white/[0.03] rounded-full overflow-hidden border border-white/5">
+            <div className="flex-1 h-3 bg-white/3 rounded-full overflow-hidden border border-white/5">
                 <motion.div
                     initial={{ width: 0 }}
                     animate={{ width: `${pct}%` }}
@@ -122,14 +122,14 @@ export function ThinClawCostDashboard() {
                 <div className="flex items-center gap-2">
                     <button
                         onClick={handleExportCsv}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                     >
                         <Download className="w-3.5 h-3.5" />
                         Export CSV
                     </button>
                     <button
                         onClick={() => setShowResetConfirm(true)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-red-400/70 hover:text-red-400 bg-white/[0.03] hover:bg-red-500/10 border border-white/5 hover:border-red-500/20 transition-all"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-red-400/70 hover:text-red-400 bg-white/3 hover:bg-red-500/10 border border-white/5 hover:border-red-500/20 transition-all"
                         title="Reset all cost data"
                     >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -137,7 +137,7 @@ export function ThinClawCostDashboard() {
                     </button>
                     <button
                         onClick={fetchData}
-                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                     >
                         <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
                     </button>
@@ -165,7 +165,7 @@ export function ThinClawCostDashboard() {
                         <div className="flex items-center gap-2 shrink-0">
                             <button
                                 onClick={() => setShowResetConfirm(false)}
-                                className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                                className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                             >
                                 Cancel
                             </button>
@@ -267,7 +267,7 @@ export function ThinClawCostDashboard() {
             </div>
 
             {/* Tabs */}
-            <div className="flex items-center gap-1 p-1 rounded-xl bg-white/[0.03] border border-white/5 w-fit">
+            <div className="flex items-center gap-1 p-1 rounded-xl bg-white/3 border border-white/5 w-fit">
                 {(['overview', 'by-model', 'by-agent'] as const).map(tab => (
                     <button
                         key={tab}

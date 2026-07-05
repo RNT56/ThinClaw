@@ -33,7 +33,7 @@ export function CanvasToolbar({ showAvailability = false }: { showAvailability?:
         if (!showAvailability) return null;
         const unavailable = availability === 'unavailable';
         return (
-            <div ref={popoverRef} className="fixed bottom-4 right-4 z-[60]">
+            <div ref={popoverRef} className="fixed bottom-4 right-4 z-60">
                 <motion.button
                     initial={{ scale: 0 }}
                     animate={{ scale: 1 }}
@@ -60,7 +60,7 @@ export function CanvasToolbar({ showAvailability = false }: { showAvailability?:
     }
 
     return (
-        <div ref={popoverRef} className="fixed bottom-4 right-4 z-[60]">
+        <div ref={popoverRef} className="fixed bottom-4 right-4 z-60">
             <AnimatePresence>
                 {isOpen && (
                     <motion.div

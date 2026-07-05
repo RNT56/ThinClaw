@@ -271,7 +271,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
     const StatusDashboard = () => (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="p-6 rounded-2xl bg-gradient-to-br from-card to-background border border-border/50 shadow-xl relative overflow-hidden group">
+            <div className="p-6 rounded-2xl bg-linear-to-br from-card to-background border border-border/50 shadow-xl relative overflow-hidden group">
                 <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
                     <Radio className="w-12 h-12 text-primary" />
                 </div>
@@ -290,7 +290,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 </div>
             </div>
 
-            <div className="p-6 rounded-2xl bg-gradient-to-br from-card to-background border border-border/50 shadow-xl relative overflow-hidden group">
+            <div className="p-6 rounded-2xl bg-linear-to-br from-card to-background border border-border/50 shadow-xl relative overflow-hidden group">
                 <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
                     <CheckCircle className="w-12 h-12 text-emerald-500" />
                 </div>
@@ -328,7 +328,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                     className={cn(
                         "p-4 rounded-xl text-left border transition-all flex items-center justify-between group",
                         status.gatewayMode === 'local'
-                            ? "bg-primary/5 border-primary/40 shadow-sm"
+                            ? "bg-primary/5 border-primary/40 shadow-xs"
                             : "bg-card border-border/50 hover:bg-muted/50 hover:border-primary/30"
                     )}
                 >
@@ -365,7 +365,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         className={cn(
                             "p-4 rounded-xl text-left border transition-all flex items-center justify-between group",
                             status.gatewayMode === 'remote' && status.remoteUrl === profile.url
-                                ? "bg-indigo-500/5 border-indigo-500/40 shadow-sm"
+                                ? "bg-indigo-500/5 border-indigo-500/40 shadow-xs"
                                 : "bg-card border-border/50 hover:bg-muted/50 hover:border-indigo-500/30"
                         )}
                     >
@@ -424,7 +424,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                     onClick={handleStart}
                     disabled={isLoading}
                     className={cn(
-                        "flex-1 py-4 rounded-2xl font-bold transition-all shadow-lg hover:translate-y-[-1px] active:translate-y-[1px]",
+                        "flex-1 py-4 rounded-2xl font-bold transition-all shadow-lg hover:-translate-y-px active:translate-y-px",
                         "flex items-center justify-center gap-3",
                         "bg-emerald-600 dark:bg-emerald-700 text-white shadow-emerald-900/10",
                         isLoading && "opacity-50 cursor-wait"
@@ -439,7 +439,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         onClick={handleStop}
                         disabled={isLoading}
                         className={cn(
-                            "flex-1 py-4 rounded-2xl font-bold transition-all shadow-lg hover:translate-y-[-1px] active:translate-y-[1px]",
+                            "flex-1 py-4 rounded-2xl font-bold transition-all shadow-lg hover:-translate-y-px active:translate-y-px",
                             "flex items-center justify-center gap-3",
                             "bg-rose-600 dark:bg-rose-700 text-white shadow-rose-900/10",
                             isLoading && "opacity-50 cursor-wait"
@@ -489,7 +489,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
             </div>
 
             {/* Orchestration Controls */}
-            <div className="space-y-6 bg-card/30 p-8 rounded-3xl border border-border/50 shadow-sm">
+            <div className="space-y-6 bg-card/30 p-8 rounded-3xl border border-border/50 shadow-xs">
                 <div className="flex items-center gap-2 mb-2">
                     <Code className="w-4 h-4 text-primary" />
                     <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-muted-foreground/80">Operational Parameters</h3>
@@ -527,7 +527,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                     value={remoteUrlInput}
                                     onChange={(e) => setRemoteUrlInput(e.target.value)}
                                     onBlur={() => handleSaveGateway('remote', remoteUrlInput, remoteTokenInput)}
-                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none font-mono"
+                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden font-mono"
                                 />
                             </div>
                             <div className="space-y-2">
@@ -538,7 +538,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                     value={remoteTokenInput}
                                     onChange={(e) => setRemoteTokenInput(e.target.value)}
                                     onBlur={() => handleSaveGateway('remote', remoteUrlInput, remoteTokenInput)}
-                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none"
+                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden"
                                 />
                             </div>
                         </div>
@@ -825,7 +825,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 <textarea
                                     readOnly
                                     value={viewingFile.content}
-                                    className="w-full h-80 bg-black/20 dark:bg-black/40 border border-border/50 rounded-2xl p-5 text-xs font-mono text-foreground/80 resize-none shadow-inner outline-none scrollbar-hide"
+                                    className="w-full h-80 bg-black/20 dark:bg-black/40 border border-border/50 rounded-2xl p-5 text-xs font-mono text-foreground/80 resize-none shadow-inner outline-hidden scrollbar-hide"
                                 />
                             </div>
                         )
@@ -1003,7 +1003,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                         value={status.workspaceRoot || ''}
                                         onChange={(e) => setStatus(prev => ({ ...prev, workspaceRoot: e.target.value || null }))}
                                         placeholder="Custom path (leave empty for default)"
-                                        className="flex-1 px-3 py-2 rounded-lg bg-muted/50 border border-border/50 text-xs font-mono placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-violet-500/50"
+                                        className="flex-1 px-3 py-2 rounded-lg bg-muted/50 border border-border/50 text-xs font-mono placeholder:text-muted-foreground/40 focus:outline-hidden focus:ring-1 focus:ring-violet-500/50"
                                     />
                                     <button
                                         onClick={async () => {
@@ -1037,7 +1037,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 {/* Extended Setup & Safety */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* Security Manifest */}
-                    <div className="p-8 rounded-3xl bg-emerald-500/[0.03] border border-emerald-500/20 space-y-4">
+                    <div className="p-8 rounded-3xl bg-emerald-500/3 border border-emerald-500/20 space-y-4">
                         <div className="flex items-center gap-3">
                             <Shield className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
                             <h4 className="font-bold text-lg text-emerald-700 dark:text-emerald-300">Security Vault</h4>
@@ -1048,7 +1048,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                     </div>
 
                     {/* Critical Factory Reset */}
-                    <div className="p-8 rounded-3xl bg-red-500/[0.03] border border-red-500/20 space-y-4 relative overflow-hidden group">
+                    <div className="p-8 rounded-3xl bg-red-500/3 border border-red-500/20 space-y-4 relative overflow-hidden group">
                         <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
                             <AlertTriangle className="w-16 h-16 text-red-500" />
                         </div>
@@ -1183,7 +1183,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                             toast.error(`Failed to request ${perm.label}`, { description: String(e) });
                                                         }
                                                     }}
-                                                    className="px-3.5 py-1.5 rounded-lg bg-primary text-primary-foreground text-[10px] font-bold hover:opacity-90 active:scale-95 transition-all shadow-sm"
+                                                    className="px-3.5 py-1.5 rounded-lg bg-primary text-primary-foreground text-[10px] font-bold hover:opacity-90 active:scale-95 transition-all shadow-xs"
                                                 >
                                                     AUTHORIZE
                                                 </button>
@@ -1244,7 +1244,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         </div>
                         <button
                             onClick={copyDiagnostics}
-                            className="flex items-center gap-2 px-6 py-2.5 rounded-2xl bg-card border border-border/50 hover:bg-muted/50 transition-all text-xs font-bold uppercase tracking-wider shadow-sm"
+                            className="flex items-center gap-2 px-6 py-2.5 rounded-2xl bg-card border border-border/50 hover:bg-muted/50 transition-all text-xs font-bold uppercase tracking-wider shadow-xs"
                         >
                             <Copy className="w-4 h-4 text-primary" />
                             Copy Diagnostics Bundle

@@ -152,7 +152,7 @@ export function ServerSettings() {
 
     return (
         <div className="space-y-6">
-            <div className="flex items-center justify-between p-6 border border-border/50 rounded-xl bg-card shadow-sm">
+            <div className="flex items-center justify-between p-6 border border-border/50 rounded-xl bg-card shadow-xs">
                 <div className="space-y-1">
                     <div className="flex items-center font-semibold text-lg">
                         {engineDisplayName} Inference
@@ -178,7 +178,7 @@ export function ServerSettings() {
                     <button
                         onClick={manualRestart}
                         disabled={loading}
-                        className="inline-flex items-center justify-center rounded-xl text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 border border-input bg-background hover:bg-accent hover:text-accent-foreground shadow-sm"
+                        className="inline-flex items-center justify-center rounded-xl text-sm font-medium ring-offset-background transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 border border-input bg-background hover:bg-accent hover:text-accent-foreground shadow-xs"
                     >
                         <RotateCcw className={cn("w-4 h-4 mr-2", loading && "animate-spin")} />
                         Restart Server
@@ -186,7 +186,7 @@ export function ServerSettings() {
                 )}
             </div>
 
-            <div className="p-6 border border-border/50 rounded-xl bg-card space-y-6 shadow-sm">
+            <div className="p-6 border border-border/50 rounded-xl bg-card space-y-6 shadow-xs">
                 <div className="flex items-center justify-between">
                     <div className="space-y-1">
                         <label className="text-base font-semibold">
@@ -289,7 +289,7 @@ export function ServerSettings() {
                 })()}
             </div>
 
-            <div className="p-6 border border-border/50 rounded-xl bg-card space-y-6 shadow-sm">
+            <div className="p-6 border border-border/50 rounded-xl bg-card space-y-6 shadow-xs">
                 <div className="flex items-center justify-between">
                     <div className="space-y-1">
                         <label className="text-base font-semibold">
@@ -307,7 +307,7 @@ export function ServerSettings() {
                             setConfig(newConfig);
                             await commands.updateUserConfig(newConfig);
                         }}
-                        className="w-[42px] h-[25px] bg-muted rounded-full relative shadow-[inner_0_2px_4px_rgba(0,0,0,0.2)] data-[state=checked]:bg-primary transition-colors cursor-pointer outline-none"
+                        className="w-[42px] h-[25px] bg-muted rounded-full relative shadow-[inner_0_2px_4px_rgba(0,0,0,0.2)] data-[state=checked]:bg-primary transition-colors cursor-pointer outline-hidden"
                     >
                         <Switch.Thumb className="block w-[21px] h-[21px] bg-white rounded-full shadow-[0_2px_2px_rgba(0,0,0,0.2)] transition-transform duration-100 translate-x-0.5 will-change-transform data-[state=checked]:translate-x-[19px]" />
                     </Switch.Root>
@@ -378,7 +378,7 @@ export function ServerSettings() {
                                         await commands.updateUserConfig(newConfig);
                                         toast.info("Memory locking strategy updated. Restart server to apply.", { icon: <RotateCcw className="w-4 h-4" /> });
                                     }}
-                                    className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-emerald-500 transition-colors cursor-pointer outline-none"
+                                    className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-emerald-500 transition-colors cursor-pointer outline-hidden"
                                 >
                                     <Switch.Thumb className="block w-[16px] h-[16px] bg-white rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.2)] transition-transform duration-100 translate-x-0.5 will-change-transform data-[state=checked]:translate-x-[19px]" />
                                 </Switch.Root>
@@ -406,7 +406,7 @@ export function ServerSettings() {
                                         await commands.updateUserConfig(newConfig);
                                         toast.info("Context optimization updated. Restart server to apply.", { icon: <Box className="w-4 h-4" /> });
                                     }}
-                                    className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-blue-500 transition-colors cursor-pointer outline-none"
+                                    className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-blue-500 transition-colors cursor-pointer outline-hidden"
                                 >
                                     <Switch.Thumb className="block w-[16px] h-[16px] bg-white rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.2)] transition-transform duration-100 translate-x-0.5 will-change-transform data-[state=checked]:translate-x-[19px]" />
                                 </Switch.Root>

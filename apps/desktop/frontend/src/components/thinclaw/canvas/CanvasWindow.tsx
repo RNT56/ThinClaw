@@ -81,7 +81,7 @@ export function CanvasWindow() {
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40"
+                        className="fixed inset-0 bg-black/60 backdrop-blur-xs z-40"
                         onClick={() => {
                             // Dismiss modal panels on overlay click
                             panelArray.filter(p => p.modal).forEach(p => dismissPanel(p.id));
@@ -230,7 +230,7 @@ function A2UIPanel({ panel, isFocused, onFocus, onDismiss }: {
             </div>
 
             {/* Content — native component rendering */}
-            <div className="flex-1 overflow-y-auto bg-white/[0.02] scrollbar-thin scrollbar-thumb-white/10">
+            <div className="flex-1 overflow-y-auto bg-white/2 scrollbar-thin scrollbar-thumb-white/10">
                 <CanvasPanelRenderer
                     components={panel.components}
                     sessionKey={panel.sessionKey}
@@ -372,7 +372,7 @@ function LegacyPanel({ content, onClose }: {
             </div>
 
             {/* Content */}
-            <div className="flex-1 bg-white/[0.02] relative">
+            <div className="flex-1 bg-white/2 relative">
                 {content.url ? (
                     <iframe
                         ref={iframeRef}

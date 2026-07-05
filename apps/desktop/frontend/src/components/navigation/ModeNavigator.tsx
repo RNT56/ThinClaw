@@ -56,7 +56,7 @@ export function ModeNavigator({ activeMode, onModeChange, sidebarOpen, gatewayRu
                                     "relative flex items-center justify-center rounded-xl transition-all duration-300",
                                     "w-10 h-10",
                                     isActive
-                                        ? "bg-accent/80 shadow-lg ring-1 ring-primary/20 backdrop-blur-sm"
+                                        ? "bg-accent/80 shadow-lg ring-1 ring-primary/20 backdrop-blur-xs"
                                         : "text-muted-foreground hover:text-foreground hover:bg-accent/40"
                                 )}
                                 title={mode.label}

@@ -409,7 +409,7 @@ export function ThinClawSidebar({
                                                 "flex items-center gap-2 rounded-lg transition-all duration-200",
                                                 sidebarOpen ? "w-full px-3 py-1.5" : "w-10 h-9 justify-center mx-auto",
                                                 activePage === item.id
-                                                    ? "bg-accent text-foreground font-semibold shadow-sm ring-1 ring-primary/20"
+                                                    ? "bg-accent text-foreground font-semibold shadow-xs ring-1 ring-primary/20"
                                                     : "text-muted-foreground hover:bg-muted hover:text-foreground",
                                                 isDisabled && "opacity-40 cursor-not-allowed grayscale-[0.5] hover:bg-transparent"
                                             )}

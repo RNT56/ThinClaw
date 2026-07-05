@@ -1,6 +1,97 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+@plugin 'tailwindcss-animate';
+@plugin '@tailwindcss/typography';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --color-chart-1: hsl(var(--chart-1));
+  --color-chart-2: hsl(var(--chart-2));
+  --color-chart-3: hsl(var(--chart-3));
+  --color-chart-4: hsl(var(--chart-4));
+  --color-chart-5: hsl(var(--chart-5));
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@utility animate-stop-pulse {
+  animation: stop-pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+@utility animate-skeleton {
+  animation: skeleton-loading 4s linear infinite;
+}
+
+@utility custom-scrollbar {
+  &::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 3px;
+  }
+  &::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+  }
+}
+
+@utility mask-fade-top {
+  /* Utility for fading content at the top */
+  mask-image: linear-gradient(to bottom, transparent 0px, black 120px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0px, black 120px);
+}
 
 @layer base {
   :root {
@@ -108,102 +199,109 @@
   }
 }
 
-/* Syntax Highlighting Overrides - Controlled via ThemeProvider */
-.hljs {
-  color: hsl(var(--hljs-color)) !important;
-  background: transparent !important;
-}
-pre code.hljs {
-  background: transparent !important;
-  padding: 0 !important;
-}
+@layer utilities {
+  /* Syntax Highlighting Overrides - Controlled via ThemeProvider */
+  .hljs {
+    color: hsl(var(--hljs-color)) !important;
+    background: transparent !important;
+  }
+  pre code.hljs {
+    background: transparent !important;
+    padding: 0 !important;
+  }
 
-/* Comments & Quotes */
-.hljs-comment, .hljs-quote {
-  color: hsl(var(--hljs-comment)) !important;
-  font-style: italic;
-}
+  /* Comments & Quotes */
+  .hljs-comment,
+  .hljs-quote {
+    color: hsl(var(--hljs-comment)) !important;
+    font-style: italic;
+  }
 
-/* Keywords, Tags & Structure */
-.hljs-keyword,
-.hljs-selector-tag,
-.hljs-type,
-.hljs-tag,
-.hljs-name {
-  color: hsl(var(--hljs-keyword)) !important;
-  font-weight: 500;
-}
+  /* Keywords, Tags & Structure */
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-type,
+  .hljs-tag,
+  .hljs-name {
+    color: hsl(var(--hljs-keyword)) !important;
+    font-weight: 500;
+  }
 
-/* Numbers, Literals & Constants */
-.hljs-number,
-.hljs-literal,
-.hljs-symbol,
-.hljs-bullet {
-  color: hsl(var(--hljs-number)) !important;
-}
+  /* Numbers, Literals & Constants */
+  .hljs-number,
+  .hljs-literal,
+  .hljs-symbol,
+  .hljs-bullet {
+    color: hsl(var(--hljs-number)) !important;
+  }
 
-/* Variables & Attributes */
-.hljs-variable,
-.hljs-template-variable,
-.hljs-attr,
-.hljs-tag .hljs-attr {
-  color: hsl(var(--hljs-attr)) !important;
-}
+  /* Variables & Attributes */
+  .hljs-variable,
+  .hljs-template-variable,
+  .hljs-attr,
+  .hljs-tag .hljs-attr {
+    color: hsl(var(--hljs-attr)) !important;
+  }
 
-/* Strings, Regex & Markup-specific */
-.hljs-string,
-.hljs-doctag,
-.hljs-regexp {
-  color: hsl(var(--hljs-string)) !important;
-}
+  /* Strings, Regex & Markup-specific */
+  .hljs-string,
+  .hljs-doctag,
+  .hljs-regexp {
+    color: hsl(var(--hljs-string)) !important;
+  }
 
-/* Titles, Sections & Classes */
-.hljs-title,
-.hljs-section,
-.hljs-selector-id,
-.hljs-class .hljs-title,
-.hljs-title.class_ {
-  color: hsl(var(--hljs-title)) !important;
-  font-weight: 600;
-}
+  /* Titles, Sections & Classes */
+  .hljs-title,
+  .hljs-section,
+  .hljs-selector-id,
+  .hljs-class .hljs-title,
+  .hljs-title.class_ {
+    color: hsl(var(--hljs-title)) !important;
+    font-weight: 600;
+  }
 
-/* Functions & Methods */
-.hljs-function .hljs-title,
-.hljs-title.function_,
-.hljs-attribute,
-.hljs-link,
-.hljs-subst {
-  color: hsl(var(--hljs-function)) !important;
-}
+  /* Functions & Methods */
+  .hljs-function .hljs-title,
+  .hljs-title.function_,
+  .hljs-attribute,
+  .hljs-link,
+  .hljs-subst {
+    color: hsl(var(--hljs-function)) !important;
+  }
 
-/* Built-ins */
-.hljs-built_in,
-.hljs-builtin-name {
-  color: hsl(var(--hljs-title)) !important;
-}
+  /* Built-ins */
+  .hljs-built_in,
+  .hljs-builtin-name {
+    color: hsl(var(--hljs-title)) !important;
+  }
 
-/* Diffs */
-.hljs-addition {
-  color: hsl(var(--hljs-addition)) !important;
-  background-color: hsla(120, 100%, 50%, 0.1);
-}
-.hljs-deletion {
-  color: hsl(var(--hljs-deletion)) !important;
-  background-color: hsla(0, 100%, 50%, 0.1);
-}
+  /* Diffs */
+  .hljs-addition {
+    color: hsl(var(--hljs-addition)) !important;
+    background-color: hsla(120, 100%, 50%, 0.1);
+  }
+  .hljs-deletion {
+    color: hsl(var(--hljs-deletion)) !important;
+    background-color: hsla(0, 100%, 50%, 0.1);
+  }
 
-/* Meta-tags & Misc */
-.hljs-meta {
-  color: hsl(var(--hljs-comment)) !important;
-  font-weight: bold;
-}
-.hljs-params {
-  color: hsl(var(--hljs-color)) !important;
-}
+  /* Meta-tags & Misc */
+  .hljs-meta {
+    color: hsl(var(--hljs-comment)) !important;
+    font-weight: bold;
+  }
+  .hljs-params {
+    color: hsl(var(--hljs-color)) !important;
+  }
 
-/* Formatting Highlights */
-.hljs-emphasis { font-style: italic; }
-.hljs-strong { font-weight: bold; }
+  /* Formatting Highlights */
+  .hljs-emphasis {
+    font-style: italic;
+  }
+  .hljs-strong {
+    font-weight: bold;
+  }
+}
 
 @layer utilities {
   @keyframes stop-pulse {
@@ -221,42 +319,13 @@ pre code.hljs {
     }
   }
 
-  .animate-stop-pulse {
-    animation: stop-pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
-  }
-
   @keyframes skeleton-loading {
       0%, 100% { opacity: 0.8; }
       50% { opacity: 1; }
   }
 
-  .animate-skeleton {
-      animation: skeleton-loading 4s linear infinite;
-  }
-
-  .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
-  .custom-scrollbar::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .custom-scrollbar::-webkit-scrollbar-thumb {
-    background: hsl(var(--muted-foreground) / 0.3);
-    border-radius: 3px;
-  }
-  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background: hsl(var(--muted-foreground) / 0.5);
-  }
-
   @keyframes progress-bar-stripes {
     0% { background-position: 24px 0; }
     100% { background-position: 0 0; }
-  }
-
-  /* Utility for fading content at the top */
-  .mask-fade-top {
-      mask-image: linear-gradient(to bottom, transparent 0px, black 120px);
-      -webkit-mask-image: linear-gradient(to bottom, transparent 0px, black 120px);
   }
 }

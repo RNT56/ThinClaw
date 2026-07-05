@@ -22,7 +22,7 @@ export const STYLE_LIBRARY: StyleDefinition[] = [
         id: "meme",
         label: "Internet Meme",
         description: "Classic low-res internet image with Impact font.",
-        promptSnippet: "Low-resolution internet meme style, white Impact font text with black outline at top and bottom, slightly compressed image quality, relatable funny content look."
+        promptSnippet: "Low-resolution internet meme style, white Impact font text with black outline-solid at top and bottom, slightly compressed image quality, relatable funny content look."
     },
     {
         id: "cctv",

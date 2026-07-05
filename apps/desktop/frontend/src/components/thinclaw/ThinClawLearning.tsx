@@ -168,7 +168,7 @@ export function ThinClawLearning() {
                 </div>
                 <button
                     onClick={load}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                     title="Refresh learning"
                 >
                     <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
@@ -258,7 +258,7 @@ export function ThinClawLearning() {
                                 </button>
                             ))}
                         </div>
-                        <button onClick={() => runAction('Evaluating outcomes', () => thinclaw.evaluateLearningOutcomes())} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/[0.03] hover:bg-white/[0.06] border border-white/5">
+                        <button onClick={() => runAction('Evaluating outcomes', () => thinclaw.evaluateLearningOutcomes())} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/3 hover:bg-white/6 border border-white/5">
                             <RefreshCw className="w-3 h-3" />
                             Evaluate
                         </button>
@@ -285,11 +285,11 @@ export function ThinClawLearning() {
                                                 <ThumbsDown className="w-3 h-3" />
                                                 Negative
                                             </button>
-                                            <button onClick={() => id && runAction('Dismissing outcome', () => thinclaw.reviewLearningOutcome(id, 'dismiss'))} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/[0.03] hover:bg-white/[0.06] border border-white/5">
+                                            <button onClick={() => id && runAction('Dismissing outcome', () => thinclaw.reviewLearningOutcome(id, 'dismiss'))} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/3 hover:bg-white/6 border border-white/5">
                                                 <X className="w-3 h-3" />
                                                 Dismiss
                                             </button>
-                                            <button onClick={() => id && runAction('Requeueing outcome', () => thinclaw.reviewLearningOutcome(id, 'requeue'))} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/[0.03] hover:bg-white/[0.06] border border-white/5">
+                                            <button onClick={() => id && runAction('Requeueing outcome', () => thinclaw.reviewLearningOutcome(id, 'requeue'))} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium bg-white/3 hover:bg-white/6 border border-white/5">
                                                 <RefreshCw className="w-3 h-3" />
                                                 Requeue
                                             </button>
@@ -367,11 +367,11 @@ export function ThinClawLearning() {
 
                 <Panel title="Rollbacks" icon={RotateCcw}>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
-                        <input value={rollbackForm.artifactType} onChange={(e) => setRollbackForm(prev => ({ ...prev, artifactType: e.target.value }))} placeholder="artifact type" className="px-3 py-2 rounded-lg bg-background/60 border border-border/40 text-xs outline-none focus:border-primary/40" />
-                        <input value={rollbackForm.artifactName} onChange={(e) => setRollbackForm(prev => ({ ...prev, artifactName: e.target.value }))} placeholder="artifact name" className="px-3 py-2 rounded-lg bg-background/60 border border-border/40 text-xs outline-none focus:border-primary/40" />
-                        <input value={rollbackForm.reason} onChange={(e) => setRollbackForm(prev => ({ ...prev, reason: e.target.value }))} placeholder="reason" className="px-3 py-2 rounded-lg bg-background/60 border border-border/40 text-xs outline-none focus:border-primary/40" />
+                        <input value={rollbackForm.artifactType} onChange={(e) => setRollbackForm(prev => ({ ...prev, artifactType: e.target.value }))} placeholder="artifact type" className="px-3 py-2 rounded-lg bg-background/60 border border-border/40 text-xs outline-hidden focus:border-primary/40" />
+                        <input value={rollbackForm.artifactName} onChange={(e) => setRollbackForm(prev => ({ ...prev, artifactName: e.target.value }))} placeholder="artifact name" className="px-3 py-2 rounded-lg bg-background/60 border border-border/40 text-xs outline-hidden focus:border-primary/40" />
+                        <input value={rollbackForm.reason} onChange={(e) => setRollbackForm(prev => ({ ...prev, reason: e.target.value }))} placeholder="reason" className="px-3 py-2 rounded-lg bg-background/60 border border-border/40 text-xs outline-hidden focus:border-primary/40" />
                     </div>
-                    <button onClick={submitRollback} className="mb-4 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-white/[0.03] hover:bg-white/[0.06] border border-white/5">
+                    <button onClick={submitRollback} className="mb-4 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-white/3 hover:bg-white/6 border border-white/5">
                         <RotateCcw className="w-3.5 h-3.5" />
                         Record Rollback
                     </button>

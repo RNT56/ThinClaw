@@ -192,11 +192,11 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-in fade-in duration-200">
             <div className="bg-background/95 border border-border rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh] overflow-hidden">
                 {/* Header */}
                 <div className="p-6 border-b border-border flex items-center gap-4 bg-muted/30">
-                    <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center text-primary shadow-sm">
+                    <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center text-primary shadow-xs">
                         <Server className="w-6 h-6" />
                     </div>
                     <div>
@@ -214,13 +214,13 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                             <div className="flex bg-muted p-1.5 rounded-xl">
                                 <button
                                     onClick={() => setDeployMode('new')}
-                                    className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${deployMode === 'new' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                                    className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${deployMode === 'new' ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}`}
                                 >
                                     Deploy New Agent
                                 </button>
                                 <button
                                     onClick={() => setDeployMode('existing')}
-                                    className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${deployMode === 'existing' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                                    className={`flex-1 py-2.5 text-sm font-bold rounded-lg transition-all ${deployMode === 'existing' ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'}`}
                                 >
                                     Connect Existing
                                 </button>
@@ -243,7 +243,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                             <input
                                                 type="text"
                                                 id="deploy-ip"
-                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                 placeholder="e.g. 192.168.1.50 or your-server.com"
                                                 value={ip}
                                                 onChange={(e) => setIp(e.target.value)}
@@ -255,7 +255,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                             <input
                                                 type="text"
                                                 id="deploy-user"
-                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                 placeholder="root"
                                                 value={user}
                                                 onChange={(e) => setUser(e.target.value)}
@@ -273,7 +273,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                             <input
                                                 type="text"
                                                 id="deploy-tailscale"
-                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                 placeholder="tskey-auth-..."
                                                 value={tailscaleKey}
                                                 onChange={(e) => setTailscaleKey(e.target.value)}
@@ -311,7 +311,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                             <input
                                                 type="text"
                                                 id="connect-url"
-                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
+                                                className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-hidden transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
                                                 placeholder="192.168.1.50 or http://your-server.com:18789"
                                                 value={existingUrl}
                                                 onChange={(e) => setExistingUrl(e.target.value)}
@@ -326,7 +326,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                         <input
                                             type="password"
                                             id="connect-token"
-                                            className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none transition-all font-mono placeholder:text-muted-foreground/50"
+                                            className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                             placeholder="From GATEWAY_AUTH_TOKEN in your .env"
                                             value={existingToken}
                                             onChange={(e) => setExistingToken(e.target.value)}

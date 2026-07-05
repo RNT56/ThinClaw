@@ -60,7 +60,7 @@ function RunTelemetryStrip({ items }: { items: RunTelemetry[] }) {
     if (items.length === 0) return null;
 
     return (
-        <div className="rounded-xl border border-border/40 bg-card/50 backdrop-blur-md p-3 shadow-sm">
+        <div className="rounded-xl border border-border/40 bg-card/50 backdrop-blur-md p-3 shadow-xs">
             <div className="mb-2 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                     <Zap className="h-3.5 w-3.5 text-primary" />
@@ -76,7 +76,7 @@ function RunTelemetryStrip({ items }: { items: RunTelemetry[] }) {
                     const total = Number(usage.total_tokens || input + output);
                     const running = !terminalRunStatus(item.status);
                     return (
-                        <div key={item.runId} className="rounded-lg border border-white/5 bg-white/[0.03] p-3">
+                        <div key={item.runId} className="rounded-lg border border-white/5 bg-white/3 p-3">
                             <div className="flex items-center justify-between gap-2">
                                 <div className="min-w-0">
                                     <div className="truncate font-mono text-[10px] text-foreground/80">{item.runId}</div>
@@ -1155,7 +1155,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     onClick={() => setCoreTab('chat')}
                                     className={cn(
                                         "px-4 py-1.5 rounded-md text-xs font-medium transition-all",
-                                        coreTab === 'chat' ? "bg-blue-500/20 text-blue-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
+                                        coreTab === 'chat' ? "bg-blue-500/20 text-blue-400 shadow-xs" : "text-muted-foreground hover:text-foreground"
                                     )}
                                 >
                                     Chat
@@ -1164,7 +1164,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     onClick={() => setCoreTab('console')}
                                     className={cn(
                                         "px-4 py-1.5 rounded-md text-xs font-medium transition-all",
-                                        coreTab === 'console' ? "bg-amber-500/20 text-amber-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
+                                        coreTab === 'console' ? "bg-amber-500/20 text-amber-400 shadow-xs" : "text-muted-foreground hover:text-foreground"
                                     )}
                                 >
                                     Logs
@@ -1173,7 +1173,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     onClick={() => setCoreTab('memory')}
                                     className={cn(
                                         "px-4 py-1.5 rounded-md text-xs font-medium transition-all",
-                                        coreTab === 'memory' ? "bg-purple-500/20 text-purple-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
+                                        coreTab === 'memory' ? "bg-purple-500/20 text-purple-400 shadow-xs" : "text-muted-foreground hover:text-foreground"
                                     )}
                                 >
                                     Memory
@@ -1277,7 +1277,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                                         ) : (
                                                             <>
                                                                 {msg.role !== 'user' && (
-                                                                    <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 border border-primary/20 shadow-sm mt-1">
+                                                                    <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 border border-primary/20 shadow-xs mt-1">
                                                                         {msg.role === 'assistant' ? <Bot className="w-4 h-4 text-primary" /> : <Settings className="w-4 h-4 text-muted-foreground" />}
                                                                     </div>
                                                                 )}
@@ -1392,7 +1392,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                 {
                     (!isCoreView || coreTab !== 'memory') && (
                         <div className="absolute bottom-0 left-0 right-0 z-20 pointer-events-none">
-                            <div className="w-full bg-gradient-to-t from-background via-background/80 to-transparent pb-8 pt-20">
+                            <div className="w-full bg-linear-to-t from-background via-background/80 to-transparent pb-8 pt-20">
                                 <div className="w-full max-w-4xl mx-auto px-4 md:px-6 pointer-events-auto">
                                     <div className="relative flex items-end gap-2 bg-background/60 backdrop-blur-xl border border-input/50 p-2 rounded-2xl shadow-2xl">
                                         <textarea
@@ -1401,7 +1401,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
                                             placeholder={gatewayRunning ? (coreTab === 'chat' ? "Chat with ThinClaw..." : "Send Command...") : "Gateway offline..."}
                                             rows={1}
-                                            className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-none resize-none p-2 max-h-32 min-h-[44px] text-sm"
+                                            className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-hidden resize-none p-2 max-h-32 min-h-[44px] text-sm"
                                         />
                                         <div className="relative">
                                             <button
@@ -1411,7 +1411,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                                 className={cn(
                                                     "p-2 rounded-xl transition-all border",
                                                     thinkingEnabled
-                                                        ? "bg-violet-500/15 text-violet-500 border-violet-500/30 shadow-sm"
+                                                        ? "bg-violet-500/15 text-violet-500 border-violet-500/30 shadow-xs"
                                                         : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50 hover:text-foreground"
                                                 )}
                                             >
@@ -1500,7 +1500,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                     }}
                     className="absolute right-4 top-16 z-30 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg
                            bg-blue-500/10 border border-blue-500/30 text-blue-400 text-[11px] font-medium
-                           hover:bg-blue-500/20 transition-all backdrop-blur-sm shadow-lg"
+                           hover:bg-blue-500/20 transition-all backdrop-blur-xs shadow-lg"
                     title="Show sub-agent panel"
                 >
                     <PanelRight className="w-3.5 h-3.5" />

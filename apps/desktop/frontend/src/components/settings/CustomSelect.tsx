@@ -48,7 +48,7 @@ export function CustomSelect({
                 onClick={() => !disabled && setIsOpen(!isOpen)}
                 disabled={disabled}
                 className={cn(
-                    "flex h-11 w-full items-center justify-between rounded-xl border bg-background/50 px-4 py-2 text-sm shadow-sm transition-all duration-200 backdrop-blur-md",
+                    "flex h-11 w-full items-center justify-between rounded-xl border bg-background/50 px-4 py-2 text-sm shadow-xs transition-all duration-200 backdrop-blur-md",
                     isOpen ? "border-primary ring-2 ring-primary/20 shadow-lg" : "border-border/50 hover:border-border",
                     disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
                 )}
@@ -81,7 +81,7 @@ export function CustomSelect({
                                     className={cn(
                                         "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm transition-all duration-200 mb-0.5 last:mb-0",
                                         option.value === value ? "bg-primary/10 text-primary font-bold" : "hover:bg-muted/50 text-foreground",
-                                        option.disabled ? "opacity-40 cursor-not-allowed grayscale-[50%]" : "cursor-pointer"
+                                        option.disabled ? "opacity-40 cursor-not-allowed grayscale-50" : "cursor-pointer"
                                     )}
                                 >
                                     <span className="flex items-center gap-2">

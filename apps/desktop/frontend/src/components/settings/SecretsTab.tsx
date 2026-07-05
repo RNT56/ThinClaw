@@ -271,7 +271,7 @@ export function SecretsTab() {
                     <div className="flex items-center justify-between border-b border-border/50 pb-4">
                         <div className="flex items-center gap-2">
                             <Bot className="w-5 h-5 text-primary" />
-                            <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-foreground">Inference Cloud Brains</h3>
+                            <h3 className="text-sm font-bold uppercase tracking-widest text-foreground">Inference Cloud Brains</h3>
                         </div>
                         <button
                             onClick={() => window.dispatchEvent(new CustomEvent('open-settings', { detail: 'inference' }))}
@@ -369,7 +369,7 @@ export function SecretsTab() {
                 <div className="space-y-6">
                     <div className="flex items-center gap-2 border-b border-border/50 pb-4">
                         <Bot className="w-5 h-5 text-muted-foreground" />
-                        <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-muted-foreground">Additional Cloud Providers</h3>
+                        <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Additional Cloud Providers</h3>
                     </div>
 
                     <div className="grid gap-6">
@@ -627,7 +627,7 @@ export function SecretsTab() {
                 <div className="space-y-6">
                     <div className="flex items-center gap-2 border-b border-border/10 pb-4">
                         <Radio className="w-5 h-5 text-muted-foreground" />
-                        <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-muted-foreground">Speech & Image Generation</h3>
+                        <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Speech & Image Generation</h3>
                     </div>
 
                     <div className="grid gap-6">
@@ -737,7 +737,7 @@ export function SecretsTab() {
                 <div className="space-y-6">
                     <div className="flex items-center gap-2 border-b border-border/50 pb-4">
                         <Bot className="w-5 h-5 text-muted-foreground" />
-                        <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-muted-foreground">Amazon Bedrock (AWS)</h3>
+                        <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Amazon Bedrock (AWS)</h3>
                     </div>
 
                     <BedrockCredentialsCard
@@ -751,7 +751,7 @@ export function SecretsTab() {
                 <div className="space-y-6">
                     <div className="flex items-center gap-2 border-b border-border/10 pb-4">
                         <KeyRound className="w-5 h-5 text-muted-foreground" />
-                        <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-muted-foreground">System & Data Tools</h3>
+                        <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">System & Data Tools</h3>
                     </div>
 
                     <div className="grid gap-6">

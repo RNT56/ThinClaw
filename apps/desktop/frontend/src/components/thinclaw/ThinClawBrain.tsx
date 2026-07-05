@@ -184,7 +184,7 @@ function DbFilesTab() {
                             placeholder="Filter files..."
                             value={search}
                             onChange={e => setSearch(e.target.value)}
-                            className="w-full pl-8 pr-3 py-1.5 bg-muted/30 border border-border/40 rounded-lg text-xs focus:ring-1 focus:ring-primary/40 outline-none"
+                            className="w-full pl-8 pr-3 py-1.5 bg-muted/30 border border-border/40 rounded-lg text-xs focus:ring-1 focus:ring-primary/40 outline-hidden"
                         />
                     </div>
                 </div>
@@ -304,12 +304,12 @@ function DbFilesTab() {
                         </div>
                         <div className="flex-1 relative">
                             {isLoading ? (
-                                <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-sm z-10">
+                                <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-xs z-10">
                                     <RefreshCw className="w-8 h-8 text-primary animate-spin" />
                                 </div>
                             ) : (
                                 <textarea value={content} onChange={e => setContent(e.target.value)}
-                                    className="absolute inset-0 w-full h-full p-8 bg-transparent text-sm font-mono text-foreground/70 outline-none resize-none leading-relaxed"
+                                    className="absolute inset-0 w-full h-full p-8 bg-transparent text-sm font-mono text-foreground/70 outline-hidden resize-none leading-relaxed"
                                     placeholder="# Start writing..." spellCheck={false} />
                             )}
                         </div>
@@ -651,7 +651,7 @@ function LocalFilesTab() {
                             placeholder="Filter files..."
                             value={search}
                             onChange={e => setSearch(e.target.value)}
-                            className="w-full pl-8 pr-3 py-1.5 bg-muted/30 border border-border/40 rounded-lg text-xs focus:ring-1 focus:ring-emerald-500/40 outline-none"
+                            className="w-full pl-8 pr-3 py-1.5 bg-muted/30 border border-border/40 rounded-lg text-xs focus:ring-1 focus:ring-emerald-500/40 outline-hidden"
                         />
                     </div>
                     {workspacePath && (

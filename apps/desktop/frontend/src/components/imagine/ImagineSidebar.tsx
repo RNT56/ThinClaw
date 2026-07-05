@@ -53,7 +53,7 @@ export function ImagineSidebar({
                     sidebarOpen ? "px-1" : "justify-center px-0"
                 )}
             >
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/30 to-primary/10 flex items-center justify-center shrink-0">
+                <div className="w-8 h-8 rounded-lg bg-linear-to-br from-primary/30 to-primary/10 flex items-center justify-center shrink-0">
                     <ImagineModeIcon size={18} isActive={true} />
                 </div>
                 <AnimatePresence>
@@ -64,7 +64,7 @@ export function ImagineSidebar({
                             exit={{ opacity: 0, width: 0 }}
                             className="overflow-hidden"
                         >
-                            <span className="font-bold text-base bg-gradient-to-r from-primary via-primary/80 to-primary bg-clip-text text-transparent whitespace-nowrap">
+                            <span className="font-bold text-base bg-linear-to-r from-primary via-primary/80 to-primary bg-clip-text text-transparent whitespace-nowrap">
                                 Imagine
                             </span>
                         </motion.div>
@@ -90,7 +90,7 @@ export function ImagineSidebar({
                                 "flex items-center gap-3 rounded-lg transition-all duration-200 group relative",
                                 sidebarOpen ? "w-full px-3 py-2.5" : "w-10 h-10 justify-center mx-auto",
                                 isActive
-                                    ? "bg-gradient-to-r from-primary/20 to-primary/5 text-primary shadow-sm ring-1 ring-primary/30"
+                                    ? "bg-linear-to-r from-primary/20 to-primary/5 text-primary shadow-xs ring-1 ring-primary/30"
                                     : "text-muted-foreground hover:bg-accent hover:text-foreground"
                             )}
                             title={!sidebarOpen ? tab.label : undefined}

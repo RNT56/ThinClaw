@@ -412,7 +412,7 @@ export function FleetCommandCenter() {
     return (
         <div className="flex flex-col h-full bg-[#050505] text-zinc-100 overflow-hidden">
             {/* Top Bar */}
-            <div className="h-14 border-b border-white/10 bg-zinc-900/50 backdrop-blur flex items-center justify-between px-6 z-10">
+            <div className="h-14 border-b border-white/10 bg-zinc-900/50 backdrop-blur-sm flex items-center justify-between px-6 z-10">
                 <div className="flex items-center gap-4">
                     <div className="p-2 bg-indigo-500/10 rounded-lg">
                         <Users className="w-5 h-5 text-indigo-500" />
@@ -595,7 +595,7 @@ export function FleetCommandCenter() {
                                                     </div>
                                                     <div className="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
                                                         <motion.div
-                                                            className="h-full bg-gradient-to-r from-indigo-500 to-indigo-400"
+                                                            className="h-full bg-linear-to-r from-indigo-500 to-indigo-400"
                                                             initial={{ width: 0 }}
                                                             animate={{ width: `${Math.max(progress * 100, 10)}%` }}
                                                             transition={{ type: "spring", stiffness: 50 }}
@@ -640,7 +640,7 @@ export function FleetCommandCenter() {
                                                         name="task"
                                                         type="text"
                                                         placeholder="Assign new task..."
-                                                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500 outline-none transition-colors"
+                                                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500 outline-hidden transition-colors"
                                                     />
                                                     <button
                                                         type="submit"
@@ -688,7 +688,7 @@ export function FleetCommandCenter() {
                         name="cmd"
                         type="text"
                         placeholder="Broadcast to all sessions..."
-                        className="flex-1 bg-transparent border-none outline-none font-mono text-sm text-zinc-300 placeholder:text-zinc-600"
+                        className="flex-1 bg-transparent border-none outline-hidden font-mono text-sm text-zinc-300 placeholder:text-zinc-600"
                         autoComplete="off"
                     />
                 </form>

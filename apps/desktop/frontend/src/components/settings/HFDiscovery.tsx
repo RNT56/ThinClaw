@@ -478,7 +478,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                             className={cn(
                                 "flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all duration-200 whitespace-nowrap border shrink-0",
                                 pipelineFilter === id
-                                    ? "bg-foreground text-background border-foreground shadow-sm"
+                                    ? "bg-foreground text-background border-foreground shadow-xs"
                                     : "bg-muted/40 text-muted-foreground border-transparent hover:bg-muted hover:text-foreground"
                             )}
                             id={`hf-filter-${id}`}
@@ -498,7 +498,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                     placeholder={activeFilterDef.placeholder}
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 text-sm bg-background border border-border/50 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-foreground placeholder:text-muted-foreground/50"
+                    className="w-full pl-10 pr-4 py-2.5 text-sm bg-background border border-border/50 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-primary/20 transition-all text-foreground placeholder:text-muted-foreground/50"
                     id="hf-search-input"
                 />
                 {isSearching && (
@@ -537,9 +537,9 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                         <div
                             key={model.id}
                             className={cn(
-                                "border rounded-xl bg-card/40 hover:bg-card/60 transition-all duration-300 overflow-hidden shadow-sm",
+                                "border rounded-xl bg-card/40 hover:bg-card/60 transition-all duration-300 overflow-hidden shadow-xs",
                                 isDownloading
-                                    ? "border-primary/40 ring-1 ring-primary/10 bg-primary/[0.02]"
+                                    ? "border-primary/40 ring-1 ring-primary/10 bg-primary/2"
                                     : isDownloaded
                                         ? "border-green-500/30"
                                         : "border-border/50"
@@ -791,7 +791,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                                                             isDownloading || isDownloaded
                                                         }
                                                         className={cn(
-                                                            "w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-sm hover:translate-y-[-1px]",
+                                                            "w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-xs hover:-translate-y-px",
                                                             (isDownloading || isDownloaded) &&
                                                             "opacity-50 cursor-not-allowed hover:translate-y-0"
                                                         )}

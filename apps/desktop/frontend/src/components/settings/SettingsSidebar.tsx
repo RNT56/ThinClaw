@@ -148,7 +148,7 @@ export function SettingsSidebar({ activePage, onPageChange, onBack, sidebarOpen 
                                         className={cn(
                                             "flex items-center rounded-lg text-sm transition-all duration-300 group w-full px-3 h-10 shrink-0",
                                             isActive
-                                                ? "bg-accent text-foreground font-semibold shadow-sm ring-1 ring-primary/20"
+                                                ? "bg-accent text-foreground font-semibold shadow-xs ring-1 ring-primary/20"
                                                 : "hover:bg-accent text-muted-foreground hover:text-foreground",
                                             sidebarOpen ? "w-full" : "w-10 mx-auto"
                                         )}
