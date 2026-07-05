@@ -459,6 +459,51 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 
 ---
 
+## Host-Direct Command Execution
+
+The `run_shell` / `run_script` built-ins can execute directly on the host (as
+opposed to inside a Docker sandbox). Two OS-level controls wrap that execution
+in `thinclaw-tools/src/execution.rs`:
+
+### Network isolation (always on for `allow_network = false`)
+
+When a host-direct command is run with networking disabled, execution is wrapped
+so no egress is possible, using a **hard** isolation primitive where available:
+
+| Platform | Mechanism | Reference |
+|----------|-----------|-----------|
+| macOS | `sandbox-exec` seatbelt profile `(deny network*)` | `execution.rs` — `macos_network_deny_profile()` |
+| Linux | `bwrap --unshare-net` (network namespace with no interfaces) | `execution.rs` — `linux_bubblewrap_program()` |
+| Other | Best-effort `no_proxy=*` env only | `execution.rs` — `configure_env()` |
+
+`host_local_network_isolation()` reports `Hard` / `BestEffort` / `None` so
+callers can see the guarantee level.
+
+### Filesystem confinement (opt-in, default off)
+
+Set `THINCLAW_HOST_FS_SANDBOX=1` to additionally confine host-direct **writes**
+to the command's workspace root (plus temp/device paths). Reads and process exec
+stay broad so interpreters can load their libraries. This is **default-off** so
+enabling it never silently changes behavior for existing deployments; when off,
+host execution behaves exactly as before.
+
+| Platform | Mechanism | Reference |
+|----------|-----------|-----------|
+| macOS | seatbelt `(deny file-write*)` + `(allow file-write* (subpath <workspace>) …)` | `execution.rs` — `macos_confined_profile()` |
+| Linux | `bwrap --ro-bind / /` + writable `--bind <workspace>` + `--tmpfs /tmp` | `execution.rs` — `linux_bind_confinement()` |
+| Other | No confinement (flag has no effect) | — |
+
+The confinement is composed with the network profile: a confined command with
+`allow_network = false` both denies egress and scopes writes. On macOS the
+kernel-enforced boundary is verified by a behavioral test
+(`macos_sandbox_tests::confined_profile_blocks_writes_outside_root`) that proves
+a write outside the confine root is rejected.
+
+**References:** `execution.rs` — `host_fs_sandbox_enabled()`,
+`host_fs_confine_root()`, `build_shell_command()`, `build_script_command()`
+
+---
+
 ## Authentication Mechanisms Summary
 
 | Mechanism | Constant-Time | Used By | Reference |
