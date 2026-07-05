@@ -40,6 +40,12 @@ const SCRYPT_LOG_N: u8 = 15;
 const SCRYPT_R: u32 = 8;
 const SCRYPT_P: u32 = 1;
 
+/// Ceiling on the scrypt working set (`128 · N · r` bytes) accepted from a
+/// bundle header. `seal` emits ~32 MiB; this leaves generous room for future
+/// tuning while refusing a crafted header that would trigger a multi-GiB
+/// allocation *before* the passphrase/tag is ever checked.
+const MAX_KDF_MEM_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Seal `plaintext` under `passphrase`, returning `header || ciphertext`.
 pub fn seal(passphrase: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
     let mut salt = [0u8; SALT_LEN];
@@ -89,6 +95,15 @@ pub fn open(passphrase: &str, sealed: &[u8]) -> Result<Vec<u8>> {
     let salt = &header[18..18 + SALT_LEN];
     let nonce = &header[34..34 + NONCE_LEN];
 
+    // Reject absurd KDF cost *before* deriving the key: the params are
+    // attacker-controlled and scrypt allocates 128·N·r bytes eagerly, so an
+    // unclamped header is a pre-auth memory-exhaustion vector.
+    if !kdf_params_within_limits(log_n, r, p) {
+        return Err(PortabilityError::BadFormat(
+            "bundle KDF cost parameters exceed safe limits".to_string(),
+        ));
+    }
+
     let key = derive_key(passphrase, salt, log_n, r, p)?;
     let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
     let mut buffer = ciphertext.to_vec();
@@ -109,6 +124,18 @@ fn build_header(salt: &[u8], nonce: &[u8], log_n: u8, r: u32, p: u32) -> Vec<u8>
     header.extend_from_slice(nonce);
     debug_assert_eq!(header.len(), HEADER_LEN);
     header
+}
+
+/// Whether a header's scrypt parameters are within safe bounds. Guards the
+/// `1 << log_n` shift, requires sane iteration/parallelism, and caps the
+/// working set at [`MAX_KDF_MEM_BYTES`].
+fn kdf_params_within_limits(log_n: u8, r: u32, p: u32) -> bool {
+    if log_n >= 40 || r == 0 || p == 0 || p > 16 {
+        return false;
+    }
+    let n = 1u64 << log_n;
+    let mem = 128u64.saturating_mul(n).saturating_mul(u64::from(r));
+    mem <= MAX_KDF_MEM_BYTES
 }
 
 fn derive_key(passphrase: &str, salt: &[u8], log_n: u8, r: u32, p: u32) -> Result<[u8; KEY_LEN]> {
@@ -193,5 +220,29 @@ mod tests {
     fn empty_payload_round_trips() {
         let sealed = seal("pw", b"").unwrap();
         assert_eq!(open("pw", &sealed).unwrap(), b"");
+    }
+
+    #[test]
+    fn oversized_kdf_params_rejected_before_derivation() {
+        // Patch the header's log_n byte (offset 9) to an absurd cost. `open`
+        // must reject it as BadFormat *without* attempting the huge scrypt
+        // allocation (this returns immediately rather than OOM-ing).
+        let mut sealed = seal("pw", b"payload").unwrap();
+        sealed[9] = 24; // N = 2^24 ⇒ ~16 GiB working set
+        assert!(matches!(
+            open("pw", &sealed).unwrap_err(),
+            PortabilityError::BadFormat(_)
+        ));
+    }
+
+    #[test]
+    fn kdf_limit_accepts_seal_params_rejects_extremes() {
+        assert!(kdf_params_within_limits(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P));
+        assert!(!kdf_params_within_limits(24, 8, 1)); // ~16 GiB
+        assert!(!kdf_params_within_limits(20, 8, 1)); // 1 GiB > 512 MiB cap
+        assert!(!kdf_params_within_limits(50, 1, 1)); // shift guard
+        assert!(!kdf_params_within_limits(15, 0, 1)); // r = 0
+        assert!(!kdf_params_within_limits(15, 8, 0)); // p = 0
+        assert!(!kdf_params_within_limits(15, 8, 64)); // p too large
     }
 }

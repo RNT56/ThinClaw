@@ -84,15 +84,25 @@ the primary token and are protected by the same file permissions.
 | `admin` | Full control, including configuration/security/code-execution surfaces |
 
 **Capability model.** Each request is classified into one coarse capability by
-method and path, and the caller's role must grant it (`role_grants`):
+method and path, and the caller's role must grant it (`role_grants`). The
+classifier is **fail-closed**: a state-changing request that isn't explicitly
+operator-writable requires admin.
 
 - Any request to an **admin surface** (`/api/settings`, `/api/providers`,
   `/api/tool-policies`, `/api/security`, `/api/extensions`, `/api/mcp`,
   `/api/hooks`, `/api/principals`) → `ManageConfig` (**admin only**, read *and*
   write — reads there can expose config and the write side installs/executes
   code).
-- Otherwise a safe/read method → `ReadState`.
-- Otherwise a state-changing method → `Chat`.
+- Otherwise a safe/read method (`GET`/`HEAD`/`OPTIONS`) → `ReadState`.
+- A state-changing method to an **operator-writable** prefix (`/api/chat`,
+  `/api/sessions`, `/api/memory`, `/api/jobs` — the "drive the agent" surface)
+  → `Chat`.
+- **Any other state-changing request → `ManageConfig` (admin only).** This is
+  the fail-closed default: a control-plane route that isn't on the
+  operator-writable allowlist (e.g. `/api/gateway/restart`, `/api/autonomy/*`,
+  `/api/experiments/runners`, `/api/learning/code-proposals/*/review`,
+  `/api/pairing/*/approve`) is admin-only automatically, so a newly added
+  sensitive route can't silently become Operator-accessible.
 
 Enforcement happens in the same `auth_middleware` immediately after the caller's
 identity+role is resolved: an insufficient role returns `403 Forbidden`. Because

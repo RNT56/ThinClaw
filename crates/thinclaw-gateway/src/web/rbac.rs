@@ -43,10 +43,27 @@ const ADMIN_SURFACE_PREFIXES: &[&str] = &[
     "/api/principals",
 ];
 
-fn is_admin_surface(path: &str) -> bool {
-    ADMIN_SURFACE_PREFIXES
+/// Non-admin path prefixes an `Operator` may issue *state-changing* requests to
+/// — the "drive the agent" surface. This is an **allowlist**: any mutating route
+/// not matched here (and not a safe read) requires Admin. That makes the
+/// classifier fail *closed* — a new control-plane route (service restart,
+/// autonomy rollback, code-proposal review, runner creation, pairing approval)
+/// is Admin-only by default rather than silently Operator-accessible.
+const OPERATOR_WRITABLE_PREFIXES: &[&str] =
+    &["/api/chat", "/api/sessions", "/api/memory", "/api/jobs"];
+
+fn path_matches(path: &str, prefixes: &[&str]) -> bool {
+    prefixes
         .iter()
         .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+}
+
+fn is_admin_surface(path: &str) -> bool {
+    path_matches(path, ADMIN_SURFACE_PREFIXES)
+}
+
+fn is_operator_writable(path: &str) -> bool {
+    path_matches(path, OPERATOR_WRITABLE_PREFIXES)
 }
 
 fn is_safe_method(method: &Method) -> bool {
@@ -57,14 +74,18 @@ fn is_safe_method(method: &Method) -> bool {
 ///
 /// - Any request to an admin surface → [`GatewayCapability::ManageConfig`].
 /// - Otherwise a safe (read) method → [`GatewayCapability::ReadState`].
-/// - Otherwise (a state-changing method) → [`GatewayCapability::Chat`].
+/// - A state-changing method to an operator-writable prefix → [`GatewayCapability::Chat`].
+/// - Any other state-changing request → [`GatewayCapability::ManageConfig`]
+///   (fail-closed: unclassified mutations are Admin-only).
 pub fn capability_for_request(method: &Method, path: &str) -> GatewayCapability {
     if is_admin_surface(path) {
         GatewayCapability::ManageConfig
     } else if is_safe_method(method) {
         GatewayCapability::ReadState
-    } else {
+    } else if is_operator_writable(path) {
         GatewayCapability::Chat
+    } else {
+        GatewayCapability::ManageConfig
     }
 }
 
@@ -116,14 +137,26 @@ mod tests {
     #[test]
     fn prefix_match_is_boundary_safe() {
         // A path that merely shares a textual prefix but is a different segment
-        // must NOT be treated as an admin surface.
+        // must NOT be treated as the admin surface: a GET on `/api/settings-preview`
+        // or `/api/mcp-lite/*` stays a plain read, not admin-only ManageConfig.
         assert_eq!(
             capability_for_request(&Method::GET, "/api/settings-preview"),
             GatewayCapability::ReadState
         );
         assert_eq!(
-            capability_for_request(&Method::POST, "/api/mcp-lite/run"),
+            capability_for_request(&Method::GET, "/api/mcp-lite/status"),
+            GatewayCapability::ReadState
+        );
+        // The operator-writable allowlist is boundary-safe too: `/api/jobs/x`
+        // is operator-writable (Chat), but `/api/jobs-report` is a different
+        // segment and falls to the fail-closed default (ManageConfig).
+        assert_eq!(
+            capability_for_request(&Method::POST, "/api/jobs/queue"),
             GatewayCapability::Chat
+        );
+        assert_eq!(
+            capability_for_request(&Method::POST, "/api/jobs-report"),
+            GatewayCapability::ManageConfig
         );
     }
 
@@ -143,6 +176,49 @@ mod tests {
         );
         assert_eq!(
             capability_for_request(&Method::HEAD, "/api/status"),
+            GatewayCapability::ReadState
+        );
+    }
+
+    #[test]
+    fn unclassified_mutations_are_admin_only() {
+        // Sensitive control-plane mutations outside the operator-writable
+        // allowlist must require ManageConfig (fail-closed), not Chat.
+        for path in [
+            "/api/gateway/restart",
+            "/api/autonomy/rollback",
+            "/api/autonomy/bootstrap",
+            "/api/learning/code-proposals/abc/review",
+            "/api/experiments/runners",
+            "/api/pairing/signal/approve",
+            "/api/routines/new",
+        ] {
+            assert_eq!(
+                capability_for_request(&Method::POST, path),
+                GatewayCapability::ManageConfig,
+                "POST {path} must be Admin-only (fail-closed)"
+            );
+            assert!(
+                !role_allows_request(GatewayRole::Operator, &Method::POST, path),
+                "Operator must not reach {path}"
+            );
+        }
+        // But operator-writable mutations stay at Chat.
+        for path in [
+            "/api/chat/send",
+            "/api/sessions/x",
+            "/api/jobs",
+            "/api/memory/write",
+        ] {
+            assert_eq!(
+                capability_for_request(&Method::POST, path),
+                GatewayCapability::Chat,
+                "POST {path} should be operator-writable"
+            );
+        }
+        // Reads of those control-plane routes remain observable (ReadState).
+        assert_eq!(
+            capability_for_request(&Method::GET, "/api/autonomy/status"),
             GatewayCapability::ReadState
         );
     }

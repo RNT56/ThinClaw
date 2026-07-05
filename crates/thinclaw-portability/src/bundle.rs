@@ -15,6 +15,11 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use sha2::{Digest, Sha256};
 
+/// Ceiling on the decompressed tar payload, to bound a decompression bomb on
+/// import. Generous enough for a real whole-agent backup (workspace + DB dump)
+/// while refusing pathological expansion.
+const MAX_UNPACKED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
 use crate::envelope;
 use crate::error::{PortabilityError, Result};
 use crate::manifest::{BundleManifest, BundleSection, MANIFEST_ENTRY, SectionKind};
@@ -119,9 +124,15 @@ impl OpenBundle {
     /// [`PortabilityError::Decryption`] on a wrong passphrase or tampering.
     pub fn open(sealed: &[u8], passphrase: &str) -> Result<Self> {
         let compressed = envelope::open(passphrase, sealed)?;
-        let mut decoder = GzDecoder::new(&compressed[..]);
+        // Cap decompression so a bomb cannot exhaust memory on import.
+        let mut decoder = GzDecoder::new(&compressed[..]).take(MAX_UNPACKED_BYTES);
         let mut tar_bytes = Vec::new();
         decoder.read_to_end(&mut tar_bytes)?;
+        if tar_bytes.len() as u64 >= MAX_UNPACKED_BYTES {
+            return Err(PortabilityError::BadFormat(
+                "decompressed bundle exceeds the maximum supported size".to_string(),
+            ));
+        }
 
         let mut entries = BTreeMap::new();
         let mut archive = tar::Archive::new(&tar_bytes[..]);
