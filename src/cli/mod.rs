@@ -20,6 +20,7 @@ mod comfy;
 mod completion;
 mod config;
 mod cron;
+mod devices;
 mod doctor;
 mod experiments;
 mod gateway;
@@ -50,6 +51,7 @@ pub use comfy::{ComfyCommand, run_comfy_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use cron::{CronCommand, run_cron_command};
+pub use devices::{DeviceCommand, run_devices_command};
 pub use doctor::run_doctor_command;
 pub use experiments::{ExperimentsCommand, run_experiments_command};
 pub use gateway::{GatewayCommand, run_gateway_command};
@@ -181,6 +183,10 @@ pub enum Command {
     /// Manage scheduled routines (cron jobs)
     #[command(subcommand)]
     Cron(CronCommand),
+
+    /// Manage paired mobile devices (pair, list, rename, revoke)
+    #[command(subcommand)]
+    Devices(DeviceCommand),
 
     /// Manage optional experiment/research automation, including opportunities, targets, providers, and campaigns.
     #[command(subcommand)]

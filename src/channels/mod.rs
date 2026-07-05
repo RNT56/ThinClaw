@@ -50,6 +50,7 @@ mod bluebubbles;
 pub mod canvas_gateway;
 mod channel;
 mod discord;
+pub mod first_party_push;
 pub mod forward_download;
 mod gmail;
 pub mod gmail_wiring;

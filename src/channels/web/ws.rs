@@ -30,6 +30,8 @@ use crate::channels::web::identity_helpers::{
 };
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{ModelInfo, SseEvent, WsClientMessage, WsServerMessage};
+use thinclaw_gateway::web::devices::DeviceScope;
+use thinclaw_gateway::web::identity::DeviceContext;
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
 /// Tracks active WebSocket connections.
@@ -76,8 +78,32 @@ pub async fn handle_ws_connection(
     state: Arc<GatewayState>,
     request_identity: GatewayRequestIdentity,
     browser_origin: Option<String>,
+    device_ctx: Option<DeviceContext>,
 ) {
     let (mut ws_sink, mut ws_stream) = socket.split();
+
+    // Device-token connections tear down on revocation (spec D-T5). Subscribe
+    // synchronously (before any await) so a revoke racing the first frame is
+    // still delivered; one guard drives the sender task (stops forwarding
+    // events), the other drives the receiver loop (stops accepting frames).
+    let device_id = device_ctx.as_ref().map(|d| d.device_id.clone());
+    // While a device principal has this socket open it is watching events
+    // in-app, so the first-party push notifier suppresses Alert pushes to it
+    // (D-N1). The guard is moved into the sender task and dropped when that
+    // task ends (client disconnect, revocation, or broadcast close).
+    let stream_guard = device_id
+        .as_deref()
+        .map(|id| state.device_registry.stream_opened(id));
+    let sender_revocation = crate::channels::web::handlers::chat::device_revocation_guard(
+        device_id.clone(),
+        Arc::clone(&state.device_registry),
+    );
+    let mut receiver_revocation = Box::pin(
+        crate::channels::web::handlers::chat::device_revocation_guard(
+            device_id,
+            Arc::clone(&state.device_registry),
+        ),
+    );
 
     // Track connection
     if let Some(ref tracker) = state.ws_tracker {
@@ -122,8 +148,12 @@ pub async fn handle_ws_connection(
 
     // Sender task: forward broadcast events + direct messages to WS client
     let sender_handle = tokio::spawn(async move {
+        // Held for the connection's lifetime; dropped when this task exits.
+        let _stream_guard = stream_guard;
+        tokio::pin!(sender_revocation);
         loop {
             let msg = tokio::select! {
+                _ = &mut sender_revocation => break, // device revoked: stop forwarding
                 event = event_stream.next() => {
                     match event {
                         Some(sse_event) => WsServerMessage::from_sse_event(&sse_event),
@@ -149,8 +179,14 @@ pub async fn handle_ws_connection(
         }
     });
 
-    // Receiver task: read client frames and route to agent
-    while let Some(Ok(frame)) = ws_stream.next().await {
+    // Receiver loop: read client frames and route to agent, ending promptly
+    // if the device is revoked so a revoked token can no longer send.
+    loop {
+        let frame = tokio::select! {
+            _ = &mut receiver_revocation => break, // device revoked: stop accepting frames
+            frame = ws_stream.next() => frame,
+        };
+        let Some(Ok(frame)) = frame else { break };
         match frame {
             Message::Text(text) => {
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
@@ -160,6 +196,7 @@ pub async fn handle_ws_connection(
                             client_msg,
                             &state,
                             &request_identity,
+                            device_ctx.as_ref(),
                             &direct_tx,
                             browser_origin.as_deref(),
                         )
@@ -192,9 +229,32 @@ async fn handle_client_message(
     msg: WsClientMessage,
     state: &GatewayState,
     request_identity: &GatewayRequestIdentity,
+    device_ctx: Option<&DeviceContext>,
     direct_tx: &mpsc::Sender<WsServerMessage>,
     browser_origin: Option<&str>,
 ) {
+    // Enforce device scopes at the WS-frame level: opening `/api/chat/ws`
+    // only requires the `chat` scope, but individual frames map to distinct
+    // surfaces. A device may chat and (with the `approvals` scope) approve;
+    // every other operation — settings, secrets, extension auth, model
+    // listing — is a never-grantable surface (D-T4) even over WS.
+    if let Some(ctx) = device_ctx {
+        let allowed = match &msg {
+            WsClientMessage::Message { .. } => ctx.has_scope(DeviceScope::Chat),
+            WsClientMessage::Approval { .. } => ctx.has_scope(DeviceScope::Approvals),
+            WsClientMessage::Ping => true,
+            _ => false,
+        };
+        if !allowed {
+            let _ = direct_tx
+                .send(WsServerMessage::Error {
+                    message: "Forbidden: device token lacks the required scope".to_string(),
+                })
+                .await;
+            return;
+        }
+    }
+
     match msg {
         WsClientMessage::Message { content, thread_id } => {
             let incoming = build_gateway_message(
@@ -270,6 +330,10 @@ async fn handle_client_message(
                         message: gateway_submission_error(error).1,
                     })
                     .await;
+            } else if let Ok(mut cache) = state.pending_approvals.lock() {
+                // Drain the pull-endpoint cache so a resolved approval stops
+                // showing as pending (mirrors chat_approval_handler).
+                cache.remove(&request_id);
             }
         }
         WsClientMessage::AuthToken {
@@ -531,7 +595,15 @@ mod tests {
         let state = make_test_state(None).await;
 
         let identity = test_request_identity("user1");
-        handle_client_message(WsClientMessage::Ping, &state, &identity, &direct_tx, None).await;
+        handle_client_message(
+            WsClientMessage::Ping,
+            &state,
+            &identity,
+            None,
+            &direct_tx,
+            None,
+        )
+        .await;
 
         let response = direct_rx.recv().await.unwrap();
         assert!(matches!(response, WsServerMessage::Pong));
@@ -552,6 +624,7 @@ mod tests {
             },
             &state,
             &identity,
+            None,
             &direct_tx,
             Some("https://chat.example.com"),
         )
@@ -585,6 +658,7 @@ mod tests {
             },
             &state,
             &identity,
+            None,
             &direct_tx,
             None,
         )
@@ -615,6 +689,7 @@ mod tests {
             },
             &state,
             &identity,
+            None,
             &direct_tx,
             Some("https://chat.example.com"),
         )
@@ -641,6 +716,7 @@ mod tests {
             },
             &state,
             &identity,
+            None,
             &direct_tx,
             None,
         )
@@ -669,6 +745,7 @@ mod tests {
             },
             &state,
             &identity,
+            None,
             &direct_tx,
             None,
         )
@@ -712,6 +789,7 @@ mod tests {
             skill_remote_hub: None,
             skill_quarantine: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
+            pair_complete_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 300),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: None,
@@ -723,6 +801,10 @@ mod tests {
             hooks: None,
             cost_tracker: None,
             response_cache: None,
+            device_registry: crate::channels::web::server::test_device_registry(),
+            pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 }

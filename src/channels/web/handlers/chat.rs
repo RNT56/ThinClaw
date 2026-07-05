@@ -27,18 +27,32 @@ use thinclaw_gateway::web::chat::{
     chat_thread_delete_response, delete_assistant_thread_forbidden_error,
     extension_manager_unavailable_error, history_response, normalize_chat_history_query,
     parse_approval_request_id, parse_chat_thread_delete_id, parse_chat_thread_path_id,
-    resolve_chat_history_thread_id, send_message_response, session_manager_unavailable_error,
-    thread_command_response, thread_export_content, thread_export_response, thread_info,
-    thread_list_response, thread_list_response_from_summaries, thread_not_found_error,
-    too_many_chat_connections_error, turn_info_from_session_turn, turns_from_history_messages,
-    unknown_approval_action_error,
+    pending_approvals_response, resolve_chat_history_thread_id, send_message_response,
+    session_manager_unavailable_error, thread_command_response, thread_export_content,
+    thread_export_response, thread_info, thread_list_response, thread_list_response_from_summaries,
+    thread_not_found_error, too_many_chat_connections_error, turn_info_from_session_turn,
+    turns_from_history_messages, unknown_approval_action_error,
 };
+use thinclaw_gateway::web::identity::DeviceContext;
 use thinclaw_gateway::web::ports::{
     RouteStatePort, request_origin_from_headers, validate_websocket_origin,
 };
 pub(crate) use thinclaw_gateway::web::submission::gateway_submission_error;
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
+#[utoipa::path(
+    post,
+    path = "/api/chat/send",
+    tag = "chat",
+    request_body = SendMessageRequest,
+    responses(
+        (status = 202, description = "Message accepted for async processing; results stream over SSE/WS", body = SendMessageResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 429, description = "Chat rate limit exceeded"),
+        (status = 503, description = "Agent loop unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -71,6 +85,19 @@ pub(crate) async fn chat_send_handler(
     Ok((StatusCode::ACCEPTED, Json(send_message_response(msg_id))))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/chat/approval",
+    tag = "chat",
+    request_body = ApprovalRequest,
+    responses(
+        (status = 202, description = "Approval decision accepted", body = SendMessageResponse),
+        (status = 400, description = "Unknown approval action or malformed request id"),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 503, description = "Agent loop unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -85,6 +112,15 @@ pub(crate) async fn chat_approval_handler(
     };
 
     let request_id = parse_approval_request_id(&req.request_id)?;
+
+    // Best-effort pending-approvals cache (milestone B1, `GET
+    // /api/chat/approvals`): the decision is about to be submitted, so drop
+    // the cached entry regardless of the submission's outcome below — a
+    // stale "still pending" entry is worse than a dropped one a client
+    // could re-request via the SSE stream.
+    if let Ok(mut cache) = state.pending_approvals.lock() {
+        cache.remove(&req.request_id);
+    }
 
     let approval = crate::agent::submission::Submission::ExecApproval {
         request_id,
@@ -118,6 +154,32 @@ pub(crate) async fn chat_approval_handler(
         .map_err(gateway_submission_error)?;
 
     Ok((StatusCode::ACCEPTED, Json(send_message_response(msg_id))))
+}
+
+/// Pull-based fallback for pending tool approvals (milestone B1): a mobile
+/// client that was not holding an open SSE/WS stream when
+/// `SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of
+/// missing the approval entirely. **Best-effort and lossy** — see
+/// `PendingApprovalEntry`'s doc comment: the backing cache lives only in
+/// gateway process memory, is not persisted, and is cleared on restart.
+#[utoipa::path(
+    get,
+    path = "/api/chat/approvals",
+    tag = "chat",
+    responses(
+        (status = 200, description = "Pending tool-approval requests, oldest first", body = PendingApprovalsResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn chat_approvals_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Json<PendingApprovalsResponse> {
+    let entries = match state.pending_approvals.lock() {
+        Ok(cache) => cache.values().cloned().collect(),
+        Err(_) => Vec::new(),
+    };
+    Json(pending_approvals_response(entries))
 }
 
 async fn submit_thread_command(
@@ -155,6 +217,18 @@ async fn submit_thread_command(
     Ok((StatusCode::ACCEPTED, Json(thread_command_response(msg_id))))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/chat/abort",
+    tag = "chat",
+    request_body = ThreadCommandRequest,
+    responses(
+        (status = 202, description = "Interrupt submitted to the agent loop", body = ThreadCommandResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 503, description = "Agent loop unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_abort_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -307,14 +381,27 @@ pub(crate) async fn active_thread_id_for_identity(
 pub(crate) async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let raw_stream = state
         .sse
         .subscribe_raw()
         .ok_or_else(too_many_chat_connections_error)?;
+    let device_id = device_ctx.map(|ext| ext.0.device_id);
+    // While a device principal is streaming events in-app, the first-party
+    // push notifier suppresses Alert pushes to it (D-N1). The guard is owned
+    // by the stream closure below, so the count decrements the moment the
+    // stream is dropped (client disconnect, revocation teardown, or task
+    // cancellation).
+    let stream_guard = device_id
+        .as_deref()
+        .map(|id| state.device_registry.stream_opened(id));
     let state_for_stream = Arc::clone(&state);
     let identity_for_stream = request_identity.clone();
     let stream = raw_stream.filter_map(move |event| {
+        // Keep the stream guard alive for the stream's lifetime; it is only
+        // dropped when this closure (owned by the stream) is dropped.
+        let _stream_guard = &stream_guard;
         let state = Arc::clone(&state_for_stream);
         let identity = identity_for_stream.clone();
         async move {
@@ -334,6 +421,14 @@ pub(crate) async fn chat_events_handler(
             ))
         }
     });
+
+    // Device-token streams tear down immediately on revocation (spec D-T5).
+    // Subscribe synchronously *before* streaming so a revoke racing the
+    // first poll is not missed. `take_until` ends the SSE stream when the
+    // guard future resolves.
+    let revocation_guard = device_revocation_guard(device_id, Arc::clone(&state.device_registry));
+    let stream = stream.take_until(revocation_guard);
+
     Ok((
         [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
         Sse::new(stream).keep_alive(
@@ -344,26 +439,75 @@ pub(crate) async fn chat_events_handler(
     ))
 }
 
+/// A future that resolves once `device_id` (if any) is revoked, and never
+/// resolves otherwise. Shared by the SSE and WS handlers to tear down live
+/// device-token streams the moment the operator revokes the device. Takes
+/// the registry by owned `Arc` so the returned future borrows nothing.
+pub(crate) fn device_revocation_guard(
+    device_id: Option<String>,
+    device_registry: std::sync::Arc<thinclaw_gateway::web::devices::DeviceRegistry>,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    // Subscribe now (synchronously) so revocations sent between here and the
+    // first poll are still delivered by the broadcast channel.
+    let subscription = device_id.map(|id| (id, device_registry.subscribe_revocations()));
+    async move {
+        let Some((device_id, mut rx)) = subscription else {
+            // Non-device (shared-token) stream: never self-terminates here.
+            std::future::pending::<()>().await;
+            return;
+        };
+        loop {
+            match rx.recv().await {
+                Ok(revoked) if revoked == device_id => return,
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // Registry gone (shutdown): stop guarding, let the stream run.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    std::future::pending::<()>().await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn chat_ws_handler(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let browser_origin = request_origin_from_headers(&headers);
     if let Err(error) = validate_websocket_origin(&headers) {
         return Err((error.status_code(), error.to_string()));
     }
+    let device_ctx = device_ctx.map(|ext| ext.0);
     Ok(ws.on_upgrade(move |socket| {
         crate::channels::web::ws::handle_ws_connection(
             socket,
             state,
             request_identity,
             browser_origin,
+            device_ctx,
         )
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/chat/history",
+    tag = "chat",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "Turns for the requested (or active) thread", body = HistoryResponse),
+        (status = 400, description = "Malformed thread id or pagination cursor"),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 404, description = "Thread not found or not visible to this identity"),
+        (status = 503, description = "Session manager unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -477,6 +621,18 @@ pub(crate) async fn chat_history_handler(
     Ok(Json(history_response(thread_id, Vec::new(), false, None)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/chat/threads",
+    tag = "chat",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "Assistant thread plus regular conversation threads", body = ThreadListResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 503, description = "Session manager unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -611,6 +767,18 @@ pub(crate) async fn chat_thread_export_handler(
     Err(chat_store_unavailable_error())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/chat/thread/new",
+    tag = "chat",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "New side thread created and persisted", body = ThreadInfo),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 503, description = "Session manager unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -709,6 +877,24 @@ async fn persist_gateway_side_thread(
     Ok(())
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/chat/thread/{id}",
+    tag = "chat",
+    params(
+        ("id" = String, Path, description = "Thread UUID to delete"),
+        HistoryQuery,
+    ),
+    responses(
+        (status = 200, description = "Thread deletion outcome", body = ChatThreadDeleteResponse),
+        (status = 400, description = "Malformed thread id"),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 403, description = "The pinned assistant thread cannot be deleted"),
+        (status = 404, description = "Thread not found or not visible to this identity"),
+        (status = 503, description = "Database unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_delete_thread_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -808,6 +994,7 @@ mod tests {
             skill_remote_hub: None,
             skill_quarantine: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
+            pair_complete_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 300),
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
@@ -819,6 +1006,10 @@ mod tests {
             secrets_store: None,
             channel_manager: None,
             hooks: None,
+            device_registry: crate::channels::web::server::test_device_registry(),
+            pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 

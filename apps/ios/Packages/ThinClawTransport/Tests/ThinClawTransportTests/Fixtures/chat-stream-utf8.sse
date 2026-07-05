@@ -1,0 +1,8 @@
+data: {"type":"stream_chunk","content":"héllo → ","thread_id":"web-1720000003"}
+
+data: {"type":"stream_chunk","content":"🦀🧵 ","thread_id":"web-1720000003"}
+
+data: {"type":"stream_chunk","content":"日本語テキスト and naïve étude","thread_id":"web-1720000003"}
+
+data: {"type":"response","content":"héllo → 🦀🧵 日本語テキスト and naïve étude","thread_id":"web-1720000003"}
+

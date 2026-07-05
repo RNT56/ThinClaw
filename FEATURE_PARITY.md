@@ -437,22 +437,26 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 
 ## 11. Mobile Apps
 
+> The native iOS surface is now in active development. Roadmap, milestones, and
+> the backend contract live in `docs/MOBILE_APP.md`; the security model lives in
+> `docs/MOBILE_SECURITY.md`.
+
 | Feature | OpenClaw | ThinClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
-| iOS app (SwiftUI) | ✅ | 🚫 | - | Out of scope initially |
-| Android app (Kotlin) | ✅ | 🚫 | - | Out of scope initially |
-| Apple Watch companion | ✅ | 🚫 | - | Send/receive messages MVP |
-| Gateway WebSocket client | ✅ | 🚫 | - | |
-| Camera/photo access | ✅ | 🚫 | - | |
-| Voice input | ✅ | 🚫 | - | |
+| iOS app (SwiftUI) | ✅ | 🚧 | P1 | M1 client landed: all 7 SPM packages pass `swift test` on macOS (SSE transport + `GatewaySession`/reconcile, pairing-payload parse, Secure-Enclave keypair, SPKI pinning + D-X2 policy, Keychain, GRDB persistence, generated `ThinClawAPI`). Onboarding (state machine + VisionKit QR scanner + manual path) and chat/sessions (`ChatStore`/`SessionsStore` over the live pinned session + cache) are wired; the whole app target **builds for the iOS 26 simulator** via `xcodebuild`, onboarding store has 27 simulator tests. Not yet: chat/sessions async orchestration UI tests, simulator/real-device E2E, and approvals/jobs/settings surfaces (M2+). Milestones M1–M5 in `docs/MOBILE_APP.md` |
+| Android app (Kotlin) | ✅ | 🚫 | - | Out of scope |
+| Apple Watch companion | ✅ | 🚧 | P2 | Planned (milestone M4): actionable approvals + dictated prompts via WatchConnectivity relay, status complication |
+| Gateway WebSocket client | ✅ | 🚧 | P2 | Mobile client is SSE-primary; the `ThinClawTransport` streaming layer (`GatewaySession`/`GatewayStream`, reconnect + watchdog, per-thread event routing) is implemented and tested over SSE. WS remains available on the gateway but the mobile client has no dedicated WS transport yet |
+| Camera/photo access | ✅ | 🚫 | - | Post-M5 candidate |
+| Voice input | ✅ | 🚫 | - | Watch dictation arrives with M4; broader voice input later |
 | Push-to-talk | ✅ | 🚫 | - | |
 | Location sharing | ✅ | 🚫 | - | |
-| Node pairing | ✅ | 🚫 | - | |
-| APNs push notifications | ✅ | 🚫 | - | Mobile client remains out of scope; ThinClaw backend APNs registration/delivery pipeline is tracked above as complete with live Apple delivery smoke still credential-gated |
-| Share to OpenClaw (iOS) | ✅ | 🚫 | - | iOS share sheet integration |
+| Node pairing | ✅ | ✅ | P1 | Backend device identity (milestone B1) landed: QR pairing issues per-device, revocable, scoped `tcd_` tokens over a pinned-TLS or tailnet gateway listener; see `docs/MOBILE_SECURITY.md` and `docs/MOBILE_APP.md` |
+| APNs push notifications | ✅ | 🚧 | P2 | First-party device push landed (B2): content-free policy (`push_policy`) + notifier (`first_party_push.rs`) reusing `ApnsPusher`, device-linked registration (`PUT/DELETE /api/devices/me/push`, `/live-activity/{id}`, `/live-activity-start-token`), live-stream suppression, throttled Live Activity, and prune-on-410. Off without APNs config; mock-tested only — real Apple/TestFlight delivery still credential-gated. Client-side NSE rewrite is M2 |
+| Share to OpenClaw (iOS) | ✅ | 🚫 | - | iOS share sheet integration; post-M5 candidate |
 | Background listening toggle | ✅ | 🚫 | - | iOS background audio |
 
-### Owner: ThinClaw Agent (if ever prioritized)
+### Owner: ThinClaw Agent
 
 ---
 

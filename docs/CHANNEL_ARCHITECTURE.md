@@ -306,6 +306,48 @@ Remaining live-release checks are a real Matrix sync/appservice round trip, real
 APNs delivery, real Web Push service delivery, and a real voice
 media/transcription webhook round trip.
 
+## First-Party Mobile Push Notifier
+
+The `apns` native lifecycle channel above is a **content-in-alert chat
+transport**: it registers device tokens via the shared-secret
+`/webhook/native/apns/register` webhook and delivers message content in the
+alert body. The first-party iOS surface (see
+[`docs/MOBILE_APP.md`](MOBILE_APP.md) milestone B2 and
+[`docs/MOBILE_SECURITY.md`](MOBILE_SECURITY.md) D-N1/D-N2) requires a
+**separate, content-free** push path. That path is the first-party push
+notifier, and it is a distinct surface from the chat channel:
+
+- **Registration is device-linked, not shared-secret.** First-party devices
+  register their APNs token with a per-device scoped token
+  (`PUT/DELETE /api/devices/me/push`, `devices:self` scope) plus the
+  Live Activity endpoints (`PUT /api/devices/me/live-activity/{activity_id}`
+  and `/api/devices/me/live-activity-start-token`). This supersedes the
+  shared-secret `/webhook/native/apns/register` webhook — that webhook remains
+  for the legacy chat channel and is unchanged. Push registrations live inside
+  the device registry (`crates/thinclaw-gateway/src/web/devices/`, persisted
+  under `~/.thinclaw/`), not in `native-endpoints/apns.json`.
+- **Payloads are content-free.** The pure policy module
+  (`thinclaw_gateway::web::devices::push_policy`) maps an `SseEvent` to an
+  optional `PushDecision` whose payload carries only a generic alert plus an
+  id-only `tc` dict (`thread_id`/`request_id`/`job_id`) — never message text,
+  tool names, or parameters. Live Activity payloads carry only
+  `{phase, progress?, revision}`. A Notification Service Extension fetches real
+  content over the pinned connection and rewrites locally.
+- **Delivery reuses the APNs transport, not the chat channel.** The runtime
+  notifier (`src/channels/first_party_push.rs`) subscribes to the gateway SSE
+  broadcast *without consuming a client slot*, runs the policy per registered
+  device, and delivers each decision through `ApnsPusher`
+  (`thinclaw-channels::apns_push`), the same signed-request implementation the
+  legacy `ApnsNativeClient` delegates to. It suppresses alerts to a device with
+  a live in-app stream, throttles Live Activity updates, prunes device tokens
+  APNs rejects (`410`/`400`), and writes `device.push_token_removed` audit lines
+  without logging token material.
+- **Off by default, credential-gated.** The notifier is spawned only when APNs
+  provider config is present in the environment (`APNS_TEAM_ID`, `APNS_KEY_ID`,
+  `APNS_BUNDLE_ID`, and `APNS_PRIVATE_KEY`/`APNS_PRIVATE_KEY_PATH`); it stays off
+  otherwise. Real Apple delivery is covered only by mock-backed tests so far;
+  the live smoke remains credential-gated.
+
 ## Operator Docs
 
 Use these pages for operator setup:

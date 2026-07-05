@@ -1,0 +1,115 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/ios/**"
+      - "clients/openapi/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - "clients/openapi/**"
+      - ".github/workflows/ios.yml"
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: swift-format lint
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # The packages declare swift-tools-version 6.2, which needs the Swift 6.2
+      # toolchain (Xcode 26). The runner's *default* Xcode is older (Swift 6.1),
+      # so select the newest installed Xcode before any swift/xcodebuild call.
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Selecting ${latest:-<none found>}"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+          swift --version
+      - name: Lint Swift sources
+        working-directory: apps/ios
+        run: |
+          if xcrun --find swift-format >/dev/null 2>&1; then
+            xcrun swift-format lint --strict --recursive --configuration .swift-format \
+              Packages App Widgets Watch WatchWidgets
+          else
+            echo "::warning::swift-format not available in this Xcode toolchain; skipping"
+          fi
+
+  test-packages:
+    name: swift test (${{ matrix.package }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - ThinClawTransport
+          - ThinClawCore
+          - ThinClawSnapshotKit
+          - ThinClawAuth
+          - ThinClawAPI
+          - ThinClawPersistence
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Selecting ${latest:-<none found>}"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+          swift --version
+      - name: Test
+        run: swift test --package-path apps/ios/Packages/${{ matrix.package }}
+
+  generated-drift:
+    name: generated client drift
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Selecting ${latest:-<none found>}"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+          swift --version
+      # The drift check runs swift-openapi-generator, installed via mise.
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: apps/ios
+      - name: Check generated client freshness
+        run: apps/ios/scripts/check-generated-drift.sh
+
+  # Full app build via Tuist. Needs Xcode 26 (Swift 6.2) plus mise-managed
+  # tuist. Kept best-effort until the whole iOS pipeline is confirmed green on
+  # the GitHub runner image — the package test matrix above is the hard gate.
+  build-app:
+    name: tuist build (best effort)
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Selecting ${latest:-<none found>}"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+          swift --version
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: apps/ios
+      - name: Generate and build
+        working-directory: apps/ios
+        run: |
+          cp Config/Signing.example.xcconfig Config/Signing.local.xcconfig
+          tuist install
+          tuist generate --no-open
+          xcodebuild build \
+            -workspace ThinClaw.xcworkspace \
+            -scheme ThinClaw \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO

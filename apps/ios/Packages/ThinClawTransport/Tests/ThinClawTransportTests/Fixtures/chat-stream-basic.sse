@@ -1,0 +1,13 @@
+: gateway connected
+data: {"type":"stream_chunk","content":"Hel","thread_id":"web-1720000000"}
+
+data: {"type":"stream_chunk","content":"lo! I ca","thread_id":"web-1720000000"}
+
+data: {"type":"stream_chunk","content":"n help with that.","thread_id":"web-1720000000"}
+
+data: {"type":"usage_update","input_tokens":812,"output_tokens":64,"cost_usd":0.0042,"model":"claude-sonnet-4-5","thread_id":"web-1720000000"}
+
+data: {"type":"response","content":"Hello! I can help with that.","thread_id":"web-1720000000"}
+
+data: {"type":"heartbeat"}
+

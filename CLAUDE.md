@@ -39,6 +39,8 @@ Use these as the current documentation authority before updating surrounding doc
 | Setup and onboarding | `src/setup/README.md` |
 | Deployment and remote access | `docs/DEPLOYMENT.md` |
 | Channel architecture | `docs/CHANNEL_ARCHITECTURE.md` |
+| Mobile/iOS surface contract | `docs/MOBILE_APP.md` |
+| Mobile security model | `docs/MOBILE_SECURITY.md` |
 | Extension architecture | `docs/EXTENSION_SYSTEM.md` |
 | Crate ownership and thin-shell boundaries | `docs/CRATE_OWNERSHIP.md` |
 | Tool implementation guidance | `src/tools/README.md` |
@@ -56,6 +58,8 @@ When these docs disagree with broad overview docs, code and canonical docs win.
 The codebase is easier to reason about by subsystem than by file count.
 
 - `crates/thinclaw-*`: canonical crate-owned traits, DTOs, runtime helpers, and extracted subsystem pieces
+- `apps/`: host applications built on the ThinClaw runtime — `apps/desktop` (Tauri desktop app) and `apps/ios` (native Swift iOS/watchOS surface; Tuist workspace, strictly a gateway client)
+- `clients/`: committed generated client artifacts (`clients/swift` runtime contracts, `clients/openapi` gateway OpenAPI snapshot)
 - `src/lib.rs` and root `src/<module>/mod.rs`: compatibility facades for `thinclaw::...` imports
 - `src/app.rs`, `src/main.rs`, `src/bin/`: root package entrypoints and host app wiring
 - `src/agent/`: remaining root-owned agent loop, dispatcher, subagents, learning, routine engine, scheduler, worker orchestration, and app/runtime adapters
@@ -167,6 +171,7 @@ Temporary dev note:
 - If you change extension flows, update `docs/EXTENSION_SYSTEM.md`, `src/tools/README.md`, and any affected tool docs.
 - If you change crate boundaries, update `docs/CRATE_OWNERSHIP.md` and keep this file's repo-shape notes aligned.
 - If you change security boundaries, update `src/NETWORK_SECURITY.md` and any top-level trust/safety wording.
+- If you change gateway auth, device identity, or a mobile-contract endpoint/DTO, update `docs/MOBILE_APP.md` and `docs/MOBILE_SECURITY.md`, and regenerate `clients/openapi/thinclaw-gateway.openapi.json` (`cargo run --bin export-openapi -- generate`) in the same PR.
 
 ## Preferred Maintainer Workflow
 

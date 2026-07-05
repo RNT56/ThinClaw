@@ -19,10 +19,12 @@ pub(crate) mod handlers;
 pub mod identity_helpers;
 pub mod log_layer;
 pub mod openai_compat;
+pub mod openapi;
 pub mod rate_limiter;
 pub mod server;
 pub mod sse;
 pub mod static_files;
+pub mod tls;
 pub mod types;
 pub mod ws;
 
@@ -53,6 +55,37 @@ use self::log_layer::{LogBroadcaster, LogLevelHandle};
 use self::server::GatewayState;
 use self::sse::SseManager;
 use self::types::{ResponseAttachment, SseEvent};
+use thinclaw_gateway::web::devices::{DeviceRegistry, DeviceStore};
+
+/// Build the production `~/.thinclaw`-backed device registry. `DeviceRegistry::load`
+/// performs no actual `.await` (see its doc comment: the body is pure sync
+/// file I/O plus in-memory index construction), so `futures::executor::block_on`
+/// here is a plain synchronous call from `GatewayChannel::new()`, not a
+/// runtime-nesting hazard.
+fn load_device_registry() -> Arc<DeviceRegistry> {
+    let store = DeviceStore::new();
+    match futures::executor::block_on(DeviceRegistry::load(store)) {
+        Ok(registry) => Arc::new(registry),
+        Err(error) => {
+            tracing::error!(
+                "Failed to load device registry from ~/.thinclaw/devices.json: {} \
+                 (device-token auth will reject all tokens until this is fixed)",
+                error
+            );
+            // Fall back to an empty in-memory registry rather than failing
+            // gateway startup entirely — device-token auth degrades to
+            // "no devices recognized" (shared-token auth is unaffected).
+            let empty_store = DeviceStore::with_base_dir(std::env::temp_dir().join(format!(
+                "thinclaw-device-registry-fallback-{}",
+                uuid::Uuid::new_v4()
+            )));
+            Arc::new(
+                futures::executor::block_on(DeviceRegistry::load(empty_store))
+                    .expect("loading a fresh empty device store cannot fail"),
+            )
+        }
+    }
+}
 
 /// Web gateway channel implementing the Channel trait.
 pub struct GatewayChannel {
@@ -127,6 +160,7 @@ impl GatewayChannel {
             skill_remote_hub: None,
             skill_quarantine: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            pair_complete_rate_limiter: server::RateLimiter::new(10, 300),
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
@@ -138,6 +172,8 @@ impl GatewayChannel {
             secrets_store: None,
             channel_manager: None,
             hooks: None,
+            device_registry: load_device_registry(),
+            pending_approvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         });
 
         Self {
@@ -175,6 +211,7 @@ impl GatewayChannel {
             skill_remote_hub: self.state.skill_remote_hub.clone(),
             skill_quarantine: self.state.skill_quarantine.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            pair_complete_rate_limiter: server::RateLimiter::new(10, 300),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             cost_tracker: self.state.cost_tracker.clone(),
@@ -186,6 +223,8 @@ impl GatewayChannel {
             secrets_store: self.state.secrets_store.clone(),
             channel_manager: self.state.channel_manager.clone(),
             hooks: self.state.hooks.clone(),
+            device_registry: Arc::clone(&self.state.device_registry),
+            pending_approvals: Arc::clone(&self.state.pending_approvals),
         };
         if let Ok(existing_scheduler) = self.state.scheduler.try_read()
             && let Ok(mut next_scheduler) = new_state.scheduler.try_write()
@@ -466,6 +505,48 @@ impl Channel for GatewayChannel {
             .and_then(|v| v.as_str())
             .map(String::from);
         let event = status_update_to_sse_event(status, thread_id);
+
+        // Feed the best-effort pending-approvals cache (milestone B1,
+        // `GET /api/chat/approvals`) at the same point the SSE event is
+        // produced, so a client that queries the pull endpoint instead of
+        // holding an open stream still sees the approval. See
+        // `PendingApprovalEntry`'s doc comment for the lossiness caveat —
+        // entries are removed by `chat_approval_handler`, not here.
+        if let SseEvent::ApprovalNeeded {
+            ref request_id,
+            ref tool_name,
+            ref description,
+            ref parameters,
+            ref thread_id,
+        } = event
+        {
+            let entry = thinclaw_gateway::web::types::PendingApprovalEntry {
+                request_id: request_id.clone(),
+                tool_name: tool_name.clone(),
+                description: description.clone(),
+                parameters: parameters.clone(),
+                thread_id: thread_id.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Ok(mut cache) = self.state.pending_approvals.lock() {
+                // Bound the best-effort cache: approvals resolved on other
+                // surfaces (TUI/desktop) or that time out are never drained
+                // here, so cap total entries and evict the oldest by
+                // `created_at` (rfc3339 sorts chronologically) to keep this
+                // from growing unboundedly for the lifetime of the process.
+                const MAX_PENDING_APPROVALS: usize = 256;
+                if cache.len() >= MAX_PENDING_APPROVALS
+                    && !cache.contains_key(&entry.request_id)
+                    && let Some(oldest_id) = cache
+                        .values()
+                        .min_by(|a, b| a.created_at.cmp(&b.created_at))
+                        .map(|e| e.request_id.clone())
+                {
+                    cache.remove(&oldest_id);
+                }
+                cache.insert(entry.request_id.clone(), entry);
+            }
+        }
 
         self.state.sse.broadcast(event);
         Ok(())

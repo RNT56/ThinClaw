@@ -1,0 +1,21 @@
+# Generated Xcode projects (Tuist is the source of truth)
+*.xcodeproj
+*.xcworkspace
+
+# Tuist
+Derived/
+.tuist-cache/
+
+# SwiftPM
+.build/
+.swiftpm/
+
+# Signing (copy Config/Signing.example.xcconfig -> Config/Signing.local.xcconfig)
+Config/Signing.local.xcconfig
+
+# macOS
+.DS_Store
+
+# SPM per-package lockfiles — direct deps are pinned exact: in the manifests;
+# workspace resolution is what CI uses. Track none rather than some (hygiene).
+Packages/**/Package.resolved

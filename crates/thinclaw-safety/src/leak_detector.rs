@@ -594,6 +594,17 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Medium,
             action: LeakAction::Warn,
         },
+        // ThinClaw device tokens: "tcd_" + base64url(32 random bytes, no padding).
+        // See docs/MOBILE_SECURITY.md D-T1/D-T2 and the "Data at rest & logging
+        // hygiene" section: "tcd_" is registered in the LeakDetector scrub
+        // patterns so device tokens never end up verbatim in logs.
+        LeakPattern {
+            name: "thinclaw_device_token".to_string(),
+            regex: Regex::new(r"tcd_[A-Za-z0-9_-]{43}")
+                .expect("constant regex pattern must compile"),
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
     ]
 }
 
@@ -805,5 +816,55 @@ mod tests {
 
         let result = detector.scan_http_request("https://api.example.com/exfil", &[], Some(&body));
         assert!(result.is_err(), "binary body should still be scanned");
+    }
+
+    #[test]
+    fn test_detect_thinclaw_device_token() {
+        let detector = LeakDetector::new();
+        let content =
+            "device token: tcd_ytkCIK-SSrd7X2rFMpNkKOh8P22wpY9tKG6-DTBOKqQ logged by mistake";
+
+        let result = detector.scan(content);
+        assert!(!result.is_clean());
+        assert!(result.should_block);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "thinclaw_device_token")
+        );
+    }
+
+    #[test]
+    fn test_scan_and_clean_blocks_thinclaw_device_token() {
+        let detector = LeakDetector::new();
+        let content = "tcd_ytkCIK-SSrd7X2rFMpNkKOh8P22wpY9tKG6-DTBOKqQ";
+
+        let result = detector.scan_and_clean(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_thinclaw_device_token_prefix_alone_is_not_flagged() {
+        let detector = LeakDetector::new();
+        let result = detector.scan("tcd_");
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "thinclaw_device_token")
+        );
+    }
+
+    #[test]
+    fn test_thinclaw_device_token_too_short_is_not_flagged() {
+        let detector = LeakDetector::new();
+        let result = detector.scan("tcd_abc");
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "thinclaw_device_token")
+        );
     }
 }

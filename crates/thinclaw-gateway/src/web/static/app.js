@@ -10756,6 +10756,10 @@ const SETTINGS_SCHEMA = {
       { key: 'channels.gateway_port', label: 'Port', type: 'number', desc: 'Web gateway port (default: 3000)', min: 1, max: 65535, nullable: true },
     ]
   },
+  'Devices': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></svg>',
+    fields: []
+  },
   'Safety': {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
     fields: [
@@ -13478,7 +13482,7 @@ function renderSettings() {
   // --- Subtabs ---
   const subtabGroups = {
     'General': ['Presentation', 'Notifications', 'Heartbeat', 'Agent', 'Smart Routing', 'Safety', 'Features'],
-    'Channels': ['Channels — Telegram', 'Channels — Signal', 'Channels — Discord', 'Channels — Slack', 'Channels — Nostr', 'Channels — iMessage', 'Channels — BlueBubbles', 'Channels — Apple Mail', 'Channels — Gmail', 'Channels — Web Gateway'],
+    'Channels': ['Channels — Telegram', 'Channels — Signal', 'Channels — Discord', 'Channels — Slack', 'Channels — Nostr', 'Channels — iMessage', 'Channels — BlueBubbles', 'Channels — Apple Mail', 'Channels — Gmail', 'Channels — Web Gateway', 'Devices'],
     'Advanced': [],
   };
 
@@ -13561,15 +13565,17 @@ function renderSettingsSection(sectionName, section, startOpen) {
   chevron.innerHTML = '&#9660;';
   header.appendChild(chevron);
 
-  const countBadge = document.createElement('span');
-  countBadge.className = 'settings-section-count';
-  const configuredCount = section.fields.filter(f => settingsCache[f.key]?.value != null).length;
-  if (configuredCount > 0) {
-    countBadge.textContent = configuredCount + '/' + section.fields.length;
-  } else {
-    countBadge.textContent = section.fields.length + ' fields';
+  if (sectionName !== 'Devices') {
+    const countBadge = document.createElement('span');
+    countBadge.className = 'settings-section-count';
+    const configuredCount = section.fields.filter(f => settingsCache[f.key]?.value != null).length;
+    if (configuredCount > 0) {
+      countBadge.textContent = configuredCount + '/' + section.fields.length;
+    } else {
+      countBadge.textContent = section.fields.length + ' fields';
+    }
+    header.appendChild(countBadge);
   }
-  header.appendChild(countBadge);
 
   sectionEl.appendChild(header);
 
@@ -13578,6 +13584,8 @@ function renderSettingsSection(sectionName, section, startOpen) {
 
   if (sectionName === 'Presentation') {
     body.appendChild(renderPresentationStudio(section));
+  } else if (sectionName === 'Devices') {
+    body.appendChild(renderDevicesPanel());
   } else {
     const grid = document.createElement('div');
     grid.className = 'settings-grid';
@@ -13730,6 +13738,356 @@ function renderNostrSettingsPanel() {
   panel.appendChild(renderNostrSecretControl(status));
 
   return panel;
+}
+
+// --- Devices (paired mobile/watch clients, milestone B1) ---
+
+let devicesListCache = [];
+let devicesPendingCache = [];
+let devicesPairCountdownTimer = null;
+
+function renderDevicesPanel() {
+  const shell = document.createElement('div');
+  shell.className = 'settings-grid';
+  shell.style.marginTop = '1rem';
+
+  const intro = document.createElement('div');
+  intro.className = 'ui-panel ui-panel--note';
+  intro.innerHTML = '<p>Paired iOS/watchOS clients authenticate with their own per-device token (see <code>docs/MOBILE_APP.md</code>). Revoking a device disconnects it immediately.</p>';
+  shell.appendChild(intro);
+
+  const actions = document.createElement('div');
+  actions.className = 'ext-actions';
+  actions.style.marginBottom = '0.5rem';
+  const pairBtn = document.createElement('button');
+  pairBtn.className = 'btn-ext install';
+  pairBtn.textContent = 'Pair new device';
+  pairBtn.addEventListener('click', startDevicePairing);
+  actions.appendChild(pairBtn);
+  const refreshBtn = document.createElement('button');
+  refreshBtn.className = 'btn-ext';
+  refreshBtn.textContent = 'Refresh';
+  refreshBtn.addEventListener('click', loadDevices);
+  actions.appendChild(refreshBtn);
+  shell.appendChild(actions);
+
+  const pairingHost = document.createElement('div');
+  pairingHost.id = 'device-pairing-host';
+  shell.appendChild(pairingHost);
+
+  const pendingHost = document.createElement('div');
+  pendingHost.id = 'device-pending-list';
+  shell.appendChild(pendingHost);
+
+  const list = document.createElement('div');
+  list.id = 'devices-list';
+  list.className = 'extensions-list ui-resource-grid';
+  list.innerHTML = '<div class="settings-loading">Loading devices...</div>';
+  shell.appendChild(list);
+
+  loadDevices();
+  loadPendingPairings();
+
+  return shell;
+}
+
+function loadDevices() {
+  const list = document.getElementById('devices-list');
+  if (!list) return;
+  apiFetch('/api/devices').then(function(data) {
+    devicesListCache = data.devices || [];
+    renderDevicesList();
+  }).catch(function(err) {
+    if (String(err.message || '').indexOf('404') !== -1) {
+      list.innerHTML = '<div class="empty-state">Device identity endpoints are not available on this gateway yet.</div>';
+      return;
+    }
+    list.innerHTML = '<div class="empty-state">Failed to load devices: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderDevicesList() {
+  const list = document.getElementById('devices-list');
+  if (!list) return;
+  if (!devicesListCache.length) {
+    list.innerHTML = '<div class="empty-state">No paired devices yet.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  devicesListCache.forEach(function(device) {
+    const card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card';
+
+    const header = document.createElement('div');
+    header.className = 'ext-header ui-resource-header';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'ext-name ui-resource-name';
+    nameEl.textContent = device.name;
+    nameEl.title = 'Click to rename';
+    nameEl.style.cursor = 'pointer';
+    nameEl.addEventListener('click', function() {
+      startDeviceRename(device, nameEl);
+    });
+    header.appendChild(nameEl);
+
+    const revoked = !!device.revoked_at;
+    const badge = document.createElement('span');
+    badge.className = 'badge ' + (revoked ? 'failed' : 'enabled');
+    badge.textContent = revoked ? 'revoked' : 'active';
+    header.appendChild(badge);
+
+    card.appendChild(header);
+
+    const meta = document.createElement('div');
+    meta.className = 'ext-desc ui-resource-meta';
+    meta.textContent = (device.platform || 'unknown') + ' · token ' + (device.token_prefix || '') + '…';
+    card.appendChild(meta);
+
+    const note = document.createElement('div');
+    note.className = 'ext-keywords ui-resource-note';
+    note.textContent = 'Last seen ' + formatDeviceTimestamp(device.last_seen_at) + ' · scopes: ' + (device.scopes || []).join(', ');
+    card.appendChild(note);
+
+    const actions = document.createElement('div');
+    actions.className = 'ext-actions ui-resource-actions';
+
+    const renameBtn = document.createElement('button');
+    renameBtn.className = 'btn-ext';
+    renameBtn.textContent = 'Rename';
+    renameBtn.addEventListener('click', function() {
+      startDeviceRename(device, nameEl);
+    });
+    actions.appendChild(renameBtn);
+
+    if (!revoked) {
+      const revokeBtn = document.createElement('button');
+      revokeBtn.className = 'btn-ext remove';
+      revokeBtn.textContent = 'Revoke';
+      revokeBtn.addEventListener('click', function() {
+        revokeDevice(device);
+      });
+      actions.appendChild(revokeBtn);
+    }
+
+    card.appendChild(actions);
+    list.appendChild(card);
+  });
+}
+
+function formatDeviceTimestamp(value) {
+  if (!value) return 'never';
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return value;
+  return d.toLocaleString();
+}
+
+function startDeviceRename(device, nameEl) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = device.name;
+  input.className = 'setting-input';
+  input.style.width = '160px';
+  const finish = function(commit) {
+    if (commit && input.value.trim() && input.value.trim() !== device.name) {
+      renameDevice(device, input.value.trim());
+    } else {
+      renderDevicesList();
+    }
+  };
+  input.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Enter') finish(true);
+    if (ev.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', function() { finish(true); });
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
+function renameDevice(device, newName) {
+  apiFetch('/api/devices/' + encodeURIComponent(device.device_id) + '/rename', {
+    method: 'POST',
+    body: { name: newName },
+  }).then(function() {
+    showToast('Renamed device to ' + newName, 'success');
+    loadDevices();
+  }).catch(function(err) {
+    showToast('Rename failed: ' + err.message, 'error');
+    renderDevicesList();
+  });
+}
+
+function revokeDevice(device) {
+  if (!confirm('Revoke device "' + device.name + '"? It will be disconnected immediately and its token can no longer authenticate.')) return;
+  apiFetch('/api/devices/' + encodeURIComponent(device.device_id) + '/revoke', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: {},
+  }).then(function() {
+    showToast('Revoked device ' + device.name, 'success');
+    loadDevices();
+  }).catch(function(err) {
+    showToast('Revoke failed: ' + err.message, 'error');
+  });
+}
+
+function loadPendingPairings() {
+  const host = document.getElementById('device-pending-list');
+  if (!host) return;
+  apiFetch('/api/devices/pair/pending').then(function(data) {
+    devicesPendingCache = data.pending || [];
+    renderPendingPairings();
+  }).catch(function() {
+    // Endpoint may not exist yet, or there may be nothing pending — stay quiet.
+    if (host) host.innerHTML = '';
+  });
+}
+
+function renderPendingPairings() {
+  const host = document.getElementById('device-pending-list');
+  if (!host) return;
+  if (!devicesPendingCache.length) {
+    host.innerHTML = '';
+    return;
+  }
+  host.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'ui-panel-title';
+  title.textContent = 'Pending pairings';
+  host.appendChild(title);
+  devicesPendingCache.forEach(function(pending) {
+    const row = document.createElement('div');
+    row.className = 'ui-panel ui-panel--compact ui-resource-card';
+    row.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+      + '<span class="ext-name ui-resource-name">' + escapeHtml(pending.name || 'Unnamed device') + '</span>'
+      + '<span class="badge pending">' + (pending.awaiting_confirm ? 'awaiting confirm' : 'pending') + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">Started ' + escapeHtml(formatDeviceTimestamp(pending.created_at)) + '</div>';
+    if (pending.awaiting_confirm) {
+      const actions = document.createElement('div');
+      actions.className = 'ext-actions ui-resource-actions';
+      const approveBtn = document.createElement('button');
+      approveBtn.className = 'btn-ext install';
+      approveBtn.textContent = 'Approve';
+      approveBtn.addEventListener('click', function() {
+        approvePendingPairing(pending);
+      });
+      actions.appendChild(approveBtn);
+      row.appendChild(actions);
+    }
+    host.appendChild(row);
+  });
+}
+
+function approvePendingPairing(pending) {
+  apiFetch('/api/devices/pair/' + encodeURIComponent(pending.pairing_id) + '/approve', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: {},
+  }).then(function() {
+    showToast('Approved pairing for ' + (pending.name || 'device'), 'success');
+    loadPendingPairings();
+    loadDevices();
+  }).catch(function(err) {
+    showToast('Approve failed: ' + err.message, 'error');
+  });
+}
+
+function startDevicePairing() {
+  const host = document.getElementById('device-pairing-host');
+  if (!host) return;
+  host.innerHTML = '<div class="settings-loading">Starting pairing session...</div>';
+  apiFetch('/api/devices/pair/start', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: {},
+  }).then(function(data) {
+    renderPairingSession(data);
+    loadPendingPairings();
+  }).catch(function(err) {
+    if (String(err.message || '').indexOf('404') !== -1) {
+      host.innerHTML = '<div class="empty-state">Pairing endpoint is not available on this gateway yet.</div>';
+      return;
+    }
+    host.innerHTML = '<div class="empty-state">Failed to start pairing: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderPairingSession(data) {
+  const host = document.getElementById('device-pairing-host');
+  if (!host) return;
+  if (devicesPairCountdownTimer) {
+    clearInterval(devicesPairCountdownTimer);
+    devicesPairCountdownTimer = null;
+  }
+
+  const card = document.createElement('div');
+  card.className = 'ui-panel ui-panel--subtle';
+
+  // TODO(milestone M1): render the qr_uri as an actual scannable QR code on
+  // a <canvas> once a self-contained QR encoder lands in the codebase. For
+  // now we show the payload string, the human-typable fallback code, and a
+  // live expiry countdown so a no-camera operator can still pair.
+  card.innerHTML =
+    '<p class="ui-panel-desc">Scan this on the ThinClaw iOS app, or enter the code manually. Not a QR image yet — see the TODO in app.js (milestone M1).</p>'
+    + '<div class="setting-row">'
+    + '<div class="setting-label-wrap"><label class="setting-label">Pairing payload</label><span class="setting-desc">Full <code>thinclaw://pair</code> URI</span></div>'
+    + '<div class="setting-control"><pre id="device-pair-uri" style="white-space:pre-wrap;word-break:break-all;max-width:100%;">' + escapeHtml(data.qr_uri || '') + '</pre></div>'
+    + '</div>'
+    + '<div class="setting-row">'
+    + '<div class="setting-label-wrap"><label class="setting-label">Human code</label><span class="setting-desc">No-camera fallback, same lockout as the QR secret</span></div>'
+    + '<div class="setting-control"><code id="device-pair-code" style="font-size:1.2em;letter-spacing:2px;">' + escapeHtml(data.human_code || '') + '</code></div>'
+    + '</div>'
+    + '<div class="setting-row">'
+    + '<div class="setting-label-wrap"><label class="setting-label">Expires</label></div>'
+    + '<div class="setting-control"><span id="device-pair-countdown">--</span></div>'
+    + '</div>'
+    + '<div class="ext-actions" style="margin-top:0.5rem;">'
+    + '<button class="btn-ext" id="device-pair-copy">Copy payload</button>'
+    + '<button class="btn-ext" id="device-pair-dismiss">Dismiss</button>'
+    + '</div>';
+
+  host.innerHTML = '';
+  host.appendChild(card);
+
+  const copyBtn = card.querySelector('#device-pair-copy');
+  copyBtn.addEventListener('click', function() {
+    navigator.clipboard.writeText(data.qr_uri || '').then(function() {
+      copyBtn.textContent = 'Copied!';
+      setTimeout(function() { copyBtn.textContent = 'Copy payload'; }, 1500);
+    });
+  });
+  card.querySelector('#device-pair-dismiss').addEventListener('click', function() {
+    if (devicesPairCountdownTimer) {
+      clearInterval(devicesPairCountdownTimer);
+      devicesPairCountdownTimer = null;
+    }
+    host.innerHTML = '';
+  });
+
+  const expiresAt = data.expires_at;
+  const countdownEl = card.querySelector('#device-pair-countdown');
+  const tick = function() {
+    if (!expiresAt) {
+      countdownEl.textContent = 'unknown';
+      return;
+    }
+    const remainingMs = (expiresAt * 1000) - Date.now();
+    if (remainingMs <= 0) {
+      countdownEl.textContent = 'expired';
+      clearInterval(devicesPairCountdownTimer);
+      devicesPairCountdownTimer = null;
+      return;
+    }
+    const totalSec = Math.floor(remainingMs / 1000);
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    countdownEl.textContent = mins + 'm ' + (secs < 10 ? '0' : '') + secs + 's';
+  };
+  tick();
+  devicesPairCountdownTimer = setInterval(tick, 1000);
 }
 
 function renderPresentationStudio(section) {

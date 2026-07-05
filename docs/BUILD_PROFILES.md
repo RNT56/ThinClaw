@@ -67,7 +67,8 @@ cargo build --release --no-default-features --features edge --bin thinclaw
 ### `light` (default)
 
 **Included:** everything in `edge` plus PostgreSQL, local WASM runtime,
-HTML-to-Markdown, document extraction (PDF/DOCX), and timezones.
+HTML-to-Markdown, document extraction (PDF/DOCX), timezones, and the optional
+gateway TLS listener (`gateway-tls`).
 
 **Excluded:** REPL/TUI boot screen, ACP server, tunnel providers, Docker sandbox, browser automation, Nostr, voice wake.
 
@@ -217,6 +218,8 @@ rm -rf "$tmp"
 | `document-extraction` | PDF/DOCX/PPTX/XLSX text extraction | pdf-extract, zip |
 | `timezones` | Timezone handling via chrono-tz | chrono-tz |
 | `web-gateway` | Compatibility flag for the always-available local HTTP web UI + API server | (uses axum, already a base dep) |
+| `gateway-tls` | Optional rustls TLS listener for the gateway, self-signed cert pinned via SPKI fingerprint (`docs/MOBILE_SECURITY.md` D-X1); policy via `GATEWAY_TLS=off\|auto\|on` (default `auto`), port via `GATEWAY_TLS_PORT` (default 3443) | axum-server, rcgen, if-addrs |
+| `openapi` (crate feature of `thinclaw-gateway`) | utoipa schema derives for the gateway's v1 mobile contract; always enabled by the root package, which serves `/api/openapi.json` and ships the `export-openapi` bin (`generate`/`check` against `clients/openapi/thinclaw-gateway.openapi.json`) | utoipa |
 | `acp` | ACP integration surface | (no extra system deps) |
 | `repl` | Interactive REPL mode + boot screen | (no extra deps) |
 | `tunnel` | VPN tunnel integration | (uses tailscale binary externally) |
@@ -279,7 +282,7 @@ That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
 
 ```
 edge     = libsql
-light    = edge + postgres + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones
+light    = edge + postgres + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones + gateway-tls
 desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
 full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr
 voice    = opt-in (headless wake word; also in --all-features) — not in full

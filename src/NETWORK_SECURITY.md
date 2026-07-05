@@ -17,6 +17,7 @@ ThinClaw operates across five trust boundaries:
 | **Docker containers** | Untrusted (sandboxed) | Worker containers executing user jobs; isolated via per-job tokens, allowlisted egress, dropped capabilities |
 | **External services** | Untrusted | Webhook senders (Telegram, Slack); authenticated via shared secret |
 | **Native plugins** | Operator-trusted, **NOT sandboxed** | Dynamic libraries `dlopen`-ed in-process (default off). Run with full host privilege; controls are ed25519 signature + SHA-256 + operator allowlist + default-off + `catch_unwind` panic isolation — no memory/syscall/network isolation. Operator-only (not gateway-exposed). |
+| **Paired device client** | Authenticated, least-privilege | First-party mobile/watch clients (milestone B1). Per-device scoped `tcd_` bearer tokens issued via QR pairing; transport is pinned TLS (`gateway-tls` listener) or an existing tailnet; never the operator's shared gateway token. |
 
 **Key assumptions:**
 
@@ -25,6 +26,7 @@ ThinClaw operates across five trust boundaries:
 - Webhook senders must prove knowledge of the shared secret. The secret is never transmitted in the clear by ThinClaw itself.
 - MCP server URLs are operator-configured and treated as trusted destinations (see [MCP Client](#mcp-client)). The MCP HTTP/OAuth clients additionally pin DNS resolution to the validated address to close the rebind TOCTOU window for public hosts (local/loopback servers are exempt by design).
 - Native plugins are unsandboxed and run with full host privilege. They are default-off, signature-gated, allowlisted, and operator-only (no gateway install/activate surface); enable only code you fully trust. See `docs/EXTENSION_SYSTEM.md`.
+- Paired device clients hold scoped, revocable credentials (never the shared gateway token) and are expected to connect over pinned TLS or an existing tailnet; see `docs/MOBILE_SECURITY.md` for the full threat model.
 
 ---
 
@@ -37,6 +39,8 @@ ThinClaw operates across five trust boundaries:
 | Orchestrator Internal API | 50051 | `127.0.0.1` (macOS/Win) / `172.17.0.1` when available (Linux Docker bridge; warning fallback to `0.0.0.0`) | Per-job bearer token (constant-time), LLM proxy rate limit | `ORCHESTRATOR_PORT` | `api.rs` — `OrchestratorApi::start()` |
 | OAuth Callback Listener | 9876 | `127.0.0.1` | None (ephemeral, 5-min timeout) | N/A (hardcoded) | `oauth_defaults.rs` — `bind_callback_listener()` |
 | Sandbox HTTP Proxy | OS-assigned (ephemeral) | `127.0.0.1` | None (loopback only) | N/A (auto-assigned) | `proxy/http.rs` — `SandboxProxy::start()` |
+| Gateway TLS Listener (optional, `gateway-tls` feature) | 3443 | `0.0.0.0` (all interfaces; reachability is expected to be bounded by LAN/tailnet network position, not by bind address) | Same bearer/device-token middleware as the plain-HTTP gateway, over pinned rustls TLS | `GATEWAY_TLS` (`off`\|`auto`\|`on`), `GATEWAY_TLS_PORT` | `src/channels/web/tls.rs` |
+| `POST /api/devices/pair/complete` (route on Web Gateway, public) | 3000 / 3443 | Same as Web Gateway | One-time 32-byte pairing secret (constant-time), atomic single-use consume, lockout, dedicated rate limiter | N/A (route-level) | `src/channels/web/handlers/devices.rs`, `crates/thinclaw-gateway/src/web/devices/pairing.rs` |
 
 ---
 
@@ -467,6 +471,7 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 | Per-job bearer token | Yes | Orchestrator worker API | `src/orchestrator/auth.rs` — `TokenStore::validate()` |
 | OAuth callback | N/A | CLI OAuth flow (no auth, loopback-only) | `src/cli/oauth_defaults.rs` — `bind_callback_listener()` |
 | Sandbox proxy | N/A | No auth (loopback-only, ephemeral) | `src/sandbox/proxy/http.rs` — `SandboxProxy::start()` |
+| Device token (`tcd_…`) | Yes (constant-time hash compare, then `ct_eq`) | Paired mobile/watch clients; hash-at-rest (SHA-256), header-only — never accepted via `?token=` | `crates/thinclaw-gateway/src/web/auth.rs` — `GatewayAuthSource::DeviceToken`; `crates/thinclaw-gateway/src/web/devices/registry.rs` |
 
 ---
 
@@ -480,6 +485,7 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 **Details:** None of the listeners terminate TLS. All communication is plain HTTP.
 **Mitigation:** The web gateway and OAuth callback bind to loopback by default. For production, users are expected to front the gateway with a reverse proxy (nginx, Caddy) or tunnel (Cloudflare, ngrok) that provides TLS.
 **Recommendation:** Document the requirement for a TLS-terminating reverse proxy in deployment guides.
+**Status (partial, B1):** Partially resolved for paired device clients — the gateway now has an optional rustls TLS listener (`gateway-tls` feature, `GATEWAY_TLS`, port 3443) whose self-signed SPKI fingerprint is delivered out-of-band via the pairing QR, so the first connection is already pinned. This closes the gap for the first-party mobile/watch surface; the operator-facing web gateway and other listeners are still plain HTTP by default (see `docs/MOBILE_SECURITY.md`).
 
 #### F-3. ~~Orchestrator binds to `0.0.0.0` on Linux~~ (Mitigated)
 
@@ -513,6 +519,12 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 **Severity:** Low
 **Location:** `src/channels/http.rs` — `webhook_handler()`
 **Status:** Resolved — webhook secret now uses `subtle::ConstantTimeEq` (`ct_eq`), consistent with web gateway and orchestrator auth.
+
+#### F-1b. ~~Native-lifecycle webhook header compare was not constant-time~~ (Resolved, B1)
+
+**Severity:** Low
+**Location:** `crates/thinclaw-channels/src/native_lifecycle.rs` — `header_secret_matches_required()`
+**Status:** Resolved in passing during device-identity (B1) hardening — the legacy APNs/native-lifecycle webhook shared-secret header comparison now uses `subtle::ConstantTimeEq` (`ct_eq`) instead of `==`, matching the rest of the codebase's credential-comparison convention.
 
 #### F-4. ~~HTTP webhook server binds to `0.0.0.0` by default~~ (Mitigated)
 
@@ -549,6 +561,8 @@ Use this checklist for any PR that adds or modifies network-facing code.
 - [ ] **Auth layer**: Is the route behind the auth middleware? If public, why?
 - [ ] **Input validation**: Are path parameters, query parameters, and body fields validated?
 - [ ] **Error responses**: Do error responses avoid leaking internal details?
+- [ ] **Device scope**: If reachable under `GatewayAuthSource::DeviceToken`, does it have an explicit scope decision in `crates/thinclaw-gateway/src/web/devices/scopes.rs` (granted scope, or deliberately never-grantable)? New routes must not silently default-allow device tokens.
+- [ ] **No query-param device tokens**: Device tokens (`tcd_…`) must never be accepted via `?token=` or any other query parameter — header-only, always.
 
 ### Egress (Outbound HTTP)
 

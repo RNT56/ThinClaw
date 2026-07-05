@@ -48,6 +48,11 @@ These flags can be appended to almost any command:
     Native APNs and browser-push endpoint registrations persist under `$THINCLAW_HOME/native-endpoints/` by default; override with `APNS_ENDPOINT_REGISTRY_PATH` or `BROWSER_PUSH_ENDPOINT_REGISTRY_PATH` when the service account needs a custom writable location.
 - `thinclaw gateway`: Manage the built-in web gateway settings.
   - `access [--show-token]`: Print the bind address, WebUI URL, token URL, SSH tunnel command, auth status, health status, and service-safe warnings.
+- `thinclaw devices`: Manage paired mobile devices (pair, list, rename, revoke). Requires a running gateway and a resolvable `GATEWAY_AUTH_TOKEN` (from the environment or settings); commands talk to the gateway's `/api/devices/*` HTTP surface, the same way `thinclaw message` does.
+  - `pair [--name <NAME>]`: Start a pairing session, render a terminal QR code and human-readable code, then poll until the pairing completes or expires. Pairing is how the iOS/mobile app links to this gateway — see [MOBILE_APP.md](MOBILE_APP.md).
+  - `list [--json]`: Show a table of paired devices (id, name, platform, scopes, last seen, revoked status).
+  - `rename <ID> <NAME>`: Rename a paired device by id (or an unambiguous id prefix).
+  - `revoke <ID>`: Revoke a paired device by id (or an unambiguous id prefix), disconnecting any live sessions.
 
 ## Extensions & Tools
 
