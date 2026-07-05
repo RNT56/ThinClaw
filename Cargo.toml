@@ -72,6 +72,7 @@ thinclaw-llm = { version = "0.1.0", path = "crates/thinclaw-llm" }
 thinclaw-llm-core = { version = "0.1.0", path = "crates/thinclaw-llm-core" }
 thinclaw-media = { version = "0.1.0", path = "crates/thinclaw-media" }
 thinclaw-platform = { version = "0.1.0", path = "crates/thinclaw-platform" }
+thinclaw-portability = { version = "0.1.0", path = "crates/thinclaw-portability" }
 thinclaw-repo-projects = { version = "0.1.0", path = "crates/thinclaw-repo-projects" }
 thinclaw-runtime-contracts = { version = "0.1.0", path = "crates/thinclaw-runtime-contracts" }
 thinclaw-safety = { version = "0.1.0", path = "crates/thinclaw-safety" }

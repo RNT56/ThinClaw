@@ -69,6 +69,10 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing(cli.debug);
             return thinclaw::cli::run_repo_projects_command(rp_cmd.clone()).await;
         }
+        Some(Command::Backup(backup_cmd)) => {
+            init_cli_tracing(cli.debug);
+            return thinclaw::cli::run_backup_command(backup_cmd.clone()).await;
+        }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing(cli.debug);
             return run_mcp_command(mcp_cmd.clone()).await;

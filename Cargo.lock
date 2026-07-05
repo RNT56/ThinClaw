@@ -7721,6 +7721,7 @@ dependencies = [
  "thinclaw-llm-core",
  "thinclaw-media",
  "thinclaw-platform",
+ "thinclaw-portability",
  "thinclaw-repo-projects",
  "thinclaw-runtime-contracts",
  "thinclaw-safety",
@@ -8114,6 +8115,23 @@ dependencies = [
  "iana-time-zone",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "thinclaw-portability"
+version = "0.1.0"
+dependencies = [
+ "aead",
+ "chacha20poly1305",
+ "flate2",
+ "rand 0.10.1",
+ "scrypt",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
