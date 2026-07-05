@@ -21,7 +21,8 @@ The following commands can be typed directly into the agent's chat input:
 - `/heartbeat` — Trigger a proactive system check and background routine pass. Heartbeat routines honor a `target` (`none` suppresses delivery; `<channel>` routes the summary to that channel — light-context heartbeats broadcast it via the channel forwarder) and an `include_reasoning` knob.
 - `/summarize` — Request a summary of the current session.
 - `/suggest` — Ask the agent to suggest next steps based on the current context.
-- `/rollback` — Undo the last agent action or conversational turn.
+- `/rollback` — Filesystem-only checkpoint family (list/diff/restore shadow-git snapshots).
+- `/rewind [n|list]` — Unified rewind: `/rewind list` is a dry run showing conversation rewind points and turn-tagged filesystem checkpoints; `/rewind <n>` restores **both** the conversation (to the start of turn `n`) and the working files (to that turn's checkpoint) in one step.
 - `/undo` — Undo the last turn in a thread (also exposed in ThinClaw Desktop as the `thinclaw_undo` command + a cockpit toolbar button).
 - `/redo` — Redo a previously undone turn (desktop: `thinclaw_redo` command + toolbar button).
 

@@ -130,6 +130,7 @@ impl GatewayChannel {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            metrics_registry: None,
             response_cache: None,
             routine_engine: None,
             repo_project_supervisor: Arc::new(tokio::sync::RwLock::new(None)),
@@ -178,6 +179,7 @@ impl GatewayChannel {
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             cost_tracker: self.state.cost_tracker.clone(),
+            metrics_registry: self.state.metrics_registry.clone(),
             response_cache: self.state.response_cache.clone(),
             routine_engine: self.state.routine_engine.clone(),
             repo_project_supervisor: self.state.repo_project_supervisor.clone(),
@@ -332,6 +334,15 @@ impl GatewayChannel {
         cache: Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>,
     ) -> Self {
         self.rebuild_state(|s| s.response_cache = Some(cache));
+        self
+    }
+
+    /// Inject the Prometheus registry handle for the `/metrics` endpoint.
+    pub fn with_metrics_registry(
+        mut self,
+        registry: Arc<crate::observability::PrometheusObserver>,
+    ) -> Self {
+        self.rebuild_state(|s| s.metrics_registry = Some(registry));
         self
     }
 

@@ -902,6 +902,9 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             subscription_id: gmail_config.subscription_id.clone(),
             topic_id: gmail_config.topic_id.clone(),
             oauth_token: gmail_config.oauth_token.clone(),
+            refresh_token: gmail_config.refresh_token.clone(),
+            client_id: gmail_config.client_id.clone(),
+            client_secret: gmail_config.client_secret.clone(),
             allowed_senders: gmail_config.allowed_senders.clone(),
             label_filters: gmail_config.label_filters.clone(),
             max_message_size_bytes: gmail_config.max_message_size_bytes,
@@ -922,9 +925,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                         "Gmail channel has empty allowed_senders list — ALL incoming emails will be processed."
                     );
                 }
-                if gmail_config.oauth_token.is_none() {
+                if gmail_config.oauth_token.is_none() && gmail_config.refresh_token.is_none() {
                     tracing::warn!(
-                        "Gmail channel has no OAuth token. Run `thinclaw auth gmail` to authenticate."
+                        "Gmail channel has no OAuth token. Authenticate via the ThinClaw Desktop \
+                         Gmail setup, or set GMAIL_OAUTH_TOKEN (and GMAIL_REFRESH_TOKEN / \
+                         GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET for unattended auto-refresh)."
                     );
                 }
             }
@@ -1217,6 +1222,9 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         gw = gw.with_cost_tracker(Arc::clone(&components.cost_tracker));
+        if let Some(ref registry) = components.metrics_registry {
+            gw = gw.with_metrics_registry(Arc::clone(registry));
+        }
         gw = gw.with_response_cache(Arc::clone(&components.response_cache));
         gw = gw.with_hooks(Arc::clone(&components.hooks));
         if let Some(ref ss) = components.secrets_store {
@@ -1489,6 +1497,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             channels.clone(),
             thinclaw::agent::SubagentConfig {
                 default_tool_profile: config.agent.subagent_tool_profile,
+                max_per_principal: config.agent.subagent_max_per_principal,
                 ..thinclaw::agent::SubagentConfig::default()
             },
         );
@@ -1512,6 +1521,10 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                 executor.with_skill_registry(Arc::clone(skill_registry), config.skills.clone());
         }
         executor = executor.with_cost_tracker(Arc::clone(&components.cost_tracker));
+        // Same guard instance as the main dispatcher loop: sub-agent work now
+        // draws down (and is blocked by) the operator's daily-budget and
+        // hourly-rate limits instead of bypassing them.
+        executor = executor.with_cost_guard(Arc::clone(&components.cost_guard));
 
         let executor = std::sync::Arc::new(executor);
         thinclaw::api::experiments::register_experiment_subagent_executor(std::sync::Arc::clone(

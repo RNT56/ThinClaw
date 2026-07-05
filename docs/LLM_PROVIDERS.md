@@ -218,8 +218,15 @@ Optional overrides:
 | `LLAMA_CONTEXT_LENGTH` | `4096` | Context window |
 | `LLAMA_GPU_LAYERS` | `0` | GPU layers to offload (`-1` = all) |
 
-> **Note:** Requires the `llama-cpp` feature at compile time, or use the
-> server's OpenAI-compatible endpoint with `LLM_BACKEND=openai_compatible`.
+> **Note:** ThinClaw talks to llama.cpp through its OpenAI-compatible
+> `llama-server` HTTP endpoint (`LLM_BACKEND=llama_cpp`, or equivalently
+> `LLM_BACKEND=openai_compatible` against the same URL). There is **no**
+> in-process native FFI backend: `src/llm/llama_cpp.rs` is an abstraction stub
+> for a future `llama-cpp` feature that does not exist in the workspace yet, so
+> point this backend at a running `llama-server` (or Ollama) rather than a
+> `.gguf` path directly. The `LLAMA_MODEL_PATH`/`LLAMA_CONTEXT_LENGTH`/
+> `LLAMA_GPU_LAYERS` variables below are consumed by the ThinClaw Desktop app's
+> bundled `llama-server` sidecar, not by the server/CLI build.
 
 ---
 

@@ -737,6 +737,7 @@ pub(super) async fn make_test_agent_with_channel(
             main_tool_profile: crate::tools::ToolProfile::Standard,
             worker_tool_profile: crate::tools::ToolProfile::Restricted,
             subagent_tool_profile: crate::tools::ToolProfile::ExplicitOnly,
+            subagent_max_per_principal: 0,
             subagent_transparency_level: "balanced".to_string(),
             model_thinking_overrides: HashMap::new(),
             workspace_mode: "unrestricted".to_string(),

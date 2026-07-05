@@ -175,18 +175,26 @@ impl SetupWizard {
         let options: &[&str] = &[
             "Log (structured events via tracing, default)",
             "None (no overhead)",
+            "Prometheus (scrapeable /metrics endpoint + tracing)",
         ];
         let idx = select_one("Observability backend", options).map_err(SetupError::Io)?;
         let backend = match idx {
             1 => "none",
+            2 => "prometheus",
             _ => "log",
         };
         self.settings.observability_backend = backend.to_string();
 
-        if backend == "log" {
-            print_success("Observability enabled. Events will be emitted through tracing.");
-        } else {
-            print_info("Observability left lean. Additional event logging will stay off for now.");
+        match backend {
+            "log" => {
+                print_success("Observability enabled. Events will be emitted through tracing.")
+            }
+            "prometheus" => print_success(
+                "Prometheus metrics enabled. Scrape aggregate counters at GET /metrics on the gateway.",
+            ),
+            _ => print_info(
+                "Observability left lean. Additional event logging will stay off for now.",
+            ),
         }
 
         Ok(())

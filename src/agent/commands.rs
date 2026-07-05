@@ -369,6 +369,10 @@ impl Agent {
         };
         context.extend_from_slice(&messages[start..]);
         context.push(ChatMessage::user("Summarize this conversation."));
+        // The last-20 slice can begin or end mid tool-exchange (messages() now
+        // reconstructs assistant(tool_calls)+tool_result pairs), which providers
+        // reject as an orphaned tool call. Sanitize as the main loop does.
+        crate::llm::sanitize_tool_messages(&mut context);
 
         let request = crate::llm::CompletionRequest::new(context)
             .with_max_tokens(512)
@@ -421,6 +425,8 @@ impl Agent {
         };
         context.extend_from_slice(&messages[start..]);
         context.push(ChatMessage::user("What should I do next?"));
+        // See process_summarize: sanitize orphaned tool messages from the slice.
+        crate::llm::sanitize_tool_messages(&mut context);
 
         let request = crate::llm::CompletionRequest::new(context)
             .with_max_tokens(512)
@@ -464,6 +470,15 @@ impl Agent {
             "rollback" => Ok(SubmissionResult::response(
                 self.handle_rollback_command(thread_id, args).await,
             )),
+
+            "rewind" => {
+                let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
+                    return Ok(SubmissionResult::error(
+                        "Could not find the active session for this thread.",
+                    ));
+                };
+                self.process_rewind(session, thread_id, args).await
+            }
 
             "identity" => {
                 let Some(session) = self.session_manager.session_for_thread(thread_id).await else {

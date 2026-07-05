@@ -235,6 +235,7 @@ aws-smithy-types = { version = "1", optional = true }
 
 # Audio capture for voice wake word detection (headless mode only)
 cpal = { version = "0.15", optional = true }
+prometheus-client = "0.25"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]

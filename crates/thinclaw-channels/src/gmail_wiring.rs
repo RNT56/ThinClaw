@@ -14,9 +14,27 @@ pub struct GmailConfig {
     pub topic_id: String,
     pub webhook_path: String,
     pub oauth_token: Option<String>,
+    /// OAuth2 refresh token. When present alongside `client_id`/`client_secret`,
+    /// the channel proactively refreshes the short-lived access token so a
+    /// long-running deployment does not silently stop after ~1 hour.
+    pub refresh_token: Option<String>,
+    /// OAuth2 client id (Google Cloud OAuth credential).
+    pub client_id: Option<String>,
+    /// OAuth2 client secret.
+    pub client_secret: Option<String>,
     pub label_filters: Vec<String>,
     pub allowed_senders: Vec<String>,
     pub max_message_size_bytes: usize,
+}
+
+impl GmailConfig {
+    /// True when the channel has everything needed to refresh its own access
+    /// token without operator intervention.
+    pub fn can_refresh_token(&self) -> bool {
+        self.refresh_token.as_deref().is_some_and(|t| !t.is_empty())
+            && self.client_id.as_deref().is_some_and(|t| !t.is_empty())
+            && self.client_secret.as_deref().is_some_and(|t| !t.is_empty())
+    }
 }
 
 impl Default for GmailConfig {
@@ -28,6 +46,9 @@ impl Default for GmailConfig {
             topic_id: String::new(),
             webhook_path: "/webhooks/gmail".into(),
             oauth_token: None,
+            refresh_token: None,
+            client_id: None,
+            client_secret: None,
             label_filters: vec!["INBOX".into(), "UNREAD".into()],
             allowed_senders: Vec::new(),
             max_message_size_bytes: 10 * 1024 * 1024,

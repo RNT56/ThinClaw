@@ -1485,6 +1485,40 @@ impl McpClient {
         self.list_tools().await?;
         Ok(())
     }
+
+    /// Lightweight liveness probe for background health monitoring.
+    ///
+    /// - **stdio**: reports whether the child process's reader loop is still
+    ///   alive (`is_running()`), which flips to `false` the moment the process
+    ///   exits — free and immediate, no I/O.
+    /// - **HTTP**: performs a real `tools/list` round trip that bypasses the
+    ///   client-side tool cache, so a server that became unreachable after the
+    ///   initial connection is detected rather than masked by cached results.
+    ///
+    /// Returns `Ok(())` when the server is reachable/alive, `Err` otherwise.
+    pub async fn health_check(&self) -> Result<(), ToolError> {
+        if let Some(ref transport) = self.stdio_transport {
+            return if transport.is_running() {
+                Ok(())
+            } else {
+                Err(ToolError::ExternalService(format!(
+                    "MCP stdio server '{}' process is not running",
+                    self.server_name
+                )))
+            };
+        }
+
+        // HTTP: a live round trip that does not consult the tools cache.
+        let request = McpRequest::list_tools(self.next_request_id(), None);
+        let response = self.send_request(request).await?;
+        if let Some(error) = response.error {
+            return Err(ToolError::ExternalService(format!(
+                "MCP server '{}' health probe error: {} (code {})",
+                self.server_name, error.message, error.code
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Clone for McpClient {
@@ -1794,5 +1828,39 @@ mod tests {
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert!(client.session_manager.is_none());
         assert!(client.secrets.is_none());
+    }
+
+    #[tokio::test]
+    async fn health_check_ok_for_live_stdio_process() {
+        // `cat` reads stdin and stays alive, so the stdio transport's reader
+        // loop keeps running and health_check reports healthy.
+        let config = crate::mcp::config::McpServerConfig::new_stdio("health-live", "cat", vec![]);
+        let Ok(client) = McpClient::new_stdio(&config) else {
+            // No `cat` on this platform — skip rather than fail spuriously.
+            return;
+        };
+        assert!(client.health_check().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn health_check_errs_for_exited_stdio_process() {
+        // A command that exits immediately: the reader loop observes EOF and
+        // flips `is_running()` to false, which health_check reports as unhealthy.
+        let config = crate::mcp::config::McpServerConfig::new_stdio(
+            "health-dead",
+            "sh",
+            vec!["-c".to_string(), "exit 0".to_string()],
+        );
+        let Ok(client) = McpClient::new_stdio(&config) else {
+            return;
+        };
+        // Give the spawned reader task a moment to observe the child's EOF.
+        for _ in 0..50 {
+            if client.health_check().await.is_err() {
+                return; // observed unhealthy as expected
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("stdio health_check never reported the exited process as unhealthy");
     }
 }

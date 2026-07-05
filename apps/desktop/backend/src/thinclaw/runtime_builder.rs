@@ -659,6 +659,7 @@ pub(crate) async fn build_inner(
             channel_manager.clone(),
             thinclaw_core::agent::subagent_executor::SubagentConfig {
                 max_concurrent: 5,
+                max_per_principal: components.config.agent.subagent_max_per_principal,
                 default_timeout_secs: 300, // 5 minutes
                 allow_nested: false,       // sub-agents cannot spawn sub-agents
                 max_tool_iterations: 30,
@@ -671,6 +672,9 @@ pub(crate) async fn build_inner(
     }
     subagent_executor = subagent_executor.with_sse_tx(sse_tx.clone());
     subagent_executor = subagent_executor.with_cost_tracker(Arc::clone(&components.cost_tracker));
+    // Same guard instance as the main loop: sub-agent spend is gated by the
+    // operator's daily-budget/hourly-rate limits instead of bypassing them.
+    subagent_executor = subagent_executor.with_cost_guard(Arc::clone(&components.cost_guard));
     if let Some(ref workspace) = components.workspace {
         subagent_executor = subagent_executor.with_workspace(Arc::clone(workspace));
     }

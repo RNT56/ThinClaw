@@ -141,6 +141,9 @@ pub struct GatewayState {
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Shared cost tracker — richer historical data (daily/monthly/per-agent).
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    /// Prometheus registry handle for the `/metrics` endpoint, present only when
+    /// the observability backend is `prometheus`.
+    pub metrics_registry: Option<Arc<crate::observability::PrometheusObserver>>,
     /// Shared response cache for remote dashboard cache stats.
     pub response_cache:
         Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
@@ -824,6 +827,9 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
+        // Prometheus scrape endpoint — no auth (scraper standard); exposes only
+        // aggregate operational counters with operator-controlled label values.
+        .route("/metrics", get(metrics_handler))
         .route(
             "/api/experiments/leases/{lease_id}/job",
             get(experiment_lease_job_handler),

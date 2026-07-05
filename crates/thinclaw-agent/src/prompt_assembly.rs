@@ -8,7 +8,7 @@ pub const DEFAULT_AVAILABLE_SKILL_INSTRUCTION: &str =
 pub const SUBAGENT_AVAILABLE_SKILL_INSTRUCTION: &str = "If a task would benefit from one of these skills, use `skill_read` to load its full instructions first.";
 pub const ACTIVE_SKILL_INSTRUCTION: &str =
     "Use `skill_read` with the skill name to load full instructions before using a skill.";
-pub const CHANNEL_TRANSCRIPT_GUIDANCE: &str = "Channel transcript guidance: when the user asks about prior Telegram, WebUI, or other channel conversations, use session_search to inspect transcript history. Do not use communication/action tools like telegram_actions to read transcript history or infer account login state; those tools perform live platform actions only.";
+pub const CHANNEL_TRANSCRIPT_GUIDANCE: &str = "Channel transcript guidance: when the user asks about prior Telegram, WebUI, or other channel conversations, use session_search to inspect transcript history. Do not use communication/action tools to read transcript history or infer account login state; those tools perform live platform actions only.";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DispatcherPromptMaterials {

@@ -243,6 +243,35 @@ impl UndoManager {
         // Pop and return the target checkpoint
         self.undo_stack.pop_back()
     }
+
+    /// Restore conversation state to a specific turn number.
+    ///
+    /// Finds the checkpoint captured at the start of `turn_number` and restores
+    /// to it with the same semantics as [`UndoManager::restore`] (clears the
+    /// redo stack and discards every later checkpoint). Returns `None` when no
+    /// checkpoint exists for that turn (e.g. it aged out of the ring buffer).
+    pub fn restore_to_turn(&mut self, turn_number: usize) -> Option<Checkpoint> {
+        let id = self
+            .undo_stack
+            .iter()
+            .find(|c| c.turn_number == turn_number)
+            .map(|c| c.id)?;
+        self.restore(id)
+    }
+
+    /// The `(turn_number, description)` of every available conversation
+    /// checkpoint, oldest first — used by `/rewind list` to show rewind targets.
+    pub fn checkpoint_turns(&self) -> Vec<(usize, String)> {
+        self.undo_stack
+            .iter()
+            .map(|c| (c.turn_number, c.description.clone()))
+            .collect()
+    }
+
+    /// Whether a conversation checkpoint exists for `turn_number`.
+    pub fn has_turn(&self, turn_number: usize) -> bool {
+        self.undo_stack.iter().any(|c| c.turn_number == turn_number)
+    }
 }
 
 impl Default for UndoManager {
@@ -263,6 +292,32 @@ mod tests {
         manager.checkpoint(1, vec![ChatMessage::user("Hello")], "Turn 1");
 
         assert_eq!(manager.undo_count(), 2);
+    }
+
+    #[test]
+    fn test_restore_to_turn_and_listing() {
+        let mut manager = UndoManager::new();
+        manager.checkpoint(0, vec![], "Before turn 0");
+        manager.checkpoint(1, vec![ChatMessage::user("a")], "Before turn 1");
+        manager.checkpoint(2, vec![ChatMessage::user("b")], "Before turn 2");
+
+        assert!(manager.has_turn(1));
+        assert!(!manager.has_turn(9));
+        let turns: Vec<usize> = manager
+            .checkpoint_turns()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(turns, vec![0, 1, 2]);
+
+        // Rewind to turn 1: returns that checkpoint and discards later ones.
+        let restored = manager.restore_to_turn(1).expect("turn 1 present");
+        assert_eq!(restored.turn_number, 1);
+        assert!(!manager.has_turn(2), "later checkpoints are dropped");
+        assert!(!manager.can_redo(), "redo stack cleared on restore");
+
+        // Unknown turn is a no-op returning None.
+        assert!(manager.restore_to_turn(42).is_none());
     }
 
     #[test]

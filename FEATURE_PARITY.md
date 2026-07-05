@@ -1,6 +1,6 @@
 # ThinClaw Parity And ThinClaw-First Feature Matrix
 
-> **Last reconciled:** 2026-07-02 (agent-loop hardening: dispatcher transient retry, credential-aware failover, compaction summary re-injection, model-derived context window, routine failure backoff/auto-disable, two-phase subagent cancellation; runtime-hardening batch: per-conversation dispatch concurrency, renewable routine run-leases, durable `/undo`/`/clear` watermark, persisted `/personality` overlay, token-based context caps, declarative command registry, structured worker completion, durable subagent ledger, verifier-based eval rewards, hydrated trajectory export, per-hook failure auto-disable, severity-driven prompt sanitization, pooled/cached learning-provider orchestrator)
+> **Last reconciled:** 2026-07-05 (audit-driven hardening: content-aware/CJK token estimation with tool-call accounting, cross-turn tool-call/result continuity in reconstructed context, provider context-overflow error classification into `LlmError::ContextLengthExceeded`, sub-agent cost-guard enforcement + per-principal concurrency cap, background MCP health monitor populating `McpRuntimeHealth` with auto-reconnect, Gmail unattended OAuth-refresh loop, zero-config `web_search` built-in tool, removal of superseded dead action tools). Prior: 2026-07-02 agent-loop hardening (dispatcher transient retry, credential-aware failover, compaction summary re-injection, model-derived context window, routine failure backoff/auto-disable, two-phase subagent cancellation; runtime-hardening batch: per-conversation dispatch concurrency, renewable routine run-leases, durable `/undo`/`/clear` watermark, persisted `/personality` overlay, token-based context caps, declarative command registry, structured worker completion, durable subagent ledger, verifier-based eval rewards, hydrated trajectory export, per-hook failure auto-disable, severity-driven prompt sanitization, pooled/cached learning-provider orchestrator)
 
 This document tracks both feature parity against OpenClaw (TypeScript reference implementation) and ThinClaw-first capabilities that now extend well beyond parity. Use it both as a compatibility map and as a ledger of the newer Rust-native features we are actively adding.
 
@@ -38,6 +38,17 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Reckless desktop autonomy | ✅ | Privileged host-level desktop autonomy adds native app adapters, generic UI automation, evidence capture, seeded desktop routines, managed shadow-canary code autorollout, and rollback for promoted builds. |
 | Trajectory archive + training export | ✅ | Structured turn archives and `trajectory export` provide validated SFT/DPO offline datasets with score filtering, max-record limits, skipped-record accounting, and optional manifest hashes; exported records are now hydrated with explicit learning feedback/evaluations from the database when reachable. |
 | Anthropic prompt caching | ✅ | Provider-scoped message metadata now carries Anthropic-compatible cache hints where supported. |
+| Zero-config web search | ✅ | Built-in `web_search` tool ([`crates/thinclaw-tools/src/builtin/web_search.rs`](crates/thinclaw-tools/src/builtin/web_search.rs)) queries DuckDuckGo's keyless endpoint through the SSRF-guarded fetch path and is registered by default — no API key or install. The Brave Search WASM extension remains available for operators wanting a ranked API. |
+| Cross-turn tool-result continuity | ✅ | `Thread::messages()` reconstructs prior turns' tool calls + results (paired ids, bounded bodies) so a later turn can see what an earlier turn's tools returned, not just the final prose. Undo/redo checkpoints round-trip the richer stream. |
+| Content-aware token estimation | ✅ | Context/compaction token estimates use a content-aware heuristic (`max(chars/4, words×1.3)` with per-character CJK/kana/Hangul counting) and now include tool-call JSON and tool-result framing, instead of pure whitespace-word counting. |
+| Provider context-overflow recovery | ✅ | The rig adapter classifies real provider "prompt too long" rejections (OpenAI/Anthropic/Gemini/Ollama phrasings) into `LlmError::ContextLengthExceeded`, so the dispatcher's compact-and-retry recovery path fires on genuine overflows instead of misfiling them as transient failures. |
+| Sub-agent budget + fairness controls | ✅ | Delegated sub-agents are gated by the same `CostGuard` daily-budget/hourly-rate limits as the main loop, and an optional per-principal concurrency cap (`SUBAGENT_MAX_PER_PRINCIPAL`) prevents one principal from starving others on a shared gateway. |
+| MCP health monitor + auto-reconnect | ✅ | A background monitor probes active MCP servers, persists `McpRuntimeHealth` (surfaced on the extensions list), and rebuilds crashed stdio servers through the normal activation path. Previously `McpRuntimeHealth` was defined but never written or read. |
+| Gmail unattended OAuth refresh | ✅ | The Gmail channel proactively refreshes its access token before expiry (and reactively on auth failure) when `GMAIL_REFRESH_TOKEN`/`GMAIL_CLIENT_ID`/`GMAIL_CLIENT_SECRET` are set, so long-running deployments no longer silently stop after ~1 hour. |
+| Prometheus metrics backend | ✅ | `OBSERVABILITY_BACKEND=prometheus` records the `Observer` event/metric stream into a Prometheus registry exposed at `GET /metrics` (counters/histograms/gauges for LLM calls, tokens, cost, tool calls, latencies, errors, channel traffic). OTLP push export is deferred (tonic version conflict with libSQL). See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md). |
+| Real `/api/health` readiness | ✅ | `GET /api/health` returns `200` only when the database is reachable, an LLM provider is configured, **and** the gateway's inbound message channel is wired to the runtime; otherwise `503`. Pure, unit-tested decision. |
+| Typed Rust client SDK | ✅ | `thinclaw-client` ([`crates/thinclaw-client`](crates/thinclaw-client)) wraps the gateway HTTP+SSE surface: `send_message`/`send_and_wait`, streamed `events()` (tool-call visibility), `history`/`list_threads`/`new_thread`, `resolve_approval`, `abort`, plus an OpenAI-compat fast path. `SseEvent` degrades unknown server events to `Unknown{..}` so additive server changes never break older clients (contract-tested). Pre-1.0. See [`docs/CLIENT_SDK.md`](docs/CLIENT_SDK.md). |
+| Unified conversation+file rewind (`/rewind`) | ✅ | `/rewind <n>` restores both the conversation (undo manager, to the start of turn `n`) and the working files (turn-tagged shadow-git checkpoint) in one command; `/rewind list` is a non-destructive dry run of available rewind points. Filesystem checkpoints are now tagged with their conversation turn (`[thinclaw][tN]`) so the two systems align. Previously `/undo` (conversation) and `/rollback` (files) were separate with no turn correlation. |
 
 ---
 
@@ -407,7 +418,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 
 | Feature | OpenClaw | ThinClaw | Notes |
 |---------|----------|----------|-------|
-| Vector memory | ✅ | ✅ | pgvector |
+| Vector memory | ✅ | ✅ | pgvector (Postgres) and `libsql_vector_idx` (libSQL). **Caveat:** migration `V9` dropped the Postgres HNSW index to allow flexible embedding dimensions, so pgvector search is currently an exact per-user sequential scan; libSQL ANN indexing applies only to 1536-dim embeddings (other dimensions fall back to a brute-force cosine scan). Accurate for personal-scale corpora; see `docs/MEMORY_AND_GROWTH.md`. |
 | Session-based memory | ✅ | ✅ | |
 | Hybrid search (BM25 + vector) | ✅ | ✅ | RRF algorithm |
 | Temporal decay (hybrid search) | ✅ | ✅ | `apply_temporal_decay()` — exponential half-life scoring, wired into `hybrid_search()` post-RRF |
@@ -417,9 +428,9 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Gemini embeddings | ✅ | ✅ | `EmbeddingConfig::gemini()` ([`src/llm/embeddings.rs`](src/llm/embeddings.rs)) |
 | Local embeddings | ✅ | ✅ | `EmbeddingConfig::local()` + Ollama support ([`src/llm/embeddings.rs`](src/llm/embeddings.rs)) |
 | Bedrock embeddings | ❌ | ✅ | `BedrockEmbeddings` — Titan Text Embeddings V2 via AWS SDK `invoke_model()`, feature-gated behind `--features bedrock` ([`src/workspace/embeddings.rs`](src/workspace/embeddings.rs)) |
-| SQLite-vec backend | ✅ | ✅ | `SqliteVecConfig` with vec0 virtual table SQL, distance metrics ([`src/workspace/sqlite_vec.rs`](src/workspace/sqlite_vec.rs)) |
-| LanceDB backend | ✅ | ✅ | `LanceDbConfig` with Arrow schema, S3/local URI support ([`src/workspace/lancedb.rs`](src/workspace/lancedb.rs)) |
-| QMD backend | ✅ | ✅ | `QmdConfig` with product quantization, codebook sizing ([`src/workspace/qmd.rs`](src/workspace/qmd.rs)) |
+| SQLite-vec backend | ✅ | 🚧 | **Config/SQL scaffolding only — not wired to a live store.** `SqliteVecConfig` builds vec0 virtual-table SQL strings and distance metrics but no `sqlite-vec` client executes them and nothing implements `WorkspaceStore` against it ([`crates/thinclaw-workspace/src/sqlite_vec.rs`](crates/thinclaw-workspace/src/sqlite_vec.rs)). Wiring this is the highest-value follow-up: it would restore true local ANN for edge/libSQL deployments at arbitrary embedding dimensions. |
+| LanceDB backend | ✅ | 🔮 | **Not implemented.** `LanceDbConfig`/schema builders exist as unwired structs with no `lancedb` dependency or store binding ([`crates/thinclaw-workspace/src/lancedb.rs`](crates/thinclaw-workspace/src/lancedb.rs)). Planned/optional; low priority for a personal-scale agent. |
+| QMD backend | ✅ | 🔮 | **Not implemented.** `QmdConfig` quantization math exists as unwired scaffolding with no store binding ([`crates/thinclaw-workspace/src/qmd.rs`](crates/thinclaw-workspace/src/qmd.rs)). Planned/optional. |
 | Atomic reindexing | ✅ | ✅ | |
 | Embeddings batching | ✅ | ✅ | `embed_batch` on EmbeddingProvider trait |
 | Citation support | ✅ | ✅ | `Citation` struct with inline/footnote formatting, deduplication, relevance sorting ([`src/workspace/citations.rs`](src/workspace/citations.rs)) |
@@ -768,7 +779,9 @@ This file keeps broad ThinClaw parity and shipped-runtime capability tracking on
 | `screen_capture` | [`screen_capture.rs`](src/tools/builtin/screen_capture.rs) | macOS/Linux screenshot capture |
 | `tts` | [`tts.rs`](src/tools/builtin/tts.rs) | Text-to-speech synthesis |
 
-Source-present but not currently registered as built-in runtime tools: `slack_actions`, `discord_actions`, `telegram_actions`, `location`, and `camera_capture` ([`src/tools/builtin/mod.rs`](src/tools/builtin/mod.rs), [`src/tools/registry.rs`](src/tools/registry.rs), [`src/app.rs`](src/app.rs), [`src/main.rs`](src/main.rs)).
+Source-present but not currently registered as built-in runtime tools: `location` and `camera_capture` ([`src/tools/builtin/mod.rs`](src/tools/builtin/mod.rs), [`src/tools/registry.rs`](src/tools/registry.rs), [`src/app.rs`](src/app.rs), [`src/main.rs`](src/main.rs)).
+
+Removed dead code: the never-registered `slack_actions` / `telegram_actions` built-in Rust tools were deleted — Slack and Telegram actions ship as packaged **WASM tools** (`tools-src/slack`, `tools-src/telegram`), which is the intended production path. `discord_actions` was also removed; Discord is currently supported as an **inbound channel adapter** only, with no action/moderation tool (a first-party Discord action tool is a possible future addition, gated behind bot-token config).
 
 ### 20.12 UI & Interaction (4 tools)
 

@@ -36,8 +36,55 @@ pub(crate) async fn health_handler(
         ),
     };
     let provider_configured = state.llm_provider.is_some();
-    let (code, body) = readiness_response(db_ready, provider_configured);
+    // The gateway's inbound message channel must be wired to the agent runtime
+    // for the instance to actually serve chat, so treat an un-wired channel as
+    // not-ready even when DB + provider are fine.
+    let channel_ready = state.msg_tx.read().await.is_some();
+    let (code, body) = readiness_response(db_ready, provider_configured, channel_ready);
     (code, Json(body))
+}
+
+/// Prometheus text-exposition endpoint (`GET /metrics`).
+///
+/// Serves aggregate operational counters/histograms/gauges from the shared
+/// registry when the `prometheus` observability backend is active; otherwise
+/// returns `503` with a hint. No auth (standard for scrapers). Label values are
+/// low-cardinality operational identifiers (provider/model/tool/channel names),
+/// not end-user message content, so there is no PII exposure. Note: the `tool`
+/// label for MCP tools is derived from an MCP server's advertised tool names,
+/// which are operator-trusted but not operator-authored — a compromised MCP
+/// server could inflate label cardinality, so restrict `/metrics` at the
+/// reverse proxy when exposing the gateway publicly (see docs/OBSERVABILITY.md).
+pub(crate) async fn metrics_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let Some(registry) = state.metrics_registry.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "metrics disabled; set OBSERVABILITY_BACKEND=prometheus to enable\n",
+        )
+            .into_response();
+    };
+
+    // Refresh scrape-time gauges (cost) from the cost tracker without touching
+    // the hot LLM path.
+    if let Some(tracker) = state.cost_tracker.as_ref() {
+        let cents = (tracker.lock().await.total_cost() * 100.0).round() as i64;
+        registry.set_cost_cents(cents);
+    }
+
+    let body = registry.encode();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 pub(crate) async fn gateway_restart_handler(
@@ -292,12 +339,25 @@ fn build_gmail_setup_status(settings: &crate::settings::Settings) -> PartialChan
         .ok()
         .flatten();
 
+    // A refresh-token-only setup (refresh_token + client_id + client_secret) is
+    // fully functional via unattended refresh, so it doesn't "need oauth".
+    let env_present = |key: &str| {
+        crate::config::helpers::optional_env(key)
+            .ok()
+            .flatten()
+            .is_some_and(|v| !v.trim().is_empty())
+    };
+    let refresh_ready = env_present("GMAIL_REFRESH_TOKEN")
+        && env_present("GMAIL_CLIENT_ID")
+        && env_present("GMAIL_CLIENT_SECRET");
+
     gateway_build_gmail_setup_status(GmailSetupStatusInput {
         enabled,
         project_id,
         subscription_id,
         topic_id,
         oauth_token,
+        refresh_ready,
     })
 }
 

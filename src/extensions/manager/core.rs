@@ -118,6 +118,8 @@ pub struct ExtensionManager {
     pub(super) mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
     /// Background config sync tasks keyed by server name.
     pub(super) mcp_watchers: RwLock<HashMap<String, JoinHandle<()>>>,
+    /// Handle to the background MCP health monitor (probe + auto-reconnect).
+    pub(super) mcp_health_monitor: RwLock<Option<JoinHandle<()>>>,
 
     // WASM tool infrastructure
     pub(super) wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
@@ -181,6 +183,7 @@ impl ExtensionManager {
             mcp_session_manager,
             mcp_clients: RwLock::new(HashMap::new()),
             mcp_watchers: RwLock::new(HashMap::new()),
+            mcp_health_monitor: RwLock::new(None),
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,

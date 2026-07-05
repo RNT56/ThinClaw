@@ -602,3 +602,91 @@ fn test_extract_response_empty_reasoning_ignored() {
     // Empty reasoning strings should be filtered, resulting in None
     assert!(thinking.is_none());
 }
+
+#[test]
+fn context_overflow_classifier_matches_real_provider_phrasings() {
+    // OpenAI
+    let openai = "This model's maximum context length is 128000 tokens. \
+                  However, your messages resulted in 131072 tokens. \
+                  Please reduce the length of the messages.";
+    assert!(is_context_overflow_message(openai));
+    assert_eq!(extract_context_overflow_tokens(openai), (131072, 128000));
+
+    // OpenAI error-code form
+    assert!(is_context_overflow_message(
+        "http status 400: {\"error\":{\"code\":\"context_length_exceeded\"}}"
+    ));
+
+    // Anthropic
+    let anthropic = "prompt is too long: 210145 tokens > 200000 maximum";
+    assert!(is_context_overflow_message(anthropic));
+    assert_eq!(extract_context_overflow_tokens(anthropic), (210145, 200000));
+
+    // Gemini
+    let gemini =
+        "The input token count (1189136) exceeds the maximum number of tokens allowed (1048575).";
+    assert!(is_context_overflow_message(gemini));
+    assert_eq!(extract_context_overflow_tokens(gemini), (1189136, 1048575));
+
+    // llama.cpp / OpenAI-compatible servers
+    assert!(is_context_overflow_message(
+        "the request exceeds the available context size / context length exceeded"
+    ));
+
+    // Thousands separators are folded into one number.
+    let separated = "maximum context length is 128,000 tokens; you supplied 130,500 tokens";
+    assert_eq!(extract_context_overflow_tokens(separated), (130500, 128000));
+}
+
+#[test]
+fn context_overflow_classifier_ignores_unrelated_errors() {
+    for message in [
+        "429 Too Many Requests: rate limit reached",
+        "max_tokens is too large: 5000. This model supports at most 4096 completion tokens",
+        "invalid_api_key: Incorrect API key provided",
+        "connection reset by peer",
+        "model does not exist",
+    ] {
+        assert!(
+            !is_context_overflow_message(message),
+            "false positive on: {message}"
+        );
+        assert!(matches!(
+            classify_completion_error("test-model", message),
+            LlmError::RequestFailed { .. }
+        ));
+    }
+}
+
+#[test]
+fn classify_completion_error_produces_typed_overflow() {
+    let err = classify_completion_error(
+        "gpt-test",
+        "This model's maximum context length is 8192 tokens. However, your messages \
+         resulted in 9000 tokens. Please reduce the length of the messages.",
+    );
+    match err {
+        LlmError::ContextLengthExceeded { used, limit } => {
+            assert_eq!(used, 9000);
+            assert_eq!(limit, 8192);
+        }
+        other => panic!("expected ContextLengthExceeded, got {other:?}"),
+    }
+
+    // A limit-only message still classifies; counts degrade to (0, limit).
+    let err = classify_completion_error("m", "maximum context length is 8192 tokens");
+    assert!(matches!(
+        err,
+        LlmError::ContextLengthExceeded {
+            used: 0,
+            limit: 8192
+        }
+    ));
+
+    // No numbers at all still classifies on phrasing alone.
+    let err = classify_completion_error("m", "Prompt is too long");
+    assert!(matches!(
+        err,
+        LlmError::ContextLengthExceeded { used: 0, limit: 0 }
+    ));
+}

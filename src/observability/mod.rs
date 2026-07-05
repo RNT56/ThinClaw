@@ -14,16 +14,18 @@
 mod log;
 mod multi;
 mod noop;
+mod prometheus;
 pub mod traits;
 
 pub use self::log::LogObserver;
 pub use self::noop::NoopObserver;
+pub use self::prometheus::PrometheusObserver;
 pub use self::traits::{Observer, ObserverEvent, ObserverMetric};
 
 /// Configuration for the observability backend.
 #[derive(Debug, Clone)]
 pub struct ObservabilityConfig {
-    /// Backend name: "none", "noop", "log".
+    /// Backend name: "none", "noop", "log", "prometheus".
     pub backend: String,
 }
 
@@ -35,19 +37,40 @@ impl Default for ObservabilityConfig {
     }
 }
 
+impl ObservabilityConfig {
+    /// Whether the configured backend exposes a scrapeable Prometheus registry.
+    pub fn is_prometheus(&self) -> bool {
+        self.backend.eq_ignore_ascii_case("prometheus")
+    }
+}
+
 /// Create an observer from configuration.
 ///
-/// Returns a [`NoopObserver`] for "none"/"noop" (or unknown values),
-/// and a [`LogObserver`] for "log".
+/// Returns a [`NoopObserver`] for "none"/"noop" (or unknown values), a
+/// [`LogObserver`] for "log", and a [`PrometheusObserver`] for "prometheus".
+///
+/// For the Prometheus backend the caller usually wants the concrete
+/// [`PrometheusObserver`] too (to expose `/metrics`); use
+/// [`create_prometheus_observer`] there and coerce it to `Arc<dyn Observer>`.
 ///
 /// Returns an [`Arc`] so the runtime can store a single shared owner and hand
 /// cheap clones to event-emitting sites (the [`Observer`] trait is documented
 /// as cheaply cloneable behind `Arc<dyn Observer>`).
 pub fn create_observer(config: &ObservabilityConfig) -> std::sync::Arc<dyn Observer> {
-    match config.backend.as_str() {
+    match config.backend.to_ascii_lowercase().as_str() {
         "log" => std::sync::Arc::new(LogObserver),
+        "prometheus" => create_prometheus_observer(),
         _ => std::sync::Arc::new(NoopObserver),
     }
+}
+
+/// Construct a Prometheus observer whose registry the gateway can scrape.
+///
+/// Returned as the concrete type so callers can store a clone for the
+/// `/metrics` endpoint and coerce another clone to `Arc<dyn Observer>` for the
+/// event-emitting sites — both share the same registry/atomics.
+pub fn create_prometheus_observer() -> std::sync::Arc<PrometheusObserver> {
+    std::sync::Arc::new(PrometheusObserver::new())
 }
 
 #[cfg(test)]
@@ -81,10 +104,20 @@ mod tests {
     #[test]
     fn factory_returns_noop_for_unknown() {
         let cfg = ObservabilityConfig {
-            backend: "prometheus".into(),
+            backend: "statsd".into(),
         };
         let obs = create_observer(&cfg);
         assert_eq!(obs.name(), "noop");
+    }
+
+    #[test]
+    fn factory_returns_prometheus_for_prometheus() {
+        let cfg = ObservabilityConfig {
+            backend: "prometheus".into(),
+        };
+        assert!(cfg.is_prometheus());
+        let obs = create_observer(&cfg);
+        assert_eq!(obs.name(), "prometheus");
     }
 
     #[test]

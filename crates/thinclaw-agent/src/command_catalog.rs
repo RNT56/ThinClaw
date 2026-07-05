@@ -24,8 +24,8 @@ enum HelpSection {
 
 fn help_section_for(name: &str) -> HelpSection {
     match name {
-        "/help" | "/status" | "/context" | "/model" | "/rollback" | "/version" | "/tools"
-        | "/debug" | "/ping" => HelpSection::System,
+        "/help" | "/status" | "/context" | "/model" | "/rollback" | "/rewind" | "/version"
+        | "/tools" | "/debug" | "/ping" => HelpSection::System,
         "/undo" | "/redo" | "/compress" | "/clear" | "/interrupt" | "/new" | "/thread new"
         | "/thread <id>" | "/resume <id>" => HelpSection::Session,
         "/identity" | "/personality" | "/skin" => HelpSection::Identity,
@@ -46,6 +46,7 @@ fn help_label(spec: &CommandSpec) -> &'static str {
         "/context" => "/context",
         "/model" => "/model [name]",
         "/rollback" => "/rollback ...",
+        "/rewind" => "/rewind [n|list]",
         "/personality" => "/personality [name]",
         "/skin" => "/skin [name]",
         other => other,

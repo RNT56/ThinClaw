@@ -30,6 +30,9 @@ pub struct CheckpointEntry {
     pub commit_hash: String,
     pub timestamp: DateTime<Utc>,
     pub summary: String,
+    /// Conversation turn this checkpoint was created during, parsed from the
+    /// commit tag. `None` for untagged (older) checkpoints.
+    pub turn: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -74,6 +77,10 @@ pub struct CheckpointManager {
     shadow_root: PathBuf,
     per_turn_dirs: HashMap<String, HashSet<PathBuf>>,
     thread_roots: HashMap<String, PathBuf>,
+    /// Current conversation turn number per scope, so checkpoint commits can be
+    /// tagged with the turn they belong to (enables `/rewind <n>` to restore
+    /// files to the exact turn's checkpoint).
+    turn_for_scope: HashMap<String, usize>,
 }
 
 impl Default for CheckpointManager {
@@ -85,8 +92,18 @@ impl Default for CheckpointManager {
             shadow_root,
             per_turn_dirs: HashMap::new(),
             thread_roots: HashMap::new(),
+            turn_for_scope: HashMap::new(),
         }
     }
+}
+
+/// Extract the turn number a checkpoint commit was tagged with, if any.
+/// Commit subjects created by [`CheckpointManager`] look like
+/// `[thinclaw][t3] <reason>`; older/un-tagged commits return `None`.
+pub(crate) fn parse_turn_tag(summary: &str) -> Option<usize> {
+    let rest = summary.strip_prefix("[thinclaw][t")?;
+    let end = rest.find(']')?;
+    rest[..end].parse::<usize>().ok()
 }
 
 static GLOBAL_MANAGER: OnceLock<Mutex<CheckpointManager>> = OnceLock::new();
@@ -262,8 +279,21 @@ impl CheckpointManager {
         }
     }
 
-    pub fn new_turn(&mut self, scope: impl Into<String>) {
-        self.per_turn_dirs.insert(scope.into(), HashSet::new());
+    pub fn new_turn(&mut self, scope: impl Into<String>, turn_number: Option<usize>) {
+        let scope = scope.into();
+        match turn_number {
+            Some(turn) => {
+                self.turn_for_scope.insert(scope.clone(), turn);
+            }
+            // Clear any prior turn tag so a checkpoint committed before the
+            // real turn number is set (e.g. `new_turn(scope, None)` early in the
+            // turn) is left untagged rather than mislabeled with the previous
+            // turn's number.
+            None => {
+                self.turn_for_scope.remove(&scope);
+            }
+        }
+        self.per_turn_dirs.insert(scope, HashSet::new());
     }
 
     fn shadow_repo_path(&self, project_dir: &Path) -> PathBuf {
@@ -366,10 +396,12 @@ impl CheckpointManager {
                 .timestamp_opt(timestamp, 0)
                 .single()
                 .ok_or_else(|| CheckpointError::Parse("invalid commit timestamp".to_string()))?;
+            let turn = parse_turn_tag(&summary);
             entries.push(CheckpointEntry {
                 commit_hash: commit_hash.to_string(),
                 timestamp,
                 summary,
+                turn,
             });
         }
 
@@ -401,6 +433,14 @@ impl CheckpointManager {
         }
 
         let reason = sanitize_reason(reason);
+        // Tag the commit with the current turn so `/rewind <n>` can locate the
+        // exact checkpoint for a turn. Untagged form is kept when no turn is
+        // known for the scope, so behavior is unchanged for non-conversation
+        // callers.
+        let commit_message = match self.turn_for_scope.get(scope) {
+            Some(turn) => format!("[thinclaw][t{turn}] {reason}"),
+            None => format!("[thinclaw] {reason}"),
+        };
         git_ok(
             &[
                 "add",
@@ -415,12 +455,7 @@ impl CheckpointManager {
             Some(&root),
         )?;
         git_ok(
-            &[
-                "commit",
-                "--allow-empty",
-                "-m",
-                &format!("[thinclaw] {}", reason),
-            ],
+            &["commit", "--allow-empty", "-m", &commit_message],
             Some(&repo_dir),
             Some(&root),
             Some(&root),
@@ -586,9 +621,9 @@ pub fn configure(enabled: bool, max_checkpoints: usize) {
     }
 }
 
-pub fn new_turn(scope: impl Into<String>) {
+pub fn new_turn(scope: impl Into<String>, turn_number: Option<usize>) {
     if let Ok(mut guard) = global_manager().lock() {
-        guard.new_turn(scope);
+        guard.new_turn(scope, turn_number);
     }
 }
 
@@ -708,10 +743,19 @@ mod tests {
         ctx
     }
 
+    #[test]
+    fn parse_turn_tag_reads_tagged_and_untagged_commits() {
+        assert_eq!(parse_turn_tag("[thinclaw][t3] edited files"), Some(3));
+        assert_eq!(parse_turn_tag("[thinclaw][t0] initial"), Some(0));
+        assert_eq!(parse_turn_tag("[thinclaw] legacy untagged"), None);
+        assert_eq!(parse_turn_tag("unrelated commit"), None);
+        assert_eq!(parse_turn_tag("[thinclaw][tX] bad"), None);
+    }
+
     #[tokio::test]
     async fn checkpoints_round_trip_and_restore() {
         configure(true, 10);
-        new_turn("thread-a");
+        new_turn("thread-a", Some(0));
 
         let dir = TempDir::new().unwrap();
         std::fs::write(
@@ -748,7 +792,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_dedup_is_per_turn_and_thread() {
         configure(true, 10);
-        new_turn("thread-b");
+        new_turn("thread-b", Some(0));
 
         let dir = TempDir::new().unwrap();
         std::fs::write(

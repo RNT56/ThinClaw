@@ -158,6 +158,93 @@ impl<M: CompletionModel + 'static> RigAdapter<M> {
     }
 }
 
+/// Provider phrasings that indicate the request exceeded the model's context
+/// window. Matched case-insensitively against the raw error text rig-core
+/// surfaces. Deliberately explicit (no loose "token" matching) so unrelated
+/// errors — e.g. a too-large `max_tokens` parameter — are not misclassified.
+const CONTEXT_OVERFLOW_PATTERNS: &[&str] = &[
+    "context_length_exceeded",              // OpenAI error code
+    "maximum context length",               // OpenAI message body
+    "reduce the length of the messages",    // OpenAI message body (tail)
+    "prompt is too long",                   // Anthropic
+    "input is too long",                    // Anthropic / Bedrock
+    "exceeds the maximum number of tokens", // Gemini
+    "context length exceeded",              // Ollama / llama.cpp / OpenAI-compatible
+    "exceeds context window",               // OpenAI-compatible servers
+    "exceeds the context window",           // OpenAI-compatible servers
+];
+
+/// True when a provider error message describes a context-window overflow.
+pub(crate) fn is_context_overflow_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    CONTEXT_OVERFLOW_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+}
+
+/// Extract `(used, limit)` token counts from a context-overflow message.
+///
+/// Providers that include numbers always report `used > limit` (that is why
+/// the request failed), so the largest plausible number is `used` and the
+/// smallest is `limit`. Messages with a single number report only the limit
+/// ("maximum context length is 8192 tokens"), and some report none — both
+/// degrade gracefully to zeros; the dispatcher's recovery path matches on the
+/// error variant, not the counts.
+pub(crate) fn extract_context_overflow_tokens(message: &str) -> (usize, usize) {
+    let mut numbers: Vec<usize> = Vec::new();
+    let mut current = 0usize;
+    let mut in_number = false;
+    for ch in message.chars() {
+        if ch.is_ascii_digit() {
+            current = current
+                .saturating_mul(10)
+                .saturating_add((ch as u8 - b'0') as usize);
+            in_number = true;
+        } else if ch == ',' && in_number {
+            // Thousands separator inside a number ("128,000"): keep accumulating.
+        } else {
+            if in_number {
+                numbers.push(current);
+            }
+            current = 0;
+            in_number = false;
+        }
+    }
+    if in_number {
+        numbers.push(current);
+    }
+    // Token counts in overflow messages are large; drop small numbers that are
+    // status codes, indexes, or version fragments.
+    numbers.retain(|n| *n >= 1024);
+    match numbers.as_slice() {
+        [] => (0, 0),
+        [only] => (0, *only),
+        rest => {
+            let used = rest.iter().copied().max().unwrap_or(0);
+            let limit = rest.iter().copied().min().unwrap_or(0);
+            (used, limit)
+        }
+    }
+}
+
+/// Classify a provider completion rejection into a typed [`LlmError`].
+///
+/// rig-core surfaces provider rejections as opaque strings, which previously
+/// all collapsed into `LlmError::RequestFailed`. That left the dispatcher's
+/// context-overflow recovery (compact-and-retry on `ContextLengthExceeded`)
+/// unreachable from any real provider error. Context-window rejections now map
+/// to `ContextLengthExceeded`; everything else stays `RequestFailed`.
+pub(crate) fn classify_completion_error(provider: &str, message: &str) -> LlmError {
+    if is_context_overflow_message(message) {
+        let (used, limit) = extract_context_overflow_tokens(message);
+        return LlmError::ContextLengthExceeded { used, limit };
+    }
+    LlmError::RequestFailed {
+        provider: provider.to_string(),
+        reason: message.to_string(),
+    }
+}
+
 fn requested_model_matches_active_model(requested_model: &str, active_model: &str) -> bool {
     let requested_model = requested_model.trim();
     if requested_model == active_model {
@@ -1029,16 +1116,15 @@ where
                 self.model
                     .completion(retry_req)
                     .await
-                    .map_err(|retry_error| LlmError::RequestFailed {
-                        provider: self.model_name.clone(),
-                        reason: retry_error.to_string(),
+                    .map_err(|retry_error| {
+                        classify_completion_error(&self.model_name, &retry_error.to_string())
                     })?
             }
             Err(error) => {
-                return Err(LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: error.to_string(),
-                });
+                return Err(classify_completion_error(
+                    &self.model_name,
+                    &error.to_string(),
+                ));
             }
         };
 
@@ -1180,16 +1266,15 @@ where
                 self.model
                     .completion(retry_req)
                     .await
-                    .map_err(|retry_error| LlmError::RequestFailed {
-                        provider: self.model_name.clone(),
-                        reason: retry_error.to_string(),
+                    .map_err(|retry_error| {
+                        classify_completion_error(&self.model_name, &retry_error.to_string())
                     })?
             }
             Err(error) => {
-                return Err(LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: error.to_string(),
-                });
+                return Err(classify_completion_error(
+                    &self.model_name,
+                    &error.to_string(),
+                ));
             }
         };
 
@@ -1328,17 +1413,14 @@ where
                     thinking_params,
                 )?;
                 self.model.stream(retry_req).await.map_err(|retry_error| {
-                    LlmError::RequestFailed {
-                        provider: self.model_name.clone(),
-                        reason: retry_error.to_string(),
-                    }
+                    classify_completion_error(&self.model_name, &retry_error.to_string())
                 })?
             }
             Err(error) => {
-                return Err(LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: error.to_string(),
-                });
+                return Err(classify_completion_error(
+                    &self.model_name,
+                    &error.to_string(),
+                ));
             }
         };
 
@@ -1455,17 +1537,14 @@ where
                     thinking_params,
                 )?;
                 self.model.stream(retry_req).await.map_err(|retry_error| {
-                    LlmError::RequestFailed {
-                        provider: self.model_name.clone(),
-                        reason: retry_error.to_string(),
-                    }
+                    classify_completion_error(&self.model_name, &retry_error.to_string())
                 })?
             }
             Err(error) => {
-                return Err(LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: error.to_string(),
-                });
+                return Err(classify_completion_error(
+                    &self.model_name,
+                    &error.to_string(),
+                ));
             }
         };
 
@@ -1653,10 +1732,7 @@ where
                         // Stream was cancelled
                         break;
                     }
-                    yield Err(LlmError::RequestFailed {
-                        provider: "rig-stream".to_string(),
-                        reason: e.to_string(),
-                    });
+                    yield Err(classify_completion_error("rig-stream", &e.to_string()));
                     break;
                 }
             }

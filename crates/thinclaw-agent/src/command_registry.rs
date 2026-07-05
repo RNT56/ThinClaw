@@ -131,6 +131,16 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         help_text: "Filesystem rollback command family",
     },
     CommandSpec {
+        name: "/rewind",
+        aliases: &[],
+        system_command: Some("rewind"),
+        arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
+        in_help: true,
+        tui_forwarded: true,
+        tui_autocomplete: true,
+        help_text: "Rewind conversation and files to an earlier turn",
+    },
+    CommandSpec {
         name: "/version",
         aliases: &[],
         system_command: Some("version"),

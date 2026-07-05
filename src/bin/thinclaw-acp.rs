@@ -280,6 +280,7 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
             main_tool_profile: ToolProfile::Acp,
             worker_tool_profile: ToolProfile::Restricted,
             subagent_tool_profile: ToolProfile::ExplicitOnly,
+            subagent_max_per_principal: 0,
             model_thinking_overrides: std::collections::HashMap::new(),
             workspace_mode: "unrestricted".to_string(),
             workspace_root: None,

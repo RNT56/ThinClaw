@@ -68,6 +68,7 @@ If `GATEWAY_AUTH_TOKEN` is not set, a random hex token is generated at startup.
 | Route | Purpose | Response |
 |-------|---------|----------|
 | `/api/health` | Health check endpoint | `{"status":"healthy","channel":"gateway"}` — no version, uptime, or fingerprinting data |
+| `/metrics` | Prometheus scrape endpoint (only when `OBSERVABILITY_BACKEND=prometheus`) | Prometheus text exposition of aggregate operational counters. **No auth by design** (scraper standard): exposes only aggregate counters; all label values are operator-controlled config (model/tool/channel names), never user input — no PII, no unbounded-cardinality vector. Restrict at the reverse proxy if the gateway is publicly exposed. See `docs/OBSERVABILITY.md`. |
 | `/` | Static HTML (embedded) | Single-page app shell |
 | `/style.css` | Static CSS (embedded) | Stylesheet |
 | `/app.js` | Static JS (embedded) | Client-side app |
