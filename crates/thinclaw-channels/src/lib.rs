@@ -2,6 +2,7 @@
 
 pub mod ack_reaction;
 pub mod acp;
+pub mod apns_push;
 #[cfg(target_os = "macos")]
 pub mod apple_mail;
 pub mod bluebubbles;
@@ -33,6 +34,7 @@ mod util;
 pub mod wasm;
 pub mod webhook_server;
 
+pub use apns_push::{ApnsPushSpec, ApnsPushType, ApnsPusher, ApnsSendOutcome};
 #[cfg(target_os = "macos")]
 pub use apple_mail::{AppleMailChannel, AppleMailConfig, AppleMailDiagnostic, ensure_app_running};
 pub use bluebubbles::{BlueBubblesChannel, BlueBubblesConfig, BlueBubblesDiagnostic};

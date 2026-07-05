@@ -150,12 +150,29 @@ layout, toolchain setup (mise + Tuist), and testing guide. Summary:
 |---|---|
 | OpenAPI baseline (`openapi` feature, export-openapi, committed spec, CI check) | ✅ landed (R0) |
 | `apps/ios/` scaffold (Tuist workspace, packages, SSE parser + tests, CI) | ✅ landed (R0); Tuist manifests authored, first `tuist generate` verification pending |
-| Generated Swift client from the committed spec | 📋 lands with M1 (`apps/ios/scripts/generate-api.sh`) |
+| Generated Swift client from the committed spec | ✅ landed (M1); `ThinClawAPI` REST client generated + committed, `swift test` passes |
 | Device identity layer (pairing, tokens, scopes, TLS listener) | ✅ landed (B1) |
 | `GET /api/chat/approvals` pull endpoint | ✅ landed (B1) |
-| First-party push + Live Activity emitter | 📋 planned (B2) |
+| First-party push + Live Activity emitter | ✅ landed (B2); content-free policy + notifier + `PUT/DELETE /api/devices/me/push`, `/live-activity/{id}`, `/live-activity-start-token`. Credential-gated (off without APNs config); mock-tested only, real Apple/TestFlight delivery pending |
+| iOS client layers (transport, pairing, pinning, chat session) | ✅ landed (M1) as tested SPM packages — see the M1 caveat below |
+| iOS app UX wiring (onboarding + chat screens) | 🚧 in progress (M1); building blocks land, feature stores are still stubs |
 | mDNS advertisement | 📋 planned (B3) |
-| iOS app feature milestones | 📋 planned (M1–M5) |
+| iOS app feature milestones | 🚧 M1 partial; M2–M5 planned |
+
+**M1 caveat (verified 2026-07):** the client *layers* are implemented and
+unit-tested — `ThinClawTransport` (SSE parse/decode/reconnect,
+`GatewaySession`/`GatewayStream` with per-thread routing, ~10 Hz coalescing,
+and post-reconnect history reconcile), `ThinClawAuth` (pairing-payload parse,
+`DeviceKeyPair` Secure-Enclave-preferred P-256 keygen with software fallback,
+`SPKIEncoder`/`SPKIFingerprint`, `ConnectionPolicy` D-X2 matrix,
+`PinnedSessionDelegate` SPKI pinning, `DeviceCredential` Keychain storage),
+`ThinClawCore`, `ThinClawSnapshotKit`, `ThinClawPersistence`, and the generated
+`ThinClawAPI` REST client. All seven SPM packages pass `swift test` on macOS
+with **no simulator**. What is *not* yet done: the feature-layer wiring that
+composes them into a live UX — `OnboardingStore.handleScanned` and
+`ChatStore.apply`/`send` are still empty stubs, there is no camera QR scanner,
+the Tuist/`xcodebuild` UI-target build is not verified, and there is no
+simulator or real-device end-to-end pairing/chat run.
 
 ## Doc obligations (same-PR rule)
 

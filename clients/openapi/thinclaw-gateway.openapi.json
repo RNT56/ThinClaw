@@ -165,58 +165,43 @@
         "parameters": [
           {
             "name": "thread_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "minimum": 0
             }
           },
           {
             "name": "before",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "user_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "actor_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           }
         ],
@@ -304,58 +289,43 @@
         "parameters": [
           {
             "name": "thread_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "minimum": 0
             }
           },
           {
             "name": "before",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "user_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "actor_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           }
         ],
@@ -402,58 +372,43 @@
           },
           {
             "name": "thread_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "minimum": 0
             }
           },
           {
             "name": "before",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "user_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "actor_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           }
         ],
@@ -500,58 +455,43 @@
         "parameters": [
           {
             "name": "thread_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "minimum": 0
             }
           },
           {
             "name": "before",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "user_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "actor_id",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           }
         ],
@@ -656,6 +596,265 @@
         "responses": {
           "200": {
             "description": "The authenticated device's own record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Device record not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/me/live-activity-start-token": {
+      "put": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_live_activity_start_token_register_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterLiveActivityStartTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Push-to-start token registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid (empty or oversized) push token"
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Device record not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_live_activity_start_token_remove_handler",
+        "responses": {
+          "200": {
+            "description": "Push-to-start token removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Device record not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/me/live-activity/{activity_id}": {
+      "put": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_live_activity_register_handler",
+        "parameters": [
+          {
+            "name": "activity_id",
+            "in": "path",
+            "description": "Live Activity id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterLiveActivityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Live Activity token registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid (empty or oversized) push token"
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Device record not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_live_activity_remove_handler",
+        "parameters": [
+          {
+            "name": "activity_id",
+            "in": "path",
+            "description": "Live Activity id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Live Activity token removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Device record not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/me/push": {
+      "put": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_push_register_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterPushRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "APNs push token registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid environment or (empty/oversized) push token"
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Device record not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_push_remove_handler",
+        "responses": {
+          "200": {
+            "description": "APNs push token removed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1217,6 +1416,29 @@
           }
         }
       },
+      "DeviceApnsRegistration": {
+        "type": "object",
+        "description": "Persisted APNs registration for a device's content-free pushes (D-N1).\nOnly the device token, target environment, and last-updated timestamp are\nstored; payload content is never persisted here.",
+        "required": [
+          "device_token",
+          "environment",
+          "updated_at"
+        ],
+        "properties": {
+          "device_token": {
+            "type": "string",
+            "description": "APNs device token (hex string from `didRegisterForRemoteNotifications`)."
+          },
+          "environment": {
+            "type": "string",
+            "description": "APNs environment: `\"development\"` (sandbox) or `\"production\"`. Selects\nthe APNs host when the pusher delivers to this device."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC 3339 timestamp of the last registration update."
+          }
+        }
+      },
       "DeviceInfo": {
         "type": "object",
         "description": "Public view of a device (never includes token/hash material).",
@@ -1284,6 +1506,37 @@
             "items": {
               "$ref": "#/components/schemas/DeviceInfo"
             }
+          }
+        }
+      },
+      "DeviceLiveActivityKind": {
+        "type": "string",
+        "description": "The kind of Live Activity a registered push token drives (D-N2). Mirrors\nthe two activity surfaces the mobile app runs: an agent run and a\nbackground job.",
+        "enum": [
+          "agent_run",
+          "job"
+        ]
+      },
+      "DeviceLiveActivityToken": {
+        "type": "object",
+        "description": "Persisted Live Activity update-push token for one `activity_id` (D-N2).",
+        "required": [
+          "push_token",
+          "kind",
+          "updated_at"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/DeviceLiveActivityKind",
+            "description": "What the activity represents (agent run vs. job)."
+          },
+          "push_token": {
+            "type": "string",
+            "description": "APNs Live Activity update token."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC 3339 timestamp of the last registration update. Also the key used\nfor oldest-first eviction when the per-device cap is exceeded."
           }
         }
       },
@@ -2120,6 +2373,55 @@
             "format": "int32",
             "description": "Payload version.",
             "minimum": 0
+          }
+        }
+      },
+      "RegisterLiveActivityRequest": {
+        "type": "object",
+        "description": "`PUT /api/devices/me/live-activity/{activity_id}` request body: register\n(or replace) the Live Activity update-push token for one activity.",
+        "required": [
+          "push_token",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/DeviceLiveActivityKind",
+            "description": "What the activity represents (agent run vs. job)."
+          },
+          "push_token": {
+            "type": "string",
+            "description": "APNs Live Activity update token."
+          }
+        }
+      },
+      "RegisterLiveActivityStartTokenRequest": {
+        "type": "object",
+        "description": "`PUT /api/devices/me/live-activity-start-token` request body: register (or\nreplace) the device's Live Activity push-to-start token.",
+        "required": [
+          "push_token"
+        ],
+        "properties": {
+          "push_token": {
+            "type": "string",
+            "description": "APNs Live Activity push-to-start token."
+          }
+        }
+      },
+      "RegisterPushRequest": {
+        "type": "object",
+        "description": "`PUT /api/devices/me/push` request body: register (or replace) the\ndevice's APNs token for content-free pushes.",
+        "required": [
+          "apns_token",
+          "environment"
+        ],
+        "properties": {
+          "apns_token": {
+            "type": "string",
+            "description": "APNs device token (hex from `didRegisterForRemoteNotifications`)."
+          },
+          "environment": {
+            "type": "string",
+            "description": "APNs environment: `\"development\"` or `\"production\"`."
           }
         }
       },

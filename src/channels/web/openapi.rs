@@ -88,6 +88,12 @@ struct JobsApiDoc;
         super::handlers::devices::devices_revoke_handler,
         super::handlers::devices::devices_rotate_handler,
         super::handlers::devices::devices_me_handler,
+        super::handlers::devices::devices_me_push_register_handler,
+        super::handlers::devices::devices_me_push_remove_handler,
+        super::handlers::devices::devices_me_live_activity_register_handler,
+        super::handlers::devices::devices_me_live_activity_remove_handler,
+        super::handlers::devices::devices_me_live_activity_start_token_register_handler,
+        super::handlers::devices::devices_me_live_activity_start_token_remove_handler,
     ),
     components(schemas(
         thinclaw_gateway::web::devices::QrPairingPayload,
@@ -102,6 +108,12 @@ struct JobsApiDoc;
         thinclaw_gateway::web::devices::PendingPairListResponse,
         thinclaw_gateway::web::devices::DevicePlatform,
         thinclaw_gateway::web::devices::DeviceScope,
+        thinclaw_gateway::web::devices::DeviceApnsRegistration,
+        thinclaw_gateway::web::devices::DeviceLiveActivityKind,
+        thinclaw_gateway::web::devices::DeviceLiveActivityToken,
+        thinclaw_gateway::web::devices::RegisterPushRequest,
+        thinclaw_gateway::web::devices::RegisterLiveActivityRequest,
+        thinclaw_gateway::web::devices::RegisterLiveActivityStartTokenRequest,
         super::handlers::devices::PairPendingConfirmResponse,
     ))
 )]
@@ -277,6 +289,9 @@ mod tests {
         "/api/devices/{id}/revoke",
         "/api/devices/{id}/rotate",
         "/api/devices/me",
+        "/api/devices/me/push",
+        "/api/devices/me/live-activity/{activity_id}",
+        "/api/devices/me/live-activity-start-token",
     ];
 
     #[test]

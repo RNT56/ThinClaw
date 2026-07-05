@@ -37,7 +37,8 @@ use thinclaw_gateway::web::devices::{
     ConsumeOutcome, DeviceAuditEvent, DeviceAuditLog, DeviceInfo, DeviceListResponse,
     DevicePairingStore, DevicePlatform, DeviceScope, DeviceStore, PairCompleteRequest,
     PairCompleteResponse, PairStartResponse, PendingPairInfo, PendingPairListResponse,
-    QrPairingPayload, RenameDeviceRequest, RotateTokenResponse,
+    QrPairingPayload, RegisterLiveActivityRequest, RegisterLiveActivityStartTokenRequest,
+    RegisterPushRequest, RenameDeviceRequest, RotateTokenResponse,
 };
 use thinclaw_gateway::web::identity::DeviceContext;
 
@@ -78,6 +79,7 @@ fn device_store_error(
         DeviceStoreError::NotFound(id) => {
             (StatusCode::NOT_FOUND, format!("device not found: {id}"))
         }
+        DeviceStoreError::Revoked(id) => (StatusCode::NOT_FOUND, format!("device not found: {id}")),
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
     }
 }
@@ -598,6 +600,318 @@ pub(crate) async fn devices_me_handler(
     Ok(Json(DeviceInfo::from(&record)))
 }
 
+// --- Device push registration (device token; devices:self scope) ---
+
+/// Extract the calling device's identity, or a 403 if the request is not
+/// device-token-authenticated (e.g. reached via the shared admin token, which
+/// bypasses scope enforcement and carries no device principal). Mirrors the
+/// guard in [`devices_me_handler`].
+fn require_device_ctx(
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+) -> Result<DeviceContext, (StatusCode, String)> {
+    match device_ctx {
+        Some(axum::Extension(ctx)) => Ok(ctx),
+        None => Err((
+            StatusCode::FORBIDDEN,
+            "this endpoint requires a device-token-authenticated request".to_string(),
+        )),
+    }
+}
+
+/// APNs only distinguishes two environments; reject anything else so a typo
+/// can't silently route pushes to the wrong host.
+fn validate_environment(environment: &str) -> Result<(), (StatusCode, String)> {
+    match environment {
+        "development" | "production" => Ok(()),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("environment must be \"development\" or \"production\", got: {other}"),
+        )),
+    }
+}
+
+/// Maximum accepted length (bytes) for any client-supplied APNs token string
+/// (device push token, Live Activity update token, push-to-start token). Real
+/// APNs tokens are well under this; the bound just stops an oversized/garbage
+/// value from being persisted into `devices.json` (§8 hardening — bounded,
+/// validated inputs on the device-token surface).
+const MAX_PUSH_TOKEN_BYTES: usize = 512;
+
+/// Reject empty or oversized push-token strings with a 400. `field` names the
+/// offending request field for the error body.
+fn validate_push_token(token: &str, field: &str) -> Result<(), (StatusCode, String)> {
+    if token.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} must not be empty"),
+        ));
+    }
+    if token.len() > MAX_PUSH_TOKEN_BYTES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("{field} must be at most {MAX_PUSH_TOKEN_BYTES} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+/// Response shape for the push/live-activity mutation endpoints: echoes the
+/// device's own record (never token/hash material — [`DeviceInfo`] is already
+/// redacted). Registration details are internal-only, so they are not
+/// surfaced here; the device already knows what it registered.
+type PushMutationResponse = Json<DeviceInfo>;
+
+// --- PUT /api/devices/me/push (device token; devices:self scope) ---
+
+#[utoipa::path(
+    put,
+    path = "/api/devices/me/push",
+    tag = "devices",
+    request_body = RegisterPushRequest,
+    responses(
+        (status = 200, description = "APNs push token registered", body = DeviceInfo),
+        (status = 400, description = "Invalid environment or (empty/oversized) push token"),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+        (status = 404, description = "Device record not found"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_push_register_handler(
+    State(state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+    Json(req): Json<RegisterPushRequest>,
+) -> Result<PushMutationResponse, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+    validate_environment(&req.environment)?;
+    validate_push_token(&req.apns_token, "apns_token")?;
+
+    let record = device_store()
+        .set_push(&ctx.device_id, req.apns_token, req.environment)
+        .map_err(device_store_error)?;
+    state
+        .device_registry
+        .refresh(&ctx.device_id)
+        .await
+        .map_err(device_store_error)?;
+
+    let _ = audit_log().record(
+        DeviceAuditEvent::DevicePushTokenRegistered,
+        Some(&record.device_id),
+        Some(&record.token_prefix),
+        None,
+    );
+
+    Ok(Json(DeviceInfo::from(&record)))
+}
+
+// --- DELETE /api/devices/me/push (device token; devices:self scope) ---
+
+#[utoipa::path(
+    delete,
+    path = "/api/devices/me/push",
+    tag = "devices",
+    responses(
+        (status = 200, description = "APNs push token removed", body = DeviceInfo),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+        (status = 404, description = "Device record not found"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_push_remove_handler(
+    State(state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+) -> Result<PushMutationResponse, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+
+    let record = device_store()
+        .clear_push(&ctx.device_id)
+        .map_err(device_store_error)?;
+    state
+        .device_registry
+        .refresh(&ctx.device_id)
+        .await
+        .map_err(device_store_error)?;
+
+    let _ = audit_log().record(
+        DeviceAuditEvent::DevicePushTokenRemoved,
+        Some(&record.device_id),
+        Some(&record.token_prefix),
+        None,
+    );
+
+    Ok(Json(DeviceInfo::from(&record)))
+}
+
+// --- PUT /api/devices/me/live-activity/{activity_id} ---
+
+#[utoipa::path(
+    put,
+    path = "/api/devices/me/live-activity/{activity_id}",
+    tag = "devices",
+    params(("activity_id" = String, Path, description = "Live Activity id")),
+    request_body = RegisterLiveActivityRequest,
+    responses(
+        (status = 200, description = "Live Activity token registered", body = DeviceInfo),
+        (status = 400, description = "Invalid (empty or oversized) push token"),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+        (status = 404, description = "Device record not found"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_live_activity_register_handler(
+    State(state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+    Path(activity_id): Path<String>,
+    Json(req): Json<RegisterLiveActivityRequest>,
+) -> Result<PushMutationResponse, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+    validate_push_token(&req.push_token, "push_token")?;
+
+    let record = device_store()
+        .set_live_activity(&ctx.device_id, &activity_id, req.push_token, req.kind)
+        .map_err(device_store_error)?;
+    state
+        .device_registry
+        .refresh(&ctx.device_id)
+        .await
+        .map_err(device_store_error)?;
+
+    let _ = audit_log().record(
+        DeviceAuditEvent::DevicePushTokenRegistered,
+        Some(&record.device_id),
+        Some(&record.token_prefix),
+        Some(serde_json::json!({ "live_activity_id": activity_id })),
+    );
+
+    Ok(Json(DeviceInfo::from(&record)))
+}
+
+// --- DELETE /api/devices/me/live-activity/{activity_id} ---
+
+#[utoipa::path(
+    delete,
+    path = "/api/devices/me/live-activity/{activity_id}",
+    tag = "devices",
+    params(("activity_id" = String, Path, description = "Live Activity id")),
+    responses(
+        (status = 200, description = "Live Activity token removed", body = DeviceInfo),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+        (status = 404, description = "Device record not found"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_live_activity_remove_handler(
+    State(state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+    Path(activity_id): Path<String>,
+) -> Result<PushMutationResponse, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+
+    let record = device_store()
+        .clear_live_activity(&ctx.device_id, &activity_id)
+        .map_err(device_store_error)?;
+    state
+        .device_registry
+        .refresh(&ctx.device_id)
+        .await
+        .map_err(device_store_error)?;
+
+    let _ = audit_log().record(
+        DeviceAuditEvent::DevicePushTokenRemoved,
+        Some(&record.device_id),
+        Some(&record.token_prefix),
+        Some(serde_json::json!({ "live_activity_id": activity_id })),
+    );
+
+    Ok(Json(DeviceInfo::from(&record)))
+}
+
+// --- PUT /api/devices/me/live-activity-start-token ---
+
+#[utoipa::path(
+    put,
+    path = "/api/devices/me/live-activity-start-token",
+    tag = "devices",
+    request_body = RegisterLiveActivityStartTokenRequest,
+    responses(
+        (status = 200, description = "Push-to-start token registered", body = DeviceInfo),
+        (status = 400, description = "Invalid (empty or oversized) push token"),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+        (status = 404, description = "Device record not found"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_live_activity_start_token_register_handler(
+    State(state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+    Json(req): Json<RegisterLiveActivityStartTokenRequest>,
+) -> Result<PushMutationResponse, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+    validate_push_token(&req.push_token, "push_token")?;
+
+    let record = device_store()
+        .set_live_activity_start_token(&ctx.device_id, req.push_token)
+        .map_err(device_store_error)?;
+    state
+        .device_registry
+        .refresh(&ctx.device_id)
+        .await
+        .map_err(device_store_error)?;
+
+    let _ = audit_log().record(
+        DeviceAuditEvent::DevicePushTokenRegistered,
+        Some(&record.device_id),
+        Some(&record.token_prefix),
+        Some(serde_json::json!({ "live_activity_start_token": true })),
+    );
+
+    Ok(Json(DeviceInfo::from(&record)))
+}
+
+// --- DELETE /api/devices/me/live-activity-start-token ---
+
+#[utoipa::path(
+    delete,
+    path = "/api/devices/me/live-activity-start-token",
+    tag = "devices",
+    responses(
+        (status = 200, description = "Push-to-start token removed", body = DeviceInfo),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+        (status = 404, description = "Device record not found"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_live_activity_start_token_remove_handler(
+    State(state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+) -> Result<PushMutationResponse, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+
+    let record = device_store()
+        .clear_live_activity_start_token(&ctx.device_id)
+        .map_err(device_store_error)?;
+    state
+        .device_registry
+        .refresh(&ctx.device_id)
+        .await
+        .map_err(device_store_error)?;
+
+    let _ = audit_log().record(
+        DeviceAuditEvent::DevicePushTokenRemoved,
+        Some(&record.device_id),
+        Some(&record.token_prefix),
+        Some(serde_json::json!({ "live_activity_start_token": true })),
+    );
+
+    Ok(Json(DeviceInfo::from(&record)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +940,47 @@ mod tests {
     #[test]
     fn pair_complete_body_limit_matches_hardening_spec() {
         assert_eq!(PAIR_COMPLETE_BODY_LIMIT_BYTES, 4096);
+    }
+
+    #[test]
+    fn validate_environment_accepts_only_apns_environments() {
+        assert!(validate_environment("development").is_ok());
+        assert!(validate_environment("production").is_ok());
+        for bad in ["dev", "prod", "sandbox", "", "Production"] {
+            let (status, _) = validate_environment(bad).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "env: {bad}");
+        }
+    }
+
+    #[test]
+    fn validate_push_token_rejects_empty_and_oversized() {
+        // Empty is rejected.
+        let (status, _) = validate_push_token("", "apns_token").unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Exactly at the cap is accepted; one over is rejected.
+        let ok = "a".repeat(MAX_PUSH_TOKEN_BYTES);
+        assert!(validate_push_token(&ok, "push_token").is_ok());
+        let too_long = "a".repeat(MAX_PUSH_TOKEN_BYTES + 1);
+        let (status, _) = validate_push_token(&too_long, "push_token").unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // A realistic hex APNs token passes.
+        assert!(validate_push_token(&"0".repeat(64), "apns_token").is_ok());
+    }
+
+    #[test]
+    fn require_device_ctx_rejects_missing_context() {
+        // No `DeviceContext` extension => shared-admin-token path => 403,
+        // mirroring `devices_me_handler`'s guard.
+        let (status, _) = require_device_ctx(None).unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn require_device_ctx_returns_context_when_present() {
+        let ctx = DeviceContext::new("device-1", vec![DeviceScope::DevicesSelf]);
+        let extracted = require_device_ctx(Some(axum::Extension(ctx.clone()))).unwrap();
+        assert_eq!(extracted.device_id, "device-1");
     }
 }

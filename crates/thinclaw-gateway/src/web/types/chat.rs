@@ -164,6 +164,7 @@ pub struct ThreadExportResponse {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 pub struct HistoryQuery {
     pub thread_id: Option<String>,
     pub limit: Option<usize>,

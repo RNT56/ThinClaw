@@ -1422,7 +1422,25 @@ pub async fn start_server(
         .route("/api/devices/{id}/revoke", post(devices_revoke_handler))
         .route("/api/devices/{id}/rotate", post(devices_rotate_handler))
         // Device's own view (device-token-only; `devices:self` scope).
-        .route("/api/devices/me", get(devices_me_handler));
+        .route("/api/devices/me", get(devices_me_handler))
+        // Device-linked push registration (device-token-only; `devices:self`).
+        // These carry small JSON bodies and go through the normal protected
+        // router (no dedicated body-limit layer — the token-scoped surface is
+        // not attacker-reachable the way public `pair/complete` is).
+        .route(
+            "/api/devices/me/push",
+            put(devices_me_push_register_handler).delete(devices_me_push_remove_handler),
+        )
+        .route(
+            "/api/devices/me/live-activity/{activity_id}",
+            put(devices_me_live_activity_register_handler)
+                .delete(devices_me_live_activity_remove_handler),
+        )
+        .route(
+            "/api/devices/me/live-activity-start-token",
+            put(devices_me_live_activity_start_token_register_handler)
+                .delete(devices_me_live_activity_start_token_remove_handler),
+        );
     #[cfg(feature = "nostr")]
     let protected = protected
         .route("/api/nostr/key", post(nostr_save_key_handler))

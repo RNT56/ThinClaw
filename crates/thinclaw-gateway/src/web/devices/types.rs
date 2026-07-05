@@ -38,9 +38,26 @@ pub struct DeviceRecord {
     /// Stored, not yet enforced in v1 (no proof-of-possession signing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pubkey: Option<String>,
-    /// Placeholder for APNs registration state, wired in milestone B2.
+    /// APNs registration for content-free device pushes (milestone B2,
+    /// `PUT /api/devices/me/push`). `None` until the device registers a
+    /// token. The JSON field name stays `"apns"` so `devices.json` files
+    /// written by the earlier placeholder (a `serde_json::Value`) still
+    /// deserialize — the placeholder only ever wrote `null`/absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub apns: Option<serde_json::Value>,
+    pub apns: Option<DeviceApnsRegistration>,
+    /// Live Activity push tokens, keyed by `activity_id` (milestone B2,
+    /// `PUT /api/devices/me/live-activity/{activity_id}`). Bounded to
+    /// [`MAX_LIVE_ACTIVITIES_PER_DEVICE`] entries per device; the oldest
+    /// (by `updated_at`) is evicted when a new registration would exceed the
+    /// cap. Empty maps are skipped so untouched records stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub live_activities: std::collections::BTreeMap<String, DeviceLiveActivityToken>,
+    /// Optional push-to-start token for Live Activities (milestone B2,
+    /// `PUT /api/devices/me/live-activity-start-token`). One per device; APNs
+    /// uses it to *start* an activity, distinct from the per-activity update
+    /// tokens above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_activity_start_token: Option<String>,
     /// RFC 3339 timestamp. `Some` once the device has been revoked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
@@ -62,6 +79,60 @@ impl DeviceRecord {
         }
         false
     }
+}
+
+/// Maximum number of Live Activity push-token registrations kept per device.
+/// A new registration beyond this cap evicts the oldest entry (by
+/// `updated_at`) so a runaway client cannot grow `devices.json` without
+/// bound.
+pub const MAX_LIVE_ACTIVITIES_PER_DEVICE: usize = 16;
+
+/// Persisted APNs registration for a device's content-free pushes (D-N1).
+/// Only the device token, target environment, and last-updated timestamp are
+/// stored; payload content is never persisted here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DeviceApnsRegistration {
+    /// APNs device token (hex string from `didRegisterForRemoteNotifications`).
+    pub device_token: String,
+    /// APNs environment: `"development"` (sandbox) or `"production"`. Selects
+    /// the APNs host when the pusher delivers to this device.
+    pub environment: String,
+    /// RFC 3339 timestamp of the last registration update.
+    pub updated_at: String,
+}
+
+/// The kind of Live Activity a registered push token drives (D-N2). Mirrors
+/// the two activity surfaces the mobile app runs: an agent run and a
+/// background job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceLiveActivityKind {
+    AgentRun,
+    Job,
+}
+
+impl DeviceLiveActivityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeviceLiveActivityKind::AgentRun => "agent_run",
+            DeviceLiveActivityKind::Job => "job",
+        }
+    }
+}
+
+/// Persisted Live Activity update-push token for one `activity_id` (D-N2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DeviceLiveActivityToken {
+    /// APNs Live Activity update token.
+    pub push_token: String,
+    /// What the activity represents (agent run vs. job).
+    pub kind: DeviceLiveActivityKind,
+    /// RFC 3339 timestamp of the last registration update. Also the key used
+    /// for oldest-first eviction when the per-device cap is exceeded.
+    pub updated_at: String,
 }
 
 /// Platform family of a paired device.
@@ -271,6 +342,39 @@ pub struct RotateTokenResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RenameDeviceRequest {
     pub name: String,
+}
+
+// --- Push registration DTOs (device-token-only, `devices:self`) ---
+
+/// `PUT /api/devices/me/push` request body: register (or replace) the
+/// device's APNs token for content-free pushes.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RegisterPushRequest {
+    /// APNs device token (hex from `didRegisterForRemoteNotifications`).
+    pub apns_token: String,
+    /// APNs environment: `"development"` or `"production"`.
+    pub environment: String,
+}
+
+/// `PUT /api/devices/me/live-activity/{activity_id}` request body: register
+/// (or replace) the Live Activity update-push token for one activity.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RegisterLiveActivityRequest {
+    /// APNs Live Activity update token.
+    pub push_token: String,
+    /// What the activity represents (agent run vs. job).
+    pub kind: DeviceLiveActivityKind,
+}
+
+/// `PUT /api/devices/me/live-activity-start-token` request body: register (or
+/// replace) the device's Live Activity push-to-start token.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RegisterLiveActivityStartTokenRequest {
+    /// APNs Live Activity push-to-start token.
+    pub push_token: String,
 }
 
 /// A pending (not-yet-completed) pairing attempt, admin-facing view.

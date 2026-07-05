@@ -22,6 +22,7 @@ use tokio::sync::RwLock;
 use url::Url;
 use uuid::Uuid;
 
+use crate::apns_push::{ApnsPushSpec, ApnsPusher};
 use crate::native_lifecycle::{NativeLifecycleClient, NativeLifecycleEvent, NativeOutboundMessage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,15 +280,11 @@ impl ApnsNativeClient {
     }
 
     fn provider_token(&self) -> Result<String, ChannelError> {
-        jwt_es256(
-            "apns",
-            self.config.key_id.clone(),
-            ApnsClaims {
-                iss: self.config.team_id.clone(),
-                iat: unix_now(),
-            },
-            &self.config.private_key_pem,
-        )
+        apns_provider_token(&self.config)
+    }
+
+    fn pusher(&self) -> ApnsPusher {
+        ApnsPusher::new(self.config.clone(), self.http.clone())
     }
 
     async fn send_to_device_token(
@@ -295,13 +292,7 @@ impl ApnsNativeClient {
         device_token: &str,
         message: &NativeOutboundMessage,
     ) -> Result<(), ChannelError> {
-        let host = if self.config.sandbox {
-            "https://api.sandbox.push.apple.com"
-        } else {
-            "https://api.push.apple.com"
-        };
-        let token = self.provider_token()?;
-        let body = serde_json::json!({
+        let payload = serde_json::json!({
             "aps": {
                 "alert": message.content,
                 "sound": "default"
@@ -312,22 +303,24 @@ impl ApnsNativeClient {
                 "metadata": message.metadata,
             }
         });
-        let response = self
-            .http
-            .send(NativeHttpRequest {
-                method: "POST".to_string(),
-                url: format!("{host}/3/device/{device_token}"),
-                headers: HashMap::from([
-                    ("Authorization".to_string(), format!("bearer {token}")),
-                    ("Content-Type".to_string(), "application/json".to_string()),
-                    ("apns-topic".to_string(), self.config.bundle_id.clone()),
-                    ("apns-push-type".to_string(), "alert".to_string()),
-                ]),
-                body: serde_json::to_vec(&body).unwrap_or_default(),
-            })
-            .await?;
-        ensure_success("apns", "send notification", response.status)
+        self.pusher()
+            .send(device_token, ApnsPushSpec::alert(payload))
+            .await
+            .map(|_| ())
     }
+}
+
+/// Sign an APNs provider authentication token (ES256 JWT) for `config`.
+pub(crate) fn apns_provider_token(config: &ApnsNativeConfig) -> Result<String, ChannelError> {
+    jwt_es256(
+        "apns",
+        config.key_id.clone(),
+        ApnsClaims {
+            iss: config.team_id.clone(),
+            iat: unix_now(),
+        },
+        &config.private_key_pem,
+    )
 }
 
 #[async_trait]
@@ -671,7 +664,11 @@ fn json_bearer_headers(token: &str) -> HashMap<String, String> {
     headers
 }
 
-fn ensure_success(channel: &str, operation: &str, status: u16) -> Result<(), ChannelError> {
+pub(crate) fn ensure_success(
+    channel: &str,
+    operation: &str,
+    status: u16,
+) -> Result<(), ChannelError> {
     if (200..300).contains(&status) {
         Ok(())
     } else {
@@ -682,12 +679,20 @@ fn ensure_success(channel: &str, operation: &str, status: u16) -> Result<(), Cha
     }
 }
 
+/// Shared test fixtures for the native lifecycle client tests and the
+/// [`crate::apns_push`] pusher tests, which reuse the same ES256 signing key.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// A throwaway ES256 private key used only to exercise provider-token
+    /// signing paths in tests; never a real credential.
+    pub(crate) const EC_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJucIoF39xIAoPvuA\nkM4ZnoH7Epi+1r1Navl4D+QjrHahRANCAAQDw2h+idVQiHyp4aRqib1xUtSm0Xry\ndVN+sF496LBtVCQQ/vf0xtLTAxgXy3ViSOFKgac0apHRwNA8boZDN7Yy\n-----END PRIVATE KEY-----\n";
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::EC_PRIVATE_KEY;
     use super::*;
     use tokio::sync::Mutex;
-
-    const EC_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJucIoF39xIAoPvuA\nkM4ZnoH7Epi+1r1Navl4D+QjrHahRANCAAQDw2h+idVQiHyp4aRqib1xUtSm0Xry\ndVN+sF496LBtVCQQ/vf0xtLTAxgXy3ViSOFKgac0apHRwNA8boZDN7Yy\n-----END PRIVATE KEY-----\n";
 
     #[derive(Default)]
     struct MockHttp {

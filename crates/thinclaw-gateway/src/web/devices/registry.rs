@@ -15,7 +15,7 @@
 //!   down live connections synchronously (gateway hardening item 5).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use subtle::ConstantTimeEq;
@@ -62,8 +62,41 @@ struct LastSeenState {
 pub struct DeviceRegistry {
     store: Arc<DeviceStore>,
     by_hash: Arc<RwLock<HashMap<String, IndexEntry>>>,
+    /// Full device records keyed by `device_id`, kept in sync with the store
+    /// on every mutation (`load`/`refresh`). The first-party push notifier
+    /// reads this via [`DeviceRegistry::snapshot`] on the SSE hot path so it
+    /// never touches disk (and never takes the store's exclusive file lock)
+    /// per event.
+    by_id: Arc<RwLock<HashMap<String, DeviceRecord>>>,
     last_seen: Arc<RwLock<LastSeenState>>,
     revocations: broadcast::Sender<String>,
+    /// Per-device count of live SSE/WS streams currently open for that device
+    /// principal. The first-party push notifier reads this to suppress Alert
+    /// pushes to a device that is already watching events in-app (D-N1 local
+    /// rewrite is moot when the app is foregrounded and streaming).
+    active_streams: Arc<Mutex<HashMap<String, u32>>>,
+}
+
+/// RAII guard returned by [`DeviceRegistry::stream_opened`]. Increments the
+/// device's active-stream count on creation and decrements it on `Drop`, so a
+/// stream handler simply holds the guard for the connection's lifetime and the
+/// count self-heals on disconnect, panic, or task cancellation.
+pub struct StreamGuard {
+    device_id: String,
+    active_streams: Arc<Mutex<HashMap<String, u32>>>,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.active_streams.lock()
+            && let Some(count) = map.get_mut(&self.device_id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(&self.device_id);
+            }
+        }
+    }
 }
 
 impl DeviceRegistry {
@@ -73,8 +106,10 @@ impl DeviceRegistry {
         let store = Arc::new(store);
         let records = store.list()?;
         let mut by_hash = HashMap::with_capacity(records.len());
+        let mut by_id = HashMap::with_capacity(records.len());
         for record in &records {
             by_hash.insert(record.token_hash.clone(), index_entry(record));
+            by_id.insert(record.device_id.clone(), record.clone());
         }
 
         let (tx, _rx) = broadcast::channel(REVOCATION_CHANNEL_CAPACITY);
@@ -82,24 +117,60 @@ impl DeviceRegistry {
         Ok(Self {
             store,
             by_hash: Arc::new(RwLock::new(by_hash)),
+            by_id: Arc::new(RwLock::new(by_id)),
             last_seen: Arc::new(RwLock::new(LastSeenState {
                 pending: HashMap::new(),
                 last_flush: HashMap::new(),
             })),
             revocations: tx,
+            active_streams: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    /// Re-read a single device from the store and refresh its index entry.
+    /// Read-only handle to the backing store, so runtime consumers (e.g. the
+    /// first-party push notifier) can list devices and prune stale push
+    /// registrations without reaching around the registry.
+    pub fn store(&self) -> &DeviceStore {
+        &self.store
+    }
+
+    /// Re-read a single device from the store and refresh its index entries.
     /// Callers should invoke this after any store mutation that changes a
-    /// device's token/scopes/revocation state (insert/rotate/revoke).
+    /// device's token/scopes/revocation state (insert/rotate/revoke) *or* its
+    /// push/live-activity registrations, so the notifier's [`snapshot`] never
+    /// serves a stale (or revoked) push registration.
+    ///
+    /// [`snapshot`]: DeviceRegistry::snapshot
     pub async fn refresh(&self, device_id: &str) -> Result<(), DeviceStoreError> {
-        let mut by_hash = self.by_hash.write().await;
-        by_hash.retain(|_, entry| entry.device_id != device_id);
-        if let Some(record) = self.store.get(device_id)? {
-            by_hash.insert(record.token_hash.clone(), index_entry(&record));
+        let record = self.store.get(device_id)?;
+        {
+            let mut by_hash = self.by_hash.write().await;
+            by_hash.retain(|_, entry| entry.device_id != device_id);
+            if let Some(record) = &record {
+                by_hash.insert(record.token_hash.clone(), index_entry(record));
+            }
+        }
+        {
+            let mut by_id = self.by_id.write().await;
+            match &record {
+                Some(record) => {
+                    by_id.insert(device_id.to_string(), record.clone());
+                }
+                None => {
+                    by_id.remove(device_id);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Cloned snapshot of every device record currently in the in-memory
+    /// index. Used by the first-party push notifier so its per-SSE-event
+    /// device scan never does file I/O or takes the store's exclusive file
+    /// lock. The index is refreshed on every store mutation, so this reflects
+    /// registration/revocation changes without reading disk.
+    pub async fn snapshot(&self) -> Vec<DeviceRecord> {
+        self.by_id.read().await.values().cloned().collect()
     }
 
     /// Authenticate a raw bearer token. Hashes it, looks the hash up in the
@@ -189,6 +260,30 @@ impl DeviceRegistry {
     /// disconnect when they see their own `device_id`.
     pub fn subscribe_revocations(&self) -> broadcast::Receiver<String> {
         self.revocations.subscribe()
+    }
+
+    /// Record that a device principal has opened a live SSE/WS stream. Returns
+    /// a [`StreamGuard`] the handler must hold for the connection's lifetime;
+    /// dropping it decrements the count. While the count is non-zero the push
+    /// notifier suppresses Alert pushes to this device (it is watching in-app).
+    pub fn stream_opened(&self, device_id: &str) -> StreamGuard {
+        if let Ok(mut map) = self.active_streams.lock() {
+            *map.entry(device_id.to_string()).or_insert(0) += 1;
+        }
+        StreamGuard {
+            device_id: device_id.to_string(),
+            active_streams: Arc::clone(&self.active_streams),
+        }
+    }
+
+    /// True if `device_id` currently has at least one live SSE/WS stream open.
+    /// Read by the push notifier to decide Alert-push suppression (Live
+    /// Activity updates are never suppressed).
+    pub fn has_active_stream(&self, device_id: &str) -> bool {
+        self.active_streams
+            .lock()
+            .map(|map| map.get(device_id).is_some_and(|&c| c > 0))
+            .unwrap_or(false)
     }
 
     /// Find devices whose `last_seen_at` is older than `days` and are not
@@ -375,6 +470,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_guard_tracks_and_releases_active_streams() {
+        let (registry, _store, _dir) = test_registry().await;
+        assert!(!registry.has_active_stream("dev-1"));
+
+        let g1 = registry.stream_opened("dev-1");
+        assert!(registry.has_active_stream("dev-1"));
+
+        // A second concurrent stream keeps it active until both drop.
+        let g2 = registry.stream_opened("dev-1");
+        assert!(registry.has_active_stream("dev-1"));
+        drop(g1);
+        assert!(registry.has_active_stream("dev-1"));
+        drop(g2);
+        assert!(!registry.has_active_stream("dev-1"));
+
+        // Distinct devices are tracked independently.
+        let g3 = registry.stream_opened("dev-2");
+        assert!(registry.has_active_stream("dev-2"));
+        assert!(!registry.has_active_stream("dev-1"));
+        drop(g3);
+        assert!(!registry.has_active_stream("dev-2"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_reflects_store_mutations_after_refresh() {
+        let (registry, store, _dir) = test_registry().await;
+        assert!(registry.snapshot().await.is_empty());
+
+        let (record, _token) = store
+            .insert("Phone".to_string(), DevicePlatform::Ios, vec![], None)
+            .unwrap();
+        // Not visible until refreshed (snapshot is the in-memory index).
+        assert!(registry.snapshot().await.is_empty());
+        registry.refresh(&record.device_id).await.unwrap();
+
+        let snap = registry.snapshot().await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].device_id, record.device_id);
+        assert!(snap[0].apns.is_none());
+
+        // A push registration shows up in the snapshot after refresh.
+        store
+            .set_push(
+                &record.device_id,
+                "apns-tok".to_string(),
+                "production".to_string(),
+            )
+            .unwrap();
+        registry.refresh(&record.device_id).await.unwrap();
+        let snap = registry.snapshot().await;
+        assert_eq!(
+            snap[0].apns.as_ref().map(|a| a.device_token.as_str()),
+            Some("apns-tok")
+        );
+
+        // Revocation is reflected too.
+        registry.revoke(&record.device_id).await.unwrap();
+        let snap = registry.snapshot().await;
+        assert_eq!(snap.len(), 1);
+        assert!(snap[0].revoked_at.is_some());
+        assert!(snap[0].apns.is_none(), "revoke clears push state");
+    }
+
+    #[tokio::test]
     async fn sweep_inactive_finds_stale_devices() {
         let (registry, _store, _dir) = test_registry().await;
         let stale = DeviceRecord {
@@ -388,6 +547,8 @@ mod tests {
             scopes: vec![],
             pubkey: None,
             apns: None,
+            live_activities: std::collections::BTreeMap::new(),
+            live_activity_start_token: None,
             revoked_at: None,
             expires_at: None,
         };

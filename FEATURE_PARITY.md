@@ -443,16 +443,16 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 
 | Feature | OpenClaw | ThinClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
-| iOS app (SwiftUI) | ✅ | 🚧 | P1 | In development — native SwiftUI app at `apps/ios/` (Tuist workspace scaffolded); milestones M1–M5 in `docs/MOBILE_APP.md` |
+| iOS app (SwiftUI) | ✅ | 🚧 | P1 | M1 client layers landed + unit-tested (all 7 SPM packages pass `swift test` on macOS, no simulator): SSE transport + `GatewaySession`/reconcile, pairing-payload parse, Secure-Enclave keypair, SPKI pinning + D-X2 connection policy, Keychain credentials, generated `ThinClawAPI` REST client. Feature-layer UX wiring (onboarding/chat screens) still stubbed; no camera scanner, Tuist/`xcodebuild` UI build, or simulator/real-device E2E yet. Milestones M1–M5 in `docs/MOBILE_APP.md` |
 | Android app (Kotlin) | ✅ | 🚫 | - | Out of scope |
 | Apple Watch companion | ✅ | 🚧 | P2 | Planned (milestone M4): actionable approvals + dictated prompts via WatchConnectivity relay, status complication |
-| Gateway WebSocket client | ✅ | 🚧 | P2 | Mobile client is SSE-primary with WS available behind the same transport protocol; streaming layer scaffolded in `apps/ios` |
+| Gateway WebSocket client | ✅ | 🚧 | P2 | Mobile client is SSE-primary; the `ThinClawTransport` streaming layer (`GatewaySession`/`GatewayStream`, reconnect + watchdog, per-thread event routing) is implemented and tested over SSE. WS remains available on the gateway but the mobile client has no dedicated WS transport yet |
 | Camera/photo access | ✅ | 🚫 | - | Post-M5 candidate |
 | Voice input | ✅ | 🚫 | - | Watch dictation arrives with M4; broader voice input later |
 | Push-to-talk | ✅ | 🚫 | - | |
 | Location sharing | ✅ | 🚫 | - | |
 | Node pairing | ✅ | ✅ | P1 | Backend device identity (milestone B1) landed: QR pairing issues per-device, revocable, scoped `tcd_` tokens over a pinned-TLS or tailnet gateway listener; see `docs/MOBILE_SECURITY.md` and `docs/MOBILE_APP.md` |
-| APNs push notifications | ✅ | 🚧 | P2 | Backend APNs registration/delivery pipeline tracked above as complete (live Apple smoke still credential-gated); first-party device push with content-free payloads + Live Activity planned (B2/M2) |
+| APNs push notifications | ✅ | 🚧 | P2 | First-party device push landed (B2): content-free policy (`push_policy`) + notifier (`first_party_push.rs`) reusing `ApnsPusher`, device-linked registration (`PUT/DELETE /api/devices/me/push`, `/live-activity/{id}`, `/live-activity-start-token`), live-stream suppression, throttled Live Activity, and prune-on-410. Off without APNs config; mock-tested only — real Apple/TestFlight delivery still credential-gated. Client-side NSE rewrite is M2 |
 | Share to OpenClaw (iOS) | ✅ | 🚫 | - | iOS share sheet integration; post-M5 candidate |
 | Background listening toggle | ✅ | 🚫 | - | iOS background audio |
 

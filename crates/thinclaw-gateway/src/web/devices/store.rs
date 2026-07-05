@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::types::{DevicePlatform, DeviceRecord, DeviceScope};
+use super::types::{
+    DeviceApnsRegistration, DeviceLiveActivityKind, DeviceLiveActivityToken, DevicePlatform,
+    DeviceRecord, DeviceScope, MAX_LIVE_ACTIVITIES_PER_DEVICE,
+};
 
 /// Prefix registered in the `LeakDetector` scrub patterns (D-T1, D-N/logging
 /// hygiene). Device tokens are `tcd_` + base64url(32 random bytes).
@@ -35,6 +38,9 @@ pub enum DeviceStoreError {
 
     #[error("device not found: {0}")]
     NotFound(String),
+
+    #[error("device revoked: {0}")]
+    Revoked(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -213,6 +219,8 @@ impl DeviceStore {
             scopes,
             pubkey,
             apns: None,
+            live_activities: std::collections::BTreeMap::new(),
+            live_activity_start_token: None,
             revoked_at: None,
             expires_at: None,
         };
@@ -244,7 +252,13 @@ impl DeviceStore {
         Ok(updated)
     }
 
-    /// Mark a device revoked (sets `revoked_at`; idempotent).
+    /// Mark a device revoked (sets `revoked_at`; idempotent). Also clears all
+    /// push + Live Activity registrations in the *same* locked write, so a
+    /// revoked device's stale tokens can never be pushed to (D-N /
+    /// `docs/MOBILE_SECURITY.md` §8 hardening item 5 — "APNs registration
+    /// deletion on revoke"). Clearing is unconditional (not gated on the
+    /// idempotency guard) so a re-revoke still guarantees no push state
+    /// lingers.
     pub fn revoke(&self, device_id: &str) -> Result<DeviceRecord, DeviceStoreError> {
         let (mut file, mut data) = self.read_locked()?;
         let now = now_iso();
@@ -256,6 +270,9 @@ impl DeviceStore {
         if record.revoked_at.is_none() {
             record.revoked_at = Some(now);
         }
+        record.apns = None;
+        record.live_activities.clear();
+        record.live_activity_start_token = None;
         let updated = record.clone();
         self.write_locked(&mut file, &data)?;
         FileExt::unlock(&file)?;
@@ -279,6 +296,170 @@ impl DeviceStore {
         self.write_locked(&mut file, &data)?;
         FileExt::unlock(&file)?;
         Ok((updated, issued.token))
+    }
+
+    /// Register (or replace) the device's APNs push token. Returns the
+    /// updated record. `NotFound` if the id does not exist; `Revoked` if the
+    /// device has been revoked — a revoked device must never be able to
+    /// re-attach a push token (D-N, `docs/MOBILE_SECURITY.md` §8 item 5), and
+    /// the check runs inside the same locked read-modify-write so it cannot
+    /// race a concurrent `revoke`.
+    pub fn set_push(
+        &self,
+        device_id: &str,
+        device_token: String,
+        environment: String,
+    ) -> Result<DeviceRecord, DeviceStoreError> {
+        let (mut file, mut data) = self.read_locked()?;
+        let now = now_iso();
+        let record = data
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
+            .ok_or_else(|| DeviceStoreError::NotFound(device_id.to_string()))?;
+        if record.revoked_at.is_some() {
+            return Err(DeviceStoreError::Revoked(device_id.to_string()));
+        }
+        record.apns = Some(DeviceApnsRegistration {
+            device_token,
+            environment,
+            updated_at: now,
+        });
+        let updated = record.clone();
+        self.write_locked(&mut file, &data)?;
+        FileExt::unlock(&file)?;
+        Ok(updated)
+    }
+
+    /// Clear the device's APNs push token. Idempotent (clearing an unset
+    /// registration is a no-op that still succeeds).
+    pub fn clear_push(&self, device_id: &str) -> Result<DeviceRecord, DeviceStoreError> {
+        let (mut file, mut data) = self.read_locked()?;
+        let record = data
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
+            .ok_or_else(|| DeviceStoreError::NotFound(device_id.to_string()))?;
+        record.apns = None;
+        let updated = record.clone();
+        self.write_locked(&mut file, &data)?;
+        FileExt::unlock(&file)?;
+        Ok(updated)
+    }
+
+    /// Register (or replace) the Live Activity update token for `activity_id`.
+    /// When the per-device cap ([`MAX_LIVE_ACTIVITIES_PER_DEVICE`]) would be
+    /// exceeded by a *new* activity, the oldest entry (by `updated_at`, then
+    /// `activity_id` for a stable tiebreak) is evicted first. Replacing an
+    /// existing `activity_id` never evicts.
+    pub fn set_live_activity(
+        &self,
+        device_id: &str,
+        activity_id: &str,
+        push_token: String,
+        kind: DeviceLiveActivityKind,
+    ) -> Result<DeviceRecord, DeviceStoreError> {
+        let (mut file, mut data) = self.read_locked()?;
+        let now = now_iso();
+        let record = data
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
+            .ok_or_else(|| DeviceStoreError::NotFound(device_id.to_string()))?;
+        if record.revoked_at.is_some() {
+            return Err(DeviceStoreError::Revoked(device_id.to_string()));
+        }
+
+        let is_new = !record.live_activities.contains_key(activity_id);
+        if is_new && record.live_activities.len() >= MAX_LIVE_ACTIVITIES_PER_DEVICE {
+            // Evict the oldest by (updated_at, activity_id) so the write stays
+            // bounded. `updated_at` is RFC 3339, so lexical order == time
+            // order; the id tiebreak keeps eviction deterministic.
+            if let Some(oldest_id) = record
+                .live_activities
+                .iter()
+                .min_by(|a, b| {
+                    a.1.updated_at
+                        .cmp(&b.1.updated_at)
+                        .then_with(|| a.0.cmp(b.0))
+                })
+                .map(|(id, _)| id.clone())
+            {
+                record.live_activities.remove(&oldest_id);
+            }
+        }
+
+        record.live_activities.insert(
+            activity_id.to_string(),
+            DeviceLiveActivityToken {
+                push_token,
+                kind,
+                updated_at: now,
+            },
+        );
+        let updated = record.clone();
+        self.write_locked(&mut file, &data)?;
+        FileExt::unlock(&file)?;
+        Ok(updated)
+    }
+
+    /// Remove the Live Activity token for `activity_id`. Idempotent.
+    pub fn clear_live_activity(
+        &self,
+        device_id: &str,
+        activity_id: &str,
+    ) -> Result<DeviceRecord, DeviceStoreError> {
+        let (mut file, mut data) = self.read_locked()?;
+        let record = data
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
+            .ok_or_else(|| DeviceStoreError::NotFound(device_id.to_string()))?;
+        record.live_activities.remove(activity_id);
+        let updated = record.clone();
+        self.write_locked(&mut file, &data)?;
+        FileExt::unlock(&file)?;
+        Ok(updated)
+    }
+
+    /// Register (or replace) the device's Live Activity push-to-start token.
+    pub fn set_live_activity_start_token(
+        &self,
+        device_id: &str,
+        push_token: String,
+    ) -> Result<DeviceRecord, DeviceStoreError> {
+        let (mut file, mut data) = self.read_locked()?;
+        let record = data
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
+            .ok_or_else(|| DeviceStoreError::NotFound(device_id.to_string()))?;
+        if record.revoked_at.is_some() {
+            return Err(DeviceStoreError::Revoked(device_id.to_string()));
+        }
+        record.live_activity_start_token = Some(push_token);
+        let updated = record.clone();
+        self.write_locked(&mut file, &data)?;
+        FileExt::unlock(&file)?;
+        Ok(updated)
+    }
+
+    /// Clear the device's Live Activity push-to-start token. Idempotent.
+    pub fn clear_live_activity_start_token(
+        &self,
+        device_id: &str,
+    ) -> Result<DeviceRecord, DeviceStoreError> {
+        let (mut file, mut data) = self.read_locked()?;
+        let record = data
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
+            .ok_or_else(|| DeviceStoreError::NotFound(device_id.to_string()))?;
+        record.live_activity_start_token = None;
+        let updated = record.clone();
+        self.write_locked(&mut file, &data)?;
+        FileExt::unlock(&file)?;
+        Ok(updated)
     }
 
     /// Update `last_seen_at`. Used by the registry's debounced flush.
@@ -479,6 +660,326 @@ mod tests {
         assert_eq!(fetched.last_seen_at, "2099-01-01T00:00:00+00:00");
     }
 
+    fn insert_phone(store: &DeviceStore) -> DeviceRecord {
+        store
+            .insert(
+                "Phone".to_string(),
+                DevicePlatform::Ios,
+                DeviceScope::default_grant(),
+                None,
+            )
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn set_and_clear_push_round_trips() {
+        let (store, _dir) = test_store();
+        let record = insert_phone(&store);
+        assert!(record.apns.is_none());
+
+        let updated = store
+            .set_push(
+                &record.device_id,
+                "apns-device-token".to_string(),
+                "production".to_string(),
+            )
+            .unwrap();
+        let apns = updated.apns.expect("apns registration present");
+        assert_eq!(apns.device_token, "apns-device-token");
+        assert_eq!(apns.environment, "production");
+        assert!(!apns.updated_at.is_empty());
+
+        // Persisted and reloadable.
+        let fetched = store.get(&record.device_id).unwrap().unwrap();
+        assert_eq!(
+            fetched.apns.as_ref().map(|a| a.device_token.as_str()),
+            Some("apns-device-token")
+        );
+
+        let cleared = store.clear_push(&record.device_id).unwrap();
+        assert!(cleared.apns.is_none());
+        // Clearing again is a no-op that still succeeds (idempotent).
+        assert!(store.clear_push(&record.device_id).unwrap().apns.is_none());
+    }
+
+    #[test]
+    fn set_push_hash_at_rest_invariant_untouched() {
+        // Registering a push token must not disturb the token hashing
+        // invariants (no raw device *auth* token leaks; the stored hash is
+        // still hex(SHA-256(token))).
+        let (store, dir) = test_store();
+        let (record, token) = store
+            .insert(
+                "Phone".to_string(),
+                DevicePlatform::Ios,
+                DeviceScope::default_grant(),
+                None,
+            )
+            .unwrap();
+        store
+            .set_push(
+                &record.device_id,
+                "apns-device-token".to_string(),
+                "development".to_string(),
+            )
+            .unwrap();
+
+        let raw = fs::read_to_string(dir.path().join(DEVICES_FILE_NAME)).unwrap();
+        assert!(!raw.contains(&token), "raw auth token must never persist");
+        assert!(raw.contains(&hash_token(&token)));
+    }
+
+    #[test]
+    fn set_push_missing_device_errors() {
+        let (store, _dir) = test_store();
+        let err = store
+            .set_push("missing", "t".to_string(), "production".to_string())
+            .unwrap_err();
+        assert!(matches!(err, DeviceStoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn set_and_clear_live_activity_round_trips() {
+        let (store, _dir) = test_store();
+        let record = insert_phone(&store);
+
+        let updated = store
+            .set_live_activity(
+                &record.device_id,
+                "run-1",
+                "la-token-1".to_string(),
+                DeviceLiveActivityKind::AgentRun,
+            )
+            .unwrap();
+        let entry = updated.live_activities.get("run-1").unwrap();
+        assert_eq!(entry.push_token, "la-token-1");
+        assert_eq!(entry.kind, DeviceLiveActivityKind::AgentRun);
+
+        // Replacing the same activity_id updates in place, no duplicate.
+        let updated = store
+            .set_live_activity(
+                &record.device_id,
+                "run-1",
+                "la-token-2".to_string(),
+                DeviceLiveActivityKind::Job,
+            )
+            .unwrap();
+        assert_eq!(updated.live_activities.len(), 1);
+        assert_eq!(updated.live_activities["run-1"].push_token, "la-token-2");
+        assert_eq!(
+            updated.live_activities["run-1"].kind,
+            DeviceLiveActivityKind::Job
+        );
+
+        let cleared = store
+            .clear_live_activity(&record.device_id, "run-1")
+            .unwrap();
+        assert!(cleared.live_activities.is_empty());
+        // Idempotent clear.
+        assert!(
+            store
+                .clear_live_activity(&record.device_id, "run-1")
+                .unwrap()
+                .live_activities
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn live_activities_cap_evicts_oldest() {
+        let (store, _dir) = test_store();
+        let record = insert_phone(&store);
+
+        // Fill to exactly the cap, giving each a distinct (increasing)
+        // updated_at so eviction order is deterministic. We set updated_at by
+        // rewriting the file between inserts is overkill; instead rely on the
+        // store's own now_iso — which may collide within the same second — so
+        // manually normalize timestamps afterward to make "oldest" unambiguous.
+        for i in 0..MAX_LIVE_ACTIVITIES_PER_DEVICE {
+            store
+                .set_live_activity(
+                    &record.device_id,
+                    &format!("run-{i}"),
+                    format!("tok-{i}"),
+                    DeviceLiveActivityKind::AgentRun,
+                )
+                .unwrap();
+        }
+        // Rewrite updated_at so run-0 is unambiguously the oldest and the rest
+        // strictly increase.
+        let raw_path = _dir.path().join(DEVICES_FILE_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&raw_path).unwrap()).unwrap();
+        for i in 0..MAX_LIVE_ACTIVITIES_PER_DEVICE {
+            value["devices"][0]["live_activities"][format!("run-{i}")]["updated_at"] =
+                serde_json::json!(format!("2024-01-01T00:00:{:02}+00:00", i));
+        }
+        fs::write(&raw_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        assert_eq!(
+            store
+                .get(&record.device_id)
+                .unwrap()
+                .unwrap()
+                .live_activities
+                .len(),
+            MAX_LIVE_ACTIVITIES_PER_DEVICE
+        );
+
+        // One more *new* activity evicts the oldest (run-0) and keeps the cap.
+        let updated = store
+            .set_live_activity(
+                &record.device_id,
+                "run-new",
+                "tok-new".to_string(),
+                DeviceLiveActivityKind::Job,
+            )
+            .unwrap();
+        assert_eq!(
+            updated.live_activities.len(),
+            MAX_LIVE_ACTIVITIES_PER_DEVICE
+        );
+        assert!(!updated.live_activities.contains_key("run-0"));
+        assert!(updated.live_activities.contains_key("run-new"));
+    }
+
+    #[test]
+    fn set_and_clear_live_activity_start_token_round_trips() {
+        let (store, _dir) = test_store();
+        let record = insert_phone(&store);
+
+        let updated = store
+            .set_live_activity_start_token(&record.device_id, "start-token".to_string())
+            .unwrap();
+        assert_eq!(
+            updated.live_activity_start_token.as_deref(),
+            Some("start-token")
+        );
+
+        let cleared = store
+            .clear_live_activity_start_token(&record.device_id)
+            .unwrap();
+        assert!(cleared.live_activity_start_token.is_none());
+    }
+
+    #[test]
+    fn revoke_clears_all_push_registrations_atomically() {
+        let (store, _dir) = test_store();
+        let record = insert_phone(&store);
+        store
+            .set_push(
+                &record.device_id,
+                "apns-device-token".to_string(),
+                "production".to_string(),
+            )
+            .unwrap();
+        store
+            .set_live_activity(
+                &record.device_id,
+                "run-1",
+                "la-token".to_string(),
+                DeviceLiveActivityKind::AgentRun,
+            )
+            .unwrap();
+        store
+            .set_live_activity_start_token(&record.device_id, "start-token".to_string())
+            .unwrap();
+
+        let revoked = store.revoke(&record.device_id).unwrap();
+        assert!(revoked.revoked_at.is_some());
+        assert!(revoked.apns.is_none());
+        assert!(revoked.live_activities.is_empty());
+        assert!(revoked.live_activity_start_token.is_none());
+
+        // Persisted, not just the returned copy.
+        let fetched = store.get(&record.device_id).unwrap().unwrap();
+        assert!(fetched.apns.is_none());
+        assert!(fetched.live_activities.is_empty());
+        assert!(fetched.live_activity_start_token.is_none());
+    }
+
+    #[test]
+    fn set_push_on_revoked_device_is_rejected() {
+        // R2: a revoked device must never be able to re-attach a push token.
+        let (store, _dir) = test_store();
+        let record = insert_phone(&store);
+        store.revoke(&record.device_id).unwrap();
+
+        let err = store
+            .set_push(
+                &record.device_id,
+                "apns-device-token".to_string(),
+                "production".to_string(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, DeviceStoreError::Revoked(_)));
+        // Nothing was persisted onto the revoked record.
+        let fetched = store.get(&record.device_id).unwrap().unwrap();
+        assert!(fetched.apns.is_none());
+    }
+
+    #[test]
+    fn set_live_activity_on_revoked_device_is_rejected() {
+        let (store, _dir) = test_store();
+        let record = insert_phone(&store);
+        store.revoke(&record.device_id).unwrap();
+
+        let err = store
+            .set_live_activity(
+                &record.device_id,
+                "run-1",
+                "la-token".to_string(),
+                DeviceLiveActivityKind::AgentRun,
+            )
+            .unwrap_err();
+        assert!(matches!(err, DeviceStoreError::Revoked(_)));
+        assert!(
+            store
+                .get(&record.device_id)
+                .unwrap()
+                .unwrap()
+                .live_activities
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn set_live_activity_start_token_on_revoked_device_is_rejected() {
+        let (store, _dir) = test_store();
+        let record = insert_phone(&store);
+        store.revoke(&record.device_id).unwrap();
+
+        let err = store
+            .set_live_activity_start_token(&record.device_id, "start-token".to_string())
+            .unwrap_err();
+        assert!(matches!(err, DeviceStoreError::Revoked(_)));
+        assert!(
+            store
+                .get(&record.device_id)
+                .unwrap()
+                .unwrap()
+                .live_activity_start_token
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn apns_field_reads_legacy_null_placeholder() {
+        // Older devices.json files may carry `"apns": null` (or omit it) from
+        // the B1 placeholder era. Both must still deserialize into `None`.
+        let (store, dir) = test_store();
+        let record = insert_phone(&store);
+        let raw_path = dir.path().join(DEVICES_FILE_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&raw_path).unwrap()).unwrap();
+        value["devices"][0]["apns"] = serde_json::Value::Null;
+        fs::write(&raw_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let fetched = store.get(&record.device_id).unwrap().unwrap();
+        assert!(fetched.apns.is_none());
+    }
+
     #[test]
     fn is_blocked_reflects_revocation_and_expiry() {
         let mut record = DeviceRecord {
@@ -492,6 +993,8 @@ mod tests {
             scopes: vec![],
             pubkey: None,
             apns: None,
+            live_activities: std::collections::BTreeMap::new(),
+            live_activity_start_token: None,
             revoked_at: None,
             expires_at: None,
         };

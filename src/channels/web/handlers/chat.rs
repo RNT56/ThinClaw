@@ -387,9 +387,21 @@ pub(crate) async fn chat_events_handler(
         .sse
         .subscribe_raw()
         .ok_or_else(too_many_chat_connections_error)?;
+    let device_id = device_ctx.map(|ext| ext.0.device_id);
+    // While a device principal is streaming events in-app, the first-party
+    // push notifier suppresses Alert pushes to it (D-N1). The guard is owned
+    // by the stream closure below, so the count decrements the moment the
+    // stream is dropped (client disconnect, revocation teardown, or task
+    // cancellation).
+    let stream_guard = device_id
+        .as_deref()
+        .map(|id| state.device_registry.stream_opened(id));
     let state_for_stream = Arc::clone(&state);
     let identity_for_stream = request_identity.clone();
     let stream = raw_stream.filter_map(move |event| {
+        // Keep the stream guard alive for the stream's lifetime; it is only
+        // dropped when this closure (owned by the stream) is dropped.
+        let _stream_guard = &stream_guard;
         let state = Arc::clone(&state_for_stream);
         let identity = identity_for_stream.clone();
         async move {
@@ -414,10 +426,7 @@ pub(crate) async fn chat_events_handler(
     // Subscribe synchronously *before* streaming so a revoke racing the
     // first poll is not missed. `take_until` ends the SSE stream when the
     // guard future resolves.
-    let revocation_guard = device_revocation_guard(
-        device_ctx.map(|ext| ext.0.device_id),
-        Arc::clone(&state.device_registry),
-    );
+    let revocation_guard = device_revocation_guard(device_id, Arc::clone(&state.device_registry));
     let stream = stream.take_until(revocation_guard);
 
     Ok((

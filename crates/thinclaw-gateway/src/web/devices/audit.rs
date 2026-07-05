@@ -40,6 +40,7 @@ pub enum DeviceAuditEvent {
     DeviceRevoked,
     DeviceAutoRevokedInactive,
     DevicePushTokenRegistered,
+    DevicePushTokenRemoved,
 }
 
 impl DeviceAuditEvent {
@@ -56,6 +57,7 @@ impl DeviceAuditEvent {
             DeviceAuditEvent::DeviceRevoked => "device.revoked",
             DeviceAuditEvent::DeviceAutoRevokedInactive => "device.auto_revoked_inactive",
             DeviceAuditEvent::DevicePushTokenRegistered => "device.push_token_registered",
+            DeviceAuditEvent::DevicePushTokenRemoved => "device.push_token_removed",
         }
     }
 }
@@ -220,6 +222,10 @@ mod tests {
         assert_eq!(
             DeviceAuditEvent::DevicePushTokenRegistered.as_str(),
             "device.push_token_registered"
+        );
+        assert_eq!(
+            DeviceAuditEvent::DevicePushTokenRemoved.as_str(),
+            "device.push_token_removed"
         );
     }
 

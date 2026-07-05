@@ -228,15 +228,72 @@ thinclaw://pair?d=<base64url(json)>
 4. ✅ **Landed.** Scope middleware returns identical 403 bodies for "no
    scope" and "unknown route" under a device principal (no route-existence
    leakage).
-5. 🚧 **Partially landed.** `DeviceRegistry::revoke` persists the revocation
-   and broadcasts the revoked `device_id` on a `tokio::broadcast` channel
-   (`subscribe_revocations`) built for live SSE/WS handlers to subscribe to;
-   no SSE/WS handler subscribes yet, so live connections are not yet torn
-   down synchronously on revoke. APNs registration/companion-token deletion
-   on revoke is not yet implemented.
+5. ✅ **Landed.** `DeviceRegistry::revoke` persists the revocation and
+   broadcasts the revoked `device_id` on a `tokio::broadcast` channel
+   (`subscribe_revocations`). Both the SSE (`/api/chat/events`) and WS
+   (`/api/chat/ws`) handlers now subscribe via `device_revocation_guard` and
+   tear down a live device-token connection synchronously the moment its
+   device is revoked (WS stops both forwarding and accepting frames). APNs
+   registration deletion on revoke is also implemented: `DeviceStore::revoke`
+   clears the device's APNs push registration, all per-activity Live Activity
+   tokens, and the push-to-start token in the same locked write, and the store
+   setters reject re-attaching any push token to a revoked device — so a
+   revoked device's stale tokens can never be pushed to.
 6. 📋 **Not yet wired.** `DeviceRegistry::sweep_inactive` implements the
    90-day-inactivity selection logic (unit-tested), but nothing schedules or
    calls it yet — there is no running daily auto-revoke sweep.
+
+## Client & push implementation status (M1 / B2)
+
+Annotates the decisions above against what the iOS client (`apps/ios/`) and the
+first-party push notifier actually implement today. **These are unit-tested
+Swift package layers, not yet an end-to-end app run** — the feature-layer wiring
+that composes them (onboarding/chat screens, camera QR scanner) is still stubbed
+and no simulator/real-device pairing flow has been exercised. See the
+[M1 caveat in `docs/MOBILE_APP.md`](MOBILE_APP.md#implementation-status).
+
+Phase 1 — iOS client security primitives (`ThinClawAuth`,
+`swift test`-covered on macOS, no simulator):
+
+- ✅ **D-P1 QR payload parse/validate.** `PairingPayload.parse` decodes the
+  `thinclaw://pair?d=…` link, rejects unknown versions and expired/at-expiry
+  payloads, and exposes the gateway URLs, SPKI fingerprint, instance id, and
+  one-time secret. *Not done:* the camera scanner UI and the
+  `POST /api/devices/pair/complete` call flow (the onboarding store method is a
+  stub); confirm-mode (`device_pairing.require_confirm`) is enforced
+  gateway-side but not yet surfaced in the client UX.
+- ✅ **D-P2 Secure-Enclave keypair.** `DeviceKeyPair.generate` creates a
+  non-exportable P-256 key in the Secure Enclave
+  (`kSecAttrTokenIDSecureEnclave`, `AfterFirstUnlockThisDeviceOnly`,
+  `.privateKeyUsage`) and transparently falls back to a software CryptoKit key
+  on the simulator, returning the public key as base64 SPKI for the pairing
+  body. Proof-of-possession is still not enforced (v2), matching the decision.
+- ✅ **D-X1/D-X2 SPKI pinning + connection policy.** `SPKIEncoder` rebuilds the
+  leaf SPKI DER, `SPKIFingerprint` computes bare unpadded base64url SHA-256 and
+  compares constant-time, and `PinnedSessionDelegate` enforces the pin over a
+  live `SecTrust` (bypassing chain validation only for the pinned anchor).
+  `ConnectionPolicy` implements the full D-X2 matrix purely (tailnet/loopback/
+  LAN/public × pinned/public-chain/plaintext), refusing plaintext to LAN/public
+  and never falling back from a pinned gateway to HTTP.
+- ✅ **D-K1/D-K2 Keychain credential storage.** `DeviceCredential` persists the
+  `tcd_` token via a `KeychainStoring` abstraction
+  (`SecItemKeychainStore`) and `DeviceToken.redacted` keeps token material out
+  of logs. *Not done:* the shared access group / App Group entitlement wiring is
+  authored in the target shells but unverified (no Tuist/`xcodebuild` build).
+
+Phase 2 — push privacy (B2, `thinclaw-gateway`/`thinclaw-channels`/root,
+Rust-tested):
+
+- ✅ **D-N1 content-free payload builder.** `push_policy` builds every alert as
+  a generic `aps.alert` (`mutable-content: 1`) plus an id-only `tc` dict; tests
+  assert no message text, tool name, or parameters ever serialize into the
+  payload. The runtime notifier carries the payload verbatim and never logs it.
+- ✅ **D-N2 Live Activity payloads.** Content-state carries only
+  `{phase, progress?, revision}` with a monotonic revision and a ≥15 s/activity
+  throttle; the tool name never rides in the state. Background wakes are bounded
+  by a per-device 3/hour budget.
+- 📋 **D-N3 per-category controls** and the Notification Service Extension
+  rewrite are client-side (M2), not yet implemented.
 
 ## v1 simplifications (explicit, each with an upgrade path)
 

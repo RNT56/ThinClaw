@@ -87,6 +87,13 @@ pub async fn handle_ws_connection(
     // still delivered; one guard drives the sender task (stops forwarding
     // events), the other drives the receiver loop (stops accepting frames).
     let device_id = device_ctx.as_ref().map(|d| d.device_id.clone());
+    // While a device principal has this socket open it is watching events
+    // in-app, so the first-party push notifier suppresses Alert pushes to it
+    // (D-N1). The guard is moved into the sender task and dropped when that
+    // task ends (client disconnect, revocation, or broadcast close).
+    let stream_guard = device_id
+        .as_deref()
+        .map(|id| state.device_registry.stream_opened(id));
     let sender_revocation = crate::channels::web::handlers::chat::device_revocation_guard(
         device_id.clone(),
         Arc::clone(&state.device_registry),
@@ -141,6 +148,8 @@ pub async fn handle_ws_connection(
 
     // Sender task: forward broadcast events + direct messages to WS client
     let sender_handle = tokio::spawn(async move {
+        // Held for the connection's lifetime; dropped when this task exits.
+        let _stream_guard = stream_guard;
         tokio::pin!(sender_revocation);
         loop {
             let msg = tokio::select! {

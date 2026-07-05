@@ -17,9 +17,13 @@
 //!   broadcast, last-seen debounce, inactivity sweep.
 //! - [`scopes`]: route -> required-scope precedence map.
 //! - [`audit`]: append-only `~/.thinclaw/device-audit.jsonl` writer.
+//! - [`push_policy`]: pure `SseEvent` -> content-free `PushDecision` mapping
+//!   (throttle, wake budget, Live Activity revisions), consumed by the runtime
+//!   first-party push notifier.
 
 pub mod audit;
 pub mod pairing;
+pub mod push_policy;
 pub mod registry;
 pub mod scopes;
 pub mod store;
@@ -30,13 +34,20 @@ pub use pairing::{
     ConsumeOutcome, CreatedPairing, DevicePairingError, DevicePairingStore, PAIRING_FAILED_LIMIT,
     PAIRING_FAILED_WINDOW_SECS, PAIRING_PENDING_MAX, PAIRING_PENDING_TTL_SECS, PendingPairView,
 };
-pub use registry::{DeviceAuth, DeviceRegistry};
+pub use push_policy::{
+    BACKGROUND_WAKE_BUDGET, BACKGROUND_WAKE_WINDOW_SECS, DevicePushState,
+    LIVE_ACTIVITY_MIN_INTERVAL_SECS, PushDecision, PushKind, decide, decide_background_wake,
+};
+pub use registry::{DeviceAuth, DeviceRegistry, StreamGuard};
 pub use scopes::required_scope;
 pub use store::{
     DEVICE_TOKEN_PREFIX, DeviceStore, DeviceStoreError, IssuedToken, hash_token, issue_token,
 };
 pub use types::{
-    DeviceInfo, DeviceListResponse, DevicePlatform, DeviceRecord, DeviceScope, PairCompleteRequest,
-    PairCompleteResponse, PairStartResponse, PendingPairInfo, PendingPairListResponse,
-    QrPairingPayload, RenameDeviceRequest, RotateTokenResponse,
+    DeviceApnsRegistration, DeviceInfo, DeviceListResponse, DeviceLiveActivityKind,
+    DeviceLiveActivityToken, DevicePlatform, DeviceRecord, DeviceScope,
+    MAX_LIVE_ACTIVITIES_PER_DEVICE, PairCompleteRequest, PairCompleteResponse, PairStartResponse,
+    PendingPairInfo, PendingPairListResponse, QrPairingPayload, RegisterLiveActivityRequest,
+    RegisterLiveActivityStartTokenRequest, RegisterPushRequest, RenameDeviceRequest,
+    RotateTokenResponse,
 };

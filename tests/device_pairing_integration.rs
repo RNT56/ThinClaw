@@ -404,6 +404,100 @@ async fn test_admin_revoke_invalidates_device_token() {
 }
 
 #[tokio::test]
+async fn test_device_token_registers_push_but_admin_token_is_forbidden() {
+    let (addr, _home, _state) = start_isolated_server().await;
+
+    let start_body = pair_start(addr).await;
+    let secret = start_body["qr_payload"]["sec"].as_str().unwrap();
+    let complete_resp = pair_complete(addr, secret, "My Phone").await;
+    assert_eq!(complete_resp.status(), 200);
+    let complete_body: serde_json::Value = complete_resp.json().await.unwrap();
+    let token = complete_body["token"].as_str().unwrap();
+
+    // Device token succeeds: PUT /api/devices/me/push.
+    let resp = client()
+        .put(format!("http://{addr}/api/devices/me/push"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "apns_token": "apns-device-token-abc",
+            "environment": "production",
+        }))
+        .send()
+        .await
+        .expect("device push register request failed");
+    assert_eq!(
+        resp.status(),
+        200,
+        "device token should register its own push token"
+    );
+
+    // The shared admin token reaches `/api/devices/me/push` (that prefix maps
+    // to `devices:self`, and the shared token bypasses scope enforcement),
+    // but it carries no `DeviceContext`, so the handler's own guard returns
+    // 403 — `/me` routes are device-scoped by design, never admin-usable.
+    let resp = client()
+        .put(format!("http://{addr}/api/devices/me/push"))
+        .header("Authorization", format!("Bearer {AUTH_TOKEN}"))
+        .json(&serde_json::json!({
+            "apns_token": "apns-device-token-abc",
+            "environment": "production",
+        }))
+        .send()
+        .await
+        .expect("admin push register request failed");
+    assert_eq!(
+        resp.status(),
+        403,
+        "shared admin token must not register a device's push token (no device principal)"
+    );
+}
+
+#[tokio::test]
+async fn test_admin_revoke_clears_registered_push_token() {
+    let (addr, home, _state) = start_isolated_server().await;
+
+    let start_body = pair_start(addr).await;
+    let secret = start_body["qr_payload"]["sec"].as_str().unwrap();
+    let complete_resp = pair_complete(addr, secret, "My Phone").await;
+    let complete_body: serde_json::Value = complete_resp.json().await.unwrap();
+    let token = complete_body["token"].as_str().unwrap();
+    let device_id = complete_body["device_id"].as_str().unwrap();
+
+    // Register a push token as the device.
+    let resp = client()
+        .put(format!("http://{addr}/api/devices/me/push"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "apns_token": "apns-device-token-abc",
+            "environment": "development",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Admin revoke.
+    let resp = client()
+        .post(format!("http://{addr}/api/devices/{device_id}/revoke"))
+        .header("Authorization", format!("Bearer {AUTH_TOKEN}"))
+        .send()
+        .await
+        .expect("admin revoke request failed");
+    assert_eq!(resp.status(), 200);
+
+    // The push registration must be gone (cleared atomically with the revoke
+    // write) — read it back through the store directly (same on-disk file the
+    // gateway's registry is backed by).
+    let store = DeviceStore::with_base_dir(home.path());
+    let record = store.get(device_id).unwrap().unwrap();
+    assert!(
+        record.apns.is_none(),
+        "revoke must clear the device's APNs registration"
+    );
+    assert!(record.revoked_at.is_some());
+}
+
+#[tokio::test]
 async fn test_repeated_pair_complete_with_garbage_secrets_locks_out() {
     let (addr, _home, _state) = start_isolated_server().await;
 

@@ -1274,6 +1274,27 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         sse_sender = Some(gw.state().sse.sender());
         gateway_state = Some(Arc::clone(gw.state()));
 
+        // First-party mobile push notifier (milestone B2): subscribe to the
+        // gateway SSE broadcast without consuming a client slot and deliver
+        // content-free APNs pushes to paired devices. Spawned only when APNs
+        // provider config is present in the environment; stays off otherwise.
+        match thinclaw::channels::first_party_push::apns_native_config_from_env() {
+            Ok(Some(apns_config)) => {
+                let notifier = thinclaw::channels::first_party_push::FirstPartyPushNotifier::new(
+                    Arc::clone(&gw.state().device_registry),
+                    Arc::new(thinclaw::channels::first_party_push::ApnsPushSender::new(
+                        apns_config,
+                    )),
+                );
+                let notifier_sender = gw.state().sse.sender();
+                tokio::spawn(async move { notifier.run(notifier_sender).await });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "First-party push notifier APNs config is invalid");
+            }
+        }
+
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
     }

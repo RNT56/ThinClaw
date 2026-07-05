@@ -280,27 +280,11 @@ fn voice_call_native_config_from_env() -> Result<Option<VoiceCallNativeConfig>, 
     }))
 }
 
+/// APNs provider config from the environment. Delegates to the shared helper
+/// in `thinclaw::channels::first_party_push` so the native APNs lifecycle
+/// channel here and the first-party push notifier read one identical config.
 fn apns_native_config_from_env() -> Result<Option<ApnsNativeConfig>, String> {
-    let Some(team_id) = env_value("APNS_TEAM_ID") else {
-        return Ok(None);
-    };
-    let Some(key_id) = env_value("APNS_KEY_ID") else {
-        return Ok(None);
-    };
-    let Some(bundle_id) = env_value("APNS_BUNDLE_ID") else {
-        return Ok(None);
-    };
-    let Some(private_key_pem) = env_value_or_file("APNS_PRIVATE_KEY", "APNS_PRIVATE_KEY_PATH")?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(ApnsNativeConfig {
-        team_id,
-        key_id,
-        bundle_id,
-        private_key_pem,
-        sandbox: env_bool("APNS_SANDBOX")?.unwrap_or(false),
-    }))
+    thinclaw::channels::first_party_push::apns_native_config_from_env()
 }
 
 fn browser_push_native_config_from_env() -> Result<Option<BrowserPushNativeConfig>, String> {
@@ -362,17 +346,6 @@ fn env_value_or_file(value_key: &str, path_key: &str) -> Result<Option<String>, 
     std::fs::read_to_string(&path)
         .map(|value| Some(value.replace("\\n", "\n")))
         .map_err(|error| format!("failed to read {path_key}={path}: {error}"))
-}
-
-fn env_bool(key: &str) -> Result<Option<bool>, String> {
-    let Some(value) = env_value(key) else {
-        return Ok(None);
-    };
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(Some(true)),
-        "0" | "false" | "no" | "off" => Ok(Some(false)),
-        _ => Err(format!("{key} must be true or false")),
-    }
 }
 
 mod async_main;
