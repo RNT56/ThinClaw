@@ -24,7 +24,9 @@ public actor InMemoryTranscriptStore: TranscriptStoring {
     }
 
     public func timeline(for thread: ThreadID) async throws -> [TimelineItem] {
-        timelines[thread] ?? []
+        // Sorted-by-timestamp on read, matching the GRDB store's contract so the
+        // two implementations are interchangeable (see the parity test suite).
+        (timelines[thread] ?? []).sorted { $0.timestamp < $1.timestamp }
     }
 
     public func replaceTimeline(_ items: [TimelineItem], for thread: ThreadID) async throws {
@@ -32,7 +34,16 @@ public actor InMemoryTranscriptStore: TranscriptStoring {
     }
 
     public func append(_ item: TimelineItem, to thread: ThreadID) async throws {
-        timelines[thread, default: []].append(item)
+        // Upsert by id: appending an item whose id already exists (e.g. a
+        // streaming row finalizing to its server id) replaces it, matching the
+        // GRDB store's `(thread_id, item_id)` upsert.
+        var items = timelines[thread] ?? []
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            items[index] = item
+        } else {
+            items.append(item)
+        }
+        timelines[thread] = items
     }
 
     public func enqueueOutbox(_ message: OutboxMessage) async throws {
@@ -40,7 +51,11 @@ public actor InMemoryTranscriptStore: TranscriptStoring {
     }
 
     public func outbox() async throws -> [OutboxMessage] {
-        outboxMessages.sorted { $0.queuedAt < $1.queuedAt }
+        // Match the GRDB store: order by queued_at, then id as a stable
+        // tie-breaker for same-instant enqueues (parity contract).
+        outboxMessages.sorted {
+            ($0.queuedAt, $0.id.uuidString) < ($1.queuedAt, $1.id.uuidString)
+        }
     }
 
     public func removeFromOutbox(_ id: UUID) async throws {

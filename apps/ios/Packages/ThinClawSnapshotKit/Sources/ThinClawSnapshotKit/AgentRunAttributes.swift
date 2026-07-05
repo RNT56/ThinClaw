@@ -16,7 +16,14 @@
     /// extension (which renders them) share one definition.
     public struct AgentRunAttributes: ActivityAttributes {
         public struct ContentState: Codable, Hashable {
-            public enum RunPhase: Codable, Hashable {
+            /// The backend's `push_policy` emits `phase` as a bare string
+            /// (`"thinking"`, `"runningTool"`, `"awaitingApproval"`, `"done"`,
+            /// `"failed"`), so this must be a `String`-raw-valued enum: the
+            /// implicit raw values match the wire exactly. A raw-value-less
+            /// enum would (de)serialize as `{"runningTool":{}}`, which does not
+            /// match what the gateway sends (see
+            /// `crates/thinclaw-gateway/src/web/devices/push_policy.rs`).
+            public enum RunPhase: String, Codable, Hashable {
                 case thinking
                 case runningTool
                 case awaitingApproval

@@ -3,36 +3,31 @@ import ThinClawCore
 import ThinClawDesign
 
 /// The streaming chat transcript for one thread: a flat list of
-/// `TimelineItem`s with the glass composer bar.
-@MainActor
-@Observable
-public final class ChatStore {
-    public private(set) var timeline: [TimelineItem] = []
-    public private(set) var connection: StatusPill.Status = .offline
-    public var draft: String = ""
-
-    public init() {}
-
-    /// M1: fold `AgentEvent`s (routed per-thread by the EventRouter) into
-    /// timeline items via `StreamChunkCoalescer`.
-    public func apply(_ event: AgentEvent) {}
-
-    /// M1: POST /api/chat/send, or enqueue to the outbox while offline.
-    public func send() async {}
-}
-
+/// `TimelineItem`s, a slim offline/degraded banner with manual retry, and the
+/// glass composer bar with a 429 cooldown.
 public struct ChatScreen: View {
     @State private var store: ChatStore
 
-    public init(store: ChatStore = ChatStore()) {
+    public init(store: ChatStore) {
         self._store = State(initialValue: store)
     }
 
     public var body: some View {
         VStack(spacing: 0) {
-            List(store.timeline) { item in
-                TimelineRow(item: item)
+            if store.isOffline {
+                offlineBanner
+            }
+
+            List {
+                if store.hasMoreHistory {
+                    historyLoader
+                }
+                ForEach(store.timeline) { item in
+                    TimelineRow(item: item) {
+                        Task { await store.retry(rowID: item.id) }
+                    }
                     .listRowSeparator(.hidden)
+                }
             }
             .listStyle(.plain)
 
@@ -43,21 +38,58 @@ public struct ChatScreen: View {
                 StatusPill(store.connection)
             }
         }
+        .task { await store.open() }
+        .onDisappear { store.close() }
+    }
+
+    private var offlineBanner: some View {
+        HStack(spacing: ThinClawSpacing.sm) {
+            Image(systemName: "wifi.slash")
+            Text("Offline — messages will send when reconnected")
+                .font(ThinClawTypography.caption)
+            Spacer()
+            Button("Retry") {
+                Task { await store.retryConnection() }
+            }
+            .font(ThinClawTypography.caption)
+        }
+        .padding(.horizontal, ThinClawSpacing.md)
+        .padding(.vertical, ThinClawSpacing.sm)
+        .frame(maxWidth: .infinity)
+        .background(.orange.opacity(0.15))
+    }
+
+    private var historyLoader: some View {
+        HStack {
+            Spacer()
+            ProgressView()
+                .task { await store.loadOlderHistory() }
+            Spacer()
+        }
+        .listRowSeparator(.hidden)
     }
 
     private var composer: some View {
-        HStack(spacing: ThinClawSpacing.sm) {
-            TextField("Message ThinClaw…", text: $store.draft, axis: .vertical)
-                .lineLimit(1...5)
-                .textFieldStyle(.plain)
-                .padding(ThinClawSpacing.md)
-            Button {
-                Task { await store.send() }
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title2)
+        VStack(spacing: ThinClawSpacing.xs) {
+            if store.cooldownRemaining > 0 {
+                Text("Rate limited — try again in \(Int(store.cooldownRemaining.rounded(.up)))s")
+                    .font(ThinClawTypography.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .disabled(store.draft.isEmpty)
+            HStack(spacing: ThinClawSpacing.sm) {
+                TextField("Message ThinClaw…", text: $store.draft, axis: .vertical)
+                    .lineLimit(1...5)
+                    .textFieldStyle(.plain)
+                    .padding(ThinClawSpacing.md)
+                Button {
+                    Task { await store.send() }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                }
+                .disabled(store.isSendDisabled)
+            }
         }
         .padding(.horizontal, ThinClawSpacing.md)
         .padding(.vertical, ThinClawSpacing.sm)
@@ -66,9 +98,11 @@ public struct ChatScreen: View {
     }
 }
 
-/// Renders one timeline item by kind. Grows with M1.
+/// Renders one timeline item by kind.
 struct TimelineRow: View {
     let item: TimelineItem
+    /// Invoked when a failure row is tapped (retry). No-op for other kinds.
+    var onRetry: () -> Void = {}
 
     var body: some View {
         switch item.kind {
@@ -91,8 +125,11 @@ struct TimelineRow: View {
             Text("Approval requested: \(request.toolName)")
                 .font(ThinClawTypography.caption)
         case .failure(let message):
-            Label(message, systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.red)
+            Button(action: onRetry) {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
         }
     }
 }

@@ -2,24 +2,13 @@ import SwiftUI
 import ThinClawCore
 import ThinClawDesign
 
-/// Thread list: the assistant thread plus side conversations, cached
-/// locally for instant offline first paint.
-@MainActor
-@Observable
-public final class SessionsStore {
-    public private(set) var threads: [ChatThread] = []
-
-    public init() {}
-
-    /// M1: hydrate from ThinClawPersistence, refresh from GET /api/chat/threads.
-    public func refresh() async {}
-}
-
+/// Thread list: the assistant thread plus side conversations, cached locally
+/// for an instant offline first paint, refreshed from the gateway.
 public struct SessionsScreen: View {
     @State private var store: SessionsStore
     private let onSelect: (ThreadID) -> Void
 
-    public init(store: SessionsStore = SessionsStore(), onSelect: @escaping (ThreadID) -> Void = { _ in }) {
+    public init(store: SessionsStore, onSelect: @escaping (ThreadID) -> Void = { _ in }) {
         self._store = State(initialValue: store)
         self.onSelect = onSelect
     }
@@ -43,6 +32,6 @@ public struct SessionsScreen: View {
         }
         .navigationTitle("Sessions")
         .refreshable { await store.refresh() }
-        .task { await store.refresh() }
+        .task { await store.load() }
     }
 }

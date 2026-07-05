@@ -28,6 +28,10 @@ let package = Package(
                 .product(name: "ThinClawAuth", package: "ThinClawAuth"),
                 .product(name: "ThinClawAPI", package: "ThinClawAPI"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "FeatureOnboardingTests",
+            dependencies: ["FeatureOnboarding"]
+        ),
     ]
 )

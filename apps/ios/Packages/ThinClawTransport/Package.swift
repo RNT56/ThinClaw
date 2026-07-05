@@ -1,12 +1,16 @@
 // swift-tools-version: 6.2
 
-// ThinClawTransport — SSE parsing, event decoding, and reconnect policy for
-// the gateway event stream (`/api/chat/events`).
+// ThinClawTransport — SSE parsing, event decoding, reconnect policy, the live
+// event stream, and the gateway session for the mobile client.
 //
-// Dependency direction: Transport -> Core (and nothing else). ThinClawCore is
-// the dependency-free leaf that owns `AgentEvent`; Transport turns bytes into
-// those events. Pure logic, no UI imports, so it declares macOS as well and
-// tests run with plain `swift test` on a Mac host — no simulator, no network.
+// Dependency direction: Transport -> Core (domain models) and Transport ->
+// ThinClawAPI (generated REST client). Both are lower layers: ThinClawCore is
+// the pure leaf that owns `AgentEvent` and the domain result types; ThinClawAPI
+// owns the typed REST surface. Transport is where bytes become events and where
+// the REST client + event stream are composed into a session — so it must sit
+// above both. Neither Core nor API depends back on Transport, so this stays
+// acyclic. Pure logic, no UI imports, so it declares macOS as well and tests
+// run with plain `swift test` on a Mac host — no simulator, no network.
 import PackageDescription
 
 let package = Package(
@@ -19,13 +23,15 @@ let package = Package(
         .library(name: "ThinClawTransport", targets: ["ThinClawTransport"])
     ],
     dependencies: [
-        .package(path: "../ThinClawCore")
+        .package(path: "../ThinClawCore"),
+        .package(path: "../ThinClawAPI"),
     ],
     targets: [
         .target(
             name: "ThinClawTransport",
             dependencies: [
-                .product(name: "ThinClawCore", package: "ThinClawCore")
+                .product(name: "ThinClawCore", package: "ThinClawCore"),
+                .product(name: "ThinClawAPI", package: "ThinClawAPI"),
             ]
         ),
         .testTarget(

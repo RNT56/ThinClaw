@@ -1,0 +1,74 @@
+# swift-openapi-generator config for the ThinClaw gateway client.
+#
+# Generation is driven by scripts/generate-api.sh (NOT the SwiftPM build
+# plugin): the output under ../Sources/ThinClawAPI/Generated/ is committed so
+# iOS CI never needs the Rust toolchain. Regenerate with generate-api.sh and
+# commit; scripts/check-generated-drift.sh enforces freshness.
+#
+# We emit both the DTO types and the async Client for the REST surface.
+generate:
+  - types
+  - client
+accessModifier: public
+namingStrategy: idiomatic
+
+# --- Filter: REST endpoints only -------------------------------------------
+# The generator filter is INCLUSIVE (a union of the matched operations, plus
+# the dependency-closure of the schemas those operations reference). There is
+# no "exclude" primitive, so we enumerate every REST operationId we want and
+# deliberately OMIT the two streaming endpoints:
+#
+#   - chat_events_sse  (GET /api/chat/events, text/event-stream)
+#   - chat_ws          (GET /api/chat/ws, WebSocket upgrade / 101)
+#
+# Those two are owned by the hand-rolled ThinClawTransport package, which
+# parses SSE / drives the socket directly. swift-openapi-generator has no
+# streaming-body support for text/event-stream, so pulling them in here would
+# either fail or emit a client method that cannot represent the stream. Keeping
+# them out of the generated surface is the contract, not a workaround.
+#
+# We ALSO deliberately omit the six device push-token endpoints, even though
+# they are plain REST and already present in the vendored spec:
+#
+#   - devices_me_push_register_handler          (PUT    /api/devices/me/push)
+#   - devices_me_push_remove_handler            (DELETE /api/devices/me/push)
+#   - devices_me_live_activity_start_token_register_handler
+#                                               (PUT    .../live-activity-start-token)
+#   - devices_me_live_activity_start_token_remove_handler
+#                                               (DELETE .../live-activity-start-token)
+#   - devices_me_live_activity_register_handler (PUT    .../live-activity/{activity_id})
+#   - devices_me_live_activity_remove_handler   (DELETE .../live-activity/{activity_id})
+#
+# Client-side push/Live-Activity token registration is milestone M2. The spec
+# itself must stay current (the vendored openapi.json carries these paths so
+# check-generated-drift.sh passes), but generating client methods the app has
+# no caller for yet would ship dead surface. Add these operationIds here when
+# M2 wires up APNs registration, not before.
+#
+# When a REST endpoint is added to the gateway, add its operationId here and
+# rerun generate-api.sh; new endpoints are intentionally opt-in so a streaming
+# path can never leak into the typed client by default.
+filter:
+  operations:
+    - chat_abort_handler
+    - chat_approval_handler
+    - chat_approvals_handler
+    - chat_delete_thread_handler
+    - chat_history_handler
+    - chat_new_thread_handler
+    - chat_send_handler
+    - chat_threads_handler
+    - devices_list_handler
+    - devices_me_handler
+    - devices_pair_approve_handler
+    - devices_pair_complete_handler
+    - devices_pair_pending_handler
+    - devices_pair_start_handler
+    - devices_rename_handler
+    - devices_revoke_handler
+    - devices_rotate_handler
+    - gateway_status_handler
+    - health_handler
+    - jobs_detail_handler
+    - jobs_list_handler
+    - jobs_summary_handler

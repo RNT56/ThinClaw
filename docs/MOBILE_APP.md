@@ -149,15 +149,17 @@ layout, toolchain setup (mise + Tuist), and testing guide. Summary:
 | Piece | Status |
 |---|---|
 | OpenAPI baseline (`openapi` feature, export-openapi, committed spec, CI check) | ✅ landed (R0) |
-| `apps/ios/` scaffold (Tuist workspace, packages, SSE parser + tests, CI) | ✅ landed (R0); Tuist manifests authored, first `tuist generate` verification pending |
+| `apps/ios/` scaffold (Tuist workspace, packages, SSE parser + tests, CI) | ✅ landed (R0); `tuist generate` verified locally and the whole `ThinClaw` app target builds for the iOS 26 simulator (`xcodebuild`) |
 | Generated Swift client from the committed spec | ✅ landed (M1); `ThinClawAPI` REST client generated + committed, `swift test` passes |
 | Device identity layer (pairing, tokens, scopes, TLS listener) | ✅ landed (B1) |
 | `GET /api/chat/approvals` pull endpoint | ✅ landed (B1) |
 | First-party push + Live Activity emitter | ✅ landed (B2); content-free policy + notifier + `PUT/DELETE /api/devices/me/push`, `/live-activity/{id}`, `/live-activity-start-token`. Credential-gated (off without APNs config); mock-tested only, real Apple/TestFlight delivery pending |
 | iOS client layers (transport, pairing, pinning, chat session) | ✅ landed (M1) as tested SPM packages — see the M1 caveat below |
-| iOS app UX wiring (onboarding + chat screens) | 🚧 in progress (M1); building blocks land, feature stores are still stubs |
+| iOS app UX wiring — onboarding | ✅ landed (M1); `OnboardingStore` state machine + VisionKit QR scanner + manual path + app credential gating/unpair seam, store unit-tested on the iOS 26 simulator, whole app target compiles |
+| iOS app UX wiring — chat + sessions | ✅ landed (M1); `ChatStore` folds live events through the pure `ChatTimelineReducer` (stream→final swap, tool rows, thread routing, out-of-order tolerance), optimistic send with an offline outbox, 429 composer cooldown, failure-row retry, history paging, and post-reconnect reconcile; `SessionsStore` is cache-first then refreshes via `threads()`; Sessions selection routes into the Chat tab. Pure logic (`ChatTimelineReducer`, `ComposerCooldown`, `SessionsListModel`) unit-tested on macOS; whole app target builds for the iOS 26 simulator |
+| iOS transcript persistence (`ThinClawPersistence`) | ✅ landed (M1); GRDB 7.11.1 WAL `DatabasePool`, migration v1 (`threads`, `timeline_items` keyed `(thread_id,item_id)`, `outbox`), app-process-only, db dir `NSFileProtectionCompleteUntilFirstUserAuthentication` (iOS). `InMemoryTranscriptStore` kept; the `TranscriptStoring` contract is parameterized over both stores on macOS |
 | mDNS advertisement | 📋 planned (B3) |
-| iOS app feature milestones | 🚧 M1 partial; M2–M5 planned |
+| iOS app feature milestones | 🚧 M1 core wired + building (onboarding, chat, sessions, persistence); remaining M1 = live-gateway/real-device E2E + TestFlight. M2–M5 planned |
 
 **M1 caveat (verified 2026-07):** the client *layers* are implemented and
 unit-tested — `ThinClawTransport` (SSE parse/decode/reconnect,
@@ -168,11 +170,38 @@ and post-reconnect history reconcile), `ThinClawAuth` (pairing-payload parse,
 `PinnedSessionDelegate` SPKI pinning, `DeviceCredential` Keychain storage),
 `ThinClawCore`, `ThinClawSnapshotKit`, `ThinClawPersistence`, and the generated
 `ThinClawAPI` REST client. All seven SPM packages pass `swift test` on macOS
-with **no simulator**. What is *not* yet done: the feature-layer wiring that
-composes them into a live UX — `OnboardingStore.handleScanned` and
-`ChatStore.apply`/`send` are still empty stubs, there is no camera QR scanner,
-the Tuist/`xcodebuild` UI-target build is not verified, and there is no
-simulator or real-device end-to-end pairing/chat run.
+with **no simulator**. The **onboarding feature layer is now wired**:
+`OnboardingStore` drives parse → confirm (with a D-X2 transport badge) → pair
+(`LivePairingService` over the pinned session) → persist → done/pending/failed,
+the camera scanner is a VisionKit `DataScannerViewController` behind a
+permission gate with an always-present manual path, and the app swaps between
+onboarding and the tab shell from the Keychain credential with an unpair seam
+(`AppDependencies.unpair()`, best-effort self-revoke). `FeatureOnboarding`
+compiles for the iOS 26 simulator, the whole `ThinClaw` app target builds, and
+the store carries 27 simulator-run unit tests. The **chat + sessions feature
+layer is now wired**: `FeatureChat.ChatStore` subscribes to the `GatewaySession`
+per-thread event stream and connection state, folds events through the pure
+`ChatTimelineReducer` (in `ThinClawCore`), sends optimistically with an offline
+outbox that flushes in order on reconnect, applies a 429 composer cooldown,
+offers failure-row retry, pages history on scroll-top, and reconciles the
+transcript after a reconnect; `FeatureSessions.SessionsStore` hydrates from the
+`ThinClawPersistence` cache then refreshes via `threads()`, and a Sessions row
+tap routes into the Chat tab (`AppRouter.openThread`). `AppDependencies` builds
+the real graph — Keychain credential → `GatewayEndpoint` + a single pinned
+`URLSession` shared by the SSE byte-stream provider and the generated REST
+transport → `GatewaySession` → the GRDB-backed transcript store — and
+starts/stops the event stream on `scenePhase`. Pure logic (`ChatTimelineReducer`,
+`ComposerCooldown`, `SessionsListModel`, the `TranscriptStoring` parity contract
+over both stores, GRDB round-trip/migration) is unit-tested on macOS; the whole
+`ThinClaw` app target builds for the iOS 26 simulator. What is *not* yet done:
+`ChatStore`/`SessionsStore` async orchestration has no simulator UI tests
+(coverage is at the pure-reducer level), and there is no real-device or
+live-gateway end-to-end pairing/chat run. **Known API-spec gap:** the gateway's
+`assistant_thread` is modeled in the committed OpenAPI snapshot as
+`oneOf: [null, $ref]`, which swift-openapi-generator drops from the generated
+`ThreadListResponse`, so `GatewaySession.threads()` cannot surface the pinned
+assistant thread until that spec pattern is corrected and the client
+regenerated.
 
 ## Doc obligations (same-PR rule)
 

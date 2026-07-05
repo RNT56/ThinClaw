@@ -11,18 +11,52 @@ milestones) and [`docs/MOBILE_SECURITY.md`](../../docs/MOBILE_SECURITY.md)
 
 ## Status
 
-This is the **R0 scaffold**. What is real today:
+The **M1 client is implemented**: the seven SPM packages, the onboarding flow,
+and the chat + sessions surfaces are all wired, and the whole `ThinClaw` app
+target (plus its widget and watch embeds) **builds for the iOS 26 simulator**.
+All seven packages pass `swift test` on macOS with no simulator; the pure logic
+behind the feature stores is unit-tested. What remains for M1 is real-device /
+live-gateway exercise; approvals, jobs, and settings surfaces are M2+ (see the
+caveat below the table).
 
 | Piece | Status |
 |---|---|
-| `ThinClawTransport` (SSE parser, event decoder, reconnect policy) | ✅ implemented + fixture-tested |
-| `ThinClawCore` (domain models, chunk coalescer) | ✅ implemented + tested |
-| `ThinClawSnapshotKit` (App Group snapshots, Live Activity attributes) | ✅ implemented + tested |
-| `ThinClawAuth` (pairing payload, Keychain store) | ✅ implemented + tested |
-| `ThinClawAPI` (endpoint/auth/error shell) | ✅ shell tested; generated client lands with M1 |
-| `ThinClawPersistence` (in-memory store; GRDB at M1) | ✅ protocol + tests |
-| `ThinClawDesign`, features, target shells, widgets, watch | 🚧 authored seeds — compiled via Tuist/xcodebuild, not yet exercised |
-| Tuist manifests / CI `build-app` job | 🚧 authored; verify locally with `tuist generate` |
+| `ThinClawTransport` (SSE parser, event decoder, reconnect, `GatewaySession`/`GatewayStream`, reconcile) | ✅ implemented + fixture-tested (89 tests) |
+| `ThinClawCore` (domain models, chunk coalescer, `ChatTimelineReducer`, `ComposerCooldown`, `SessionsListModel`, `ReconcileResult`) | ✅ implemented + tested (49 tests) |
+| `ThinClawSnapshotKit` (App Group snapshots, Live Activity attributes) | ✅ implemented + tested (12 tests) |
+| `ThinClawAuth` (pairing parse, Secure-Enclave keypair, SPKI pinning, connection policy, Keychain) | ✅ implemented + tested (23 tests) |
+| `ThinClawAPI` (generated REST client + auth/error shell) | ✅ generated + tested (13 tests) |
+| `ThinClawPersistence` (GRDB WAL store + in-memory store, parameterized `TranscriptStoring` parity) | ✅ implemented + tested (11 tests) |
+| `FeatureOnboarding` (pairing state machine, QR scanner, app wiring) | ✅ implemented; store unit-tested on the iOS simulator (27 tests) |
+| `FeatureChat` / `FeatureSessions` (`ChatStore`, `SessionsStore` over the live session + cache) | ✅ implemented; pure logic tested on macOS, async orchestration not yet UI-tested |
+| `App` composition (`AppDependencies` real graph, `AppRouter`, scenePhase lifecycle) | ✅ wired; whole app target builds for the iOS 26 simulator |
+| `FeatureApprovals` / `FeatureJobs` / `FeatureSettings`, widgets, watch | 🚧 placeholder screens (M2+); compiled into the app build, no stores yet |
+| Tuist manifests / CI `build-app` job | ✅ `tuist generate` succeeds locally and the app builds; CI `build-app` job unverified here |
+
+**M1 caveat:** the onboarding **and** chat/sessions flows are wired end to end
+in code. `OnboardingStore` is a real state machine (parse → confirm + D-X2
+transport badge → pair via `PairingService` → persist → done/pending/failed);
+the camera scanner uses VisionKit behind availability + a permission gate with
+an always-present manual path (paste link, or gateway URL + short code); and the
+app flips between onboarding and the tab shell from the Keychain credential with
+an unpair seam (`AppDependencies.unpair()` best-effort self-revokes then erases).
+`ChatStore.send`/`apply` are **implemented, not stubs**: `ChatStore` folds live
+`GatewaySession` events through the pure `ChatTimelineReducer` (stream→final
+swap, tool rows, thread routing), sends optimistically with an offline outbox,
+applies a 429 composer cooldown, offers failure-row retry, pages history, and
+reconciles after reconnect; `SessionsStore` hydrates from the `ThinClawPersistence`
+cache then refreshes via `threads()`, and a Sessions tap routes into Chat.
+Transcript persistence is the GRDB WAL `DatabasePool` store. The whole `ThinClaw`
+app target builds for the iOS 26 simulator (verified with `xcodebuild`), and the
+onboarding store carries 27 simulator-run tests. Still **not** done: no
+real-device or live-gateway pairing/chat run has happened (treat E2E as
+unverified), the `ChatStore`/`SessionsStore` async orchestration has no simulator
+UI tests (coverage is at the pure-reducer level), and approvals/jobs/settings are
+placeholder screens. **Known API-spec gap:** the gateway's `assistant_thread` is
+modeled in the committed OpenAPI snapshot as `oneOf: [null, $ref]`, which
+swift-openapi-generator drops from `ThreadListResponse`, so `GatewaySession.threads()`
+cannot surface the pinned assistant thread until that spec pattern is corrected
+and the client regenerated. No real-device run and TestFlight are still pending.
 
 Milestones M1–M5 are defined in `docs/MOBILE_APP.md`.
 

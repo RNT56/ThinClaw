@@ -37,6 +37,14 @@ public struct SSEParser: Sendable {
     public private(set) var lastEventID = ""
     /// Reconnection delay requested by the most recent valid `retry:` field.
     public private(set) var reconnectionTime: Duration?
+    /// Monotonically increasing count of every *terminated* line consumed —
+    /// data/event/id/retry field lines, blank dispatch lines, and comment
+    /// (`:`) keep-alive lines alike. A reader can compare this across
+    /// ``feed(_:)`` calls to detect stream liveness even when no
+    /// ``ServerSentEvent`` was produced (e.g. the gateway's idle keep-alive is
+    /// an SSE *comment* line, which the watchdog must treat as activity so an
+    /// otherwise-idle connection is not needlessly torn down).
+    public private(set) var linesConsumed: UInt64 = 0
 
     private var pendingCR = false
     private var atStreamStart = true
@@ -81,6 +89,10 @@ public struct SSEParser: Sendable {
     // MARK: - Line handling
 
     private mutating func consumeLine() -> ServerSentEvent? {
+        // Count every terminated line as stream activity before dispatching —
+        // comment keep-alives and blank lines included — so liveness detection
+        // does not depend on producing a `ServerSentEvent`.
+        linesConsumed += 1
         var bytes = lineBuffer[...]
         if atStreamStart {
             atStreamStart = false

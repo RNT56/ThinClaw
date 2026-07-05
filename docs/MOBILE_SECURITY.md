@@ -246,22 +246,36 @@ thinclaw://pair?d=<base64url(json)>
 ## Client & push implementation status (M1 / B2)
 
 Annotates the decisions above against what the iOS client (`apps/ios/`) and the
-first-party push notifier actually implement today. **These are unit-tested
-Swift package layers, not yet an end-to-end app run** — the feature-layer wiring
-that composes them (onboarding/chat screens, camera QR scanner) is still stubbed
-and no simulator/real-device pairing flow has been exercised. See the
+first-party push notifier actually implement today. The security primitives are
+unit-tested Swift package layers; the **onboarding/pairing and chat/sessions
+features are now wired end to end in code** (`OnboardingStore` state machine +
+VisionKit QR scanner + app credential gating; `ChatStore`/`SessionsStore` over
+the live pinned `GatewaySession` + GRDB cache), the whole app target compiles for
+the iOS 26 simulator, and the onboarding store is covered by simulator-run unit
+tests. **No real-device or live-gateway pairing/chat run has been exercised**,
+and the chat/sessions async orchestration has no simulator UI tests (coverage is
+at the pure-reducer level). See the
 [M1 caveat in `docs/MOBILE_APP.md`](MOBILE_APP.md#implementation-status).
 
 Phase 1 — iOS client security primitives (`ThinClawAuth`,
 `swift test`-covered on macOS, no simulator):
 
-- ✅ **D-P1 QR payload parse/validate.** `PairingPayload.parse` decodes the
-  `thinclaw://pair?d=…` link, rejects unknown versions and expired/at-expiry
-  payloads, and exposes the gateway URLs, SPKI fingerprint, instance id, and
-  one-time secret. *Not done:* the camera scanner UI and the
-  `POST /api/devices/pair/complete` call flow (the onboarding store method is a
-  stub); confirm-mode (`device_pairing.require_confirm`) is enforced
-  gateway-side but not yet surfaced in the client UX.
+- ✅ **D-P1 QR payload parse/validate + pairing flow.** `PairingPayload.parse`
+  decodes the `thinclaw://pair?d=…` link, rejects unknown versions and
+  expired/at-expiry payloads, and exposes the gateway URLs, SPKI fingerprint,
+  instance id, and one-time secret. `FeatureOnboarding` now composes this into
+  the full flow: `OnboardingStore.handleScanned` parses and advances to a
+  confirm step (gateway name/id + a D-X2 transport badge distinguishing
+  pinned/public-chain TLS from a badged `vpn-http` warning), `LivePairingService`
+  filters candidate URLs through `ConnectionPolicy`, submits the SE public key,
+  and drives `POST /api/devices/pair/complete` over the pinned session. The
+  camera scanner is a VisionKit `DataScannerViewController` behind device
+  support + a camera-permission gate, with an always-available manual path
+  (paste link, or gateway URL + short code) for the simulator. **Confirm-mode
+  (`device_pairing.require_confirm`) is now surfaced**: a 202 response parks the
+  store in a `pendingApproval` state instead of pairing. Every `PairingError`
+  maps to an actionable, retryable failure message. *Not done:* no live-gateway
+  or real-device run has exercised the round-trip yet.
 - ✅ **D-P2 Secure-Enclave keypair.** `DeviceKeyPair.generate` creates a
   non-exportable P-256 key in the Secure Enclave
   (`kSecAttrTokenIDSecureEnclave`, `AfterFirstUnlockThisDeviceOnly`,

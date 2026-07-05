@@ -32,8 +32,14 @@ public actor SSEClient {
     /// - An error from the byte stream is rethrown to the consumer after all
     ///   events completed before the failure have been yielded.
     /// - Cancelling the consumer cancels the underlying iteration.
+    /// - `onActivity` fires whenever *any* line completes — including comment
+    ///   (`:`) keep-alives that produce no ``ServerSentEvent`` — so a liveness
+    ///   watchdog can distinguish an idle-but-alive connection (the gateway
+    ///   heartbeats with SSE comments) from true silence. It may fire without a
+    ///   corresponding yielded event.
     public func events<Bytes>(
-        from bytes: Bytes
+        from bytes: Bytes,
+        onActivity: (@Sendable () -> Void)? = nil
     ) -> AsyncThrowingStream<ServerSentEvent, any Error>
     where Bytes: AsyncSequence & Sendable, Bytes.Element == UInt8 {
         let (stream, continuation) = AsyncThrowingStream<ServerSentEvent, any Error>
@@ -44,12 +50,19 @@ public actor SSEClient {
         // strict concurrency.
         let task = Task {
             do {
+                var lastLinesConsumed = parser.linesConsumed
                 for try await byte in bytes {
                     if Task.isCancelled { break }
                     // CollectionOfOne avoids an Array allocation per byte;
                     // the parser buffers internally.
                     for event in parser.feed(CollectionOfOne(byte)) {
                         continuation.yield(event)
+                    }
+                    // Any completed line (comment keep-alive included) counts
+                    // as stream activity, even when it produced no event.
+                    if parser.linesConsumed != lastLinesConsumed {
+                        lastLinesConsumed = parser.linesConsumed
+                        onActivity?()
                     }
                 }
                 parser.finish()

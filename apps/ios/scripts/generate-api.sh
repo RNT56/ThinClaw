@@ -22,16 +22,19 @@ fi
 cp "$SPEC_SRC" "$SPEC_DST"
 
 if [[ ! -f "$CONFIG" ]]; then
-    cat > "$CONFIG" <<'YAML'
-generate:
-  - types
-  - client
-accessModifier: public
-YAML
+    echo "error: missing $CONFIG — the generator config (modes, access level," >&2
+    echo "       and the REST-only operation filter) is committed and must not" >&2
+    echo "       be regenerated ad hoc; restore it from git" >&2
+    exit 1
 fi
 
 mkdir -p "$GEN_DIR"
 if command -v mise >/dev/null 2>&1; then
+    # `mise exec --` puts the spm-backed generator binary on PATH (installs/
+    # spm-apple-swift-openapi-generator/<ver>/bin/swift-openapi-generator).
+    # The committed config selects modes (types+client), access level, naming
+    # strategy, and the REST-only operation filter — keep those in the config,
+    # not on the command line, so generation stays reproducible.
     (cd "$IOS_ROOT" && mise exec -- swift-openapi-generator generate \
         --config "$CONFIG" \
         --output-directory "$GEN_DIR" \
@@ -40,5 +43,22 @@ else
     echo "error: mise not found — install mise, then 'mise install' in apps/ios" >&2
     exit 1
 fi
+
+# The generated sources deliberately do not conform to the repo's .swift-format
+# style (long operationId comments, generator indentation, unsorted @_spi
+# imports). CI lints Packages/ recursively, so mark each generated file
+# swift-format-ignore. Injecting the header here (rather than editing the files
+# by hand) keeps generation the single source of truth: check-generated-drift.sh
+# regenerates verbatim and the header is reproduced every time.
+IGNORE_HEADER='// swift-format-ignore-file'
+for f in "$GEN_DIR"/*.swift; do
+    [[ -f "$f" ]] || continue
+    if [[ "$(head -n 1 "$f")" != "$IGNORE_HEADER" ]]; then
+        tmp="$(mktemp)"
+        printf '%s\n' "$IGNORE_HEADER" >"$tmp"
+        cat "$f" >>"$tmp"
+        mv "$tmp" "$f"
+    fi
+done
 
 echo "regenerated $GEN_DIR from $(basename "$SPEC_SRC")"

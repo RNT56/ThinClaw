@@ -32,6 +32,10 @@ public enum KeychainKey {
 public struct DeviceCredential: Codable, Sendable, Equatable {
     /// Gateway installation this credential belongs to.
     public var installationID: String
+    /// Server-assigned device id (`device_id` from pair/complete), needed to
+    /// address this device for self-revoke on unpair. Optional for forward
+    /// compatibility with credentials stored before it was captured.
+    public var deviceID: String?
     /// Bearer token (`tcd_…`) presented on every gateway request.
     public var deviceToken: String
     /// Gateway base URLs in preference order (from pairing; may be
@@ -45,6 +49,7 @@ public struct DeviceCredential: Codable, Sendable, Equatable {
 
     public init(
         installationID: String,
+        deviceID: String? = nil,
         deviceToken: String,
         gatewayURLs: [URL],
         serverFingerprint: String? = nil,
@@ -52,6 +57,7 @@ public struct DeviceCredential: Codable, Sendable, Equatable {
         pairedAt: Date
     ) {
         self.installationID = installationID
+        self.deviceID = deviceID
         self.deviceToken = deviceToken
         self.gatewayURLs = gatewayURLs
         self.serverFingerprint = serverFingerprint
@@ -74,5 +80,32 @@ extension DeviceCredential {
     /// Forget the pairing (sign out / unpair).
     public static func erase(from keychain: some KeychainStoring) throws {
         try keychain.removeSecret(for: KeychainKey.deviceCredential)
+    }
+
+    /// The first stored gateway URL that the D-X2 connection policy permits for
+    /// this credential (pinned ⇒ TLS anywhere or tailnet HTTP; unpinned ⇒
+    /// tailnet HTTP only), or `nil` if none qualify.
+    ///
+    /// Callers building a live session **must** use this rather than
+    /// `gatewayURLs.first`: `PinnedSessionDelegate` only enforces the pin on a
+    /// TLS server-trust challenge, so a plaintext `http://` LAN URL would never
+    /// trip it and would carry the `tcd_` token in the clear. Selecting a
+    /// policy-allowed URL here closes that gap even if a mixed-scheme list was
+    /// somehow persisted (e.g. by an older build before pairing filtered it).
+    public var preferredBaseURL: URL? {
+        let hasPin = serverFingerprint != nil
+        #if DEBUG
+            let allowLoopbackHTTP = true
+        #else
+            let allowLoopbackHTTP = false
+        #endif
+        return gatewayURLs.first { url in
+            switch ConnectionPolicy.evaluate(
+                url: url, hasPin: hasPin, allowLoopbackHTTP: allowLoopbackHTTP)
+            {
+            case .allowedSecure, .allowedInsecure: return true
+            case .refused: return false
+            }
+        }
     }
 }
