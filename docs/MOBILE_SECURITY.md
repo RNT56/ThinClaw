@@ -213,20 +213,30 @@ thinclaw://pair?d=<base64url(json)>
 
 ### Gateway-side hardening (B1)
 
-1. Pairing: admin-only `pair/start` (max 3 outstanding, 15-min TTL); public
-   `pair/complete` protected by the 32-byte single-use secret, atomic
-   consume under file lock, lockout, 1 KB body limit, audit on every attempt.
-2. Device auth failures: sliding-window counter on `tcd_`-prefixed 401s →
-   tarpit + audit burst alert.
-3. Constant-time comparisons throughout; **fix in passing** the
-   non-constant-time `==` in `native_lifecycle.rs`
-   `header_secret_matches_required`.
-4. Scope middleware returns identical 403 bodies for "no scope" and
-   "unknown route" under a device principal (no route-existence leakage).
-5. Revocation tears down live SSE/WS connections synchronously and deletes
-   APNs registrations + companion (watch) tokens.
-6. Daily auto-revoke sweep for devices unseen past `device_inactivity_days`
-   (default 90).
+1. ✅ **Landed.** Pairing: admin-only `pair/start` (max 3 outstanding, 15-min
+   TTL); public `pair/complete` protected by the 32-byte single-use secret,
+   atomic consume under file lock, lockout, a dedicated rate limiter, and a
+   body limit (landed at 4 KB, not the 1 KB originally sketched here), audit
+   on every attempt.
+2. 📋 **Not yet implemented.** Device auth failures: sliding-window counter on
+   `tcd_`-prefixed 401s → tarpit + audit burst alert. Auth failures are
+   audited per-attempt today; the dedicated failure-rate tarpit/burst-alert
+   is not wired.
+3. ✅ **Landed.** Constant-time comparisons throughout; **fixed in passing**
+   the non-constant-time `==` in `native_lifecycle.rs`
+   `header_secret_matches_required` (now `subtle::ConstantTimeEq`).
+4. ✅ **Landed.** Scope middleware returns identical 403 bodies for "no
+   scope" and "unknown route" under a device principal (no route-existence
+   leakage).
+5. 🚧 **Partially landed.** `DeviceRegistry::revoke` persists the revocation
+   and broadcasts the revoked `device_id` on a `tokio::broadcast` channel
+   (`subscribe_revocations`) built for live SSE/WS handlers to subscribe to;
+   no SSE/WS handler subscribes yet, so live connections are not yet torn
+   down synchronously on revoke. APNs registration/companion-token deletion
+   on revoke is not yet implemented.
+6. 📋 **Not yet wired.** `DeviceRegistry::sweep_inactive` implements the
+   90-day-inactivity selection logic (unit-tested), but nothing schedules or
+   calls it yet — there is no running daily auto-revoke sweep.
 
 ## v1 simplifications (explicit, each with an upgrade path)
 
@@ -240,6 +250,8 @@ thinclaw://pair?d=<base64url(json)>
    operators who refuse cert management.
 
 ## NETWORK_SECURITY.md additions (due with B1, same PR)
+
+✅ Done — see `src/NETWORK_SECURITY.md`.
 
 - Threat-model row: *Paired device client* — authenticated, least-privilege,
   per-device scoped tokens, QR pairing, pinned TLS or tailnet transport.

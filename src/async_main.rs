@@ -83,6 +83,10 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e));
         }
+        Some(Command::Devices(device_cmd)) => {
+            init_cli_tracing(cli.debug);
+            return thinclaw::cli::run_devices_command(device_cmd.clone()).await;
+        }
         #[cfg(feature = "repl")]
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing(cli.debug);

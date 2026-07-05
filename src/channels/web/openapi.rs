@@ -51,13 +51,20 @@ impl Modify for GatewayTokenSecurity {
     paths(
         super::handlers::chat::chat_send_handler,
         super::handlers::chat::chat_approval_handler,
+        super::handlers::chat::chat_approvals_handler,
         super::handlers::chat::chat_abort_handler,
         super::handlers::chat::chat_history_handler,
         super::handlers::chat::chat_threads_handler,
         super::handlers::chat::chat_new_thread_handler,
         super::handlers::chat::chat_delete_thread_handler,
     ),
-    components(schemas(SseEvent, WsClientMessage, WsServerMessage))
+    components(schemas(
+        SseEvent,
+        WsClientMessage,
+        WsServerMessage,
+        thinclaw_gateway::web::types::PendingApprovalEntry,
+        thinclaw_gateway::web::types::PendingApprovalsResponse
+    ))
 )]
 struct ChatApiDoc;
 
@@ -68,6 +75,37 @@ struct ChatApiDoc;
     super::handlers::jobs::jobs_detail_handler,
 ))]
 struct JobsApiDoc;
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        super::handlers::devices::devices_pair_start_handler,
+        super::handlers::devices::devices_pair_pending_handler,
+        super::handlers::devices::devices_pair_complete_handler,
+        super::handlers::devices::devices_pair_approve_handler,
+        super::handlers::devices::devices_list_handler,
+        super::handlers::devices::devices_rename_handler,
+        super::handlers::devices::devices_revoke_handler,
+        super::handlers::devices::devices_rotate_handler,
+        super::handlers::devices::devices_me_handler,
+    ),
+    components(schemas(
+        thinclaw_gateway::web::devices::QrPairingPayload,
+        thinclaw_gateway::web::devices::PairStartResponse,
+        thinclaw_gateway::web::devices::PairCompleteRequest,
+        thinclaw_gateway::web::devices::PairCompleteResponse,
+        thinclaw_gateway::web::devices::DeviceInfo,
+        thinclaw_gateway::web::devices::DeviceListResponse,
+        thinclaw_gateway::web::devices::RenameDeviceRequest,
+        thinclaw_gateway::web::devices::RotateTokenResponse,
+        thinclaw_gateway::web::devices::PendingPairInfo,
+        thinclaw_gateway::web::devices::PendingPairListResponse,
+        thinclaw_gateway::web::devices::DevicePlatform,
+        thinclaw_gateway::web::devices::DeviceScope,
+        super::handlers::devices::PairPendingConfirmResponse,
+    ))
+)]
+struct DevicesApiDoc;
 
 #[derive(OpenApi)]
 #[openapi(paths(
@@ -81,14 +119,16 @@ pub fn gateway_openapi() -> utoipa::openapi::OpenApi {
     let mut doc = ChatApiDoc::openapi();
     doc.merge(JobsApiDoc::openapi());
     doc.merge(StatusApiDoc::openapi());
+    doc.merge(DevicesApiDoc::openapi());
 
     doc.info.title = "ThinClaw Gateway API".to_string();
     doc.info.version = CONTRACT_VERSION.to_string();
     doc.info.description = Some(
         "The v1 mobile contract of the ThinClaw web gateway: chat, threads, \
-         approvals, read-only jobs, and gateway status. Streaming events are \
-         delivered over `/api/chat/events` (SSE) or `/api/chat/ws` (WebSocket); \
-         both carry the `SseEvent` component schema."
+         approvals, read-only jobs, gateway status, and device identity \
+         (pairing, device management, per-device tokens). Streaming events \
+         are delivered over `/api/chat/events` (SSE) or `/api/chat/ws` \
+         (WebSocket); both carry the `SseEvent` component schema."
             .to_string(),
     );
 
@@ -215,6 +255,7 @@ mod tests {
     const EXPECTED_PATHS: &[&str] = &[
         "/api/chat/send",
         "/api/chat/approval",
+        "/api/chat/approvals",
         "/api/chat/abort",
         "/api/chat/history",
         "/api/chat/threads",
@@ -227,6 +268,15 @@ mod tests {
         "/api/jobs/{id}",
         "/api/health",
         "/api/gateway/status",
+        "/api/devices/pair/start",
+        "/api/devices/pair/pending",
+        "/api/devices/pair/complete",
+        "/api/devices/pair/{id}/approve",
+        "/api/devices",
+        "/api/devices/{id}/rename",
+        "/api/devices/{id}/revoke",
+        "/api/devices/{id}/rotate",
+        "/api/devices/me",
     ];
 
     #[test]
@@ -253,6 +303,18 @@ mod tests {
             );
         }
         assert!(components.security_schemes.contains_key("gateway_token"));
+    }
+
+    #[test]
+    fn device_and_approvals_component_schemas_are_registered() {
+        let doc = gateway_openapi();
+        let components = doc.components.expect("components present");
+        for name in ["PendingApprovalEntry", "PendingApprovalsResponse"] {
+            assert!(
+                components.schemas.contains_key(name),
+                "missing component schema {name}"
+            );
+        }
     }
 
     #[test]

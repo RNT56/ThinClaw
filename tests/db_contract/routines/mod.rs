@@ -291,6 +291,19 @@ async fn start_routine_gateway_server(
         skill_remote_hub: None,
         skill_quarantine: None,
         chat_rate_limiter: thinclaw::channels::web::rate_limiter::RateLimiter::new(30, 60),
+        pair_complete_rate_limiter: thinclaw::channels::web::rate_limiter::RateLimiter::new(
+            10, 300,
+        ),
+        device_registry: std::sync::Arc::new(
+            thinclaw_gateway::web::devices::DeviceRegistry::load(
+                thinclaw_gateway::web::devices::DeviceStore::with_base_dir(std::env::temp_dir()),
+            )
+            .await
+            .expect("load device store for test"),
+        ),
+        pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,

@@ -17,6 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -459,7 +460,7 @@ fn header_secret_matches(headers: &HeaderMap, name: &str, expected: &Option<Stri
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|actual| actual == expected)
+        .is_some_and(|actual| bool::from(actual.as_bytes().ct_eq(expected.as_bytes())))
 }
 
 fn header_secret_matches_required(
@@ -473,7 +474,7 @@ fn header_secret_matches_required(
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|actual| actual == expected)
+        .is_some_and(|actual| bool::from(actual.as_bytes().ct_eq(expected.as_bytes())))
 }
 
 fn registration_fields(payload: &Value, endpoint_paths: &[&str]) -> Option<(String, String)> {
@@ -1142,5 +1143,111 @@ mod tests {
             .expect("request should be served");
         assert_eq!(removed.status(), StatusCode::OK);
         assert!(registry.endpoints_for("user-1").await.is_empty());
+    }
+
+    fn headers_with(name: &str, value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            value.parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn header_secret_matches_required_rejects_when_no_secret_configured() {
+        let headers = headers_with("x-thinclaw-apns-registration-secret", "anything");
+        assert!(!header_secret_matches_required(
+            &headers,
+            "x-thinclaw-apns-registration-secret",
+            &None
+        ));
+        assert!(!header_secret_matches_required(
+            &headers,
+            "x-thinclaw-apns-registration-secret",
+            &Some(String::new())
+        ));
+    }
+
+    #[test]
+    fn header_secret_matches_required_rejects_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(!header_secret_matches_required(
+            &headers,
+            "x-thinclaw-apns-registration-secret",
+            &Some("expected-secret".to_string())
+        ));
+    }
+
+    #[test]
+    fn header_secret_matches_required_rejects_mismatched_value() {
+        let headers = headers_with("x-thinclaw-apns-registration-secret", "wrong-secret");
+        assert!(!header_secret_matches_required(
+            &headers,
+            "x-thinclaw-apns-registration-secret",
+            &Some("expected-secret".to_string())
+        ));
+    }
+
+    #[test]
+    fn header_secret_matches_required_rejects_mismatched_length() {
+        let headers = headers_with("x-thinclaw-apns-registration-secret", "short");
+        assert!(!header_secret_matches_required(
+            &headers,
+            "x-thinclaw-apns-registration-secret",
+            &Some("a-much-longer-expected-secret".to_string())
+        ));
+    }
+
+    #[test]
+    fn header_secret_matches_required_accepts_exact_match() {
+        let headers = headers_with("x-thinclaw-apns-registration-secret", "expected-secret");
+        assert!(header_secret_matches_required(
+            &headers,
+            "x-thinclaw-apns-registration-secret",
+            &Some("expected-secret".to_string())
+        ));
+    }
+
+    #[test]
+    fn header_secret_matches_allows_when_no_secret_configured() {
+        let headers = HeaderMap::new();
+        assert!(header_secret_matches(
+            &headers,
+            "x-thinclaw-browser-push-secret",
+            &None
+        ));
+        assert!(header_secret_matches(
+            &headers,
+            "x-thinclaw-browser-push-secret",
+            &Some(String::new())
+        ));
+    }
+
+    #[test]
+    fn header_secret_matches_rejects_mismatched_or_missing_value() {
+        let headers = HeaderMap::new();
+        assert!(!header_secret_matches(
+            &headers,
+            "x-thinclaw-browser-push-secret",
+            &Some("expected-secret".to_string())
+        ));
+
+        let headers = headers_with("x-thinclaw-browser-push-secret", "wrong-secret");
+        assert!(!header_secret_matches(
+            &headers,
+            "x-thinclaw-browser-push-secret",
+            &Some("expected-secret".to_string())
+        ));
+    }
+
+    #[test]
+    fn header_secret_matches_accepts_exact_match() {
+        let headers = headers_with("x-thinclaw-browser-push-secret", "expected-secret");
+        assert!(header_secret_matches(
+            &headers,
+            "x-thinclaw-browser-push-secret",
+            &Some("expected-secret".to_string())
+        ));
     }
 }

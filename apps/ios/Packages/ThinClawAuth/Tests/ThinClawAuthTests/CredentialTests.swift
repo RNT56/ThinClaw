@@ -68,7 +68,7 @@ struct DeviceCredentialTests {
             installationID: "inst_9f8e",
             deviceToken: "tcd_8f3a9b2c4d5e",
             gatewayURLs: [URL(string: "https://gw.example.ts.net")!],
-            serverFingerprint: "sha256:ab12cd34",
+            serverFingerprint: "qMnE3hSuF3zXV0AJIT9cKW0eGD6dV3nCFbYbBGDs0XU",
             gatewayName: "home-server",
             pairedAt: Date(timeIntervalSince1970: 1_750_000_000))
     }

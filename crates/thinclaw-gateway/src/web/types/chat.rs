@@ -97,6 +97,40 @@ pub struct ApprovalRequest {
     pub actor_id: Option<String>,
 }
 
+/// One pending tool-approval request, as surfaced by `GET /api/chat/approvals`
+/// (milestone B1 approvals-pull endpoint for mobile clients that are not
+/// holding an open SSE/WS stream when the approval is raised).
+///
+/// Populated from the `StatusUpdate::ApprovalNeeded` -> `SseEvent::ApprovalNeeded`
+/// projection at broadcast time (see `src/channels/web/mod.rs::send_status`),
+/// and removed once `chat_approval_handler` submits a decision for the
+/// `request_id`. This cache is **best-effort**: it lives only in gateway
+/// process memory, is not persisted, and is cleared on restart — a client
+/// that misses the SSE broadcast *and* queries after a restart will not see
+/// an approval that was already resolved or that predates the restart. It
+/// exists to close the gap for a client that connects (or reconnects) after
+/// the SSE event already fired, not to be an authoritative durable queue.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PendingApprovalEntry {
+    pub request_id: String,
+    pub tool_name: String,
+    pub description: String,
+    /// Pretty-printed JSON, matching `SseEvent::ApprovalNeeded.parameters`.
+    pub parameters: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// RFC 3339 timestamp; entries are returned sorted oldest-first.
+    pub created_at: String,
+}
+
+/// `GET /api/chat/approvals` response.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PendingApprovalsResponse {
+    pub approvals: Vec<PendingApprovalEntry>,
+}
+
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ThreadCommandRequest {

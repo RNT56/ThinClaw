@@ -5,11 +5,14 @@ use axum::{
 
 use thinclaw_identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 
+use crate::web::devices::DeviceScope;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatewayAuthSource {
     BearerHeader,
     BearerQuery,
     TrustedProxy,
+    DeviceToken,
 }
 
 impl GatewayAuthSource {
@@ -18,11 +21,43 @@ impl GatewayAuthSource {
             Self::BearerHeader => "bearer_header",
             Self::BearerQuery => "bearer_query",
             Self::TrustedProxy => "trusted_proxy",
+            Self::DeviceToken => "device_token",
         }
     }
 
+    /// Whether this auth source may honor request-supplied
+    /// `user_id`/`actor_id` compatibility overrides.
+    ///
+    /// Device principals must never be able to override their identity via
+    /// request params — a paired device always acts as the operator
+    /// (`fallback_principal_id`/`fallback_actor_id`), never as an arbitrary
+    /// caller-chosen identity. See `docs/MOBILE_SECURITY.md` D-T4 and the
+    /// gateway hardening checklist (§8).
     pub fn allows_compat_overrides(&self) -> bool {
         matches!(self, Self::BearerHeader | Self::BearerQuery)
+    }
+}
+
+/// Attached to a request's extensions when it authenticated with a device
+/// token (see `crate::web::auth::auth_middleware`). Scope-enforcement
+/// middleware and stream handlers (SSE/WS revocation teardown) key off this
+/// to know the request carries a device principal and which scopes it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceContext {
+    pub device_id: String,
+    pub scopes: Vec<DeviceScope>,
+}
+
+impl DeviceContext {
+    pub fn new(device_id: impl Into<String>, scopes: Vec<DeviceScope>) -> Self {
+        Self {
+            device_id: device_id.into(),
+            scopes,
+        }
+    }
+
+    pub fn has_scope(&self, scope: DeviceScope) -> bool {
+        self.scopes.contains(&scope)
     }
 }
 

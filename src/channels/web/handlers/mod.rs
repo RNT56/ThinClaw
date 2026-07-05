@@ -4,6 +4,7 @@
 
 pub mod autonomy;
 pub mod chat;
+pub mod devices;
 pub mod experiments;
 pub mod extensions;
 pub mod gateway;
@@ -26,6 +27,7 @@ pub mod skills;
 
 pub(crate) use autonomy::*;
 pub(crate) use chat::*;
+pub(crate) use devices::*;
 pub(crate) use experiments::*;
 pub(crate) use extensions::*;
 pub(crate) use gateway::*;

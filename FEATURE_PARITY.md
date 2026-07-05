@@ -451,7 +451,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Voice input | ✅ | 🚫 | - | Watch dictation arrives with M4; broader voice input later |
 | Push-to-talk | ✅ | 🚫 | - | |
 | Location sharing | ✅ | 🚫 | - | |
-| Node pairing | ✅ | 🚧 | P1 | Device-identity pairing designed (QR + per-device revocable scoped tokens); backend milestone B1 — see `docs/MOBILE_SECURITY.md` |
+| Node pairing | ✅ | ✅ | P1 | Backend device identity (milestone B1) landed: QR pairing issues per-device, revocable, scoped `tcd_` tokens over a pinned-TLS or tailnet gateway listener; see `docs/MOBILE_SECURITY.md` and `docs/MOBILE_APP.md` |
 | APNs push notifications | ✅ | 🚧 | P2 | Backend APNs registration/delivery pipeline tracked above as complete (live Apple smoke still credential-gated); first-party device push with content-free payloads + Live Activity planned (B2/M2) |
 | Share to OpenClaw (iOS) | ✅ | 🚫 | - | iOS share sheet integration; post-M5 candidate |
 | Background listening toggle | ✅ | 🚫 | - | iOS background audio |

@@ -56,6 +56,13 @@ impl GatewayAccessInfo {
         )
     }
 
+    /// Base URL for direct API requests issued from this host (e.g. CLI
+    /// subcommands calling `/api/devices/*`). Uses the same loopback
+    /// resolution as [`Self::health_url`].
+    pub fn api_base_url(&self) -> String {
+        format!("http://{}:{}", self.local_request_host(), self.port)
+    }
+
     pub fn local_url(&self) -> String {
         format!("http://{}:{}/", self.access_host(), self.port)
     }

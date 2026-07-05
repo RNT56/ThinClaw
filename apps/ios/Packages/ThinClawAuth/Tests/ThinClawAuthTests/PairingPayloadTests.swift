@@ -20,7 +20,7 @@ private func validJSON(
     extra: String = ""
 ) -> String {
     """
-    {"v":\(v),"urls":\(urls),"fp":"sha256:ab12cd34","iid":"inst_9f8e",\
+    {"v":\(v),"urls":\(urls),"fp":"qMnE3hSuF3zXV0AJIT9cKW0eGD6dV3nCFbYbBGDs0XU","iid":"inst_9f8e",\
     "name":"home-server","sec":"pair_5f4dcc3b5aa7","exp":\(exp)\(extra)}
     """
 }
@@ -37,7 +37,7 @@ struct PairingPayloadParsingTests {
                 URL(string: "https://gw.example.ts.net")!,
                 URL(string: "http://192.168.1.20:3000")!,
             ])
-        #expect(payload.fingerprint == "sha256:ab12cd34")
+        #expect(payload.fingerprint == "qMnE3hSuF3zXV0AJIT9cKW0eGD6dV3nCFbYbBGDs0XU")
         #expect(payload.installationID == "inst_9f8e")
         #expect(payload.name == "home-server")
         #expect(payload.secret == "pair_5f4dcc3b5aa7")

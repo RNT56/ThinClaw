@@ -31,6 +31,7 @@ use crate::extensions::ExtensionManager;
 use crate::sandbox_types::{ContainerJobManager, PendingPrompt};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+use thinclaw_gateway::web::devices::DeviceRegistry;
 use thinclaw_gateway::web::identity::{GatewayAuthSource, GatewayRequestIdentity};
 use thinclaw_gateway::web::ports::{
     AgentSubmissionPort, ConversationPort, ExtensionAuthPort, GatewayConversationMessage,
@@ -43,7 +44,36 @@ use thinclaw_gateway::web::ports::{
     gateway_message_to_chat_message, gateway_port_error, gateway_unavailable as unavailable,
     with_activation_metadata,
 };
+use thinclaw_gateway::web::types::PendingApprovalEntry;
 use thinclaw_llm_core::CompletionRequest;
+
+/// Build an empty, ephemeral [`DeviceRegistry`] for tests that don't exercise
+/// device-identity behavior but still need to construct a `GatewayState`
+/// literal. `DeviceRegistry::load` performs no actual `.await` (see its doc
+/// comment), so `futures::executor::block_on` here is a plain synchronous
+/// call, not a runtime-nesting hazard. The backing `TempDir` is intentionally
+/// dropped immediately — nothing after `load()` re-reads the file for these
+/// unrelated test fixtures.
+#[cfg(test)]
+pub(crate) fn test_device_registry() -> Arc<DeviceRegistry> {
+    let dir = tempfile::TempDir::new().expect("create temp dir for test device store");
+    let store =
+        thinclaw_gateway::web::devices::DeviceStore::with_base_dir(dir.path().to_path_buf());
+    Arc::new(
+        futures::executor::block_on(DeviceRegistry::load(store)).expect("load empty device store"),
+    )
+}
+
+/// In-memory, best-effort cache of pending tool-approval requests, keyed by
+/// `request_id` (as a string — mirrors `SseEvent::ApprovalNeeded.request_id`).
+/// Populated when an `ApprovalNeeded` SSE event is broadcast (see
+/// `GatewayChannel::send_status` in `src/channels/web/mod.rs`) and drained
+/// when `chat_approval_handler` submits a decision for that id. Backs
+/// `GET /api/chat/approvals` (milestone B1) for clients that were not
+/// holding an open stream when the approval was raised. Never persisted —
+/// see `PendingApprovalEntry`'s doc comment for the lossiness caveat.
+pub type PendingApprovalsCache =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, PendingApprovalEntry>>>;
 
 #[cfg(test)]
 pub(crate) use crate::channels::web::handlers::providers::{
@@ -134,6 +164,11 @@ pub struct GatewayState {
     pub skill_quarantine: Option<Arc<crate::skills::quarantine::QuarantineManager>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
+    /// Rate limiter for the public `POST /api/devices/pair/complete` endpoint
+    /// (10 attempts per 5 minutes), independent of the pairing store's own
+    /// per-credential lockout — this one bounds request *volume* regardless
+    /// of which (or whether any) pairing secret is presented.
+    pub pair_complete_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
     /// Populated at startup from `registry/` manifests, independent of extension manager.
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
@@ -162,6 +197,13 @@ pub struct GatewayState {
     pub channel_manager: Option<Arc<crate::channels::ChannelManager>>,
     /// Lifecycle hook registry for hook management APIs.
     pub hooks: Option<Arc<crate::hooks::HookRegistry>>,
+    /// Device identity registry (milestone B1): per-device scoped token
+    /// authentication index, shared with the auth middleware's `AuthState`.
+    /// See `docs/MOBILE_SECURITY.md` / `docs/MOBILE_APP.md`.
+    pub device_registry: Arc<DeviceRegistry>,
+    /// Best-effort pending-approvals cache backing `GET /api/chat/approvals`.
+    /// See [`PendingApprovalsCache`].
+    pub pending_approvals: PendingApprovalsCache,
 }
 
 #[async_trait]
@@ -856,6 +898,21 @@ pub async fn start_server(
             post(github_repo_projects_webhook_handler),
         );
 
+    // Device pairing completion: public (protected by the one-time secret /
+    // human code, the dedicated `pair_complete_rate_limiter`, and its own
+    // 4 KB body limit — see `docs/MOBILE_SECURITY.md` §8 hardening item 1).
+    // A dedicated router + `.layer()` scopes the body limit to just this
+    // route rather than the whole gateway.
+    let device_pairing_public = Router::new()
+        .route(
+            "/api/devices/pair/complete",
+            post(devices_pair_complete_handler),
+        )
+        .layer(DefaultBodyLimit::max(
+            crate::channels::web::handlers::devices::PAIR_COMPLETE_BODY_LIMIT_BYTES,
+        ));
+    let public = public.merge(device_pairing_public);
+
     // Protected routes (require auth)
     let auth_state = {
         let (trusted_proxy_header, trusted_proxy_ips) = load_trusted_proxy_config();
@@ -876,6 +933,8 @@ pub async fn start_server(
                 Arc::new(DatabaseGatewayIdentityStore(Arc::clone(store)))
                     as Arc<dyn IdentityLookupPort>
             }),
+            // Device-token auth (milestone B1, `thinclaw-gateway::web::devices`).
+            devices: Some(Arc::clone(&state.device_registry)),
         }
     };
     let protected = Router::new()
@@ -883,6 +942,7 @@ pub async fn start_server(
         .route("/api/chat/send", post(chat_send_handler))
         .route("/api/chat/abort", post(chat_abort_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
+        .route("/api/chat/approvals", get(chat_approvals_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
         .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
         .route("/api/chat/events", get(chat_events_handler))
@@ -1341,7 +1401,28 @@ pub async fn start_server(
         .route(
             "/api/providers/{slug}/key",
             axum::routing::delete(providers_delete_key_handler),
-        );
+        )
+        // Device identity (milestone B1). Admin-only (non-device principal):
+        // pairing administration and device management. `required_scope`
+        // returns `None` for all of these routes, so a device-authenticated
+        // request is already rejected with a generic 403 by `auth_middleware`
+        // before it reaches any of these handlers (see
+        // `thinclaw_gateway::web::devices::scopes::required_scope` tests).
+        .route("/api/devices/pair/start", post(devices_pair_start_handler))
+        .route(
+            "/api/devices/pair/pending",
+            get(devices_pair_pending_handler),
+        )
+        .route(
+            "/api/devices/pair/{id}/approve",
+            post(devices_pair_approve_handler),
+        )
+        .route("/api/devices", get(devices_list_handler))
+        .route("/api/devices/{id}/rename", post(devices_rename_handler))
+        .route("/api/devices/{id}/revoke", post(devices_revoke_handler))
+        .route("/api/devices/{id}/rotate", post(devices_rotate_handler))
+        // Device's own view (device-token-only; `devices:self` scope).
+        .route("/api/devices/me", get(devices_me_handler));
     #[cfg(feature = "nostr")]
     let protected = protected
         .route("/api/nostr/key", post(nostr_save_key_handler))
@@ -1479,6 +1560,42 @@ pub async fn start_server(
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
+
+    // Optional rustls TLS listener (docs/MOBILE_SECURITY.md D-X1). Serves the
+    // exact same router the plain-HTTP listener serves, cloned before the
+    // listener below consumes it. Policy: `off` never starts it, `on` always
+    // starts it here at boot, `auto` starts it here only if a device is
+    // already paired — otherwise the pairing handler lazily starts it via
+    // `tls::ensure_started()` on first successful pairing.
+    #[cfg(feature = "gateway-tls")]
+    {
+        let tls_app = app.clone();
+        let base_dir = thinclaw_platform::resolve_thinclaw_home();
+        match crate::channels::web::tls::TlsPolicy::from_env() {
+            crate::channels::web::tls::TlsPolicy::Off => {
+                crate::channels::web::tls::mark_inactive().await;
+            }
+            crate::channels::web::tls::TlsPolicy::On => {
+                crate::channels::web::tls::register_router(tls_app, base_dir).await;
+                if let Err(e) = crate::channels::web::tls::ensure_started().await {
+                    tracing::error!("Failed to start gateway TLS listener: {}", e);
+                }
+            }
+            crate::channels::web::tls::TlsPolicy::Auto => {
+                crate::channels::web::tls::register_router(tls_app, base_dir.clone()).await;
+                if crate::channels::web::tls::has_paired_devices(&base_dir) {
+                    if let Err(e) = crate::channels::web::tls::ensure_started().await {
+                        tracing::error!("Failed to start gateway TLS listener: {}", e);
+                    }
+                } else {
+                    tracing::debug!(
+                        "Gateway TLS auto mode: no paired devices yet; \
+                         listener will start lazily on first pairing"
+                    );
+                }
+            }
+        }
+    }
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(

@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod autonomy;
 pub mod chat;
+pub mod devices;
 pub mod experiments;
 pub mod extensions;
 pub mod hooks;

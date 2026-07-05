@@ -791,6 +791,7 @@ mod tests {
             skill_remote_hub: None,
             skill_quarantine: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
+            pair_complete_rate_limiter: RateLimiter::new(10, 300),
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
@@ -802,6 +803,10 @@ mod tests {
             secrets_store: None,
             channel_manager: None,
             hooks: None,
+            device_registry: crate::channels::web::server::test_device_registry(),
+            pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 

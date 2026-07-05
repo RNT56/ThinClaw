@@ -151,8 +151,8 @@ layout, toolchain setup (mise + Tuist), and testing guide. Summary:
 | OpenAPI baseline (`openapi` feature, export-openapi, committed spec, CI check) | ✅ landed (R0) |
 | `apps/ios/` scaffold (Tuist workspace, packages, SSE parser + tests, CI) | ✅ landed (R0); Tuist manifests authored, first `tuist generate` verification pending |
 | Generated Swift client from the committed spec | 📋 lands with M1 (`apps/ios/scripts/generate-api.sh`) |
-| Device identity layer (pairing, tokens, scopes, TLS listener) | 📋 planned (B1) |
-| `GET /api/chat/approvals` pull endpoint | 📋 planned (B1) |
+| Device identity layer (pairing, tokens, scopes, TLS listener) | ✅ landed (B1) |
+| `GET /api/chat/approvals` pull endpoint | ✅ landed (B1) |
 | First-party push + Live Activity emitter | 📋 planned (B2) |
 | mDNS advertisement | 📋 planned (B3) |
 | iOS app feature milestones | 📋 planned (M1–M5) |

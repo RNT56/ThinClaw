@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ThinClaw Gateway API",
-    "description": "The v1 mobile contract of the ThinClaw web gateway: chat, threads, approvals, read-only jobs, and gateway status. Streaming events are delivered over `/api/chat/events` (SSE) or `/api/chat/ws` (WebSocket); both carry the `SseEvent` component schema.",
+    "description": "The v1 mobile contract of the ThinClaw web gateway: chat, threads, approvals, read-only jobs, gateway status, and device identity (pairing, device management, per-device tokens). Streaming events are delivered over `/api/chat/events` (SSE) or `/api/chat/ws` (WebSocket); both carry the `SseEvent` component schema.",
     "contact": {
       "name": "RNT56 (ThinClaw)"
     },
@@ -89,6 +89,35 @@
           },
           "503": {
             "description": "Agent loop unavailable"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/approvals": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Pull-based fallback for pending tool approvals (milestone B1): a mobile\nclient that was not holding an open SSE/WS stream when\n`SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of\nmissing the approval entirely. **Best-effort and lossy** — see\n`PendingApprovalEntry`'s doc comment: the backing cache lives only in\ngateway process memory, is not persisted, and is cleared on restart.",
+        "operationId": "chat_approvals_handler",
+        "responses": {
+          "200": {
+            "description": "Pending tool-approval requests, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingApprovalsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
           }
         },
         "security": [
@@ -590,6 +619,347 @@
         ]
       }
     },
+    "/api/devices": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_list_handler",
+        "responses": {
+          "200": {
+            "description": "All paired devices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/me": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_handler",
+        "responses": {
+          "200": {
+            "description": "The authenticated device's own record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Device record not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/pair/complete": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_pair_complete_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairCompleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Device paired; token returned exactly once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairCompleteResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "require_confirm mode: awaiting admin approval",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairPendingConfirmResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown or expired pairing credential"
+          },
+          "429": {
+            "description": "Too many pairing attempts"
+          }
+        }
+      }
+    },
+    "/api/devices/pair/pending": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_pair_pending_handler",
+        "responses": {
+          "200": {
+            "description": "Pending device-pairing requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingPairListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/pair/start": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_pair_start_handler",
+        "responses": {
+          "200": {
+            "description": "QR pairing payload issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairStartResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "403": {
+            "description": "Device principals cannot administer pairing"
+          },
+          "429": {
+            "description": "Too many pending pairing requests"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/pair/{id}/approve": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_pair_approve_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Pairing id from `pair/start`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pairing approved; the device can now finalize with a repeat pair/complete call"
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "404": {
+            "description": "Pairing id not found or not awaiting confirmation"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/{id}/rename": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_rename_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Renamed device",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "404": {
+            "description": "Device not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/{id}/revoke": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_revoke_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked device",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "404": {
+            "description": "Device not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/{id}/rotate": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_rotate_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New token issued; returned exactly once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotateTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "404": {
+            "description": "Device not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
     "/api/gateway/status": {
       "get": {
         "tags": [
@@ -846,6 +1216,128 @@
             "type": "string"
           }
         }
+      },
+      "DeviceInfo": {
+        "type": "object",
+        "description": "Public view of a device (never includes token/hash material).",
+        "required": [
+          "device_id",
+          "name",
+          "platform",
+          "created_at",
+          "last_seen_at",
+          "token_prefix",
+          "scopes",
+          "has_pubkey"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_pubkey": {
+            "type": "boolean"
+          },
+          "last_seen_at": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/DevicePlatform"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceScope"
+            }
+          },
+          "token_prefix": {
+            "type": "string"
+          }
+        }
+      },
+      "DeviceListResponse": {
+        "type": "object",
+        "description": "`GET /api/devices` response.",
+        "required": [
+          "devices"
+        ],
+        "properties": {
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceInfo"
+            }
+          }
+        }
+      },
+      "DevicePlatform": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "ios"
+            ]
+          },
+          {
+            "type": "string",
+            "enum": [
+              "ipados"
+            ]
+          },
+          {
+            "type": "string",
+            "enum": [
+              "watchos"
+            ]
+          },
+          {
+            "type": "string",
+            "enum": [
+              "macos"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "Anything else (e.g. future platforms, test fixtures). Carries the\nraw platform string as reported at pairing time.",
+            "required": [
+              "other"
+            ],
+            "properties": {
+              "other": {
+                "type": "string",
+                "description": "Anything else (e.g. future platforms, test fixtures). Carries the\nraw platform string as reported at pairing time."
+              }
+            }
+          }
+        ],
+        "description": "Platform family of a paired device."
+      },
+      "DeviceScope": {
+        "type": "string",
+        "description": "Device scopes (v1), per `docs/MOBILE_SECURITY.md` D-T4.\n\nNever grantable to device tokens (enforced by never having a variant\nhere, and by [`super::scopes::required_scope`] returning `None` for\nthose routes): settings, secrets/providers, extensions/skills, memory\nwrite, logs, restart, pairing admin.",
+        "enum": [
+          "chat",
+          "approvals",
+          "jobs:read",
+          "devices:self"
+        ]
       },
       "GatewayStatusResponse": {
         "type": "object",
@@ -1286,6 +1778,118 @@
           }
         }
       },
+      "PairCompleteRequest": {
+        "type": "object",
+        "description": "`POST /api/devices/pair/complete` request body (public endpoint,\nprotected only by the one-time secret / human code).",
+        "required": [
+          "name",
+          "platform"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "pubkey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 SPKI public key (D-P2). Stored, not yet enforced."
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One-time 32-byte secret (base64url) from the QR, OR the short human\ncode — exactly one of the two redemption paths."
+          }
+        }
+      },
+      "PairCompleteResponse": {
+        "type": "object",
+        "description": "`POST /api/devices/pair/complete` response — the only place the raw\ndevice token is ever returned.",
+        "required": [
+          "device_id",
+          "token",
+          "scopes",
+          "gateway_instance"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string"
+          },
+          "gateway_instance": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceScope"
+            }
+          },
+          "token": {
+            "type": "string",
+            "description": "Raw `tcd_...` token. Returned exactly once."
+          }
+        }
+      },
+      "PairPendingConfirmResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "pairing_id"
+        ],
+        "properties": {
+          "pairing_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "PairStartResponse": {
+        "type": "object",
+        "description": "Response to `POST /api/devices/pair/start` (admin-only).",
+        "required": [
+          "qr_payload",
+          "qr_uri",
+          "human_code",
+          "expires_at",
+          "pairing_id"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix expiry, mirrors `qr_payload.exp`."
+          },
+          "human_code": {
+            "type": "string",
+            "description": "Short human-typable code (no-camera fallback), same lockout as the\nQR secret."
+          },
+          "pairing_id": {
+            "type": "string",
+            "description": "Internal pairing-record id, used by the `require_confirm` admin\napprove call."
+          },
+          "qr_payload": {
+            "$ref": "#/components/schemas/QrPairingPayload"
+          },
+          "qr_uri": {
+            "type": "string",
+            "description": "Rendered `thinclaw://pair?d=<base64url(json)>` URI."
+          }
+        }
+      },
       "PartialChannelSetupStatus": {
         "type": "object",
         "required": [
@@ -1372,6 +1976,165 @@
           }
         }
       },
+      "PendingApprovalEntry": {
+        "type": "object",
+        "description": "One pending tool-approval request, as surfaced by `GET /api/chat/approvals`\n(milestone B1 approvals-pull endpoint for mobile clients that are not\nholding an open SSE/WS stream when the approval is raised).\n\nPopulated from the `StatusUpdate::ApprovalNeeded` -> `SseEvent::ApprovalNeeded`\nprojection at broadcast time (see `src/channels/web/mod.rs::send_status`),\nand removed once `chat_approval_handler` submits a decision for the\n`request_id`. This cache is **best-effort**: it lives only in gateway\nprocess memory, is not persisted, and is cleared on restart — a client\nthat misses the SSE broadcast *and* queries after a restart will not see\nan approval that was already resolved or that predates the restart. It\nexists to close the gap for a client that connects (or reconnects) after\nthe SSE event already fired, not to be an authoritative durable queue.",
+        "required": [
+          "request_id",
+          "tool_name",
+          "description",
+          "parameters",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339 timestamp; entries are returned sorted oldest-first."
+          },
+          "description": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "string",
+            "description": "Pretty-printed JSON, matching `SseEvent::ApprovalNeeded.parameters`."
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_name": {
+            "type": "string"
+          }
+        }
+      },
+      "PendingApprovalsResponse": {
+        "type": "object",
+        "description": "`GET /api/chat/approvals` response.",
+        "required": [
+          "approvals"
+        ],
+        "properties": {
+          "approvals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PendingApprovalEntry"
+            }
+          }
+        }
+      },
+      "PendingPairInfo": {
+        "type": "object",
+        "description": "A pending (not-yet-completed) pairing attempt, admin-facing view.",
+        "required": [
+          "pairing_id",
+          "name",
+          "created_at",
+          "expires_at",
+          "awaiting_confirm"
+        ],
+        "properties": {
+          "awaiting_confirm": {
+            "type": "boolean",
+            "description": "True once a `pair/complete` call has staged the device awaiting an\nadmin `approve` call (`require_confirm` mode)."
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pairing_id": {
+            "type": "string"
+          }
+        }
+      },
+      "PendingPairListResponse": {
+        "type": "object",
+        "description": "`GET /api/devices/pair/pending` response (admin-only).",
+        "required": [
+          "pending"
+        ],
+        "properties": {
+          "pending": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PendingPairInfo"
+            }
+          }
+        }
+      },
+      "QrPairingPayload": {
+        "type": "object",
+        "description": "QR payload embedded (base64url-json) in `thinclaw://pair?d=<...>`.\n\nField names are intentionally short — this travels through a QR code.\nUnknown fields must be ignored by readers (versioned via `v`).",
+        "required": [
+          "v",
+          "urls",
+          "iid",
+          "name",
+          "sec",
+          "exp"
+        ],
+        "properties": {
+          "exp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix expiry (created + 15 min)."
+          },
+          "fp": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "base64url SHA-256 of the TLS leaf SPKI. Omitted only in `vpn-http` mode."
+          },
+          "iid": {
+            "type": "string",
+            "description": "Stable gateway instance id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human label for the gateway (shown in the pairing UI)."
+          },
+          "sec": {
+            "type": "string",
+            "description": "base64url 32-byte one-time pairing secret."
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Candidate gateway URLs (tailnet, `.local`, etc)."
+          },
+          "v": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Payload version.",
+            "minimum": 0
+          }
+        }
+      },
+      "RenameDeviceRequest": {
+        "type": "object",
+        "description": "`POST /api/devices/{id}/rename` request body.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "ResponseAttachment": {
         "type": "object",
         "required": [
@@ -1390,6 +2153,23 @@
           },
           "mime_type": {
             "type": "string"
+          }
+        }
+      },
+      "RotateTokenResponse": {
+        "type": "object",
+        "description": "`POST /api/devices/{id}/rotate` response — the only other place a raw\ntoken is returned.",
+        "required": [
+          "device_id",
+          "token"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "description": "Newly issued raw `tcd_...` token. Returned exactly once."
           }
         }
       },

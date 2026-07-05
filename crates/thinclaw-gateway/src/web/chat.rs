@@ -8,8 +8,9 @@ use uuid::Uuid;
 
 use crate::web::ports::{message_hidden_from_main_chat, message_is_startup_hook};
 use crate::web::types::{
-    ActionResponse, HistoryQuery, HistoryResponse, SendMessageResponse, ThreadCommandResponse,
-    ThreadExportResponse, ThreadInfo, ThreadListResponse, ToolCallInfo, TurnInfo,
+    ActionResponse, HistoryQuery, HistoryResponse, PendingApprovalEntry, PendingApprovalsResponse,
+    SendMessageResponse, ThreadCommandResponse, ThreadExportResponse, ThreadInfo,
+    ThreadListResponse, ToolCallInfo, TurnInfo,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -319,6 +320,17 @@ pub fn thread_command_response(message_id: Uuid) -> ThreadCommandResponse {
 
 pub fn chat_auth_success_response(message: impl Into<String>) -> ActionResponse {
     ActionResponse::ok(message)
+}
+
+/// Build the `GET /api/chat/approvals` response, sorted oldest-first
+/// (`created_at` ascending) regardless of the cache's internal iteration
+/// order. See `PendingApprovalEntry`'s doc comment for the best-effort /
+/// lossiness caveat.
+pub fn pending_approvals_response(
+    mut entries: Vec<PendingApprovalEntry>,
+) -> PendingApprovalsResponse {
+    entries.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    PendingApprovalsResponse { approvals: entries }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1164,5 +1176,33 @@ mod tests {
                 INVALID_THREAD_QUERY_ID_MESSAGE.to_string()
             ))
         );
+    }
+
+    fn approval(request_id: &str, created_at: &str) -> PendingApprovalEntry {
+        PendingApprovalEntry {
+            request_id: request_id.to_string(),
+            tool_name: "shell".to_string(),
+            description: "run a command".to_string(),
+            parameters: "{}".to_string(),
+            thread_id: None,
+            created_at: created_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn pending_approvals_response_sorts_oldest_first() {
+        let entries = vec![
+            approval("b", "2024-01-02T00:00:00+00:00"),
+            approval("a", "2024-01-01T00:00:00+00:00"),
+            approval("c", "2024-01-03T00:00:00+00:00"),
+        ];
+
+        let response = pending_approvals_response(entries);
+        let ids: Vec<&str> = response
+            .approvals
+            .iter()
+            .map(|entry| entry.request_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
     }
 }

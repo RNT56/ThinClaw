@@ -23,7 +23,7 @@ public enum PairingPayloadError: Error, Equatable {
 ///     {
 ///       "v": 1,
 ///       "urls": ["https://gw.example.ts.net", "http://192.168.1.20:3000"],
-///       "fp": "sha256:ab12…",        // optional TLS fingerprint pin
+///       "fp": "qMnE3hSuF3zXV0AJIT9cKW0eGD6dV3nCFbYbBGDs0XU",  // optional TLS fingerprint pin (bare base64url SHA-256 of the TLS SPKI, no prefix)
 ///       "iid": "inst_9f8e",          // gateway installation id
 ///       "name": "home-server",       // human-readable gateway name
 ///       "sec": "pair_5f4dcc3b…",     // one-time pairing secret
