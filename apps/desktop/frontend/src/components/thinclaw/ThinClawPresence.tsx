@@ -105,8 +105,8 @@ function SubAgentRow({ info }: SubAgentRowProps) {
                 : 'text-muted-foreground bg-primary/5';
 
     return (
-        <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-white/[0.02] hover:bg-white/[0.04] transition-colors">
-            <GitBranch className="w-3.5 h-3.5 text-muted-foreground/50 flex-shrink-0" />
+        <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-white/2 hover:bg-white/4 transition-colors">
+            <GitBranch className="w-3.5 h-3.5 text-muted-foreground/50 shrink-0" />
             <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium text-foreground/80 truncate">{info.task || info.session_key}</p>
                 <p className="text-[10px] font-mono text-muted-foreground/50 truncate">{info.session_key}</p>
@@ -203,7 +203,7 @@ export function ThinClawPresence() {
 
             {/* Engine info bar */}
             {presence && (
-                <div className="flex items-center gap-4 px-5 py-3 rounded-xl bg-white/[0.02] text-xs font-mono text-muted-foreground/70">
+                <div className="flex items-center gap-4 px-5 py-3 rounded-xl bg-white/2 text-xs font-mono text-muted-foreground/70">
                     <span className="flex items-center gap-1.5">
                         <Cpu className="w-3 h-3" />
                         Engine: <span className="text-foreground/70">{presence.engine}</span>
@@ -233,7 +233,7 @@ export function ThinClawPresence() {
             {isLoading && !presence ? (
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {[...Array(6)].map((_, i) => (
-                        <div key={i} className="h-36 rounded-2xl bg-white/[0.02] animate-pulse" />
+                        <div key={i} className="h-36 rounded-2xl bg-white/2 animate-pulse" />
                     ))}
                 </div>
             ) : (
@@ -302,7 +302,7 @@ export function ThinClawPresence() {
             {/* Live Sessions */}
             <div className="rounded-2xl bg-card/20 overflow-hidden">
                 <button
-                    className="w-full flex items-center justify-between px-6 py-4 hover:bg-white/[0.02] transition-colors"
+                    className="w-full flex items-center justify-between px-6 py-4 hover:bg-white/2 transition-colors"
                     onClick={() => setExpandedSection(prev => prev === 'sessions' ? null : 'sessions')}
                 >
                     <div className="flex items-center gap-3">
@@ -335,9 +335,9 @@ export function ThinClawPresence() {
                                     sessions.map(sess => (
                                         <div
                                             key={sess.session_key}
-                                            className="flex items-center gap-3 px-4 py-3 mt-3 rounded-xl bg-white/[0.02] hover:bg-white/[0.04] transition-colors"
+                                            className="flex items-center gap-3 px-4 py-3 mt-3 rounded-xl bg-white/2 hover:bg-white/4 transition-colors"
                                         >
-                                            <div className="flex items-center gap-2 flex-shrink-0">
+                                            <div className="flex items-center gap-2 shrink-0">
                                                 <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                                             </div>
                                             <div className="flex-1 min-w-0">
@@ -352,7 +352,7 @@ export function ThinClawPresence() {
                                                 </p>
                                             </div>
                                             {sess.updated_at_ms && (
-                                                <span className="text-[10px] text-muted-foreground/50 font-mono flex-shrink-0">
+                                                <span className="text-[10px] text-muted-foreground/50 font-mono shrink-0">
                                                     {new Date(sess.updated_at_ms).toLocaleTimeString()}
                                                 </span>
                                             )}
@@ -369,7 +369,7 @@ export function ThinClawPresence() {
             {subAgents.length > 0 && (
                 <div className="rounded-2xl bg-card/20 overflow-hidden">
                     <button
-                        className="w-full flex items-center justify-between px-6 py-4 hover:bg-white/[0.02] transition-colors"
+                        className="w-full flex items-center justify-between px-6 py-4 hover:bg-white/2 transition-colors"
                         onClick={() => setExpandedSection(prev => prev === 'subagents' ? null : 'subagents')}
                     >
                         <div className="flex items-center gap-3">
@@ -407,7 +407,7 @@ export function ThinClawPresence() {
             {/* Capability summary */}
             {presence && (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="p-5 rounded-2xl bg-white/[0.02] space-y-3">
+                    <div className="p-5 rounded-2xl bg-white/2 space-y-3">
                         <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">
                             <Layers className="w-3.5 h-3.5" />
                             Capabilities
@@ -431,7 +431,7 @@ export function ThinClawPresence() {
                         ))}
                     </div>
 
-                    <div className="p-5 rounded-2xl bg-white/[0.02] space-y-3 md:col-span-2">
+                    <div className="p-5 rounded-2xl bg-white/2 space-y-3 md:col-span-2">
                         <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">
                             <Terminal className="w-3.5 h-3.5" />
                             Runtime Details

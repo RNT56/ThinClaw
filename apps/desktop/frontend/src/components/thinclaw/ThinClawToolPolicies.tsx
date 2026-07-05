@@ -76,10 +76,10 @@ export function ThinClawToolPolicies() {
     return (
         <div className="flex flex-col h-full overflow-hidden">
             {/* Header */}
-            <div className="flex-shrink-0 px-5 pt-5 pb-3">
+            <div className="shrink-0 px-5 pt-5 pb-3">
                 <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500/20 to-violet-500/20 border border-indigo-500/30 flex items-center justify-center">
+                        <div className="w-9 h-9 rounded-xl bg-linear-to-br from-indigo-500/20 to-violet-500/20 border border-indigo-500/30 flex items-center justify-center">
                             <Shield className="w-4.5 h-4.5 text-primary" />
                         </div>
                         <div>
@@ -112,7 +112,7 @@ export function ThinClawToolPolicies() {
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         placeholder="Search tools..."
-                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-indigo-500/50"
+                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-indigo-500/50"
                     />
                 </div>
 

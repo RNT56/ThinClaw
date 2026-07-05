@@ -73,7 +73,7 @@ export function ThinClawSessionSearch() {
                         onChange={(e) => setQuery(e.target.value)}
                         onKeyDown={(e) => { if (e.key === 'Enter') search(); }}
                         placeholder="Search transcripts…"
-                        className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/60"
+                        className="flex-1 bg-transparent text-sm outline-hidden placeholder:text-muted-foreground/60"
                     />
                 </div>
                 <button
@@ -81,7 +81,7 @@ export function ThinClawSessionSearch() {
                     title="Summarize matching sessions with the primary model"
                     className={cn(
                         'inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border transition-all',
-                        summarize ? 'bg-primary/10 text-primary border-primary/20' : 'bg-white/[0.03] text-muted-foreground border-white/5',
+                        summarize ? 'bg-primary/10 text-primary border-primary/20' : 'bg-white/3 text-muted-foreground border-white/5',
                     )}
                 >
                     <Sparkles className="w-3.5 h-3.5" /> Summarize
@@ -124,7 +124,7 @@ export function ThinClawSessionSearch() {
                             const excerpt = field(r, 'excerpt', 'snippet', 'preview', 'summary', 'text');
                             const score = field(r, 'score', 'rank');
                             return (
-                                <div key={i} className="rounded-xl border border-white/5 bg-white/[0.02] px-3 py-2.5">
+                                <div key={i} className="rounded-xl border border-white/5 bg-white/2 px-3 py-2.5">
                                     <div className="flex items-center justify-between gap-2">
                                         <span className="text-xs font-mono text-foreground/80 truncate">{title}</span>
                                         {score && <span className="text-[10px] tabular-nums text-muted-foreground shrink-0">{score}</span>}

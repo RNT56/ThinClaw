@@ -77,7 +77,7 @@ function SectionCard({
     children: React.ReactNode;
 }) {
     return (
-        <div className="p-6 border border-border/50 rounded-xl bg-card shadow-sm space-y-0">
+        <div className="p-6 border border-border/50 rounded-xl bg-card shadow-xs space-y-0">
             <div className="flex items-center gap-3 mb-4 pb-4 border-b border-border/30">
                 <div className={cn('p-2 rounded-lg', iconBg)}>
                     <Icon className={cn('w-4 h-4', iconColor)} />
@@ -115,7 +115,7 @@ function TextInput({
             spellCheck={false}
             autoComplete="off"
             className={cn(
-                'w-[320px] h-10 px-3 rounded-xl border bg-background/70 text-sm font-mono transition-all duration-200 backdrop-blur-sm outline-none',
+                'w-[320px] h-10 px-3 rounded-xl border bg-background/70 text-sm font-mono transition-all duration-200 backdrop-blur-xs outline-hidden',
                 'border-border/50 focus:border-primary focus:ring-2 focus:ring-primary/20',
                 disabled && 'opacity-50 cursor-not-allowed'
             )}
@@ -137,7 +137,7 @@ function ToggleSwitch({
             checked={checked}
             onCheckedChange={onCheckedChange}
             className={cn(
-                'w-[42px] h-[25px] rounded-full relative shadow-inner transition-colors duration-200 cursor-pointer outline-none',
+                'w-[42px] h-[25px] rounded-full relative shadow-inner transition-colors duration-200 cursor-pointer outline-hidden',
                 checked ? color : 'bg-muted'
             )}
         >
@@ -497,7 +497,7 @@ export function McpTab() {
                                         'px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors',
                                         selectedServer === server.name
                                             ? 'bg-primary/15 border-primary/30 text-primary'
-                                            : 'bg-white/[0.03] border-border/40 text-muted-foreground hover:text-foreground'
+                                            : 'bg-white/3 border-border/40 text-muted-foreground hover:text-foreground'
                                     )}
                                 >
                                     {server.display_name || server.name}
@@ -509,7 +509,7 @@ export function McpTab() {
                                 refreshMcpServers();
                                 refreshMcpDetails(selectedServer);
                             }}
-                            className="p-2 rounded-lg bg-white/[0.04] border border-border/40 hover:bg-white/[0.07]"
+                            className="p-2 rounded-lg bg-white/4 border border-border/40 hover:bg-white/[0.07]"
                         >
                             <RefreshCw className={cn('w-4 h-4', mcpLoading && 'animate-spin')} />
                         </button>
@@ -517,7 +517,7 @@ export function McpTab() {
 
                     {selectedServerInfo && (
                         <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4">
-                            <div className="p-4 rounded-xl bg-white/[0.03] border border-white/5 space-y-3">
+                            <div className="p-4 rounded-xl bg-white/3 border border-white/5 space-y-3">
                                 <div>
                                     <h4 className="font-semibold text-sm">{selectedServerInfo.display_name || selectedServerInfo.name}</h4>
                                     <p className="text-xs text-muted-foreground mt-1">{selectedServerInfo.description || selectedServerInfo.transport}</p>
@@ -546,7 +546,7 @@ export function McpTab() {
                                         <option value="warn">Warn</option>
                                         <option value="error">Error</option>
                                     </select>
-                                    <button onClick={handleOauth} className="px-2 py-1.5 rounded-lg bg-white/[0.04] border border-border/40 text-xs hover:bg-white/[0.07]">
+                                    <button onClick={handleOauth} className="px-2 py-1.5 rounded-lg bg-white/4 border border-border/40 text-xs hover:bg-white/[0.07]">
                                         OAuth
                                     </button>
                                 </div>
@@ -554,7 +554,7 @@ export function McpTab() {
 
                             <div className="space-y-4">
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
+                                    <div className="p-3 rounded-xl bg-white/3 border border-white/5">
                                         <div className="flex items-center justify-between mb-2">
                                             <h4 className="text-xs font-semibold uppercase text-muted-foreground">Tools</h4>
                                             <span className="text-[10px] text-muted-foreground">{serverTools.length}</span>
@@ -563,7 +563,7 @@ export function McpTab() {
                                             {serverTools.map((tool: any) => <ToolChip key={tool.name || tool.id} name={tool.name || tool.id || 'tool'} />)}
                                         </div>
                                     </div>
-                                    <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
+                                    <div className="p-3 rounded-xl bg-white/3 border border-white/5">
                                         <div className="flex items-center justify-between mb-2">
                                             <h4 className="text-xs font-semibold uppercase text-muted-foreground">Prompts</h4>
                                             <span className="text-[10px] text-muted-foreground">{serverPrompts.length}</span>
@@ -583,7 +583,7 @@ export function McpTab() {
                                     </div>
                                 </div>
 
-                                <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5 space-y-3">
+                                <div className="p-3 rounded-xl bg-white/3 border border-white/5 space-y-3">
                                     <div className="flex items-center justify-between">
                                         <h4 className="text-xs font-semibold uppercase text-muted-foreground">Resources</h4>
                                         <span className="text-[10px] text-muted-foreground">{serverResources.length} resources · {resourceTemplates.length} templates</span>
@@ -594,7 +594,7 @@ export function McpTab() {
                                     </div>
                                     <div className="flex flex-wrap gap-1.5">
                                         {serverResources.slice(0, 10).map((resource: any) => (
-                                            <button key={resource.uri || resource.name} onClick={() => setResourceUri(resource.uri || '')} className="px-2 py-1 rounded-lg bg-white/[0.04] text-[10px] border border-border/30">
+                                            <button key={resource.uri || resource.name} onClick={() => setResourceUri(resource.uri || '')} className="px-2 py-1 rounded-lg bg-white/4 text-[10px] border border-border/30">
                                                 {resource.name || resource.uri}
                                             </button>
                                         ))}
@@ -664,7 +664,7 @@ export function McpTab() {
                             placeholder="••••••••••••••••••••••••"
                             spellCheck={false}
                             autoComplete="new-password"
-                            className="w-full h-10 pl-3 pr-10 rounded-xl border border-border/50 bg-background/70 text-sm font-mono transition-all duration-200 backdrop-blur-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+                            className="w-full h-10 pl-3 pr-10 rounded-xl border border-border/50 bg-background/70 text-sm font-mono transition-all duration-200 backdrop-blur-xs outline-hidden focus:border-primary focus:ring-2 focus:ring-primary/20"
                         />
                         <button
                             type="button"
@@ -690,7 +690,7 @@ export function McpTab() {
                         className={cn(
                             'inline-flex items-center gap-2 h-9 px-4 rounded-xl text-sm font-medium border transition-all duration-200',
                             hasMcpUrl && connectionResult.status !== 'testing'
-                                ? 'bg-primary/10 border-primary/30 text-primary hover:bg-primary/20 hover:border-primary/50 shadow-sm hover:shadow-primary/10'
+                                ? 'bg-primary/10 border-primary/30 text-primary hover:bg-primary/20 hover:border-primary/50 shadow-xs hover:shadow-primary/10'
                                 : 'bg-muted/40 border-border/30 text-muted-foreground cursor-not-allowed opacity-50'
                         )}
                     >

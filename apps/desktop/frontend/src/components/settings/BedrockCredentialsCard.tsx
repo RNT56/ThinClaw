@@ -119,7 +119,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
                     {showConfirm && (
                         <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-2 duration-200">
                             <button onClick={() => setShowConfirm(false)} disabled={loading} className="px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors cursor-pointer">Cancel</button>
-                            <button onClick={handleDelete} disabled={loading} className="px-2.5 py-1 bg-rose-700 text-white rounded-md text-xs font-bold uppercase tracking-wider hover:bg-rose-800 transition-colors shadow-sm flex items-center gap-1.5 cursor-pointer">
+                            <button onClick={handleDelete} disabled={loading} className="px-2.5 py-1 bg-rose-700 text-white rounded-md text-xs font-bold uppercase tracking-wider hover:bg-rose-800 transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer">
                                 {loading && <Loader2 className="w-3 h-3 animate-spin" />}
                                 Confirm Delete
                             </button>
@@ -136,7 +136,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
                         value={accessKeyId}
                         onChange={(e) => setAccessKeyId(e.target.value)}
                         placeholder={hasKey ? "••••••••••••••••" : "AKIA..."}
-                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all"
                     />
                 </div>
                 <div>
@@ -146,7 +146,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
                         value={secretAccessKey}
                         onChange={(e) => setSecretAccessKey(e.target.value)}
                         placeholder={hasKey ? "••••••••••••••••" : "wJal..."}
-                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all"
                     />
                 </div>
                 <div>
@@ -156,7 +156,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
                         value={region}
                         onChange={(e) => setRegion(e.target.value)}
                         placeholder="us-east-1"
-                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all"
                     />
                 </div>
             </div>
@@ -166,7 +166,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
                     onClick={handleSave}
                     disabled={loading || (!accessKeyId && !secretAccessKey)}
                     className={cn(
-                        "px-6 h-10 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shrink-0 shadow-sm hover:translate-y-[-1px]",
+                        "px-6 h-10 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shrink-0 shadow-xs hover:-translate-y-px",
                         (loading || (!accessKeyId && !secretAccessKey)) && "opacity-50 cursor-not-allowed transform-none"
                     )}
                 >
@@ -193,7 +193,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
                         <button
                             onClick={() => handleToggle('amazon-bedrock', !granted)}
                             className={cn(
-                                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+                                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-hidden focus:ring-2 focus:ring-primary focus:ring-offset-2",
                                 granted ? "bg-emerald-500" : "bg-slate-200 dark:bg-muted"
                             )}
                         >

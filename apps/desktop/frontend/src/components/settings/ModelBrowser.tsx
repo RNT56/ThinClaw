@@ -385,7 +385,7 @@ export function ModelBrowser() {
                     className={cn(
                         "flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2",
                         topTab === "discover"
-                            ? "bg-background text-foreground shadow-sm"
+                            ? "bg-background text-foreground shadow-xs"
                             : "text-muted-foreground hover:text-foreground"
                     )}
                     id="tab-discover"
@@ -398,7 +398,7 @@ export function ModelBrowser() {
                     className={cn(
                         "flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2",
                         topTab === "library"
-                            ? "bg-background text-foreground shadow-sm"
+                            ? "bg-background text-foreground shadow-xs"
                             : "text-muted-foreground hover:text-foreground"
                     )}
                     id="tab-library"
@@ -423,7 +423,7 @@ export function ModelBrowser() {
             {/* Library Tab (existing content) */}
             {topTab === "library" && <>
                 {/* Sticky Header Container */}
-                <div className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 -mx-1 px-1 py-4 space-y-4">
+                <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm supports-backdrop-filter:bg-background/60 -mx-1 px-1 py-4 space-y-4">
                     <div className="flex flex-col gap-3">
                         <div className="flex justify-end items-center h-4 gap-2">
                             {cloudLoading && (
@@ -464,7 +464,7 @@ export function ModelBrowser() {
                                 placeholder="Search models..."
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
-                                className="w-full pl-10 pr-4 py-2.5 text-sm bg-muted/50 border-none rounded-xl focus:outline-none focus:ring-1 focus:ring-primary/20 transition-all"
+                                className="w-full pl-10 pr-4 py-2.5 text-sm bg-muted/50 border-none rounded-xl focus:outline-hidden focus:ring-1 focus:ring-primary/20 transition-all"
                             />
                         </div>
                     </div>
@@ -481,9 +481,9 @@ export function ModelBrowser() {
                                     setSearchQuery("");
                                 }}
                                 className={cn(
-                                    "px-4 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap border flex-shrink-0 snap-start",
+                                    "px-4 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap border shrink-0 snap-start",
                                     activeCategory === cat
-                                        ? "bg-foreground text-background border-foreground shadow-sm"
+                                        ? "bg-foreground text-background border-foreground shadow-xs"
                                         : "bg-muted/50 text-muted-foreground border-transparent hover:bg-muted hover:text-foreground"
                                 )}
                             >
@@ -504,7 +504,7 @@ export function ModelBrowser() {
                                 </span>
                                 <button
                                     onClick={() => commands.openStandardModelsFolder()}
-                                    className="bg-background border border-border/50 hover:bg-accent hover:border-border text-foreground px-3 py-1.5 rounded-xl transition-all text-xs font-medium flex items-center shrink-0 ml-4 shadow-sm"
+                                    className="bg-background border border-border/50 hover:bg-accent hover:border-border text-foreground px-3 py-1.5 rounded-xl transition-all text-xs font-medium flex items-center shrink-0 ml-4 shadow-xs"
                                 >
                                     <FolderOpen className="w-3.5 h-3.5 mr-1.5" /> Open Folder
                                 </button>
@@ -543,7 +543,7 @@ export function ModelBrowser() {
                                             ) : (
                                                 <button
                                                     onClick={() => downloadStandardAsset(asset.filename)}
-                                                    className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-sm hover:translate-y-[-1px]"
+                                                    className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-xs hover:-translate-y-px"
                                                 >
                                                     <Download className="w-4 h-4 mr-2" /> Download Missing Asset
                                                 </button>
@@ -605,7 +605,7 @@ export function ModelBrowser() {
                                 "flex flex-col p-5 border rounded-2xl transition-all duration-300",
                                 isModelActive
                                     ? "bg-accent/40 border-primary/20 shadow-inner"
-                                    : "bg-card/40 border-border/50 hover:border-border hover:bg-card/60 shadow-sm"
+                                    : "bg-card/40 border-border/50 hover:border-border hover:bg-card/60 shadow-xs"
                             )}>
                                 <div className="flex items-start justify-between mb-4">
                                     <div className="min-w-0 flex-1">
@@ -790,8 +790,8 @@ export function ModelBrowser() {
                                                         className={cn(
                                                             "flex-1 py-2 px-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all",
                                                             isModelActive
-                                                                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shadow-sm ring-1 ring-emerald-500/10"
-                                                                : "bg-secondary hover:bg-secondary/80 text-secondary-foreground border border-transparent shadow-sm hover:translate-y-[-1px]"
+                                                                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shadow-xs ring-1 ring-emerald-500/10"
+                                                                : "bg-secondary hover:bg-secondary/80 text-secondary-foreground border border-transparent shadow-xs hover:-translate-y-px"
                                                         )}
                                                         disabled={!!isModelActive}
                                                     >
@@ -803,7 +803,7 @@ export function ModelBrowser() {
                                                             "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
                                                             isSummarizer
                                                                 ? "bg-muted text-muted-foreground border-border/50 cursor-default"
-                                                                : "border-input hover:bg-accent hover:text-accent-foreground shadow-sm"
+                                                                : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                         )}
                                                         disabled={!!isSummarizer}
                                                     >
@@ -819,7 +819,7 @@ export function ModelBrowser() {
                                                         "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
                                                         isVision
                                                             ? "bg-muted text-muted-foreground border-border/50 cursor-default"
-                                                            : "border-input hover:bg-accent hover:text-accent-foreground shadow-sm"
+                                                            : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                     )}
                                                     disabled={!!isVision}
                                                 >
@@ -834,7 +834,7 @@ export function ModelBrowser() {
                                                         "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
                                                         isStt
                                                             ? "bg-muted text-muted-foreground border-border/50 cursor-default"
-                                                            : "border-input hover:bg-accent hover:text-accent-foreground shadow-sm"
+                                                            : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                     )}
                                                     disabled={!!isStt}
                                                 >
@@ -849,7 +849,7 @@ export function ModelBrowser() {
                                                         "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
                                                         isImageGen
                                                             ? "bg-muted text-muted-foreground border-border/50 cursor-default"
-                                                            : "border-input hover:bg-accent hover:text-accent-foreground shadow-sm"
+                                                            : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                     )}
                                                     disabled={!!isImageGen}
                                                 >
@@ -864,7 +864,7 @@ export function ModelBrowser() {
                                                         "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
                                                         isEmbedding
                                                             ? "bg-muted text-muted-foreground border-border/50 cursor-default"
-                                                            : "border-input hover:bg-accent hover:text-accent-foreground shadow-sm"
+                                                            : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                     )}
                                                     disabled={!!isEmbedding}
                                                 >
@@ -916,8 +916,8 @@ export function ModelBrowser() {
                                             className={cn(
                                                 "flex-1 py-2 px-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all",
                                                 isModelActive
-                                                    ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 shadow-sm ring-1 ring-indigo-500/10"
-                                                    : "bg-secondary hover:bg-secondary/80 text-secondary-foreground border border-transparent shadow-sm hover:translate-y-[-1px]"
+                                                    ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 shadow-xs ring-1 ring-indigo-500/10"
+                                                    : "bg-secondary hover:bg-secondary/80 text-secondary-foreground border border-transparent shadow-xs hover:-translate-y-px"
                                             )}
                                             disabled={!!isModelActive}
                                         >
@@ -929,7 +929,7 @@ export function ModelBrowser() {
                                                 "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
                                                 isSummarizer
                                                     ? "bg-muted text-muted-foreground border-border/50 cursor-default"
-                                                    : "border-input hover:bg-accent hover:text-accent-foreground shadow-sm"
+                                                    : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                             )}
                                             disabled={!!isSummarizer}
                                         >
@@ -982,7 +982,7 @@ export function ModelBrowser() {
                                                         // Local model or legacy handled by select buttons
                                                     }
                                                 }}
-                                                className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-sm hover:translate-y-[-1px]"
+                                                className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-xs hover:-translate-y-px"
                                             >
                                                 <Download className="w-4 h-4 mr-2" />
                                                 {model.isCurated && (model as any).manual_download
@@ -1030,8 +1030,8 @@ export function ModelBrowser() {
 
                 {/* Quantization selection modal */}
                 {selectedModelVariants?.isOpen && selectedModelVariants.model && (
-                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-                        <div className="absolute inset-0 bg-background/80 backdrop-blur-sm" onClick={() => setSelectedModelVariants(null)} />
+                    <div className="fixed inset-0 z-100 flex items-center justify-center p-4">
+                        <div className="absolute inset-0 bg-background/80 backdrop-blur-xs" onClick={() => setSelectedModelVariants(null)} />
                         <div className="relative bg-card border border-white/10 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
                             <div className="p-6 space-y-4">
                                 <div>

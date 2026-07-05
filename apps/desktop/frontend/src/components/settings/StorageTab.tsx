@@ -143,18 +143,18 @@ function S3ConfigForm({
                         value={endpoint}
                         onChange={e => setEndpoint(e.target.value)}
                         placeholder="https://your-r2-account.r2.cloudflarestorage.com"
-                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all"
                     />
                 </div>
                 <div className="space-y-1.5">
                     <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">Bucket *</label>
                     <input type="text" value={bucket} onChange={e => setBucket(e.target.value)} placeholder="my-thinclaw-backup" required
-                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all" />
                 </div>
                 <div className="space-y-1.5">
                     <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">Region</label>
                     <input type="text" value={region} onChange={e => setRegion(e.target.value)} placeholder="auto"
-                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all" />
                 </div>
             </div>
 
@@ -319,7 +319,7 @@ function OAuthProviderCard({
                 disabled={loading || testing}
                 className={cn(
                     'w-full h-11 rounded-xl font-bold text-xs uppercase tracking-wider',
-                    'flex items-center justify-center gap-2 shadow-sm transition-all hover:translate-y-[-1px]',
+                    'flex items-center justify-center gap-2 shadow-xs transition-all hover:-translate-y-px',
                     'bg-primary text-primary-foreground hover:bg-primary/90',
                     (loading || testing) && 'opacity-50 cursor-not-allowed transform-none'
                 )}
@@ -373,8 +373,8 @@ function ICloudConnectCard({
                 disabled={loading || testing}
                 className={cn(
                     'w-full h-11 rounded-xl font-bold text-xs uppercase tracking-wider',
-                    'flex items-center justify-center gap-2 shadow-sm transition-all hover:translate-y-[-1px]',
-                    'bg-gradient-to-r from-sky-500 to-blue-500 text-white hover:from-sky-400 hover:to-blue-400',
+                    'flex items-center justify-center gap-2 shadow-xs transition-all hover:-translate-y-px',
+                    'bg-linear-to-r from-sky-500 to-blue-500 text-white hover:from-sky-400 hover:to-blue-400',
                     (loading || testing) && 'opacity-50 cursor-not-allowed transform-none'
                 )}
             >
@@ -400,7 +400,7 @@ function InputField({ label, value, onChange, placeholder, required, sublabel }:
                 {label} {sublabel && <span className="text-muted-foreground/40">{sublabel}</span>}
             </label>
             <input type="text" value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} required={required}
-                className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
+                className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all" />
         </div>
     );
 }
@@ -416,7 +416,7 @@ function SecretField({ label, value, onChange, placeholder, show, onToggle, requ
             </label>
             <div className="relative">
                 <input type={show ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} required={required}
-                    className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 pr-12 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
+                    className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 pr-12 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all" />
                 <button type="button" onClick={onToggle} className="absolute right-3 top-2.5 text-muted-foreground hover:text-foreground transition-colors">
                     {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -432,7 +432,7 @@ function TestButton({ testing, disabled }: { testing: boolean; disabled?: boolea
             disabled={testing || disabled}
             className={cn(
                 'w-full h-11 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider',
-                'flex items-center justify-center gap-2 shadow-sm hover:bg-primary/90 transition-all hover:translate-y-[-1px]',
+                'flex items-center justify-center gap-2 shadow-xs hover:bg-primary/90 transition-all hover:-translate-y-px',
                 (testing || disabled) && 'opacity-50 cursor-not-allowed transform-none'
             )}
         >
@@ -536,7 +536,7 @@ function ProviderConfigPanel({
     const Icon = meta?.icon ?? Cloud;
 
     return (
-        <div className="p-6 rounded-2xl border border-border/50 bg-card/40 shadow-sm space-y-5">
+        <div className="p-6 rounded-2xl border border-border/50 bg-card/40 shadow-xs space-y-5">
             <h3 className="font-bold text-base flex items-center gap-2">
                 <Icon className={cn('w-4 h-4', meta?.color ?? 'text-primary')} />
                 {meta?.name ?? providerId} Connection
@@ -681,9 +681,9 @@ export function StorageTab() {
         <div className="space-y-8 pb-20">
 
             {/* ── Current Mode Card ────────────────────────────────────── */}
-            <div className="relative overflow-hidden rounded-2xl border border-border/50 bg-card/40 shadow-sm">
+            <div className="relative overflow-hidden rounded-2xl border border-border/50 bg-card/40 shadow-xs">
                 <div className={cn(
-                    'absolute inset-0 bg-gradient-to-br pointer-events-none opacity-40',
+                    'absolute inset-0 bg-linear-to-br pointer-events-none opacity-40',
                     isCloud ? 'from-blue-500/20 to-sky-500/10' : 'from-emerald-500/20 to-green-500/10'
                 )} />
                 <div className="relative p-6 space-y-4">
@@ -757,7 +757,7 @@ export function StorageTab() {
             </div>
 
             {/* ── Storage Breakdown ────────────────────────────────────── */}
-            <div className="p-6 rounded-2xl border border-border/50 bg-card/40 shadow-sm">
+            <div className="p-6 rounded-2xl border border-border/50 bg-card/40 shadow-xs">
                 <StorageBreakdown breakdown={breakdown} totalSize={totalSize} />
             </div>
 
@@ -785,12 +785,12 @@ export function StorageTab() {
                                         isSelected
                                             ? 'border-primary bg-primary/5 ring-2 ring-primary/20 shadow-md'
                                             : p.available
-                                                ? 'border-border/50 bg-card/40 hover:bg-card/60 hover:border-border cursor-pointer shadow-sm'
+                                                ? 'border-border/50 bg-card/40 hover:bg-card/60 hover:border-border cursor-pointer shadow-xs'
                                                 : 'border-border/30 bg-muted/20 opacity-50 cursor-not-allowed'
                                     )}
                                 >
                                     <div className={cn(
-                                        'absolute inset-0 bg-gradient-to-br opacity-0 transition-opacity duration-500 pointer-events-none',
+                                        'absolute inset-0 bg-linear-to-br opacity-0 transition-opacity duration-500 pointer-events-none',
                                         isSelected && 'opacity-100',
                                         p.gradient
                                     )} />
@@ -871,9 +871,9 @@ export function StorageTab() {
                                         {testResult.connected && (
                                             <button
                                                 onClick={handleMigrateToCloud}
-                                                className="mt-4 w-full h-11 rounded-xl bg-gradient-to-r from-blue-500 to-sky-500 text-white font-bold text-xs uppercase tracking-wider
+                                                className="mt-4 w-full h-11 rounded-xl bg-linear-to-r from-blue-500 to-sky-500 text-white font-bold text-xs uppercase tracking-wider
                                                     flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30
-                                                    hover:translate-y-[-1px] transition-all"
+                                                    hover:-translate-y-px transition-all"
                                             >
                                                 <Upload className="w-4 h-4" />
                                                 Migrate to Cloud
@@ -889,7 +889,7 @@ export function StorageTab() {
 
             {/* ── Migrate Back to Local ────────────────────────────────── */}
             {isCloud && (
-                <div className="p-6 rounded-2xl border border-border/50 bg-card/40 shadow-sm space-y-4">
+                <div className="p-6 rounded-2xl border border-border/50 bg-card/40 shadow-xs space-y-4">
                     <div className="flex items-center gap-3">
                         <div className="p-2.5 rounded-xl bg-emerald-500/10">
                             <HardDrive className="w-5 h-5 text-emerald-500" />

@@ -288,7 +288,7 @@ export const ChatInput = memo(function ChatInput({
                                 : (!modelRunning ? "Starting model..." : (isImageMode ? "Describe the image you want to generate..." : (canSee ? "Type a message..." : (isRagCapable ? "Type a message..." : "Select a Vision model or start Embedder..."))))
                         )
                     }
-                    className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-none resize-none p-2 max-h-32 min-h-[44px]"
+                    className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-hidden resize-none p-2 max-h-32 min-h-[44px]"
                     rows={1}
                     style={{ height: 'auto', minHeight: '44px' }}
                 />
@@ -510,9 +510,9 @@ export const ChatInput = memo(function ChatInput({
                                     <button
                                         key={s.id}
                                         className={cn(
-                                            "w-full text-left px-3 py-2.5 text-sm rounded-xl flex items-center justify-between group transition-all duration-200 outline-none",
+                                            "w-full text-left px-3 py-2.5 text-sm rounded-xl flex items-center justify-between group transition-all duration-200 outline-hidden",
                                             i === slashSelectedIndex
-                                                ? "bg-accent text-foreground font-semibold shadow-sm ring-1 ring-primary/20 translate-x-1"
+                                                ? "bg-accent text-foreground font-semibold shadow-xs ring-1 ring-primary/20 translate-x-1"
                                                 : "hover:bg-muted text-foreground"
                                         )}
                                         onClick={() => handleSlashCommandExecute(s)}

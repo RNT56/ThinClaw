@@ -177,7 +177,7 @@ function RuleCard({ rule, index, onUpdate, onDelete, isExpanded, onToggleExpand 
                                         value={rule.label}
                                         onChange={e => onUpdate(rule.id, { label: e.target.value })}
                                         placeholder='e.g. "Code tasks → GPT-4o"'
-                                        className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500/50 placeholder:text-muted-foreground/40"
+                                        className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-hidden focus:ring-1 focus:ring-violet-500/50 placeholder:text-muted-foreground/40"
                                     />
                                 </div>
 
@@ -193,7 +193,7 @@ function RuleCard({ rule, index, onUpdate, onDelete, isExpanded, onToggleExpand 
                                                 match_kind: e.target.value as MatchKind,
                                                 match_value: e.target.value === 'always' ? '' : rule.match_value
                                             })}
-                                            className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500/50 appearance-none cursor-pointer"
+                                            className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-hidden focus:ring-1 focus:ring-violet-500/50 appearance-none cursor-pointer"
                                         >
                                             {MATCH_KIND_OPTIONS.map(opt => (
                                                 <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -218,7 +218,7 @@ function RuleCard({ rule, index, onUpdate, onDelete, isExpanded, onToggleExpand 
                                                         rule.match_kind === 'context_length' ? '32000' :
                                                             'anthropic'
                                                 }
-                                                className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500/50 placeholder:text-muted-foreground/40"
+                                                className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-hidden focus:ring-1 focus:ring-violet-500/50 placeholder:text-muted-foreground/40"
                                             />
                                         </div>
                                     )}
@@ -235,7 +235,7 @@ function RuleCard({ rule, index, onUpdate, onDelete, isExpanded, onToggleExpand 
                                             value={rule.target_model}
                                             onChange={e => onUpdate(rule.id, { target_model: e.target.value })}
                                             placeholder="gpt-4o, claude-sonnet-4-20250514, etc."
-                                            className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500/50 placeholder:text-muted-foreground/40"
+                                            className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-hidden focus:ring-1 focus:ring-violet-500/50 placeholder:text-muted-foreground/40"
                                         />
                                     </div>
                                     <div className="space-y-1.5">
@@ -247,7 +247,7 @@ function RuleCard({ rule, index, onUpdate, onDelete, isExpanded, onToggleExpand 
                                             value={rule.target_provider ?? ''}
                                             onChange={e => onUpdate(rule.id, { target_provider: e.target.value || null })}
                                             placeholder="openai, anthropic, openrouter..."
-                                            className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500/50 placeholder:text-muted-foreground/40"
+                                            className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm focus:outline-hidden focus:ring-1 focus:ring-violet-500/50 placeholder:text-muted-foreground/40"
                                         />
                                     </div>
                                 </div>
@@ -549,32 +549,32 @@ export function ThinClawRouting() {
                         Runtime
                     </h3>
                     <div className="grid grid-cols-2 gap-3">
-                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
+                        <div className="rounded-xl border border-white/5 bg-white/2 p-3">
                             <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Mode</div>
                             <div className="mt-1 text-sm font-medium">{routingStatus?.routing_mode ?? 'unknown'}</div>
                         </div>
-                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
+                        <div className="rounded-xl border border-white/5 bg-white/2 p-3">
                             <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Advisor</div>
                             <div className={cn("mt-1 text-sm font-medium", advisorReady ? "text-emerald-400" : "text-muted-foreground")}>
                                 {advisorReady ? 'Ready' : 'Unavailable'}
                             </div>
                         </div>
-                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 col-span-2">
+                        <div className="rounded-xl border border-white/5 bg-white/2 p-3 col-span-2">
                             <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Primary</div>
                             <div className="mt-1 text-sm font-mono truncate">{primaryTarget || 'not configured'}</div>
                         </div>
-                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 col-span-2">
+                        <div className="rounded-xl border border-white/5 bg-white/2 p-3 col-span-2">
                             <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Cheap Lane</div>
                             <div className="mt-1 text-sm font-mono truncate">
                                 {routingStatus?.cheap_model || routingStatus?.preferred_cheap_provider || 'not configured'}
                             </div>
                         </div>
-                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 col-span-2">
+                        <div className="rounded-xl border border-white/5 bg-white/2 p-3 col-span-2">
                             <div className="text-[10px] uppercase font-bold text-muted-foreground/60">llm_select</div>
                             <div className="mt-1 text-xs text-muted-foreground">{routingStatus?.llm_select_state ?? 'unknown'}</div>
                         </div>
                     </div>
-                    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 space-y-3">
+                    <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-3">
                         <div className="flex items-center justify-between gap-3">
                             <div>
                                 <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Provider Pools</div>
@@ -597,7 +597,7 @@ export function ThinClawRouting() {
                                     onChange={e => setPrimaryPoolDraft(e.target.value)}
                                     rows={4}
                                     placeholder="anthropic&#10;openai"
-                                    className="w-full min-h-[92px] px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y placeholder:text-muted-foreground/40"
+                                    className="w-full min-h-[92px] px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm font-mono focus:outline-hidden focus:ring-1 focus:ring-violet-500/50 resize-y placeholder:text-muted-foreground/40"
                                 />
                             </label>
                             <label className="space-y-1.5">
@@ -607,7 +607,7 @@ export function ThinClawRouting() {
                                     onChange={e => setCheapPoolDraft(e.target.value)}
                                     rows={4}
                                     placeholder="openai&#10;groq"
-                                    className="w-full min-h-[92px] px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y placeholder:text-muted-foreground/40"
+                                    className="w-full min-h-[92px] px-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm font-mono focus:outline-hidden focus:ring-1 focus:ring-violet-500/50 resize-y placeholder:text-muted-foreground/40"
                                 />
                             </label>
                         </div>
@@ -640,7 +640,7 @@ export function ThinClawRouting() {
                         value={simulationPrompt}
                         onChange={e => setSimulationPrompt(e.target.value)}
                         rows={4}
-                        className="w-full min-h-[96px] px-3 py-2 rounded-xl bg-white/5 border border-border/40 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y placeholder:text-muted-foreground/40"
+                        className="w-full min-h-[96px] px-3 py-2 rounded-xl bg-white/5 border border-border/40 text-sm focus:outline-hidden focus:ring-1 focus:ring-violet-500/50 resize-y placeholder:text-muted-foreground/40"
                     />
 
                     <div className="flex flex-wrap gap-2">
@@ -649,7 +649,7 @@ export function ThinClawRouting() {
                             ['has_vision', 'Vision'],
                             ['requires_streaming', 'Streaming'],
                         ].map(([key, label]) => (
-                            <label key={key} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-white/5 bg-white/[0.02] text-xs text-muted-foreground cursor-pointer">
+                            <label key={key} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-white/5 bg-white/2 text-xs text-muted-foreground cursor-pointer">
                                 <input
                                     type="checkbox"
                                     checked={simulationOptions[key as keyof typeof simulationOptions]}
@@ -662,7 +662,7 @@ export function ThinClawRouting() {
                     </div>
 
                     {simulationResult && (
-                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 space-y-3">
+                        <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-3">
                             <div className="flex items-center justify-between gap-3">
                                 <div>
                                     <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Selected Target</div>
@@ -729,7 +729,7 @@ export function ThinClawRouting() {
                     <motion.div
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
-                        className="rounded-2xl border border-dashed border-border/40 bg-white/[0.01] p-8 flex flex-col items-center justify-center text-center space-y-3"
+                        className="rounded-2xl border border-dashed border-border/40 bg-white/1 p-8 flex flex-col items-center justify-center text-center space-y-3"
                     >
                         <div className="p-3 rounded-xl bg-white/5 border border-border/40">
                             <GitBranch className="w-6 h-6 text-muted-foreground/40" />

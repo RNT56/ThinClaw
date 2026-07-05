@@ -37,7 +37,7 @@ function StatCard({ title, value, icon: Icon, status = 'info', description, clas
     };
 
     return (
-        <div className={cn("p-4 rounded-xl border border-border/40 bg-card/50 backdrop-blur-sm shadow-sm", className)}>
+        <div className={cn("p-4 rounded-xl border border-border/40 bg-card/50 backdrop-blur-xs shadow-xs", className)}>
             <div className="flex items-start justify-between mb-2">
                 <div className={cn("p-2 rounded-lg", statusColors[status])}>
                     <Icon className="w-5 h-5" />
@@ -113,7 +113,7 @@ export function ThinClawDashboard() {
             </div>
 
             {/* Alpha Warning Banner */}
-            <div className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/10 backdrop-blur-sm flex items-start gap-4">
+            <div className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/10 backdrop-blur-xs flex items-start gap-4">
                 <div className="p-2 rounded-lg bg-amber-500/20">
                     <AlertTriangle className="w-5 h-5 text-amber-500" />
                 </div>
@@ -147,7 +147,7 @@ export function ThinClawDashboard() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Identity & Security */}
                 <div className="col-span-1 lg:col-span-2 space-y-6">
-                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
+                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-xs border-border/40">
                         <div className="flex items-center gap-3 mb-6">
                             <div className="p-2 bg-primary/10 rounded-lg">
                                 <Activity className="w-5 h-5 text-primary" />
@@ -188,7 +188,7 @@ export function ThinClawDashboard() {
 
                     {/* Channel Integration Status */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
+                        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-xs border-border/40">
                             <div className="flex items-center justify-between mb-4">
                                 <div className="flex items-center gap-2">
                                     <MessageSquare className="w-4 h-4 text-primary" />
@@ -204,7 +204,7 @@ export function ThinClawDashboard() {
                                 {status?.slack_enabled ? 'Real-time bidirectional message routing active.' : 'Slack integration is currently disabled.'}
                             </p>
                         </div>
-                        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
+                        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-xs border-border/40">
                             <div className="flex items-center justify-between mb-4">
                                 <div className="flex items-center gap-2">
                                     <MessageSquare className="w-4 h-4 text-primary" />
@@ -225,7 +225,7 @@ export function ThinClawDashboard() {
 
                 {/* System Specs & Files */}
                 <div className="space-y-6">
-                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
+                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-xs border-border/40">
                         <h3 className="text-sm font-semibold mb-4 flex items-center gap-2">
                             <Database className="w-4 h-4 text-primary" />
                             Storage Paths
@@ -240,7 +240,7 @@ export function ThinClawDashboard() {
                         </div>
                     </div>
 
-                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
+                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-xs border-border/40">
                         <h3 className="text-sm font-semibold mb-4 flex items-center gap-2">
                             <Binary className="w-4 h-4 text-primary" />
                             Software Version

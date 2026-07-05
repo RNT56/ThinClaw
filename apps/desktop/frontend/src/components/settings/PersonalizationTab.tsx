@@ -80,7 +80,7 @@ export function PersonalizationTab() {
     return (
         <div className="space-y-10 animate-in fade-in slide-in-from-bottom-4 duration-500">
             {/* General Knowledge Section */}
-            <div className="p-8 border rounded-2xl bg-gradient-to-br from-card to-background shadow-xl border-border/30 space-y-8 relative overflow-hidden group">
+            <div className="p-8 border rounded-2xl bg-linear-to-br from-card to-background shadow-xl border-border/30 space-y-8 relative overflow-hidden group">
                 <div className="absolute top-0 right-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl -mr-32 -mt-32 transition-colors group-hover:bg-primary/10" />
 
                 <div className="flex items-center justify-between relative z-10">
@@ -175,7 +175,7 @@ export function PersonalizationTab() {
                 <button
                     onClick={() => updateConfig({ ...config, image_prompt_enhance_enabled: !config.image_prompt_enhance_enabled })}
                     className={cn(
-                        "relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                        "relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
                         config.image_prompt_enhance_enabled ? "bg-primary" : "bg-muted"
                     )}
                 >
@@ -189,7 +189,7 @@ export function PersonalizationTab() {
             </div>
 
             {/* Danger Zone Section */}
-            <div className="p-8 border border-rose-500/20 rounded-2xl bg-rose-500/[0.03] space-y-6">
+            <div className="p-8 border border-rose-500/20 rounded-2xl bg-rose-500/3 space-y-6">
                 <div className="flex items-start gap-4">
                     <div className="p-3 bg-rose-500/10 rounded-2xl">
                         <Trash2 className="w-6 h-6 text-rose-600 dark:text-rose-400" />
@@ -216,8 +216,8 @@ export function PersonalizationTab() {
             {/* Delete Confirmation Dialog */}
             <Dialog.Root open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
                 <Dialog.Portal>
-                    <Dialog.Overlay className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] animate-in fade-in duration-300" />
-                    <Dialog.Content className="fixed left-[50%] top-[50%] z-[60] grid w-full max-w-md translate-x-[-50%] translate-y-[-50%] gap-6 border bg-card p-8 shadow-2xl rounded-2xl animate-in fade-in zoom-in-95 duration-200">
+                    <Dialog.Overlay className="fixed inset-0 bg-black/60 backdrop-blur-xs z-60 animate-in fade-in duration-300" />
+                    <Dialog.Content className="fixed left-[50%] top-[50%] z-60 grid w-full max-w-md translate-x-[-50%] translate-y-[-50%] gap-6 border bg-card p-8 shadow-2xl rounded-2xl animate-in fade-in zoom-in-95 duration-200">
                         <div className="space-y-3 text-center sm:text-left">
                             <Dialog.Title className="text-2xl font-bold text-red-500 tracking-tight">Erase Everything?</Dialog.Title>
                             <Dialog.Description className="text-sm text-muted-foreground leading-relaxed">
@@ -267,8 +267,8 @@ export function PersonalizationTab() {
             {/* Edit/Add Dialog */}
             <Dialog.Root open={isDialogOpen} onOpenChange={setIsDialogOpen}>
                 <Dialog.Portal>
-                    <Dialog.Overlay className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] animate-in fade-in duration-300" />
-                    <Dialog.Content className="fixed left-[50%] top-[50%] z-[60] grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-6 border bg-card p-8 shadow-2xl rounded-3xl animate-in fade-in zoom-in-95 duration-200">
+                    <Dialog.Overlay className="fixed inset-0 bg-black/60 backdrop-blur-xs z-60 animate-in fade-in duration-300" />
+                    <Dialog.Content className="fixed left-[50%] top-[50%] z-60 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-6 border bg-card p-8 shadow-2xl rounded-3xl animate-in fade-in zoom-in-95 duration-200">
                         <div className="space-y-1">
                             <Dialog.Title className="text-2xl font-bold tracking-tight">{editingBit ? "Refine Knowledge" : "Inject Knowledge"}</Dialog.Title>
                             <p className="text-sm text-muted-foreground">Information here is injected into the system prompt for all future sessions.</p>
@@ -280,7 +280,7 @@ export function PersonalizationTab() {
                                     value={formLabel}
                                     onChange={(e) => setFormLabel(e.target.value)}
                                     placeholder="e.g. My Coding Style"
-                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-none transition-all font-semibold"
+                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-hidden transition-all font-semibold"
                                     autoFocus
                                 />
                             </div>
@@ -290,7 +290,7 @@ export function PersonalizationTab() {
                                     value={formContent}
                                     onChange={(e) => setFormContent(e.target.value)}
                                     placeholder="Always format code in TypeScript using functional patterns..."
-                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm resize-none h-40 focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-none transition-all leading-relaxed"
+                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm resize-none h-40 focus:ring-2 focus:ring-primary/20 focus:border-primary/50 outline-hidden transition-all leading-relaxed"
                                 />
                             </div>
                         </div>

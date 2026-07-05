@@ -301,7 +301,7 @@ export function ImagineGeneration({
                                 }}
                                 transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
                             >
-                                <div className="absolute inset-0 bg-gradient-to-tr from-primary/5 via-transparent to-primary/5 animate-pulse" />
+                                <div className="absolute inset-0 bg-linear-to-tr from-primary/5 via-transparent to-primary/5 animate-pulse" />
                                 <ImagineMainIcon size={80} isActive={true} className="relative z-10" />
                             </motion.div>
 
@@ -322,9 +322,9 @@ export function ImagineGeneration({
                                     </span>
                                 </div>
 
-                                <div className="h-3 w-full bg-muted/30 rounded-full border border-border/20 overflow-hidden relative backdrop-blur-sm">
+                                <div className="h-3 w-full bg-muted/30 rounded-full border border-border/20 overflow-hidden relative backdrop-blur-xs">
                                     <motion.div
-                                        className="h-full bg-gradient-to-r from-primary via-primary/80 to-primary relative"
+                                        className="h-full bg-linear-to-r from-primary via-primary/80 to-primary relative"
                                         initial={{ width: 0 }}
                                         animate={{
                                             width: typeof progress === 'object' && progress !== null
@@ -333,7 +333,7 @@ export function ImagineGeneration({
                                         }}
                                         transition={{ type: "spring", bounce: 0, duration: 0.5 }}
                                     >
-                                        <div className="absolute inset-0 bg-[linear-gradient(45deg,rgba(255,255,255,0.15)_25%,transparent_25%,transparent_50%,rgba(255,255,255,0.15)_50%,rgba(255,255,255,0.15)_75%,transparent_75%,transparent)] bg-[length:24px_24px] animate-[progress-bar-stripes_1s_linear_infinity]" />
+                                        <div className="absolute inset-0 bg-[linear-gradient(45deg,rgba(255,255,255,0.15)_25%,transparent_25%,transparent_50%,rgba(255,255,255,0.15)_50%,rgba(255,255,255,0.15)_75%,transparent_75%,transparent)] bg-size-[24px_24px] animate-[progress-bar-stripes_1s_linear_infinity]" />
                                     </motion.div>
                                 </div>
 
@@ -366,27 +366,27 @@ export function ImagineGeneration({
                                 whileHover={{ y: 0 }}
                             >
                                 <button
-                                    className="p-2 rounded-lg bg-black/60 backdrop-blur text-white hover:bg-black/80 transition-colors"
+                                    className="p-2 rounded-lg bg-black/60 backdrop-blur-sm text-white hover:bg-black/80 transition-colors"
                                     onClick={handleDownload}
                                     title="Download"
                                 >
                                     <Download className="w-4 h-4" />
                                 </button>
                                 <button
-                                    className="p-2 rounded-lg bg-black/60 backdrop-blur text-white hover:bg-black/80 transition-colors"
+                                    className="p-2 rounded-lg bg-black/60 backdrop-blur-sm text-white hover:bg-black/80 transition-colors"
                                     onClick={handleCopy}
                                     title="Copy to Clipboard"
                                 >
                                     <Copy className="w-4 h-4" />
                                 </button>
                                 <button
-                                    className="p-2 rounded-lg bg-black/60 backdrop-blur text-white hover:bg-black/80 transition-colors"
+                                    className="p-2 rounded-lg bg-black/60 backdrop-blur-sm text-white hover:bg-black/80 transition-colors"
                                     onClick={() => setIsExpanded(true)}
                                     title="Expand"
                                 >
                                     <Expand className="w-4 h-4" />
                                 </button>
-                                {/* <button className="p-2 rounded-lg bg-pink-500/80 backdrop-blur text-white hover:bg-pink-500 transition-colors">
+                                {/* <button className="p-2 rounded-lg bg-pink-500/80 backdrop-blur-sm text-white hover:bg-pink-500 transition-colors">
                                     <RefreshCw className="w-4 h-4" />
                                 </button> */}
                             </motion.div>
@@ -400,7 +400,7 @@ export function ImagineGeneration({
                             className="flex flex-col items-center gap-4 text-center max-w-md"
                         >
                             <motion.div
-                                className="w-24 h-24 rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 flex items-center justify-center"
+                                className="w-24 h-24 rounded-2xl bg-linear-to-br from-primary/10 to-accent/10 flex items-center justify-center"
                                 animate={{
                                     y: [0, -4, 0],
                                 }}
@@ -468,7 +468,7 @@ export function ImagineGeneration({
                                 initial={{ opacity: 0, y: 10, scale: 0.9 }}
                                 animate={{ opacity: 1, y: 0, scale: 1 }}
                                 exit={{ opacity: 0, y: 10, scale: 0.9 }}
-                                className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-primary text-xs z-20 shadow-sm"
+                                className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-primary text-xs z-20 shadow-xs"
                             >
                                 <Palette className="w-3 h-3" />
                                 <span className="font-medium">{selectedStyle.label}</span>
@@ -610,7 +610,7 @@ export function ImagineGeneration({
                             onKeyDown={handleKeyDown}
                             placeholder={sourceImages.length > 0 ? "Describe how to edit these images..." : "Describe your imagination..."}
                             rows={1}
-                            className="flex-1 resize-none bg-transparent border-0 outline-none text-foreground placeholder:text-muted-foreground min-h-[40px] max-h-[120px] py-2"
+                            className="flex-1 resize-none bg-transparent border-0 outline-hidden text-foreground placeholder:text-muted-foreground min-h-[40px] max-h-[120px] py-2"
                             style={{ height: 'auto' }}
                             onInput={(e) => {
                                 const target = e.target as HTMLTextAreaElement;
@@ -625,7 +625,7 @@ export function ImagineGeneration({
                             disabled={!prompt.trim() || isGenerating}
                             className={cn(
                                 "p-3 rounded-xl transition-all duration-300",
-                                "bg-gradient-to-r from-primary to-accent",
+                                "bg-linear-to-r from-primary to-accent",
                                 "text-primary-foreground shadow-lg shadow-primary/20",
                                 "hover:shadow-xl hover:shadow-primary/30 hover:scale-105",
                                 "disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
@@ -823,7 +823,7 @@ export function ImagineGeneration({
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-8 backdrop-blur-sm"
+                        className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-8 backdrop-blur-xs"
                         onClick={() => setIsExpanded(false)}
                     >
                         <motion.div
@@ -848,14 +848,14 @@ export function ImagineGeneration({
                             {/* Modal Actions */}
                             <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex gap-3 z-50">
                                 <button
-                                    className="flex items-center gap-2 px-6 py-3 rounded-full bg-black/60 backdrop-blur text-white hover:bg-black/80 transition-colors border border-white/10"
+                                    className="flex items-center gap-2 px-6 py-3 rounded-full bg-black/60 backdrop-blur-sm text-white hover:bg-black/80 transition-colors border border-white/10"
                                     onClick={handleDownload}
                                 >
                                     <Download className="w-5 h-5" />
                                     <span className="text-base font-medium">Download</span>
                                 </button>
                                 <button
-                                    className="flex items-center gap-2 px-6 py-3 rounded-full bg-black/60 backdrop-blur text-white hover:bg-black/80 transition-colors border border-white/10"
+                                    className="flex items-center gap-2 px-6 py-3 rounded-full bg-black/60 backdrop-blur-sm text-white hover:bg-black/80 transition-colors border border-white/10"
                                     onClick={handleCopy}
                                 >
                                     <Copy className="w-5 h-5" />

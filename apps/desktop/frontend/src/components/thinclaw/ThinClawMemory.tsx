@@ -125,7 +125,7 @@ export function ThinClawMemory() {
                             className={cn(
                                 "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
                                 searchMode === 'files'
-                                    ? "bg-primary/15 text-primary shadow-sm"
+                                    ? "bg-primary/15 text-primary shadow-xs"
                                     : "text-muted-foreground hover:text-foreground"
                             )}
                         >
@@ -137,7 +137,7 @@ export function ThinClawMemory() {
                             className={cn(
                                 "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
                                 searchMode === 'semantic'
-                                    ? "bg-violet-500/15 text-primary shadow-sm"
+                                    ? "bg-violet-500/15 text-primary shadow-xs"
                                     : "text-muted-foreground hover:text-foreground"
                             )}
                         >
@@ -155,7 +155,7 @@ export function ThinClawMemory() {
                             onChange={(e) => setSearch(e.target.value)}
                             onKeyDown={(e) => { if (e.key === 'Enter' && searchMode === 'semantic') handleSemanticSearch(); }}
                             className={cn(
-                                "w-full pl-9 pr-3 py-2 bg-white/5 border rounded-xl text-xs focus:ring-1 outline-none transition-all",
+                                "w-full pl-9 pr-3 py-2 bg-white/5 border rounded-xl text-xs focus:ring-1 outline-hidden transition-all",
                                 searchMode === 'semantic'
                                     ? "border-violet-500/20 focus:ring-violet-500/40"
                                     : "border-border/40 focus:ring-primary/40"
@@ -192,7 +192,7 @@ export function ThinClawMemory() {
                                         className={cn(
                                             "w-full flex flex-col gap-1.5 px-3 py-3 rounded-xl text-xs transition-all border",
                                             activeLog === result.path
-                                                ? "bg-violet-500/10 border-violet-500/30 shadow-sm"
+                                                ? "bg-violet-500/10 border-violet-500/30 shadow-xs"
                                                 : "border-transparent hover:bg-muted/30 hover:border-border/40"
                                         )}
                                     >
@@ -285,7 +285,7 @@ export function ThinClawMemory() {
                         </div>
                         <div className="flex-1 overflow-y-auto relative">
                             {isLoading ? (
-                                <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-10">
+                                <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-xs z-10">
                                     <RefreshCw className="w-10 h-10 text-primary animate-spin" />
                                 </div>
                             ) : (

@@ -57,7 +57,7 @@ export function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, 
                         value={name}
                         onChange={(e) => setName(e.target.value)}
                         placeholder="e.g. OpenAI, ElevenLabs, etc."
-                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all"
                         required
                     />
                 </div>
@@ -67,7 +67,7 @@ export function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, 
                         value={description}
                         onChange={(e) => setDescription(e.target.value)}
                         placeholder="What is this key used for?"
-                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all"
                     />
                 </div>
                 <div className="space-y-2">
@@ -77,7 +77,7 @@ export function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, 
                         value={value}
                         onChange={(e) => setValue(e.target.value)}
                         placeholder="Paste your key here"
-                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-hidden transition-all"
                         required
                     />
                 </div>
@@ -93,7 +93,7 @@ export function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, 
                 </button>
                 <button
                     disabled={loading || !name || !value}
-                    className="px-6 h-10 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shadow-sm hover:translate-y-[-1px] disabled:opacity-50 disabled:transform-none"
+                    className="px-6 h-10 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shadow-xs hover:-translate-y-px disabled:opacity-50 disabled:transform-none"
                 >
                     {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                     Save Secret

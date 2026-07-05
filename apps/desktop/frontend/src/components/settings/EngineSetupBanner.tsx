@@ -45,7 +45,7 @@ export function EngineSetupBanner() {
     // Already set up successfully
     if (setupComplete) {
         return (
-            <div className="flex items-center gap-3 p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-sm shadow-sm">
+            <div className="flex items-center gap-3 p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-sm shadow-xs">
                 <CheckCircle2 className="w-5 h-5 shrink-0" />
                 <div>
                     <span className="font-semibold">{displayName}</span> is ready! You
@@ -58,7 +58,7 @@ export function EngineSetupBanner() {
     return (
         <div
             className={cn(
-                "rounded-xl border overflow-hidden transition-all duration-300 shadow-sm",
+                "rounded-xl border overflow-hidden transition-all duration-300 shadow-xs",
                 setupError
                     ? "bg-card/50 border-rose-500/20"
                     : isSettingUp
@@ -146,8 +146,8 @@ export function EngineSetupBanner() {
                         onClick={triggerSetup}
                         className={cn(
                             "w-full py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider",
-                            "flex items-center justify-center gap-2 transition-all shadow-sm",
-                            "hover:translate-y-[-1px] active:translate-y-0",
+                            "flex items-center justify-center gap-2 transition-all shadow-xs",
+                            "hover:-translate-y-px active:translate-y-0",
                             setupError
                                 ? "bg-destructive/10 text-destructive border border-destructive/30 hover:bg-destructive/20"
                                 : "bg-primary text-primary-foreground hover:opacity-90"

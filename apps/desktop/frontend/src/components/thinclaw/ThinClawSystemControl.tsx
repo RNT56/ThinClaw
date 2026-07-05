@@ -48,14 +48,14 @@ function LogRow({ entry, idx }: { entry: LogLine; idx: number }) {
                 idx % 2 === 0 ? '' : 'bg-muted/10'
             )}
         >
-            <span className="text-muted-foreground/30 select-none w-[30px] text-right shrink-0 mt-[1px]">
+            <span className="text-muted-foreground/30 select-none w-[30px] text-right shrink-0 mt-px">
                 {(idx + 1).toString().padStart(3, '0')}
             </span>
-            <span className="text-muted-foreground/50 shrink-0 mt-[1px] tabular-nums">{timeStr}</span>
+            <span className="text-muted-foreground/50 shrink-0 mt-px tabular-nums">{timeStr}</span>
             <span className={cn('shrink-0 px-1.5 py-0 rounded text-[9px] font-bold uppercase tracking-widest leading-5', s.badge)}>
                 {entry.level.slice(0, 4)}
             </span>
-            <span className="text-muted-foreground/40 shrink-0 mt-[1px] max-w-[120px] truncate">{shortTarget}</span>
+            <span className="text-muted-foreground/40 shrink-0 mt-px max-w-[120px] truncate">{shortTarget}</span>
             <span className={cn('flex-1 break-all whitespace-pre-wrap leading-relaxed', s.text)}>
                 {entry.message}
             </span>
@@ -290,7 +290,7 @@ export function ThinClawSystemControl() {
                                                             setConfig({ ...config, [key]: newVal });
                                                         } catch { }
                                                     }}
-                                                    className="w-full bg-muted/30 border border-border/40 rounded-lg p-3 text-xs font-mono text-foreground min-h-[100px] focus:border-primary/50 outline-none transition-colors"
+                                                    className="w-full bg-muted/30 border border-border/40 rounded-lg p-3 text-xs font-mono text-foreground min-h-[100px] focus:border-primary/50 outline-hidden transition-colors"
                                                 />
                                             ) : typeof value === 'boolean' ? (
                                                 <div className="flex items-center gap-2">
@@ -309,7 +309,7 @@ export function ThinClawSystemControl() {
                                                     type="text"
                                                     value={value}
                                                     onChange={(e) => setConfig({ ...config, [key]: e.target.value })}
-                                                    className="w-full bg-muted/30 border border-border/40 rounded-lg px-3 py-2 text-xs font-mono text-foreground focus:border-primary/50 outline-none transition-colors"
+                                                    className="w-full bg-muted/30 border border-border/40 rounded-lg px-3 py-2 text-xs font-mono text-foreground focus:border-primary/50 outline-hidden transition-colors"
                                                 />
                                             )}
                                             {schema?.[key]?.description && (
@@ -402,7 +402,7 @@ export function ThinClawSystemControl() {
                                         value={filter}
                                         onChange={e => setFilter(e.target.value)}
                                         placeholder="Filter logs…"
-                                        className="w-full bg-muted/30 border border-border/40 rounded-lg pl-7 pr-7 py-1 text-[10px] font-mono text-foreground placeholder-muted-foreground/40 focus:outline-none focus:border-primary/40"
+                                        className="w-full bg-muted/30 border border-border/40 rounded-lg pl-7 pr-7 py-1 text-[10px] font-mono text-foreground placeholder-muted-foreground/40 focus:outline-hidden focus:border-primary/40"
                                     />
                                     {filter && (
                                         <button onClick={() => setFilter('')} className="absolute right-2 text-muted-foreground/40 hover:text-muted-foreground/70">

@@ -210,7 +210,7 @@ export function ImagineGallery({
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
                             placeholder="Search by prompt..."
-                            className="w-full pl-10 pr-4 py-2 rounded-lg bg-muted/50 border border-border/50 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all"
+                            className="w-full pl-10 pr-4 py-2 rounded-lg bg-muted/50 border border-border/50 text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all"
                         />
                     </div>
 
@@ -264,7 +264,7 @@ export function ImagineGallery({
                         animate={{ opacity: 1 }}
                         className="flex flex-col items-center justify-center h-full text-center"
                     >
-                        <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center mb-4">
+                        <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-primary/10 to-primary/5 flex items-center justify-center mb-4">
                             <ImagineMainIcon size={40} isActive={false} />
                         </div>
                         <h3 className="text-lg font-medium text-muted-foreground mb-1">No images yet</h3>
@@ -307,7 +307,7 @@ export function ImagineGallery({
                                     {/* Image */}
                                     <div className={cn(
                                         "aspect-square bg-muted overflow-hidden",
-                                        gridSize === 'large' && "aspect-[4/3]"
+                                        gridSize === 'large' && "aspect-4/3"
                                     )}>
                                         <img
                                             src={getImageUrl(image.filePath)}
@@ -339,7 +339,7 @@ export function ImagineGallery({
                                     </button>
 
                                     {/* Hover overlay */}
-                                    <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                    <div className="absolute inset-0 bg-linear-to-t from-black/70 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200">
                                         <div className="absolute bottom-0 left-0 right-0 p-3">
                                             <p className="text-white text-xs line-clamp-2 mb-2">{image.prompt}</p>
                                             <div className="flex items-center justify-between">
@@ -415,7 +415,7 @@ export function ImagineGallery({
                             </button>
 
                             {/* Image info */}
-                            <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/80 to-transparent rounded-b-xl">
+                            <div className="absolute bottom-0 left-0 right-0 p-6 bg-linear-to-t from-black/80 to-transparent rounded-b-xl">
                                 <p className="text-white mb-2">{previewImage.prompt}</p>
                                 <div className="flex items-center gap-4 text-white/60 text-sm">
                                     <div className="flex items-center gap-1">

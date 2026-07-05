@@ -117,7 +117,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
                             value={botToken}
                             onChange={(e) => setBotToken(e.target.value)}
                             placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
-                            className="w-full px-3 py-2 rounded-lg bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-colors font-mono text-sm"
+                            className="w-full px-3 py-2 rounded-lg bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary outline-hidden transition-colors font-mono text-sm"
                         />
                         <p className="text-xs text-muted-foreground">The token from BotFather (format: ID:SECRET)</p>
                     </div>

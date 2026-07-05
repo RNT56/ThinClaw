@@ -28,7 +28,7 @@ function ScrapingStreamWindow({ progress }: { progress: ScrapingProgress | null 
             initial={{ opacity: 0, height: 0, marginTop: 0 }}
             animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
             exit={{ opacity: 0, height: 0, marginTop: 0 }}
-            className="w-full max-w-md overflow-hidden rounded-xl border border-border/30 bg-muted/30 backdrop-blur-sm"
+            className="w-full max-w-md overflow-hidden rounded-xl border border-border/30 bg-muted/30 backdrop-blur-xs"
         >
             <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/20 bg-muted/20">
                 <div className="flex items-center gap-2">
@@ -43,7 +43,7 @@ function ScrapingStreamWindow({ progress }: { progress: ScrapingProgress | null 
             </div>
 
             <div className="relative h-24 overflow-hidden p-3 font-mono text-[10px] leading-relaxed text-muted-foreground/80">
-                <div className="absolute inset-0 bg-gradient-to-b from-background/40 via-transparent to-background/90 z-10 pointer-events-none" />
+                <div className="absolute inset-0 bg-linear-to-b from-background/40 via-transparent to-background/90 z-10 pointer-events-none" />
 
                 <motion.div
                     key={progress.url}
@@ -108,9 +108,9 @@ function SourceCard({ src, index }: { src: WebSource, index: number }) {
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ delay: index * 0.05 }}
-                className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-card border border-border/60 hover:border-primary/40 hover:bg-accent/10 hover:shadow-sm transition-all w-full sm:w-[260px] cursor-pointer"
+                className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-card border border-border/60 hover:border-primary/40 hover:bg-accent/10 hover:shadow-xs transition-all w-full sm:w-[260px] cursor-pointer"
             >
-                <div className="relative shrink-0 w-8 h-8 rounded-lg bg-background/80 flex items-center justify-center p-1.5 border border-border/40 shadow-sm transition-transform group-hover:scale-105">
+                <div className="relative shrink-0 w-8 h-8 rounded-lg bg-background/80 flex items-center justify-center p-1.5 border border-border/40 shadow-xs transition-transform group-hover:scale-105">
                     <img
                         src={favicon}
                         alt=""
@@ -254,7 +254,7 @@ export function WebSearchBubble({ status, message, sources, conversationId }: We
                             initial={{ opacity: 0, scale: 0.9, y: 5 }}
                             animate={{ opacity: 1, scale: 1, y: 0 }}
                             exit={{ opacity: 0, scale: 0.9, height: 0 }}
-                            className="inline-flex items-center gap-3 px-4 py-2 bg-secondary/50 backdrop-blur-md border border-primary/20 rounded-full shadow-sm max-w-full md:max-w-md z-10"
+                            className="inline-flex items-center gap-3 px-4 py-2 bg-secondary/50 backdrop-blur-md border border-primary/20 rounded-full shadow-xs max-w-full md:max-w-md z-10"
                         >
                             <div className="relative flex items-center justify-center w-6 h-6 rounded-full bg-primary/10 text-primary">
                                 {status === 'searching' && <Globe className="w-4 h-4 animate-pulse" />}

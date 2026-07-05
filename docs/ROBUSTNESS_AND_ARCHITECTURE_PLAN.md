@@ -104,7 +104,7 @@ un-shippable.
   (`rig_lib/llama_provider.rs:49-67`) into `OnceLock` statics (correctness + perf).
 - `unreachable!()` in the vision tool `execute()` (`thinclaw-tools/builtin/vision.rs:167`) →
   `Err(ToolError::ExecutionFailed)`; replace 40× `SystemTime…UNIX_EPOCH.unwrap()` in desktop commands
-  with one `unix_millis_now()` helper; fix `pairing/store.rs` `parent().expect()` → typed error;
+  with one `unix_millis_now()` helper; (`pairing/store.rs` `parent().expect()` — resolved: orphaned file removed in PR #197);
   parse the `SocketAddr` at config-validation time, not via startup `expect` (`main.rs:1023`).
 - **Add `clippy::unwrap_used`/`expect_used` as workspace `warn` for non-test code** with explicit
   `#[allow]`+comment at infallible sites. This is the systemic fix — review alone won't scale at 538k LOC.

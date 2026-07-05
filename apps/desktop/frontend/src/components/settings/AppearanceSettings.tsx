@@ -19,7 +19,7 @@ function SyntaxThemeOption({ theme, isActive, onClick }: { theme: SyntaxTheme, i
                 "group relative flex flex-col items-start p-4 rounded-xl border transition-all duration-200 text-left w-full",
                 isActive
                     ? "bg-primary/5 border-primary shadow-[0_0_20px_rgba(var(--primary),0.1)] ring-1 ring-primary/20"
-                    : "bg-card/50 hover:bg-muted/50 border-border/50 hover:border-border shadow-sm"
+                    : "bg-card/50 hover:bg-muted/50 border-border/50 hover:border-border shadow-xs"
             )}
         >
             <div className="flex items-center justify-between w-full mb-3">
@@ -54,7 +54,7 @@ function AppThemeOption({ theme, isActive, onClick, currentMode }: { theme: AppT
                 "group relative flex flex-col items-start p-4 rounded-xl border transition-all duration-200 text-left w-full",
                 isActive
                     ? "bg-primary/5 border-primary shadow-[0_0_20px_rgba(var(--primary),0.1)] ring-1 ring-primary/20"
-                    : "bg-card/50 hover:bg-muted/50 border-border/50 hover:border-border shadow-sm"
+                    : "bg-card/50 hover:bg-muted/50 border-border/50 hover:border-border shadow-xs"
             )}
         >
             <div className="flex items-center justify-between w-full mb-3">
@@ -108,7 +108,7 @@ export function AppearanceSettings() {
     return (
         <div className="space-y-10">
             {/* UI Theme Group */}
-            <div className="p-8 border rounded-2xl bg-gradient-to-br from-card to-background shadow-xl border-border/30 flex items-center justify-between">
+            <div className="p-8 border rounded-2xl bg-linear-to-br from-card to-background shadow-xl border-border/30 flex items-center justify-between">
                 <div className="space-y-1">
                     <h4 className="font-bold text-xl tracking-tight">Workspace Aesthetic</h4>
                     <p className="text-sm text-muted-foreground max-w-sm leading-relaxed">
@@ -188,7 +188,7 @@ export function AppearanceSettings() {
                     <p className="text-sm text-muted-foreground">Configure shortcuts to trigger ThinClaw Desktop from anywhere on your system.</p>
                 </div>
 
-                <div className="p-6 border border-border/50 rounded-xl bg-card/50 flex items-center justify-between shadow-sm border-border/50">
+                <div className="p-6 border border-border/50 rounded-xl bg-card/50 flex items-center justify-between shadow-xs border-border/50">
                     <div className="space-y-1">
                         <label className="text-sm font-semibold flex items-center gap-2 text-foreground">
                             <Sparkles className="w-4 h-4 text-primary" />
@@ -203,7 +203,7 @@ export function AppearanceSettings() {
                             value={config?.spotlight_shortcut ?? "Command+Shift+K"}
                             onChange={(e) => updateShortcut(e.currentTarget.value)}
                             placeholder="e.g. Command+Shift+K"
-                            className="bg-background border border-border/50 rounded-lg px-3 py-2 text-sm w-48 font-mono focus:ring-2 focus:ring-primary outline-none transition-all text-foreground"
+                            className="bg-background border border-border/50 rounded-lg px-3 py-2 text-sm w-48 font-mono focus:ring-2 focus:ring-primary outline-hidden transition-all text-foreground"
                         />
                         <span className="absolute right-3 top-2.5 opacity-30 pointer-events-none">
                             <Command className="w-4 h-4 text-foreground" />

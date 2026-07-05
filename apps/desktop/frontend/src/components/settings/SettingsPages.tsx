@@ -36,7 +36,7 @@ interface SettingsContentProps {
 
 export function SettingsContent({ activePage }: SettingsContentProps) {
     return (
-        <div className="flex-1 h-full overflow-hidden flex flex-col bg-background/50 backdrop-blur-sm">
+        <div className="flex-1 h-full overflow-hidden flex flex-col bg-background/50 backdrop-blur-xs">
             <AnimatePresence mode="wait">
                 <motion.div
                     key={activePage}

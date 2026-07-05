@@ -55,7 +55,7 @@ export function MigrationProgressDialog({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+            className="fixed inset-0 z-100 flex items-center justify-center bg-black/60 backdrop-blur-xs"
             onClick={e => { if (e.target === e.currentTarget && (isComplete || hasError)) onClose(); }}
         >
             <motion.div
@@ -110,7 +110,7 @@ export function MigrationProgressDialog({
                                     'h-full rounded-full transition-colors',
                                     hasError ? 'bg-rose-500' :
                                         isComplete ? 'bg-emerald-500' :
-                                            'bg-gradient-to-r from-primary to-primary/70'
+                                            'bg-linear-to-r from-primary to-primary/70'
                                 )}
                                 initial={{ width: 0 }}
                                 animate={{ width: `${Math.min(progress.overall_percent, 100)}%` }}
