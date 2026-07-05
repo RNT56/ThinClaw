@@ -192,7 +192,12 @@ thinclaw://pair?d=<base64url(json)>
   finding the mobile path must not reuse. *Rejected:* content-in-payload —
   ships transcript fragments through Apple, trivially avoidable.
 - **D-N2 — Live Activity payloads:** status enum + progress + short job id
-  only; no prompt text, no tool arguments.
+  only; no prompt text, no tool arguments. The Live Activity *registration*
+  also associates the activity with the `thread_id`/`job_id` it mirrors so the
+  gateway can route run events to the right per-activity update token; these
+  are opaque ids, never content. Update/end pushes go only to the
+  per-activity token and push-to-start only to the start token — a rejected
+  Live Activity token prunes just that entry, never the alert registration.
 - **D-N3 — Per-category controls:** previews always/when-unlocked/never;
   approvals can be set "app only"; interactive approve-from-notification
   offered only for low-risk categories.
@@ -205,7 +210,13 @@ thinclaw://pair?d=<base64url(json)>
 - Never cached on device: secrets-store values, `credential_prompt`
   contents, the pairing secret (freed after pairing).
 - Widget snapshots carry at most: thread title, truncated preview
-  (respecting the preview setting), approval title + risk badge.
+  (respecting the preview setting), approval title + risk badge. Enforced
+  client-side (M3) by `SnapshotPrivacyPolicy` in the `SnapshotPublisher`
+  pipeline: every human-authored string is truncated to a character cap before
+  it reaches the App Group container, and the "app only" preview setting drops
+  titles/descriptions entirely, leaving only status enums, counts, ids, and the
+  risk tier. Tool names and risk tiers are structural (not operator prose) and
+  are always retained so a redacted widget can still label and gate a row.
 - OSLog: tokens/URLs logged with `privacy: .private`; no body logging.
 - Gateway: `tcd_` registered in the `LeakDetector` scrub patterns; device
   tokens rejected on the `?token=` query path; optional app-switcher
@@ -302,10 +313,19 @@ Rust-tested):
   a generic `aps.alert` (`mutable-content: 1`) plus an id-only `tc` dict; tests
   assert no message text, tool name, or parameters ever serialize into the
   payload. The runtime notifier carries the payload verbatim and never logs it.
-- ✅ **D-N2 Live Activity payloads.** Content-state carries only
-  `{phase, progress?, revision}` with a monotonic revision and a ≥15 s/activity
-  throttle; the tool name never rides in the state. Background wakes are bounded
-  by a per-device 3/hour budget.
+- ✅ **D-N2 Live Activity payloads.** The gateway-**pushed** content-state
+  carries only `{phase, progress?, revision}` with a monotonic revision and a
+  ≥15 s/activity throttle; the tool name never rides in a pushed state.
+  Background wakes are bounded by a per-device 3/hour budget. On the client
+  (M3), `ThinClawLiveActivity`'s `LiveActivityManager` drives the activity
+  **locally** while foregrounded and may include the tool name in a *local*
+  update only — that state never transits APNs, and a late gateway push is
+  superseded by the higher-`revision` local update the widget already applied.
+  The `LiveActivity` **registration** associates the activity with its
+  `thread_id` (`kind: agent_run`), an opaque id, so the notifier can route run
+  events to the per-activity update token; on run end the client `DELETE`s that
+  registration. The device's push-to-start token is registered so a killed app
+  can be spawned.
 - 🟡 **D-N3 per-category controls** and the Notification Service Extension
   rewrite (client-side, M2): authored in `apps/ios`. The app registers four
   categories — `THINCLAW_MESSAGE`, `THINCLAW_APPROVAL_LOW` (inline Approve/Deny),

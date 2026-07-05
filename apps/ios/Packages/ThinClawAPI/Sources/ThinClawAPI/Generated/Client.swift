@@ -986,6 +986,8 @@ public struct Client: APIProtocol {
             }
         )
     }
+    /// Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.
+    ///
     /// - Remark: HTTP `PUT /api/devices/me/live-activity/{activity_id}`.
     /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)`.
     public func devicesMeLiveActivityRegisterHandler(_ input: Operations.DevicesMeLiveActivityRegisterHandler.Input) async throws -> Operations.DevicesMeLiveActivityRegisterHandler.Output {

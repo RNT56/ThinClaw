@@ -9,6 +9,7 @@ import SwiftUI
 import ThinClawAPI
 import ThinClawAuth
 import ThinClawCore
+import ThinClawLiveActivity
 import ThinClawPersistence
 import ThinClawTransport
 
@@ -50,6 +51,26 @@ final class AppDependencies {
     /// same pending set. Cleared on unpair.
     private var approvalsStore: ApprovalsStore?
 
+    /// The App Group snapshot pipeline (status/approvals/jobs → widgets). Built
+    /// once and reused; a `nil` container inside makes every call a no-op, so it
+    /// is always safe to touch. Owns its own publisher, independent of the live
+    /// event session's lifecycle.
+    private let snapshotService = SnapshotService()
+
+    /// Background task mirroring the approvals store's pending set into the
+    /// snapshot publisher; cancelled on unpair.
+    private var snapshotMirrorTask: Task<Void, Never>?
+
+    #if canImport(ActivityKit)
+        /// The agent-run Live Activity manager, built lazily from the paired
+        /// session the first time a thread is observed. Owns at most one activity
+        /// per thread; nil before pairing (or after unpair/teardown).
+        private var liveActivityManager: LiveActivityManager?
+        /// The ActivityKit controller the manager drives, retained here so its
+        /// weak `manager` back-reference (for push-token forwarding) stays valid.
+        private var liveActivityController: LiveActivityKitController?
+    #endif
+
     init(
         transcriptStore: any TranscriptStoring = AppDependencies.defaultTranscriptStore(),
         keychain: any KeychainStoring = AppDependencies.defaultKeychain()
@@ -90,12 +111,69 @@ final class AppDependencies {
         guard isPaired else { return }
         let session = ensureSession()
         await session?.start()
+        // Mirror approvals into the snapshot pipeline for the foreground live
+        // path, and kick one immediate fetch so widgets reflect current state
+        // right after launch/foreground without waiting for a push.
+        startSnapshotMirroring()
+        await refreshSnapshots()
     }
 
     /// Tear down the live event stream when the app backgrounds. The session
     /// object is retained so a later `.active` restarts it without rebuilding.
+    ///
+    /// The Live Activity manager is *not* stopped here: a run in flight keeps its
+    /// activity alive across a background (the gateway pushes updates to the
+    /// per-activity token while the app is asleep). It is torn down only on
+    /// unpair.
     func stopSession() async {
         await session?.shutdown()
+    }
+
+    // MARK: - Snapshot pipeline (M3)
+
+    /// Fetch a fresh App Group snapshot (gateway status + approvals + jobs) over
+    /// the pinned client and write it, then reload widget timelines. Called from
+    /// the silent-push handler, the `BGAppRefresh` task, and on foreground.
+    /// Returns whether a snapshot was produced so the background caller can pick
+    /// the right `UIBackgroundFetchResult`. No-op (returns `false`) when
+    /// unpaired or when the App Group container is unavailable.
+    @discardableResult
+    func refreshSnapshots() async -> Bool {
+        guard isPaired, let client = makePushClient() else { return false }
+        return await snapshotService.refresh(client: client)
+    }
+
+    /// Begin mirroring the shared approvals store's pending set into the snapshot
+    /// publisher so the approvals widget tracks the app live while foregrounded.
+    /// Idempotent; cold-loads the store and then folds each change. The status
+    /// widget's `waitingForApproval` phase falls out of this without a separate
+    /// event tap (the publisher promotes an idle phase when approvals are
+    /// non-empty).
+    func startSnapshotMirroring() {
+        guard isPaired, snapshotMirrorTask == nil, let store = makeApprovalsStore() else {
+            return
+        }
+        snapshotMirrorTask = Task { [weak self] in
+            await store.start()
+            // Observe `pending` and re-publish on every change until cancelled.
+            while !Task.isCancelled {
+                let pending = store.pending
+                await self?.snapshotService.mirror(approvals: pending)
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    withObservationTracking {
+                        _ = store.pending
+                    } onChange: {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stop mirroring approvals into the snapshot publisher.
+    func stopSnapshotMirroring() {
+        snapshotMirrorTask?.cancel()
+        snapshotMirrorTask = nil
     }
 
     /// Build the ``GatewaySession`` from the stored credential if not already
@@ -168,6 +246,55 @@ final class AppDependencies {
         _ = try? await client.devicesMePushRegisterHandler(
             body: .json(.init(apnsToken: apnsToken, environment: environment)))
     }
+
+    // MARK: - Live Activity (M3)
+
+    #if canImport(ActivityKit)
+        /// Build (once) the ``LiveActivityManager`` over the paired session: its
+        /// events feed the run tracker, an ``LiveActivityKitController`` performs
+        /// the real ActivityKit calls, and a ``GatewayLiveActivityRegistrar`` over
+        /// the pinned client registers per-activity + push-to-start tokens. Nil
+        /// when unpaired or when no policy-allowed client is available.
+        private func ensureLiveActivityManager() -> LiveActivityManager? {
+            if let liveActivityManager { return liveActivityManager }
+            guard let session = ensureSession(), let client = makePushClient() else { return nil }
+
+            let controller = LiveActivityKitController()
+            let manager = LiveActivityManager(
+                eventSource: GatewaySessionEventSource(session: session),
+                controller: controller,
+                registrar: GatewayLiveActivityRegistrar(client: client))
+            // The controller forwards new per-activity push tokens back to the
+            // manager for gateway registration; wire the weak back-reference.
+            controller.manager = manager
+
+            liveActivityController = controller
+            liveActivityManager = manager
+            return manager
+        }
+
+        /// Start driving the agent-run Live Activity for `thread`: observe its
+        /// events and register the device's push-to-start token so a killed app
+        /// can be spawned by the gateway. Called when the Chat tab resolves its
+        /// active thread and on `.active` while paired. Idempotent per thread.
+        func startLiveActivity(for thread: ThreadID, title: String) {
+            guard isPaired, let manager = ensureLiveActivityManager() else { return }
+            manager.observe(thread: thread, title: title)
+            if let controller = liveActivityController {
+                manager.startPushToStartRegistration(tokens: {
+                    controller.pushToStartTokenUpdates()
+                })
+            }
+        }
+
+        /// Tear down the Live Activity manager: stop observation and end every
+        /// activity. Called on unpair and full teardown.
+        func stopLiveActivity() async {
+            await liveActivityManager?.stop()
+            liveActivityManager = nil
+            liveActivityController = nil
+        }
+    #endif
 
     // MARK: - Store factories
 
@@ -245,8 +372,12 @@ final class AppDependencies {
             await UnpairService.revoke(credential)
         }
         try? DeviceCredential.erase(from: keychain)
+        stopSnapshotMirroring()
         approvalsStore?.stop()
         approvalsStore = nil
+        #if canImport(ActivityKit)
+            await stopLiveActivity()
+        #endif
         await session?.shutdown()
         session = nil
         isPaired = false

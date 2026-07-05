@@ -55,6 +55,8 @@ public protocol APIProtocol: Sendable {
     /// - Remark: HTTP `DELETE /api/devices/me/live-activity-start-token`.
     /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)`.
     func devicesMeLiveActivityStartTokenRemoveHandler(_ input: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input) async throws -> Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output
+    /// Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.
+    ///
     /// - Remark: HTTP `PUT /api/devices/me/live-activity/{activity_id}`.
     /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)`.
     func devicesMeLiveActivityRegisterHandler(_ input: Operations.DevicesMeLiveActivityRegisterHandler.Input) async throws -> Operations.DevicesMeLiveActivityRegisterHandler.Output
@@ -232,6 +234,8 @@ extension APIProtocol {
     public func devicesMeLiveActivityStartTokenRemoveHandler(headers: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input.Headers = .init()) async throws -> Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output {
         try await devicesMeLiveActivityStartTokenRemoveHandler(Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input(headers: headers))
     }
+    /// Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.
+    ///
     /// - Remark: HTTP `PUT /api/devices/me/live-activity/{activity_id}`.
     /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)`.
     public func devicesMeLiveActivityRegisterHandler(
@@ -1739,6 +1743,11 @@ public enum Components {
         ///
         /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest`.
         public struct RegisterLiveActivityRequest: Codable, Hashable, Sendable {
+            /// The background job this activity mirrors (for `kind == job`). Optional;
+            /// omit for agent-run activities.
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest/job_id`.
+            public var jobId: Swift.String?
             /// What the activity represents (agent run vs. job).
             ///
             /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest/kind`.
@@ -1747,21 +1756,35 @@ public enum Components {
             ///
             /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest/push_token`.
             public var pushToken: Swift.String
+            /// The chat thread this activity mirrors (for `kind == agent_run`). Lets
+            /// the gateway route run-progress events to this activity's update token
+            /// (D-N2). Optional; omit for job activities.
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest/thread_id`.
+            public var threadId: Swift.String?
             /// Creates a new `RegisterLiveActivityRequest`.
             ///
             /// - Parameters:
+            ///   - jobId: The background job this activity mirrors (for `kind == job`). Optional;
             ///   - kind: What the activity represents (agent run vs. job).
             ///   - pushToken: APNs Live Activity update token.
+            ///   - threadId: The chat thread this activity mirrors (for `kind == agent_run`). Lets
             public init(
+                jobId: Swift.String? = nil,
                 kind: Components.Schemas.DeviceLiveActivityKind,
-                pushToken: Swift.String
+                pushToken: Swift.String,
+                threadId: Swift.String? = nil
             ) {
+                self.jobId = jobId
                 self.kind = kind
                 self.pushToken = pushToken
+                self.threadId = threadId
             }
             public enum CodingKeys: String, CodingKey {
+                case jobId = "job_id"
                 case kind
                 case pushToken = "push_token"
+                case threadId = "thread_id"
             }
         }
         /// `PUT /api/devices/me/live-activity-start-token` request body: register (or
@@ -4863,6 +4886,8 @@ public enum Operations {
             }
         }
     }
+    /// Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.
+    ///
     /// - Remark: HTTP `PUT /api/devices/me/live-activity/{activity_id}`.
     /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)`.
     public enum DevicesMeLiveActivityRegisterHandler {

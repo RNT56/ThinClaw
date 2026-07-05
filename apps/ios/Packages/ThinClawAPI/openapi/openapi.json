@@ -705,6 +705,7 @@
         "tags": [
           "devices"
         ],
+        "description": "Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.",
         "operationId": "devices_me_live_activity_register_handler",
         "parameters": [
           {
@@ -1534,6 +1535,13 @@
           "updated_at"
         ],
         "properties": {
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The background job this activity mirrors, when `kind == Job`. Lets the\nnotifier route job-completion events to this activity. `None` for agent\nruns and legacy records."
+          },
           "kind": {
             "$ref": "#/components/schemas/DeviceLiveActivityKind",
             "description": "What the activity represents (agent run vs. job)."
@@ -1541,6 +1549,13 @@
           "push_token": {
             "type": "string",
             "description": "APNs Live Activity update token."
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chat thread this activity mirrors, when `kind == AgentRun`. Lets the\nfirst-party notifier route run-progress events (keyed by `thread_id`) to\nthis activity's per-activity update token. `None` for job activities and\nfor legacy records written before the association existed."
           },
           "updated_at": {
             "type": "string",
@@ -2397,6 +2412,13 @@
           "kind"
         ],
         "properties": {
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The background job this activity mirrors (for `kind == job`). Optional;\nomit for agent-run activities."
+          },
           "kind": {
             "$ref": "#/components/schemas/DeviceLiveActivityKind",
             "description": "What the activity represents (agent run vs. job)."
@@ -2404,6 +2426,13 @@
           "push_token": {
             "type": "string",
             "description": "APNs Live Activity update token."
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chat thread this activity mirrors (for `kind == agent_run`). Lets\nthe gateway route run-progress events to this activity's update token\n(D-N2). Optional; omit for job activities."
           }
         }
       },

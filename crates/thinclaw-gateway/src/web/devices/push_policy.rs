@@ -77,6 +77,11 @@ pub enum PushKind {
     /// Silent content-available wake (`apns-push-type: background`), spent
     /// against the per-device wake budget.
     Background,
+    /// Live Activity push-to-start (`apns-push-type: liveactivity`, `event:
+    /// start`): spawns a fresh activity on a device that has no active activity
+    /// for the run. Delivered to the device's push-to-start token, not a
+    /// per-activity update token.
+    LiveActivityStart,
     /// Live Activity update (`apns-push-type: liveactivity`).
     LiveActivityUpdate,
     /// Final Live Activity update that dismisses the activity
@@ -134,12 +139,17 @@ pub struct DevicePushState {
     /// Monotonic-clock timestamps (seconds) of recent background wakes, oldest
     /// first, pruned to the rolling window on each check.
     wake_events: Vec<u64>,
+    /// Threads for which a Live Activity push-to-start has already been emitted
+    /// this session, so a killed app is only asked to spawn one activity per
+    /// run. Cleared for a thread when its run ends (the activity is dismissed).
+    started_threads: std::collections::HashSet<String>,
 }
 
 impl DevicePushState {
-    /// Begin tracking a Live Activity run for `thread_id` under `activity_id`.
-    /// The runtime notifier calls this when a device registers a Live Activity
-    /// token (D-N2) so subsequent run-progress events can drive updates.
+    /// Begin tracking a Live Activity run for `thread_id` under `activity_id`,
+    /// resetting revision/throttle state. The runtime notifier calls this when
+    /// a device registers a Live Activity token (D-N2) so subsequent
+    /// run-progress events can drive updates.
     pub fn track_run(&mut self, thread_id: impl Into<String>, activity_id: impl Into<String>) {
         let thread_id = thread_id.into();
         self.tracked_runs.insert(
@@ -152,14 +162,68 @@ impl DevicePushState {
         );
     }
 
-    /// Stop tracking the run for `thread_id`, if any.
+    /// Ensure a run is tracked for `thread_id` under `activity_id` without
+    /// disturbing the monotonic revision/throttle state of an existing track.
+    ///
+    /// Returns `true` when this call *started* tracking (i.e. the run was not
+    /// already tracked), which the notifier treats as "the run began" for
+    /// push-to-start purposes. If a run is already tracked under a *different*
+    /// `activity_id` (e.g. a push-to-start placeholder replaced by the real
+    /// activity the app registered), the id is updated in place and revision is
+    /// preserved so late pushes never regress the UI.
+    pub fn ensure_tracked(
+        &mut self,
+        thread_id: impl Into<String>,
+        activity_id: impl Into<String>,
+    ) -> bool {
+        let thread_id = thread_id.into();
+        let activity_id = activity_id.into();
+        match self.tracked_runs.get_mut(&thread_id) {
+            Some(run) => {
+                if run.activity_id != activity_id {
+                    run.activity_id = activity_id;
+                }
+                false
+            }
+            None => {
+                self.tracked_runs.insert(
+                    thread_id,
+                    TrackedRun {
+                        activity_id,
+                        revision: 0,
+                        last_update_secs: None,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    /// Stop tracking the run for `thread_id`, if any. Also clears the
+    /// push-to-start fire-once marker so a genuinely new run later can start a
+    /// fresh activity.
     pub fn untrack_run(&mut self, thread_id: &str) {
         self.tracked_runs.remove(thread_id);
+        self.started_threads.remove(thread_id);
     }
 
     /// True if a Live Activity run is currently tracked for `thread_id`.
     pub fn is_tracking(&self, thread_id: &str) -> bool {
         self.tracked_runs.contains_key(thread_id)
+    }
+
+    /// The `activity_id` currently tracked for `thread_id`, if any.
+    pub fn tracked_activity_id(&self, thread_id: &str) -> Option<&str> {
+        self.tracked_runs
+            .get(thread_id)
+            .map(|run| run.activity_id.as_str())
+    }
+
+    /// Record that a push-to-start has been emitted for `thread_id`, so it is
+    /// only sent once per run. Returns `true` if this is the first time (caller
+    /// should emit the start), `false` if it already fired.
+    pub fn mark_start_emitted(&mut self, thread_id: impl Into<String>) -> bool {
+        self.started_threads.insert(thread_id.into())
     }
 
     /// Remaining background-wake budget at `now_secs` (after pruning expired
@@ -424,6 +488,36 @@ fn end_live_activity(
         collapse_id: Some(format!("run-{activity_id}")),
         activity_id: Some(activity_id),
         payload: live_activity_payload("end", now_secs, phase, None, revision),
+    }
+}
+
+/// Build a Live Activity push-to-start decision for a run that is beginning on
+/// a device with no active activity (D-N2). The payload is an ActivityKit
+/// `event: start` envelope carrying only the content-free initial
+/// `content-state` (`{phase, revision}`) plus the (id-only) `attributes` needed
+/// to spawn the activity — never prompt text or tool arguments.
+///
+/// `activity_id` seeds the notifier's tracking so the app's subsequently
+/// registered per-activity update token (which carries the same `thread_id`)
+/// can take over update delivery. The push is delivered to the device's
+/// push-to-start token by the runtime notifier, never a per-activity token.
+pub fn live_activity_start(thread_id: &str, activity_id: &str, now_secs: u64) -> PushDecision {
+    #[allow(clippy::cast_possible_wrap)]
+    let timestamp = now_secs as i64;
+    PushDecision {
+        kind: PushKind::LiveActivityStart,
+        category: None,
+        collapse_id: Some(format!("run-{activity_id}")),
+        activity_id: Some(activity_id.to_string()),
+        payload: serde_json::json!({
+            "aps": {
+                "timestamp": timestamp,
+                "event": "start",
+                "content-state": content_state("thinking", None, 0),
+                "attributes-type": "AgentRunAttributes",
+                "attributes": { "thread_id": thread_id },
+            }
+        }),
     }
 }
 
@@ -751,6 +845,55 @@ mod tests {
         ] {
             assert!(!can_produce_push(&event), "pre-filter kept: {event:?}");
         }
+    }
+
+    #[test]
+    fn live_activity_start_is_content_free_and_seeds_activity() {
+        let start = live_activity_start("t1", "act-1", 42);
+        assert_eq!(start.kind, PushKind::LiveActivityStart);
+        assert_eq!(start.activity_id.as_deref(), Some("act-1"));
+        assert_eq!(start.collapse_id.as_deref(), Some("run-act-1"));
+        assert_eq!(start.payload["aps"]["event"], "start");
+        // Initial content-state is the content-free {phase, revision} shape.
+        assert_eq!(start.payload["aps"]["content-state"]["phase"], "thinking");
+        assert_eq!(start.payload["aps"]["content-state"]["revision"], 0);
+        // Attributes carry only the id; never prompt/tool text.
+        assert_eq!(start.payload["aps"]["attributes"]["thread_id"], "t1");
+        assert_content_free(&start.payload, &["secret", "shell.execute"]);
+    }
+
+    #[test]
+    fn ensure_tracked_starts_once_and_preserves_revision_on_reassociation() {
+        let mut state = DevicePushState::default();
+        // First call starts tracking.
+        assert!(state.ensure_tracked("t1", "start-t1"));
+        // Bump the revision via an update.
+        let _ = decide(&tool_started("t1", "x"), &mut state, 0).unwrap(); // revision 1
+        // Re-associating to the real activity id does not restart tracking and
+        // preserves the revision.
+        assert!(!state.ensure_tracked("t1", "act-real"));
+        assert_eq!(state.tracked_activity_id("t1"), Some("act-real"));
+        let next = decide(
+            &status("t1", "thinking"),
+            &mut state,
+            LIVE_ACTIVITY_MIN_INTERVAL_SECS,
+        )
+        .unwrap();
+        // Revision continues from 1 → 2 under the new activity id.
+        assert_eq!(next.payload["aps"]["content-state"]["revision"], 2);
+        assert_eq!(next.activity_id.as_deref(), Some("act-real"));
+    }
+
+    #[test]
+    fn untrack_run_clears_start_marker_so_a_new_run_can_restart() {
+        let mut state = DevicePushState::default();
+        assert!(state.mark_start_emitted("t1"), "first mark is fresh");
+        assert!(!state.mark_start_emitted("t1"), "second is a no-op");
+        state.untrack_run("t1");
+        assert!(
+            state.mark_start_emitted("t1"),
+            "after a run ends, a new run may start a fresh activity"
+        );
     }
 
     #[test]

@@ -358,6 +358,8 @@ impl DeviceStore {
         activity_id: &str,
         push_token: String,
         kind: DeviceLiveActivityKind,
+        thread_id: Option<String>,
+        job_id: Option<String>,
     ) -> Result<DeviceRecord, DeviceStoreError> {
         let (mut file, mut data) = self.read_locked()?;
         let now = now_iso();
@@ -394,6 +396,8 @@ impl DeviceStore {
             DeviceLiveActivityToken {
                 push_token,
                 kind,
+                thread_id,
+                job_id,
                 updated_at: now,
             },
         );
@@ -750,11 +754,14 @@ mod tests {
                 "run-1",
                 "la-token-1".to_string(),
                 DeviceLiveActivityKind::AgentRun,
+                Some("thread-1".to_string()),
+                None,
             )
             .unwrap();
         let entry = updated.live_activities.get("run-1").unwrap();
         assert_eq!(entry.push_token, "la-token-1");
         assert_eq!(entry.kind, DeviceLiveActivityKind::AgentRun);
+        assert_eq!(entry.thread_id.as_deref(), Some("thread-1"));
 
         // Replacing the same activity_id updates in place, no duplicate.
         let updated = store
@@ -763,6 +770,8 @@ mod tests {
                 "run-1",
                 "la-token-2".to_string(),
                 DeviceLiveActivityKind::Job,
+                None,
+                Some("job-9".to_string()),
             )
             .unwrap();
         assert_eq!(updated.live_activities.len(), 1);
@@ -770,6 +779,12 @@ mod tests {
         assert_eq!(
             updated.live_activities["run-1"].kind,
             DeviceLiveActivityKind::Job
+        );
+        // Replacement swaps the association too: thread cleared, job set.
+        assert_eq!(updated.live_activities["run-1"].thread_id, None);
+        assert_eq!(
+            updated.live_activities["run-1"].job_id.as_deref(),
+            Some("job-9")
         );
 
         let cleared = store
@@ -803,6 +818,8 @@ mod tests {
                     &format!("run-{i}"),
                     format!("tok-{i}"),
                     DeviceLiveActivityKind::AgentRun,
+                    None,
+                    None,
                 )
                 .unwrap();
         }
@@ -834,6 +851,8 @@ mod tests {
                 "run-new",
                 "tok-new".to_string(),
                 DeviceLiveActivityKind::Job,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -880,6 +899,8 @@ mod tests {
                 "run-1",
                 "la-token".to_string(),
                 DeviceLiveActivityKind::AgentRun,
+                None,
+                None,
             )
             .unwrap();
         store
@@ -931,6 +952,8 @@ mod tests {
                 "run-1",
                 "la-token".to_string(),
                 DeviceLiveActivityKind::AgentRun,
+                None,
+                None,
             )
             .unwrap_err();
         assert!(matches!(err, DeviceStoreError::Revoked(_)));

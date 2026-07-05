@@ -56,6 +56,26 @@ public struct PendingApprovalsSnapshot: SharedSnapshot {
     public static let fileName = "pending-approvals.json"
     public static let currentSchemaVersion = 1
 
+    /// Gateway-computed approval risk tier (D-K3), denormalized into the
+    /// snapshot so widget/watch surfaces can enforce "no high-risk approval
+    /// off-device" locally. The tier is the gateway's single source of truth
+    /// (`thinclaw_gateway::web::devices::approval_risk::classify`); this enum
+    /// mirrors the API `ApprovalRisk` without pulling the generated API
+    /// package into the snapshot layer.
+    ///
+    /// Decodes **fail-closed**: an absent or unrecognized value reads back as
+    /// ``high`` so a reader can never be tricked into offering an inline
+    /// approve for an entry whose tier it does not understand.
+    public enum RiskTier: String, Codable, Sendable, Equatable {
+        case low
+        case high
+
+        public init(from decoder: any Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = RiskTier(rawValue: raw) ?? .high
+        }
+    }
+
     public struct PendingApproval: Codable, Sendable, Equatable, Identifiable {
         /// Gateway approval request id (echoed to `/api/chat/approval`).
         public var id: String
@@ -63,20 +83,32 @@ public struct PendingApprovalsSnapshot: SharedSnapshot {
         public var description: String
         public var threadID: String?
         public var requestedAt: Date
+        /// Gateway-computed risk tier (D-K3). Optional for forward/backward
+        /// compatibility with snapshots written before the field existed;
+        /// readers MUST treat a missing tier as high-risk (see
+        /// ``effectiveRisk``), never as approvable off-device.
+        public var risk: RiskTier?
 
         public init(
             id: String,
             toolName: String,
             description: String,
             threadID: String? = nil,
-            requestedAt: Date
+            requestedAt: Date,
+            risk: RiskTier? = nil
         ) {
             self.id = id
             self.toolName = toolName
             self.description = description
             self.threadID = threadID
             self.requestedAt = requestedAt
+            self.risk = risk
         }
+
+        /// The risk tier a reader must enforce: the stamped tier, or ``high``
+        /// when absent. Interactive approve is offered only when this is
+        /// ``low`` (docs/MOBILE_SECURITY.md D-K3).
+        public var effectiveRisk: RiskTier { risk ?? .high }
     }
 
     public var schemaVersion: Int

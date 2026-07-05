@@ -747,6 +747,9 @@ pub(crate) async fn devices_me_push_remove_handler(
     put,
     path = "/api/devices/me/live-activity/{activity_id}",
     tag = "devices",
+    description = "Register a Live Activity update token for one activity. Include \
+`thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress \
+events to this activity's per-activity update token.",
     params(("activity_id" = String, Path, description = "Live Activity id")),
     request_body = RegisterLiveActivityRequest,
     responses(
@@ -768,7 +771,14 @@ pub(crate) async fn devices_me_live_activity_register_handler(
     validate_push_token(&req.push_token, "push_token")?;
 
     let record = device_store()
-        .set_live_activity(&ctx.device_id, &activity_id, req.push_token, req.kind)
+        .set_live_activity(
+            &ctx.device_id,
+            &activity_id,
+            req.push_token,
+            req.kind,
+            req.thread_id.clone(),
+            req.job_id.clone(),
+        )
         .map_err(device_store_error)?;
     state
         .device_registry
@@ -776,11 +786,20 @@ pub(crate) async fn devices_me_live_activity_register_handler(
         .await
         .map_err(device_store_error)?;
 
+    // Audit carries only the run association ids (never token material), so the
+    // notifier's run-routing decision is auditable.
+    let mut detail = serde_json::json!({ "live_activity_id": activity_id });
+    if let Some(thread_id) = &req.thread_id {
+        detail["thread_id"] = serde_json::Value::String(thread_id.clone());
+    }
+    if let Some(job_id) = &req.job_id {
+        detail["job_id"] = serde_json::Value::String(job_id.clone());
+    }
     let _ = audit_log().record(
         DeviceAuditEvent::DevicePushTokenRegistered,
         Some(&record.device_id),
         Some(&record.token_prefix),
-        Some(serde_json::json!({ "live_activity_id": activity_id })),
+        Some(detail),
     );
 
     Ok(Json(DeviceInfo::from(&record)))

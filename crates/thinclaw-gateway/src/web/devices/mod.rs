@@ -41,6 +41,7 @@ pub use pairing::{
 pub use push_policy::{
     BACKGROUND_WAKE_BUDGET, BACKGROUND_WAKE_WINDOW_SECS, DevicePushState,
     LIVE_ACTIVITY_MIN_INTERVAL_SECS, PushDecision, PushKind, decide, decide_background_wake,
+    live_activity_start,
 };
 pub use registry::{DeviceAuth, DeviceRegistry, StreamGuard};
 pub use scopes::required_scope;

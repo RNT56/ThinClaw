@@ -12,39 +12,94 @@ import Foundation
 /// Snapshot refresh: the App Group snapshots (status, approvals, jobs) that keep
 /// widgets honest even without a foreground app.
 ///
-/// Two triggers feed the same refresh:
-/// - **Silent pushes** (`content-available: 1`, wired here at M2): the gateway
-///   nudges the app to re-fetch when something changed, so widgets update
-///   promptly without shipping content through APNs (docs/MOBILE_SECURITY.md
-///   D-N1).
-/// - **`BGAppRefresh`** (the slow safety net, wired at M3): a periodic fallback
-///   for when no push arrived.
+/// Three triggers feed the same fetch → write → reload pipeline:
+/// - **Foreground:** `AppDependencies.startSessionIfPaired()` kicks one refresh
+///   and starts live approval mirroring.
+/// - **Silent pushes** (`content-available: 1`, D-N1): the gateway nudges the
+///   app to re-fetch when something changed, so widgets update promptly without
+///   shipping content through APNs (docs/MOBILE_SECURITY.md D-N1).
+/// - **`BGAppRefresh`** (the slow safety net): a periodic fallback for when no
+///   push arrived, scheduled under the `com.thinclaw.ios.refresh` identifier
+///   declared in `BGTaskSchedulerPermittedIdentifiers`.
 ///
-/// The concrete fetch → SnapshotKit write pipeline is owned by M3; M2 wires the
-/// silent-push entry point and the widget reload so the plumbing exists and the
-/// snapshot mapping can drop in without touching the delegate.
+/// The concrete fetch lives in ``AppDependencies/refreshSnapshots()``; this type
+/// owns the OS-facing plumbing (task registration/scheduling and the silent-push
+/// entry point) and the widget reload.
 enum BackgroundRefresh {
     static let taskIdentifier = "com.thinclaw.ios.refresh"
 
-    static func register() {
-        // M3: BGTaskScheduler.shared.register(forTaskWithIdentifier:) →
-        // handleSilentPush(dependencies:) on the periodic cadence.
-    }
+    /// Minimum spacing between `BGAppRefresh` runs. The system treats this as a
+    /// floor, not a guarantee — actual cadence depends on usage and power.
+    static let minimumRefreshInterval: TimeInterval = 15 * 60
+
+    // MARK: - BGTaskScheduler wiring
+
+    #if canImport(BackgroundTasks) && canImport(UIKit)
+        /// Register the `BGAppRefresh` handler. Must be called **once**, before
+        /// the app finishes launching (from `application(_:didFinishLaunching…)`
+        /// or the SwiftUI launch `task`), or the scheduler traps. The handler
+        /// runs the same fetch → write → reload pipeline as a silent push and
+        /// re-arms the next refresh before returning.
+        static func register(dependencies: @escaping @MainActor @Sendable () -> AppDependencies?) {
+            BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: taskIdentifier, using: nil
+            ) { task in
+                guard let appRefresh = task as? BGAppRefreshTask else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                handle(appRefresh, dependencies: dependencies)
+            }
+        }
+
+        /// Run one background refresh for a scheduled `BGAppRefreshTask`: re-arm
+        /// the next one, run the fetch under an expiration guard, and report
+        /// completion. Re-arming first ensures the chain continues even if the
+        /// fetch is cut short.
+        private static func handle(
+            _ task: BGAppRefreshTask,
+            dependencies: @escaping @MainActor @Sendable () -> AppDependencies?
+        ) {
+            scheduleAppRefresh()
+
+            let work = Task { @MainActor in
+                let produced = await (dependencies()?.refreshSnapshots() ?? false)
+                reloadWidgets()
+                return produced
+            }
+            task.expirationHandler = { work.cancel() }
+            Task {
+                let produced = await work.value
+                task.setTaskCompleted(success: produced)
+            }
+        }
+
+        /// Submit the next `BGAppRefresh` request. Safe to call repeatedly; a
+        /// resubmission replaces the pending request. Failures (e.g. the app is
+        /// not authorized for background refresh) are swallowed — the live and
+        /// silent-push paths still update widgets.
+        static func scheduleAppRefresh() {
+            let request = BGAppRefreshTaskRequest(identifier: taskIdentifier)
+            request.earliestBeginDate = Date(timeIntervalSinceNow: minimumRefreshInterval)
+            try? BGTaskScheduler.shared.submit(request)
+        }
+    #else
+        static func register(dependencies: @escaping @MainActor @Sendable () -> AppDependencies?) {}
+        static func scheduleAppRefresh() {}
+    #endif
+
+    // MARK: - Silent push
 
     /// Handle a silent (`content-available`) push: refresh the shared snapshots
-    /// and reload widget timelines. Returns whether new data was produced so the
-    /// caller can report the right `UIBackgroundFetchResult`.
-    ///
-    /// M2 reloads widgets unconditionally (cheap, and a silent push means the
-    /// gateway believes something changed). The snapshot re-fetch that decides
-    /// `.newData` vs `.noData` lands with M3's fetch pipeline; until then this
-    /// reports `.newData` so the system keeps honoring the wake budget.
+    /// over the pinned client and reload widget timelines. Returns whether new
+    /// data was produced so the caller can report the right
+    /// `UIBackgroundFetchResult`.
     @MainActor
     @discardableResult
     static func handleSilentPush(dependencies: AppDependencies) async -> BackgroundFetchOutcome {
-        // M3: await dependencies.refreshSnapshots() to write SnapshotKit files.
+        let produced = await dependencies.refreshSnapshots()
         reloadWidgets()
-        return .newData
+        return produced ? .newData : .noData
     }
 
     /// Reload every widget timeline from the shared snapshots.

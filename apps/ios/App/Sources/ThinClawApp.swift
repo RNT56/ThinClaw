@@ -67,6 +67,11 @@ struct ThinClawApp: App {
                 #endif
             case .background:
                 Task { await dependencies.stopSession() }
+                // Arm the periodic BGAppRefresh safety net so widgets keep
+                // updating even if no silent push arrives while backgrounded.
+                #if canImport(UIKit)
+                    BackgroundRefresh.scheduleAppRefresh()
+                #endif
             default:
                 break
             }
@@ -154,7 +159,24 @@ struct ChatTab: View {
             if router.selectedThread == nil, resolvedThread == nil {
                 resolvedThread = await dependencies.defaultThread()
             }
+            startLiveActivityForActiveThread()
         }
+        .onChange(of: router.selectedThread) { _, _ in
+            startLiveActivityForActiveThread()
+        }
+    }
+
+    /// Point the Live Activity manager at the Chat tab's active thread so an
+    /// agent run on it drives the Dynamic Island / lock-screen activity. The
+    /// manager owns at most one activity per thread and is idempotent per
+    /// thread, so re-calling on every thread change is safe. The thread id is
+    /// used as a best-effort activity title until a richer title is threaded
+    /// through the resolver.
+    private func startLiveActivityForActiveThread() {
+        #if canImport(ActivityKit)
+            guard let thread = router.selectedThread ?? resolvedThread else { return }
+            dependencies.startLiveActivity(for: thread, title: thread.rawValue)
+        #endif
     }
 }
 

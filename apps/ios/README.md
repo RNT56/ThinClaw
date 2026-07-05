@@ -11,21 +11,25 @@ milestones) and [`docs/MOBILE_SECURITY.md`](../../docs/MOBILE_SECURITY.md)
 
 ## Status
 
-The **M1 client is implemented** and the **M2 approvals + push surfaces are
+The **M1 client is implemented**, the **M2 approvals + push surfaces are
+authored**, and the **M3 widgets + Live Activity + snapshot pipeline are
 authored**: the SPM packages, the onboarding flow, the chat + sessions surfaces,
-and the risk-tiered approvals surface are all wired, and the whole `ThinClaw` app
-target (plus its widget, watch, and Notification Service Extension embeds)
-**builds for the iOS 26 simulator**. All pure-logic packages pass `swift test` on
-macOS with no simulator; the logic behind the feature stores is unit-tested. What
-remains is real-device / live-gateway exercise, a whole-app/NSE `xcodebuild`
-verification, live APNs delivery, and the jobs/settings surfaces (M3+). See the
-caveats below the table.
+the risk-tiered approvals surface, the home-screen widgets, the agent-run Live
+Activity manager, and the App Group snapshot pipeline are all wired, and the
+whole `ThinClaw` app target (plus its widget, watch, and Notification Service
+Extension embeds) **builds for the iOS 26 simulator**. All pure-logic packages
+pass `swift test` on macOS with no simulator; the logic behind the feature
+stores, the `RunTracker`/`LiveActivityManager`, and the `SnapshotPublisher` is
+unit-tested. What remains is real-device / live-gateway exercise, a
+whole-app/NSE/WidgetKit/ActivityKit `xcodebuild` verification, live APNs
+delivery, and the jobs/settings surfaces (M3+). See the caveats below the table.
 
 | Piece | Status |
 |---|---|
 | `ThinClawTransport` (SSE parser, event decoder, reconnect, `GatewaySession`/`GatewayStream`, reconcile) | ✅ implemented + fixture-tested (89 tests) |
-| `ThinClawCore` (domain models, chunk coalescer, `ChatTimelineReducer`, `ComposerCooldown`, `SessionsListModel`, `ReconcileResult`) | ✅ implemented + tested (49 tests) |
+| `ThinClawCore` (domain models, chunk coalescer, `ChatTimelineReducer`, `ComposerCooldown`, `SessionsListModel`, `ReconcileResult`, `SnapshotPublisher`/`SnapshotPrivacyPolicy`/`SnapshotStoreSink`) | ✅ implemented + tested (82 tests) |
 | `ThinClawSnapshotKit` (App Group snapshots, Live Activity attributes) | ✅ implemented + tested (12 tests) |
+| `ThinClawLiveActivity` (`RunTracker` reducer + `RunInputClassifier`, `LiveActivityManager` over `ActivityController`/`LiveActivityRegistrar`) | 🚧 authored (M3); pure logic tested on macOS (30 tests); ActivityKit compile pending Build stage |
 | `ThinClawAuth` (pairing parse, Secure-Enclave keypair, SPKI pinning, connection policy, Keychain) | ✅ implemented + tested (23 tests) |
 | `ThinClawAPI` (generated REST client + auth/error shell) | ✅ generated + tested (13 tests) |
 | `ThinClawPersistence` (GRDB WAL store + in-memory store, parameterized `TranscriptStoring` parity) | ✅ implemented + tested (11 tests) |
@@ -35,7 +39,8 @@ caveats below the table.
 | `FeatureApprovals` (risk-tiered cards over `ApprovalsStore`: cold-load + live fan-out + `POST /api/chat/approval`, Face-ID gate on high-risk approve) | ✅ implemented (M2); pure store logic tested on macOS |
 | iOS push client (`AppDelegate` APNs register/`PUT`/`DELETE`, `PushCoordinator` risk-split categories, `ThinClawNotificationService` NSE content rewrite) | 🚧 authored (M2); whole-app/NSE `xcodebuild` + live APNs delivery pending |
 | B3 discovery consumption (`BonjourBrowser` `NWBrowser` + TXT parse, `DiscoveryStore`, onboarding "Discover on this network") | ✅ wired (B3); locator-only, tested with a scripted browser; no live-LAN run |
-| `FeatureJobs` / `FeatureSettings`, widgets, watch | 🚧 placeholder screens (M3+); compiled into the app build, no stores yet |
+| Widgets (`AgentStatusWidget`, `PendingApprovalsWidget`, `QuickAskWidget`, `AgentRunLiveActivity`) | 🚧 authored (M3); read App Group snapshots via `WidgetSnapshotAccess`, inline Approve/Deny gated to low-risk rows (high/unknown → Deny + deep link), Dynamic Island renders the content-free run state; WidgetKit compile pending Build stage |
+| `FeatureJobs` / `FeatureSettings`, watch | 🚧 placeholder screens (M3+); compiled into the app build, no stores yet |
 | Tuist manifests / CI `build-app` job | ✅ `tuist generate` succeeds locally and the app builds; CI `build-app` job unverified here |
 
 **M1 caveat:** the onboarding **and** chat/sessions flows are wired end to end
@@ -80,6 +85,34 @@ swift-openapi-generator drops from `ThreadListResponse`, so `GatewaySession.thre
 cannot surface the pinned assistant thread until that spec pattern is corrected
 and the client regenerated. No real-device run and TestFlight are still pending.
 
+**M3 caveat:** the widgets, the agent-run Live Activity manager, and the App
+Group snapshot pipeline are **authored, not yet WidgetKit/ActivityKit
+build-verified**. The four widgets read the App Group snapshots through
+`WidgetSnapshotAccess` and degrade to placeholders on any read failure;
+`PendingApprovalsWidget` offers inline Approve/Deny only on low-risk rows (the
+`ApproveToolIntent` refuses high/unknown-risk, so a lock screen can never approve
+a high-risk action — D-K3), and `AgentRunLiveActivity` renders the content-free
+run state (lock screen + Dynamic Island compact/minimal/expanded). The snapshot
+pipeline lives in `ThinClawCore`: `SnapshotPublisher` projects live agent state
+into the three snapshots through an injected `SnapshotSink`/`SnapshotClock`,
+debounces bursts, suppresses no-op writes, and runs every human-authored string
+through `SnapshotPrivacyPolicy` (truncate to a char cap; drop titles/descriptions
+entirely under the "app only" preview setting) so App Group snapshots stay
+content-free (D-N / data-at-rest). Three triggers feed one fetch→write→reload:
+foreground (live approvals mirroring + one kick from `startSessionIfPaired`),
+silent push (`BackgroundRefresh.handleSilentPush` fetches gateway status +
+`GET /api/chat/approvals` + jobs over the pinned client, writes via
+`SnapshotStoreSink`, then `WidgetCenter.reloadAllTimelines`), and `BGAppRefresh`
+(`com.thinclaw.ios.refresh`, registered at launch in `AppDelegate`, re-armed on
+background). `ThinClawLiveActivity`'s `@MainActor` `LiveActivityManager` drives
+ActivityKit behind an `ActivityController` protocol, updates the activity
+**locally** on progress (a late gateway push is dropped by `revision`), forwards
+per-activity + push-to-start tokens to the gateway over the pinned client, and
+`DELETE`s on run end. Pure `RunTracker`/`RunInputClassifier`/`LiveActivityManager`
+logic (30 tests) and the `SnapshotPublisher` mapping/debounce/privacy +
+publisher→store integration pass `swift test` on macOS; the WidgetKit/ActivityKit
+and `BGTaskScheduler` compile is the Build stage's job.
+
 Milestones M1–M5 are defined in `docs/MOBILE_APP.md`.
 
 ## Toolchain
@@ -108,6 +141,7 @@ Packages/                            # all real code, local SPM packages
   ThinClawPersistence transcript cache + outbox (GRDB at M1)
   ThinClawAuth       pairing payload, Keychain, Bonjour discovery (_thinclaw._tcp)
   ThinClawSnapshotKit App Group snapshots for widgets/watch + Live Activity attrs
+  ThinClawLiveActivity RunTracker reducer + LiveActivityManager (agent-run activity)
   ThinClawDesign     Liquid Glass design system
   ThinClawWidgetKitShared  timeline providers + AppIntents (approve/deny/quick-ask)
   ThinClawWatchBridge WatchConnectivity relay (watch holds its own token)
@@ -125,7 +159,7 @@ SnapshotKit stays Foundation-only.
 Pure-logic packages declare macOS and test on any Mac without a simulator:
 
 ```bash
-for p in ThinClawTransport ThinClawCore ThinClawSnapshotKit ThinClawAuth ThinClawAPI ThinClawPersistence; do
+for p in ThinClawTransport ThinClawCore ThinClawSnapshotKit ThinClawLiveActivity ThinClawAuth ThinClawAPI ThinClawPersistence; do
   swift test --package-path Packages/$p
 done
 ```

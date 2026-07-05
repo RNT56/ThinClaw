@@ -103,15 +103,22 @@ existing `apns` chat channel is unchanged; the two are distinct surfaces
 
 - Registration is device-token-authenticated (`PUT /api/devices/me/push`,
   `PUT /api/devices/me/live-activity/{activity_id}`, push-to-start token),
-  superseding the shared-secret webhook for first-party devices.
+  superseding the shared-secret webhook for first-party devices. A Live
+  Activity registration carries the `thread_id` (agent runs) or `job_id`
+  (jobs) it mirrors, so the notifier can route run-progress events to that
+  activity's per-activity update token.
 - **Payloads are content-free** (category + ids only); a Notification Service
   Extension fetches real content from the gateway and rewrites locally, so
   Apple's servers never see message content. Live Activity payloads carry a
   status enum + progress only.
-- Event mapping: responses → collapsible alerts; `approval_needed` →
-  time-sensitive actionable alert; job results → alerts; run status →
-  throttled Live Activity updates; background wake pushes under a per-device
-  budget.
+- Event mapping: responses → collapsible alerts (or a Live Activity **end**
+  when they close a tracked run); `approval_needed` → time-sensitive
+  actionable alert; job results → alerts; run status/tool-started → throttled
+  Live Activity **updates** while the run is tracked; background wake pushes
+  under a per-device budget. When a run begins on a device that registered a
+  push-to-start token but has no active activity for the thread, the notifier
+  emits a one-shot Live Activity **push-to-start** so a killed app can spawn
+  the activity.
 
 ## Apple workspace shape
 
@@ -124,6 +131,7 @@ layout, toolchain setup (mise + Tuist), and testing guide. Summary:
   client), `ThinClawTransport` (SSE parser/stream), `ThinClawCore` (domain +
   reducers), `ThinClawPersistence`, `ThinClawAuth` (Keychain/pairing/
   Bonjour), `ThinClawSnapshotKit` (App Group snapshots for widgets/watch),
+  `ThinClawLiveActivity` (agent-run Live Activity manager + pure `RunTracker`),
   `ThinClawDesign` (Liquid Glass design system), `ThinClawWidgetKitShared`,
   `ThinClawWatchBridge`, and `Features/*`.
 - Watch connectivity is relay-first (WatchConnectivity through the phone —
@@ -154,7 +162,10 @@ layout, toolchain setup (mise + Tuist), and testing guide. Summary:
 | Device identity layer (pairing, tokens, scopes, TLS listener) | ✅ landed (B1) |
 | `GET /api/chat/approvals` pull endpoint | ✅ landed (B1) |
 | First-party push + Live Activity emitter | ✅ landed (B2); content-free policy + notifier + `PUT/DELETE /api/devices/me/push`, `/live-activity/{id}`, `/live-activity-start-token`. Credential-gated (off without APNs config); mock-tested only, real Apple/TestFlight delivery pending |
-| iOS push client — APNs registration, notification handling, NSE | 🚧 authored (M2); `AppDelegate` registers for remote notifications while paired and `PUT`s the hex APNs token (`environment` = development in DEBUG) over the pinned client, `DELETE`s on unpair. `PushCoordinator` registers the four categories (message, approval-low with inline Approve/Deny, approval-high Open-only, job), routes content-free pushes to `thinclaw://` deep links, POSTs low-risk approve/deny inline, and hands silent pushes to `BackgroundRefresh` (widget reload; full snapshot re-fetch is M3). New `ThinClawNotificationService` app-extension target (`com.apple.usernotifications.service`, App Group + shared Keychain entitlements) rewrites approval title/body from `GET /api/chat/approvals` over the shared pinned connection, generic text on failure. `tuist generate` wires the target; whole-app/NSE `xcodebuild` verification pending (Build stage) |
+| Live Activity run routing (backend) | ✅ landed (M3); Live Activity registration now carries `thread_id`/`job_id`, and the notifier auto-tracks a run from that association: run-progress events (`tool_started`/`status`) emit throttled Live Activity **updates** to the per-activity token, `response` emits the **end**, and a run beginning on a device with a push-to-start token but no active activity emits a one-shot **push-to-start**. A Live Activity token 410 prunes only that activity (or only the start token), never the alert registration. Notifier-level + policy unit tests with a mock `PushSender`; real Apple delivery still pending |
+| iOS Live Activity manager (client) | 🚧 authored (M3); new `ThinClawLiveActivity` SPM package. A pure, macOS-testable `RunTracker` reducer + `RunInputClassifier` turn the active thread's `AgentEvent`s into start/update/end actions with a monotonically increasing `revision` (start-once, end-on-completion, local-vs-push reconciliation). The `@MainActor` `LiveActivityManager` drives ActivityKit behind an `ActivityController` protocol: on a run start it `Activity.request(pushType: .token)` (guarded on `areActivitiesEnabled`), updates the activity **locally** on progress (lower latency than push; the widget drops a late push by `revision`), ends on completion with a `.after` dismissal, forwards per-activity `pushTokenUpdates` to `PUT /api/devices/me/live-activity/{activity_id}` (`kind: agent_run` + `thread_id`) and `pushToStartTokenUpdates` to `PUT /api/devices/me/live-activity-start-token`, and `DELETE`s on end — all over the pinned client. `AgentRunLiveActivity.swift` renders the lock-screen + Dynamic Island (compact/minimal/expanded) from the content-free state; the tool name shows only from local SSE, never a push. Wired into `AppDependencies`/`ChatTab` (observe the active thread while paired; torn down on unpair). 30 pure-logic tests pass under `swift test`; whole-app/ActivityKit `xcodebuild` verification pending (Build stage) |
+| iOS App Group snapshot pipeline (client) | 🚧 authored (M3); `SnapshotPublisher` (in `ThinClawCore`, macOS-testable, no UIKit) projects live agent state into the three App Group snapshots — `AgentStatusSnapshot`, `PendingApprovalsSnapshot` (now carrying a fail-closed `RiskTier` so the widget gates inline approve), `JobsSnapshot` — via an injected `SnapshotSink`/`SnapshotClock`, debouncing bursts (250 ms) and suppressing no-op writes. All human-authored strings pass through a `SnapshotPrivacyPolicy` (truncate to a char limit; drop entirely when previews are "app only") so snapshots stay content-free (D-N / data-at-rest). Three triggers feed one `fetch → write → reload`: foreground (live approvals mirroring + one kick from `startSessionIfPaired`), silent push (`BackgroundRefresh.handleSilentPush` now fetches gateway status + `GET /api/chat/approvals` + jobs list over the pinned client, writes via `SnapshotStoreSink`, then `WidgetCenter.reloadAllTimelines`), and `BGAppRefresh` (`BackgroundRefresh.register` under `com.thinclaw.ios.refresh`, registered in `AppDelegate.application(_:didFinishLaunchingWithOptions:)`, re-armed on background). Pure mapping/debounce/privacy + publisher→store integration covered by `swift test`; BGTaskScheduler/UIKit compile is the Build stage's job |
+| iOS push client — APNs registration, notification handling, NSE | 🚧 authored (M2); `AppDelegate` registers for remote notifications while paired and `PUT`s the hex APNs token (`environment` = development in DEBUG) over the pinned client, `DELETE`s on unpair. `PushCoordinator` registers the four categories (message, approval-low with inline Approve/Deny, approval-high Open-only, job), routes content-free pushes to `thinclaw://` deep links, POSTs low-risk approve/deny inline, and hands silent pushes to `BackgroundRefresh` (which now re-fetches snapshots then reloads widgets — see the snapshot-pipeline row). New `ThinClawNotificationService` app-extension target (`com.apple.usernotifications.service`, App Group + shared Keychain entitlements) rewrites approval title/body from `GET /api/chat/approvals` over the shared pinned connection, generic text on failure. `tuist generate` wires the target; whole-app/NSE `xcodebuild` verification pending (Build stage) |
 | iOS client layers (transport, pairing, pinning, chat session) | ✅ landed (M1) as tested SPM packages — see the M1 caveat below |
 | iOS app UX wiring — onboarding | ✅ landed (M1); `OnboardingStore` state machine + VisionKit QR scanner + manual path + app credential gating/unpair seam, store unit-tested on the iOS 26 simulator, whole app target compiles |
 | iOS app UX wiring — chat + sessions | ✅ landed (M1); `ChatStore` folds live events through the pure `ChatTimelineReducer` (stream→final swap, tool rows, thread routing, out-of-order tolerance), optimistic send with an offline outbox, 429 composer cooldown, failure-row retry, history paging, and post-reconnect reconcile; `SessionsStore` is cache-first then refreshes via `threads()`; Sessions selection routes into the Chat tab. Pure logic (`ChatTimelineReducer`, `ComposerCooldown`, `SessionsListModel`) unit-tested on macOS; whole app target builds for the iOS 26 simulator |

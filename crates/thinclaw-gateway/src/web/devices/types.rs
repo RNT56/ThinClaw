@@ -130,6 +130,17 @@ pub struct DeviceLiveActivityToken {
     pub push_token: String,
     /// What the activity represents (agent run vs. job).
     pub kind: DeviceLiveActivityKind,
+    /// The chat thread this activity mirrors, when `kind == AgentRun`. Lets the
+    /// first-party notifier route run-progress events (keyed by `thread_id`) to
+    /// this activity's per-activity update token. `None` for job activities and
+    /// for legacy records written before the association existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// The background job this activity mirrors, when `kind == Job`. Lets the
+    /// notifier route job-completion events to this activity. `None` for agent
+    /// runs and legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
     /// RFC 3339 timestamp of the last registration update. Also the key used
     /// for oldest-first eviction when the per-device cap is exceeded.
     pub updated_at: String,
@@ -366,6 +377,15 @@ pub struct RegisterLiveActivityRequest {
     pub push_token: String,
     /// What the activity represents (agent run vs. job).
     pub kind: DeviceLiveActivityKind,
+    /// The chat thread this activity mirrors (for `kind == agent_run`). Lets
+    /// the gateway route run-progress events to this activity's update token
+    /// (D-N2). Optional; omit for job activities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// The background job this activity mirrors (for `kind == job`). Optional;
+    /// omit for agent-run activities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 /// `PUT /api/devices/me/live-activity-start-token` request body: register (or

@@ -46,6 +46,22 @@ final class AppDelegate: NSObject {
 
 #if canImport(UIKit)
     extension AppDelegate: UIApplicationDelegate {
+        /// Register the `BGAppRefresh` handler during launch — `BGTaskScheduler`
+        /// requires registration to complete before this method returns, so it
+        /// cannot move to the later SwiftUI `.task`. The handler reads
+        /// `dependencies` lazily (the graph is injected moments later in the
+        /// SwiftUI launch task), so registering with a `nil` graph is safe.
+        func application(
+            _ application: UIApplication,
+            didFinishLaunchingWithOptions launchOptions:
+                [UIApplication.LaunchOptionsKey: Any]? = nil
+        ) -> Bool {
+            BackgroundRefresh.register { [weak self] in
+                self?.dependencies
+            }
+            return true
+        }
+
         /// APNs handed us a device token: forward it (hex-encoded, per the
         /// `RegisterPushRequest.apns_token` contract) to the gateway over the
         /// pinned client.
