@@ -68,6 +68,7 @@ let project = Project(
             dependencies: [
                 .target(name: "ThinClawWidgets"),
                 .target(name: "ThinClawWatch"),
+                .target(name: "ThinClawNotificationService"),
                 .package(product: "ThinClawAPI"),
                 .package(product: "ThinClawTransport"),
                 .package(product: "ThinClawCore"),
@@ -112,6 +113,30 @@ let project = Project(
             settings: .settings(configurations: [
                 .debug(name: "Debug", xcconfig: "Config/Widgets.xcconfig"),
                 .release(name: "Release", xcconfig: "Config/Widgets.xcconfig"),
+            ])
+        ),
+        .target(
+            name: "ThinClawNotificationService",
+            destinations: [.iPhone, .iPad],
+            product: .appExtension,
+            bundleId: "com.thinclaw.ios.notificationservice",
+            deploymentTargets: .iOS("26.0"),
+            infoPlist: .extendingDefault(with: [
+                "NSExtension": [
+                    "NSExtensionPointIdentifier": "com.apple.usernotifications.service",
+                    "NSExtensionPrincipalClass":
+                        "$(PRODUCT_MODULE_NAME).NotificationService",
+                ]
+            ]),
+            sources: ["NotificationService/Sources/**"],
+            entitlements: "NotificationService/NotificationService.entitlements",
+            dependencies: [
+                .package(product: "ThinClawAuth"),
+                .package(product: "ThinClawAPI"),
+            ],
+            settings: .settings(configurations: [
+                .debug(name: "Debug", xcconfig: "Config/NotificationService.xcconfig"),
+                .release(name: "Release", xcconfig: "Config/NotificationService.xcconfig"),
             ])
         ),
         .target(

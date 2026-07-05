@@ -44,6 +44,27 @@ public enum GatewayClient {
         )
     }
 
+    /// Builds a generated `Client` over `session`, wrapping it in a
+    /// `URLSessionTransport` for the caller.
+    ///
+    /// Prefer this over `make(baseURL:token:transport:)` when the caller only
+    /// has a `URLSession` (e.g. a pinned session from
+    /// `ThinClawAuth.PinnedSessionDelegate.makeSession()`) and does not want to
+    /// import `OpenAPIURLSession` just to name the transport type — the
+    /// Notification Service Extension links only `ThinClawAPI` + `ThinClawAuth`.
+    /// The **pinning is a property of `session`**, so callers still MUST pass a
+    /// pinned session to satisfy the D-X2 policy (docs/MOBILE_SECURITY.md).
+    public static func make(
+        baseURL: URL,
+        token: @escaping @Sendable () -> String?,
+        session: URLSession
+    ) -> Client {
+        make(
+            baseURL: baseURL,
+            token: token,
+            transport: URLSessionTransport(configuration: .init(session: session)))
+    }
+
     /// Builds a generated `Client` from a `GatewayEndpoint`, targeting its
     /// first (most-preferred) base URL.
     ///

@@ -53,6 +53,38 @@ struct GatewaySessionTests {
         #expect(client.abortedThreads == ["t9"])
     }
 
+    @Test("pendingApprovals maps the GET /api/chat/approvals response")
+    func pendingApprovalsPath() async throws {
+        let client = MockGatewayClient()
+        client.approvalsResponse = .init(approvals: [
+            .init(
+                createdAt: "2026-07-04T10:00:00Z", description: "Run a shell command",
+                parameters: "{}", requestId: "appr_1", risk: .high, threadId: "t1",
+                toolName: "shell_command")
+        ])
+        let (session, _) = makeSession(client: client, connections: [])
+
+        let pending = try await session.pendingApprovals()
+        #expect(pending.map(\.requestID) == ["appr_1"])
+        #expect(pending[0].risk == .high)
+        #expect(pending[0].threadID == ThreadID("t1"))
+    }
+
+    @Test("respondToApproval forwards action, request id, and thread")
+    func respondToApprovalPath() async throws {
+        let client = MockGatewayClient()
+        let (session, _) = makeSession(client: client, connections: [])
+
+        try await session.respondToApproval(
+            "appr_1", decision: .always, thread: ThreadID("t1"))
+
+        #expect(client.approvalDecisions.count == 1)
+        let decision = client.approvalDecisions[0]
+        #expect(decision.action == "always")
+        #expect(decision.requestId == "appr_1")
+        #expect(decision.threadId == "t1")
+    }
+
     @Test("threads maps the gateway listing")
     func threadsPath() async throws {
         let client = MockGatewayClient()
@@ -251,5 +283,34 @@ struct GatewaySessionTests {
 
         #expect(gotT1)
         #expect(otherCount == 0)
+    }
+
+    @Test("approval_needed reaches the session-wide approval stream even without a thread")
+    func approvalEventsFanOut() async {
+        let client = MockGatewayClient()
+        // A thread-less approval_needed: it must still reach approvalEvents(),
+        // which per-thread routing would otherwise drop.
+        let sse =
+            "data: {\"type\":\"approval_needed\",\"request_id\":\"appr_9\",\"tool_name\":\"shell_command\",\"description\":\"Run a command\",\"parameters\":\"{}\",\"risk\":\"high\"}\n\n"
+        let (session, _) = makeSession(client: client, connections: [.emitThenHang(sse)])
+
+        let approvals = await session.approvalEvents()
+        let collector = Task { () -> ApprovalRequest? in
+            for await request in approvals { return request }
+            return nil
+        }
+        await session.start()
+
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(5))
+            collector.cancel()
+        }
+        let received = await collector.value
+        deadline.cancel()
+        await session.shutdown()
+
+        #expect(received?.requestID == "appr_9")
+        #expect(received?.risk == .high)
+        #expect(received?.threadID == nil)
     }
 }

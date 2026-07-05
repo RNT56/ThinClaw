@@ -129,7 +129,20 @@ public enum GatewayMapping {
             toolName: entry.toolName,
             description: entry.description,
             parameters: entry.parameters,
+            risk: riskTier(entry.risk),
             threadID: entry.threadId.map(ThreadID.init))
+    }
+
+    /// Map the generated `ApprovalRisk` enum onto the domain ``RiskTier``.
+    /// Both sides carry exactly `low`/`high`; any future generated case falls
+    /// back to `.high` so an unknown tier never downgrades the gate (D-K3).
+    private static func riskTier(
+        _ risk: Components.Schemas.ApprovalRisk
+    ) -> RiskTier {
+        switch risk {
+        case .low: return .low
+        case .high: return .high
+        }
     }
 
     /// Map the `GET /api/chat/approvals` response into domain approvals,

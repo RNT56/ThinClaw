@@ -442,14 +442,23 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             tool_name,
             description,
             parameters,
-        } => SseEvent::ApprovalNeeded {
-            request_id,
-            tool_name,
-            description,
-            parameters: serde_json::to_string_pretty(&parameters)
-                .unwrap_or_else(|_| parameters.to_string()),
-            thread_id,
-        },
+        } => {
+            // D-K3: classify the risk tier gateway-side (single source of
+            // truth) from the tool name + raw parameters. This is the only
+            // place the tier is decided; it rides the SSE event and the
+            // pending-approvals cache from here.
+            let parameters = serde_json::to_string_pretty(&parameters)
+                .unwrap_or_else(|_| parameters.to_string());
+            let risk = crate::web::devices::classify_approval_risk(&tool_name, &parameters);
+            SseEvent::ApprovalNeeded {
+                request_id,
+                tool_name,
+                description,
+                parameters,
+                risk,
+                thread_id,
+            }
+        }
         StatusUpdate::AuthRequired {
             extension_name,
             instructions,

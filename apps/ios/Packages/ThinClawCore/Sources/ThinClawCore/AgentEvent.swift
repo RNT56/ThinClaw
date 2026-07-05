@@ -38,6 +38,17 @@ public enum AgentEvent: Hashable, Sendable {
     /// "description":"…","parameters":"…","thread_id":"…"}`.
     case approvalNeeded(ApprovalRequest)
 
+    /// An extension needs the operator to authorize it (usually OAuth).
+    /// Gateway shape: `{"type":"auth_required","extension_name":"…",
+    /// "auth_url":"…","instructions":"…","thread_id":"…", …}`.
+    case authRequired(AuthPrompt)
+
+    /// The agent requests a credential to store. The mobile client never
+    /// answers this (D-T4); it renders a "handle on desktop" card.
+    /// Gateway shape: `{"type":"credential_prompt","prompt_id":"…",
+    /// "secret_name":"…","provider":"…","reason":"…","thread_id":"…"}`.
+    case credentialPrompt(CredentialPrompt)
+
     /// Token/cost accounting for the turn.
     /// Gateway shape: `{"type":"usage_update","input_tokens":…,"output_tokens":…,
     /// "cost_usd":…,"model":"…","thread_id":"…"}`.
@@ -65,6 +76,10 @@ extension AgentEvent {
             return id
         case .approvalNeeded(let request):
             return request.threadID
+        case .authRequired(let prompt):
+            return prompt.threadID
+        case .credentialPrompt(let prompt):
+            return prompt.threadID
         case .usageUpdate(let usage):
             return usage.threadID
         case .heartbeat, .unknown:

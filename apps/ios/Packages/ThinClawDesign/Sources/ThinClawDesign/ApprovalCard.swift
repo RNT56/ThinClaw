@@ -7,6 +7,11 @@ import SwiftUI
 /// the tier. Widgets and the watch never present this card for high risk;
 /// they deep-link into the app instead (docs/MOBILE_SECURITY.md, D-K3).
 public struct ApprovalCard: View {
+    /// Presentation mirror of `ThinClawCore.RiskTier`. ThinClawDesign is kept
+    /// dependency-free (widgets and the watch import it without dragging in
+    /// Core/Transport), so the canonical tier lives in Core and the app layer
+    /// maps `RiskTier` -> `ApprovalCard.RiskTier` at the call site. Keep the
+    /// two cases in lockstep.
     public enum RiskTier: Sendable, Hashable {
         case low
         case high

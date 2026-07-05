@@ -8,6 +8,8 @@
 //! can wire them up without pulling in root `thinclaw` crates.
 //!
 //! Submodules, by responsibility:
+//! - [`approval_risk`]: gateway-side approval risk-tier classifier (D-K3),
+//!   the single source of truth for the `risk` carried on approval events.
 //! - [`types`]: `DeviceRecord`, `DeviceScope`, `DevicePlatform`, and the
 //!   request/response DTOs for the `/api/devices/*` endpoints.
 //! - [`store`]: persisted `~/.thinclaw/devices.json` CRUD + token issuance.
@@ -21,6 +23,7 @@
 //!   (throttle, wake budget, Live Activity revisions), consumed by the runtime
 //!   first-party push notifier.
 
+pub mod approval_risk;
 pub mod audit;
 pub mod pairing;
 pub mod push_policy;
@@ -29,6 +32,7 @@ pub mod scopes;
 pub mod store;
 pub mod types;
 
+pub use approval_risk::{ApprovalRisk, classify as classify_approval_risk};
 pub use audit::{DeviceAuditError, DeviceAuditEvent, DeviceAuditLog};
 pub use pairing::{
     ConsumeOutcome, CreatedPairing, DevicePairingError, DevicePairingStore, PAIRING_FAILED_LIMIT,

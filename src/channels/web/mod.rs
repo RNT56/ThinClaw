@@ -15,6 +15,7 @@
 //! ```
 
 pub mod auth;
+pub mod discovery;
 pub(crate) mod handlers;
 pub mod identity_helpers;
 pub mod log_layer;
@@ -96,6 +97,13 @@ pub struct GatewayChannel {
     /// Extra public routes (e.g. WASM channel webhook endpoints) to merge
     /// into the gateway server so they are reachable via the tunnel.
     webhook_routes: Vec<axum::Router>,
+    /// Live LAN discovery advertiser (milestone B3). Held for the channel's
+    /// lifetime so the mDNS registration stays up; dropping it unregisters.
+    /// `None` until `start()` runs, when discovery is disabled, or when the
+    /// `mdns` feature is off (the field is retained so the type is stable
+    /// across builds; it is only written under the `mdns` feature).
+    #[cfg_attr(not(feature = "mdns"), allow(dead_code))]
+    mdns_advertiser: tokio::sync::Mutex<Option<discovery::MdnsAdvertiserHandle>>,
 }
 
 impl GatewayChannel {
@@ -181,6 +189,7 @@ impl GatewayChannel {
             state,
             auth_token,
             webhook_routes: Vec::new(),
+            mdns_advertiser: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -464,13 +473,37 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(
+        let bound_addr = server::start_server(
             addr,
             self.state.clone(),
             self.auth_token.clone(),
             self.webhook_routes.clone(),
         )
         .await?;
+
+        // LAN discovery advertiser (milestone B3, docs/MOBILE_SECURITY.md D-X3).
+        // Default-off; advertises the gateway on `_thinclaw._tcp` only when the
+        // operator opts in via settings or `MDNS_ENABLED`. The mDNS listener
+        // (pinned-TLS clients) advertises the TLS port when the TLS feature is
+        // built; otherwise the bound gateway port. Held on the channel so the
+        // registration lives as long as the gateway. Only compiled when the
+        // `mdns` feature is on — default builds skip the settings lookup.
+        #[cfg(feature = "mdns")]
+        if let Some(name) = discovery::resolve_discovery(&self.state).await {
+            // Prefer advertising the pinned-TLS port that mobile clients
+            // actually connect to (LAN plain-HTTP is refused, D-X2).
+            #[cfg(feature = "gateway-tls")]
+            let advertise_port = crate::channels::web::tls::tls_port();
+            #[cfg(not(feature = "gateway-tls"))]
+            let advertise_port = bound_addr.port();
+
+            let advertise_addr = SocketAddr::new(bound_addr.ip(), advertise_port);
+            let config = thinclaw_config::mdns_discovery::MdnsConfig::from_env();
+            let handle = discovery::spawn_mdns_advertiser(config, advertise_addr, name);
+            *self.mdns_advertiser.lock().await = handle;
+        }
+        #[cfg(not(feature = "mdns"))]
+        let _ = bound_addr;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -517,6 +550,7 @@ impl Channel for GatewayChannel {
             ref tool_name,
             ref description,
             ref parameters,
+            ref risk,
             ref thread_id,
         } = event
         {
@@ -525,6 +559,10 @@ impl Channel for GatewayChannel {
                 tool_name: tool_name.clone(),
                 description: description.clone(),
                 parameters: parameters.clone(),
+                // Carry the same gateway-computed risk tier (D-K3) that rode
+                // the SSE event, so a client polling the pull endpoint sees an
+                // identical tier.
+                risk: *risk,
                 thread_id: thread_id.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
             };

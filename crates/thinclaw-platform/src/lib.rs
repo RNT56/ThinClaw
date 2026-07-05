@@ -8,8 +8,8 @@ pub mod shell;
 pub mod timezone;
 
 pub use paths::{
-    StatePaths, expand_home_dir, resolve_data_dir, resolve_temp_path, resolve_thinclaw_home,
-    state_paths,
+    StatePaths, expand_home_dir, instance_id_path, read_instance_id, resolve_data_dir,
+    resolve_temp_path, resolve_thinclaw_home, state_paths,
 };
 pub use shell::{ShellFlavor, ShellLauncher, shell_launcher};
 

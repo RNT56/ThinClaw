@@ -123,6 +123,12 @@ public struct ChatTimelineReducer: Sendable {
         case .approvalNeeded(let request):
             applyApproval(request)
 
+        case .authRequired(let prompt):
+            applyAuthPrompt(prompt)
+
+        case .credentialPrompt(let prompt):
+            applyCredentialPrompt(prompt)
+
         case .error(let message, _):
             // Drop any half-streamed row, then append the failure so partial
             // output does not linger looking complete.
@@ -200,10 +206,26 @@ public struct ChatTimelineReducer: Sendable {
     private mutating func applyApproval(_ request: ApprovalRequest) {
         // Approvals are keyed by request id so a duplicate `approval_needed`
         // (e.g. after a reconnect) updates the existing row rather than stacking.
-        let rowID = MessageID("approval-\(request.requestID)")
-        let item = TimelineItem(
-            id: rowID, threadID: threadID, timestamp: now(), kind: .approval(request))
-        if let index = items.firstIndex(where: { $0.id == rowID }) {
+        upsert(id: MessageID("approval-\(request.requestID)"), kind: .approval(request))
+    }
+
+    private mutating func applyAuthPrompt(_ prompt: AuthPrompt) {
+        // Keyed by extension so a re-broadcast auth_required for the same
+        // extension updates the existing card rather than stacking.
+        upsert(id: MessageID("auth-\(prompt.extensionName)"), kind: .authPrompt(prompt))
+    }
+
+    private mutating func applyCredentialPrompt(_ prompt: CredentialPrompt) {
+        // Keyed by prompt id so a re-broadcast credential_prompt dedupes.
+        upsert(id: MessageID("credential-\(prompt.promptID)"), kind: .credentialPrompt(prompt))
+    }
+
+    /// Insert `kind` as a row with a stable `id`, or replace the existing row
+    /// with that id in place (preserving position). Used by the prompt kinds
+    /// that must dedupe on reconnect instead of stacking duplicates.
+    private mutating func upsert(id: MessageID, kind: TimelineItem.Kind) {
+        let item = TimelineItem(id: id, threadID: threadID, timestamp: now(), kind: kind)
+        if let index = items.firstIndex(where: { $0.id == id }) {
             items[index] = item
         } else {
             items.append(item)

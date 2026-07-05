@@ -1,3 +1,4 @@
+import FeatureApprovals
 import FeatureChat
 import FeatureOnboarding
 import FeatureSessions
@@ -43,6 +44,11 @@ final class AppDependencies {
     /// first time it is needed while paired. Nil before pairing (or after
     /// unpair).
     private(set) var session: GatewaySession?
+
+    /// The single shared approvals store, built lazily on first use while
+    /// paired. Shared so the badge count and the presented sheet observe the
+    /// same pending set. Cleared on unpair.
+    private var approvalsStore: ApprovalsStore?
 
     init(
         transcriptStore: any TranscriptStoring = AppDependencies.defaultTranscriptStore(),
@@ -123,6 +129,46 @@ final class AppDependencies {
         return session
     }
 
+    // MARK: - Push registration (M2)
+
+    /// A generated REST ``Client`` over the **same** pinned session policy as the
+    /// live session, built directly from the stored credential. Used by
+    /// ``PushCoordinator`` to register/clear the APNs token and to action
+    /// low-risk approvals from a notification without going through a chat store.
+    /// Returns `nil` when unpaired or when no policy-allowed URL is available.
+    ///
+    /// This does not reuse ``ensureSession``'s client because push registration
+    /// must work on a cold launch triggered by APNs before the event stream is
+    /// started, and low-risk approve/deny actions fire from the notification
+    /// delegate independent of any open thread.
+    func makePushClient() -> Client? {
+        guard let credential = (try? DeviceCredential.load(from: keychain)) ?? nil,
+            let baseURL = credential.preferredBaseURL
+        else { return nil }
+        let token = credential.deviceToken
+        let pinnedSession = PinnedSessionDelegate(
+            pinnedFingerprint: credential.serverFingerprint
+        ).makeSession()
+        return GatewayClient.make(baseURL: baseURL, token: { token }, session: pinnedSession)
+    }
+
+    /// Register `apnsToken` (hex) with the gateway for content-free pushes
+    /// (`PUT /api/devices/me/push`, D-N1). `environment` is `"development"` in
+    /// DEBUG builds (sandbox APNs) and `"production"` otherwise. Best-effort:
+    /// failures are swallowed so a transient gateway outage does not crash the
+    /// app on launch; the token is re-sent on the next registration.
+    func registerPush(apnsToken: String) async {
+        guard let client = makePushClient() else { return }
+        let environment: String
+        #if DEBUG
+            environment = "development"
+        #else
+            environment = "production"
+        #endif
+        _ = try? await client.devicesMePushRegisterHandler(
+            body: .json(.init(apnsToken: apnsToken, environment: environment)))
+    }
+
     // MARK: - Store factories
 
     /// Build a chat store for `thread`, wired to the live session and the
@@ -136,6 +182,19 @@ final class AppDependencies {
     func makeSessionsStore() -> SessionsStore? {
         guard let session = ensureSession() else { return nil }
         return SessionsStore(session: session, store: transcriptStore)
+    }
+
+    /// The shared approvals store, wired to the live session and the real
+    /// `LocalAuthentication` biometric gate (D-K3). Built once and reused so
+    /// the badge and the sheet share one pending set. Nil until paired.
+    func makeApprovalsStore() -> ApprovalsStore? {
+        if let approvalsStore { return approvalsStore }
+        guard let session = ensureSession() else { return nil }
+        let store = ApprovalsStore(
+            gateway: GatewaySessionApprovalsGateway(session: session),
+            biometrics: LocalAuthenticationGate())
+        approvalsStore = store
+        return store
     }
 
     /// Resolve a default thread for the Chat tab when the user has not selected
@@ -177,9 +236,17 @@ final class AppDependencies {
     /// onboarding.
     func unpair() async {
         if let credential = (try? DeviceCredential.load(from: keychain)) ?? nil {
+            // Clear the push registration first (needs the still-valid token),
+            // then self-revoke. Both are best-effort — the local erase below is
+            // authoritative for signing out.
+            if let client = makePushClient() {
+                _ = try? await client.devicesMePushRemoveHandler()
+            }
             await UnpairService.revoke(credential)
         }
         try? DeviceCredential.erase(from: keychain)
+        approvalsStore?.stop()
+        approvalsStore = nil
         await session?.shutdown()
         session = nil
         isPaired = false

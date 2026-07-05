@@ -104,6 +104,11 @@ struct TimelineRow: View {
     /// Invoked when a failure row is tapped (retry). No-op for other kinds.
     var onRetry: () -> Void = {}
 
+    /// Opens external URLs (the `auth_required` OAuth flow). The mobile client
+    /// only *opens* the consent page — per D-T4 it never captures the returned
+    /// token, so completing the flow hands off to the desktop.
+    @Environment(\.openURL) private var openURL
+
     var body: some View {
         switch item.kind {
         case .userMessage(let text):
@@ -124,6 +129,19 @@ struct TimelineRow: View {
         case .approval(let request):
             Text("Approval requested: \(request.toolName)")
                 .font(ThinClawTypography.caption)
+        case .authPrompt(let prompt):
+            AuthPromptCard(
+                extensionName: prompt.extensionName,
+                instructions: prompt.instructions,
+                hasAuthURL: prompt.authURL != nil,
+                onOpenAuth: {
+                    if let url = prompt.authURL { openURL(url) }
+                })
+        case .credentialPrompt(let prompt):
+            CredentialPromptCard(
+                provider: prompt.provider,
+                secretName: prompt.secretName,
+                reason: prompt.reason)
         case .failure(let message):
             Button(action: onRetry) {
                 Label(message, systemImage: "exclamationmark.triangle")

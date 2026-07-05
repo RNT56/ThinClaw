@@ -1358,6 +1358,14 @@
           }
         }
       },
+      "ApprovalRisk": {
+        "type": "string",
+        "description": "Risk tier for a tool approval, computed gateway-side. Serialised\nsnake_case (`\"low\"` / `\"high\"`) on approval events and used to pick the push\ncategory. Carried on [`crate::web::types::SseEvent::ApprovalNeeded`] and\n[`crate::web::types::PendingApprovalEntry`].",
+        "enum": [
+          "low",
+          "high"
+        ]
+      },
       "ChannelSetupStatus": {
         "type": "object",
         "required": [
@@ -2237,6 +2245,7 @@
           "tool_name",
           "description",
           "parameters",
+          "risk",
           "created_at"
         ],
         "properties": {
@@ -2253,6 +2262,10 @@
           },
           "request_id": {
             "type": "string"
+          },
+          "risk": {
+            "$ref": "#/components/schemas/ApprovalRisk",
+            "description": "Gateway-computed risk tier (D-K3), matching\n`SseEvent::ApprovalNeeded.risk`. Always present."
           },
           "thread_id": {
             "type": [
@@ -3061,6 +3074,7 @@
               "tool_name",
               "description",
               "parameters",
+              "risk",
               "type"
             ],
             "properties": {
@@ -3072,6 +3086,10 @@
               },
               "request_id": {
                 "type": "string"
+              },
+              "risk": {
+                "$ref": "#/components/schemas/ApprovalRisk",
+                "description": "Gateway-computed risk tier (D-K3, single source of truth). Drives\nthe client's biometric gate and push category. Always present."
               },
               "thread_id": {
                 "type": [

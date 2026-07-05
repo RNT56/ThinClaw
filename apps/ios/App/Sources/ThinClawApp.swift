@@ -10,9 +10,27 @@ import ThinClawDesign
 
 @main
 struct ThinClawApp: App {
-    @State private var dependencies = AppDependencies()
-    @State private var router = AppRouter()
+    @State private var dependencies: AppDependencies
+    @State private var router: AppRouter
+    @State private var pushCoordinator: PushCoordinator
     @Environment(\.scenePhase) private var scenePhase
+
+    #if canImport(UIKit)
+        @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #endif
+
+    init() {
+        // Build the graph, then the notification coordinator over it. `@State`
+        // wrappers are initialized directly (not `= …` defaults) because the
+        // coordinator needs the same `dependencies`/`router` instances the rest
+        // of the app observes.
+        let dependencies = AppDependencies()
+        let router = AppRouter()
+        _dependencies = State(initialValue: dependencies)
+        _router = State(initialValue: router)
+        _pushCoordinator = State(
+            initialValue: PushCoordinator(dependencies: dependencies, router: router))
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -22,6 +40,15 @@ struct ThinClawApp: App {
                 .onOpenURL { url in
                     router.handle(deepLink: url)
                 }
+                .task {
+                    // Install the notification-center delegate + categories and
+                    // hand the delegate its dependencies once, at launch.
+                    pushCoordinator.configure()
+                    #if canImport(UIKit)
+                        appDelegate.dependencies = dependencies
+                        appDelegate.pushCoordinator = pushCoordinator
+                    #endif
+                }
         }
         .onChange(of: scenePhase) { _, phase in
             // Start the live event stream only while paired and foregrounded;
@@ -30,6 +57,14 @@ struct ThinClawApp: App {
             switch phase {
             case .active:
                 Task { await dependencies.startSessionIfPaired() }
+                #if canImport(UIKit)
+                    // Register for APNs each foreground while paired; the OS
+                    // dedupes and returns a token to the delegate. Content-free
+                    // pushes (D-N1) then flow to PushCoordinator.
+                    if dependencies.isPaired {
+                        appDelegate.requestPushAuthorizationAndRegister()
+                    }
+                #endif
             case .background:
                 Task { await dependencies.stopSession() }
             default:
@@ -73,7 +108,13 @@ struct RootView: View {
             }
             .sheet(isPresented: $router.showsApprovals) {
                 NavigationStack {
-                    ApprovalsScreen()
+                    if let store = dependencies.makeApprovalsStore() {
+                        ApprovalsScreen(store: store)
+                    } else {
+                        ContentUnavailableView(
+                            "No pending approvals",
+                            systemImage: "checkmark.shield")
+                    }
                 }
             }
         } else {

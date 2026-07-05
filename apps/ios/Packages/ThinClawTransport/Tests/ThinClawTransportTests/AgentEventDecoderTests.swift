@@ -53,11 +53,11 @@ struct AgentEventDecoderTests {
                 == .toolCompleted(name: "shell_command", success: false, threadID: ThreadID("web-1")))
     }
 
-    @Test("approval_needed decodes into an ApprovalRequest")
-    func approvalNeeded() throws {
+    @Test("approval_needed with risk:high decodes into a high-risk ApprovalRequest")
+    func approvalNeededHigh() throws {
         let event = try decode(
             #"""
-            {"type":"approval_needed","request_id":"appr_7f3a","tool_name":"shell_command","description":"Run a shell command","parameters":"{\"command\":\"ls\"}","thread_id":"web-1"}
+            {"type":"approval_needed","request_id":"appr_7f3a","tool_name":"shell_command","description":"Run a shell command","parameters":"{\"command\":\"ls\"}","risk":"high","thread_id":"web-1"}
             """#)
         #expect(
             event
@@ -67,7 +67,96 @@ struct AgentEventDecoderTests {
                         toolName: "shell_command",
                         description: "Run a shell command",
                         parameters: #"{"command":"ls"}"#,
+                        risk: .high,
                         threadID: ThreadID("web-1"))))
+    }
+
+    @Test("approval_needed with risk:low decodes into a low-risk ApprovalRequest")
+    func approvalNeededLow() throws {
+        let event = try decode(
+            #"""
+            {"type":"approval_needed","request_id":"appr_7f3a","tool_name":"read_file","description":"Read a file","parameters":"{\"path\":\"README.md\"}","risk":"low","thread_id":"web-1"}
+            """#)
+        guard case let .approvalNeeded(request) = event else {
+            Issue.record("expected .approvalNeeded, got \(event)")
+            return
+        }
+        #expect(request.risk == .low)
+    }
+
+    @Test("approval_needed missing risk defaults to high (safe default, D-K3)")
+    func approvalNeededMissingRiskDefaultsHigh() throws {
+        // A payload with no `risk` key must never silently downgrade: an
+        // unknown/absent tier decodes to `.high` so the biometric gate holds.
+        let event = try decode(
+            #"""
+            {"type":"approval_needed","request_id":"appr_7f3a","tool_name":"shell_command","description":"Run a shell command","parameters":"{\"command\":\"ls\"}","thread_id":"web-1"}
+            """#)
+        guard case let .approvalNeeded(request) = event else {
+            Issue.record("expected .approvalNeeded, got \(event)")
+            return
+        }
+        #expect(request.risk == .high)
+    }
+
+    @Test("approval_needed with an unknown risk string defaults to high")
+    func approvalNeededUnknownRiskDefaultsHigh() throws {
+        let event = try decode(
+            #"""
+            {"type":"approval_needed","request_id":"appr_7f3a","tool_name":"shell_command","description":"Run a shell command","parameters":"{}","risk":"nuclear","thread_id":"web-1"}
+            """#)
+        guard case let .approvalNeeded(request) = event else {
+            Issue.record("expected .approvalNeeded, got \(event)")
+            return
+        }
+        #expect(request.risk == .high)
+    }
+
+    @Test("auth_required decodes into an AuthPrompt with a parsed URL")
+    func authRequired() throws {
+        let event = try decode(
+            #"""
+            {"type":"auth_required","extension_name":"gmail","instructions":"Authorize access","auth_url":"https://accounts.example.com/oauth","auth_mode":"oauth","auth_status":"pending","thread_id":"web-1"}
+            """#)
+        guard case let .authRequired(prompt) = event else {
+            Issue.record("expected .authRequired, got \(event)")
+            return
+        }
+        #expect(prompt.extensionName == "gmail")
+        #expect(prompt.instructions == "Authorize access")
+        #expect(prompt.authURL == URL(string: "https://accounts.example.com/oauth"))
+        #expect(prompt.threadID == ThreadID("web-1"))
+    }
+
+    @Test("auth_required tolerates a missing auth_url (text-only card)")
+    func authRequiredWithoutURL() throws {
+        let event = try decode(
+            #"""
+            {"type":"auth_required","extension_name":"gmail","auth_mode":"device_flow","auth_status":"pending"}
+            """#)
+        guard case let .authRequired(prompt) = event else {
+            Issue.record("expected .authRequired, got \(event)")
+            return
+        }
+        #expect(prompt.authURL == nil)
+        #expect(prompt.instructions == nil)
+    }
+
+    @Test("credential_prompt decodes into a CredentialPrompt (no secret carried)")
+    func credentialPrompt() throws {
+        let event = try decode(
+            #"""
+            {"type":"credential_prompt","prompt_id":"cp_1","secret_name":"GITHUB_TOKEN","provider":"github","reason":"clone a private repo","thread_id":"web-1"}
+            """#)
+        guard case let .credentialPrompt(prompt) = event else {
+            Issue.record("expected .credentialPrompt, got \(event)")
+            return
+        }
+        #expect(prompt.promptID == "cp_1")
+        #expect(prompt.secretName == "GITHUB_TOKEN")
+        #expect(prompt.provider == "github")
+        #expect(prompt.reason == "clone a private repo")
+        #expect(prompt.threadID == ThreadID("web-1"))
     }
 
     @Test("usage_update decodes with optional cost and model")
@@ -101,7 +190,7 @@ struct AgentEventDecoderTests {
 
     @Test("unknown event types decode to .unknown, never throw")
     func unknownTypes() throws {
-        for type in ["plan_update", "subagent_spawned", "auth_required", "totally_new_thing"] {
+        for type in ["plan_update", "subagent_spawned", "job_started", "totally_new_thing"] {
             let event = try decode(#"{"type":"\#(type)","anything":123}"#)
             #expect(event == .unknown(type: type))
         }

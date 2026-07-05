@@ -306,8 +306,37 @@ Rust-tested):
   `{phase, progress?, revision}` with a monotonic revision and a ≥15 s/activity
   throttle; the tool name never rides in the state. Background wakes are bounded
   by a per-device 3/hour budget.
-- 📋 **D-N3 per-category controls** and the Notification Service Extension
-  rewrite are client-side (M2), not yet implemented.
+- 🟡 **D-N3 per-category controls** and the Notification Service Extension
+  rewrite (client-side, M2): authored in `apps/ios`. The app registers four
+  categories — `THINCLAW_MESSAGE`, `THINCLAW_APPROVAL_LOW` (inline Approve/Deny),
+  `THINCLAW_APPROVAL_HIGH` (Open-only → deep-link → in-app Face ID), and
+  `THINCLAW_JOB` — so an inline approve action is offered for low-risk approvals
+  only. The `ThinClawNotificationService` extension re-fetches approval content
+  over the shared pinned connection (`GET /api/chat/approvals`, device token from
+  the shared Keychain group) and rewrites the visible title/body locally,
+  leaving the generic text when the gateway is unreachable. Content-free pushes
+  carry only the `tc` id dict end to end. Per-category *preview* toggles
+  (always/when-unlocked/never) are the remaining D-N3 surface, not yet built.
+  Unverified against a Tuist/`xcodebuild` build (same caveat as Phase 1).
+- ✅ **D-K3 gateway-side risk classifier (single source of truth).**
+  `thinclaw_gateway::web::devices::approval_risk::classify` maps a tool name to
+  `ApprovalRisk::{Low, High}` from an auditable substring allowlist:
+  read-only/informational verbs (`read`/`search`/`list`/`get`/…) are `low`;
+  side-effecting, egress, browser, filesystem-mutating, deploy/send, and **any
+  unrecognised** tool default to `high` (least-privilege — over-gating costs one
+  Face ID prompt, under-gating approves a destructive action from a lock screen).
+  A high-risk substring wins even when a read-ish word co-occurs. The tier
+  serialises snake_case onto the `approval_needed` SSE event and the
+  `GET /api/chat/approvals` pending entries, and the push notifier derives the
+  APNs category from it — the client and NSE never approximate risk locally
+  (Rust-tested; carried through the OpenAPI snapshot to the generated client).
+- 🚧 **D-K3 client biometric gate (authored, M2).** `ApprovalsStore` fires an
+  injected `BiometricGating` (`LAContext` Face ID) before a **high-risk approve**
+  and never before deny or a low-risk decision; the widget/watch omit the approve
+  action for high-risk entirely (deep-link into the app). Push registration is
+  device-token-authenticated via the `devices:self` scope
+  (`PUT/DELETE /api/devices/me/push`). Same Tuist/`xcodebuild` + live-Apple
+  caveat as D-N3.
 
 ## v1 simplifications (explicit, each with an upgrade path)
 

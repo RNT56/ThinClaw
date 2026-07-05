@@ -24,6 +24,16 @@ final class AppRouter {
     /// the same. Nil means the default assistant thread.
     var selectedThread: ThreadID?
 
+    /// The approval a `thinclaw://approval/<request_id>` deep link (notification
+    /// tap or high-risk "Open" action) asked the app to focus. The approvals
+    /// surface reads this to scroll to and — for high-risk — Face ID-gate that
+    /// specific request. Nil when the sheet was opened without a target.
+    private(set) var focusedApprovalID: String?
+
+    /// The job a `thinclaw://job/<job_id>` deep link asked the app to focus, for
+    /// the Jobs surface to select. Nil for a bare `thinclaw://job`.
+    private(set) var focusedJobID: String?
+
     /// Select a thread and focus the Chat tab (Sessions row tap / deep link).
     func openThread(_ id: ThreadID) {
         selectedThread = id
@@ -42,8 +52,25 @@ final class AppRouter {
                 selectedTab = .chat
             }
         case "approval":
+            // `thinclaw://approval/<request_id>?thread=<id>` focuses one pending
+            // approval (notification tap / high-risk "Open"); a bare
+            // `thinclaw://approval` just opens the sheet. The `thread` query is
+            // carried so the in-app approval POST can attach `thread_id`.
+            if let requestID = url.pathComponents.dropFirst().first, !requestID.isEmpty {
+                focusedApprovalID = requestID
+                if let thread = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "thread" })?.value, !thread.isEmpty
+                {
+                    selectedThread = ThreadID(thread)
+                }
+            } else {
+                focusedApprovalID = nil
+            }
             showsApprovals = true
         case "job":
+            // `thinclaw://job/<job-id>` focuses that job; a bare `thinclaw://job`
+            // just switches to the Jobs tab.
+            focusedJobID = url.pathComponents.dropFirst().first.flatMap { $0.isEmpty ? nil : $0 }
             selectedTab = .jobs
         case "quick-ask":
             selectedTab = .chat

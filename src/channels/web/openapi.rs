@@ -62,6 +62,7 @@ impl Modify for GatewayTokenSecurity {
         SseEvent,
         WsClientMessage,
         WsServerMessage,
+        thinclaw_gateway::web::devices::ApprovalRisk,
         thinclaw_gateway::web::types::PendingApprovalEntry,
         thinclaw_gateway::web::types::PendingApprovalsResponse
     ))

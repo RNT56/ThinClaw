@@ -108,12 +108,9 @@ fn pairing_error(
 /// authenticator; the instance id is part of what must match before a
 /// credential is sent).
 fn resolve_or_create_instance_id() -> std::io::Result<String> {
-    let path = thinclaw_platform::resolve_thinclaw_home().join("instance-id");
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
+    let path = thinclaw_platform::instance_id_path();
+    if let Some(existing) = thinclaw_platform::read_instance_id() {
+        return Ok(existing);
     }
 
     let instance_id = uuid::Uuid::new_v4().to_string();

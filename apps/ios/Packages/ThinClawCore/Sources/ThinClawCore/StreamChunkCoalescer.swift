@@ -70,7 +70,7 @@ public struct StreamChunkCoalescer: Hashable, Sendable {
             return update
 
         case .thinking, .toolStarted, .toolCompleted, .approvalNeeded,
-            .usageUpdate, .heartbeat, .unknown:
+            .authRequired, .credentialPrompt, .usageUpdate, .heartbeat, .unknown:
             return nil
         }
     }

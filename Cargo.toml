@@ -245,6 +245,10 @@ axum-server = { version = "0.8", default-features = false, features = ["tls-rust
 rcgen = { version = "0.14", optional = true }
 if-addrs = { version = "0.15", optional = true }
 
+# Optional mDNS/Bonjour LAN discovery responder (mobile locator, B3).
+# Pure-Rust, no system dependencies (no Avahi/Bonjour daemon required).
+mdns-sd = { version = "0.20", optional = true }
+
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
@@ -290,6 +294,7 @@ light = [
     "document-extraction",
     "timezones",
     "gateway-tls",
+    "mdns",
 ]
 # Desktop embedding (ThinClaw Desktop/Tauri) — minimal footprint
 desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]
@@ -309,6 +314,8 @@ wasm-runtime = [
 browser = ["dep:chromiumoxide", "thinclaw-config/browser", "thinclaw-tools/browser"]
 # Optional rustls TLS listener for the gateway (mobile device pairing, D-X1).
 gateway-tls = ["dep:axum-server", "dep:rcgen", "dep:if-addrs"]
+# Optional mDNS/Bonjour LAN discovery responder (mobile locator, B3).
+mdns = ["dep:mdns-sd"]
 nostr = [
     "thinclaw-channels/nostr",
     "thinclaw-config/nostr",

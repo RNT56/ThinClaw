@@ -11,13 +11,15 @@ milestones) and [`docs/MOBILE_SECURITY.md`](../../docs/MOBILE_SECURITY.md)
 
 ## Status
 
-The **M1 client is implemented**: the seven SPM packages, the onboarding flow,
-and the chat + sessions surfaces are all wired, and the whole `ThinClaw` app
-target (plus its widget and watch embeds) **builds for the iOS 26 simulator**.
-All seven packages pass `swift test` on macOS with no simulator; the pure logic
-behind the feature stores is unit-tested. What remains for M1 is real-device /
-live-gateway exercise; approvals, jobs, and settings surfaces are M2+ (see the
-caveat below the table).
+The **M1 client is implemented** and the **M2 approvals + push surfaces are
+authored**: the SPM packages, the onboarding flow, the chat + sessions surfaces,
+and the risk-tiered approvals surface are all wired, and the whole `ThinClaw` app
+target (plus its widget, watch, and Notification Service Extension embeds)
+**builds for the iOS 26 simulator**. All pure-logic packages pass `swift test` on
+macOS with no simulator; the logic behind the feature stores is unit-tested. What
+remains is real-device / live-gateway exercise, a whole-app/NSE `xcodebuild`
+verification, live APNs delivery, and the jobs/settings surfaces (M3+). See the
+caveats below the table.
 
 | Piece | Status |
 |---|---|
@@ -29,8 +31,11 @@ caveat below the table).
 | `ThinClawPersistence` (GRDB WAL store + in-memory store, parameterized `TranscriptStoring` parity) | ✅ implemented + tested (11 tests) |
 | `FeatureOnboarding` (pairing state machine, QR scanner, app wiring) | ✅ implemented; store unit-tested on the iOS simulator (27 tests) |
 | `FeatureChat` / `FeatureSessions` (`ChatStore`, `SessionsStore` over the live session + cache) | ✅ implemented; pure logic tested on macOS, async orchestration not yet UI-tested |
-| `App` composition (`AppDependencies` real graph, `AppRouter`, scenePhase lifecycle) | ✅ wired; whole app target builds for the iOS 26 simulator |
-| `FeatureApprovals` / `FeatureJobs` / `FeatureSettings`, widgets, watch | 🚧 placeholder screens (M2+); compiled into the app build, no stores yet |
+| `App` composition (`AppDependencies` real graph, `AppRouter` deep links, `PushCoordinator`, `AppDelegate`, scenePhase lifecycle) | ✅ wired; whole app target builds for the iOS 26 simulator |
+| `FeatureApprovals` (risk-tiered cards over `ApprovalsStore`: cold-load + live fan-out + `POST /api/chat/approval`, Face-ID gate on high-risk approve) | ✅ implemented (M2); pure store logic tested on macOS |
+| iOS push client (`AppDelegate` APNs register/`PUT`/`DELETE`, `PushCoordinator` risk-split categories, `ThinClawNotificationService` NSE content rewrite) | 🚧 authored (M2); whole-app/NSE `xcodebuild` + live APNs delivery pending |
+| B3 discovery consumption (`BonjourBrowser` `NWBrowser` + TXT parse, `DiscoveryStore`, onboarding "Discover on this network") | ✅ wired (B3); locator-only, tested with a scripted browser; no live-LAN run |
+| `FeatureJobs` / `FeatureSettings`, widgets, watch | 🚧 placeholder screens (M3+); compiled into the app build, no stores yet |
 | Tuist manifests / CI `build-app` job | ✅ `tuist generate` succeeds locally and the app builds; CI `build-app` job unverified here |
 
 **M1 caveat:** the onboarding **and** chat/sessions flows are wired end to end
@@ -48,11 +53,28 @@ reconciles after reconnect; `SessionsStore` hydrates from the `ThinClawPersisten
 cache then refreshes via `threads()`, and a Sessions tap routes into Chat.
 Transcript persistence is the GRDB WAL `DatabasePool` store. The whole `ThinClaw`
 app target builds for the iOS 26 simulator (verified with `xcodebuild`), and the
-onboarding store carries 27 simulator-run tests. Still **not** done: no
+onboarding store carries 27 simulator-run tests.
+
+**M2 caveat:** the approvals surface and push client are **authored, not yet
+live-verified**. `ApprovalsStore` (UI-free) cold-loads `GET /api/chat/approvals`,
+folds live `approval_needed` events, and posts `POST /api/chat/approval`
+decisions; the `ApprovalCard` renders the gateway-computed `risk` tier and a
+Face-ID gate (injected `BiometricGating`, `LAContext`) fires on high-risk
+**approve** only (D-K3). `AppDelegate` registers for remote notifications while
+paired and `PUT`s/`DELETE`s the APNs token over the pinned client;
+`PushCoordinator` registers the risk-split categories (inline Approve/Deny for
+`THINCLAW_APPROVAL_LOW`, Open-only deep-link for `THINCLAW_APPROVAL_HIGH`) and
+routes content-free pushes to `thinclaw://` deep links; the
+`ThinClawNotificationService` app-extension rewrites approval title/body from
+`GET /api/chat/approvals` over the shared pinned connection, leaving generic text
+on failure. Chat also surfaces inline `auth_required` (opens the OAuth URL, never
+captures the token) and `credential_prompt` (handle-on-desktop per D-T4) cards.
+All exercised by `swift test` on macOS. Still **not** done: no
 real-device or live-gateway pairing/chat run has happened (treat E2E as
 unverified), the `ChatStore`/`SessionsStore` async orchestration has no simulator
-UI tests (coverage is at the pure-reducer level), and approvals/jobs/settings are
-placeholder screens. **Known API-spec gap:** the gateway's `assistant_thread` is
+UI tests (coverage is at the pure-reducer level), a whole-app/NSE `xcodebuild`
+verification and live APNs delivery are pending, per-category *preview* toggles
+(D-N3) and the jobs/settings surfaces are unbuilt. **Known API-spec gap:** the gateway's `assistant_thread` is
 modeled in the committed OpenAPI snapshot as `oneOf: [null, $ref]`, which
 swift-openapi-generator drops from `ThreadListResponse`, so `GatewaySession.threads()`
 cannot surface the pinned assistant thread until that spec pattern is corrected
@@ -78,12 +100,13 @@ and set `DEVELOPMENT_TEAM`. Nothing secret is committed.
 
 ```
 App/ Widgets/ Watch/ WatchWidgets/   # thin target shells (composition only)
+NotificationService/                 # NSE shell (content-free push rewrite, M2)
 Packages/                            # all real code, local SPM packages
   ThinClawAPI        generated gateway client + auth/error shell
   ThinClawTransport  SSE parser, AgentEvent decoding, reconnect policy
-  ThinClawCore       domain models, reducers
+  ThinClawCore       domain models, reducers, ApprovalsStore, AuthPrompt
   ThinClawPersistence transcript cache + outbox (GRDB at M1)
-  ThinClawAuth       pairing payload, Keychain, Bonjour browser
+  ThinClawAuth       pairing payload, Keychain, Bonjour discovery (_thinclaw._tcp)
   ThinClawSnapshotKit App Group snapshots for widgets/watch + Live Activity attrs
   ThinClawDesign     Liquid Glass design system
   ThinClawWidgetKitShared  timeline providers + AppIntents (approve/deny/quick-ask)

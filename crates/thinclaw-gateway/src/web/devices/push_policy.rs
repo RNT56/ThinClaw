@@ -32,6 +32,7 @@
 
 use std::collections::HashMap;
 
+use super::approval_risk::ApprovalRisk;
 use crate::web::types::SseEvent;
 
 /// Minimum interval between Live Activity update pushes for a single activity
@@ -55,7 +56,16 @@ pub const GENERIC_ALERT_BODY: &str = "New activity";
 
 /// APNs categories (`aps.category`), used by the client to route/render.
 pub const CATEGORY_MESSAGE: &str = "THINCLAW_MESSAGE";
+/// Back-compat base approval category. Retained for callers that route on the
+/// approval family; live approval pushes use the risk-split categories below so
+/// the client can offer interactive approve-from-notification for low-risk
+/// approvals only (D-N3) and gate high-risk ones behind Face ID in-app (D-K3).
 pub const CATEGORY_APPROVAL: &str = "THINCLAW_APPROVAL";
+/// Low-risk approval category: interactive approve-from-notification allowed.
+pub const CATEGORY_APPROVAL_LOW: &str = "THINCLAW_APPROVAL_LOW";
+/// High-risk approval category: no interactive action; deep-link into the app
+/// for a Face ID-gated approval.
+pub const CATEGORY_APPROVAL_HIGH: &str = "THINCLAW_APPROVAL_HIGH";
 pub const CATEGORY_JOB: &str = "THINCLAW_JOB";
 
 /// The push category (`apns-push-type`) a [`PushDecision`] targets. The
@@ -303,22 +313,31 @@ pub fn decide(
             }
         }
 
-        // Approvals are time-sensitive actionable alerts.
+        // Approvals are time-sensitive actionable alerts. The category is split
+        // by the gateway-computed risk tier (D-K3): low-risk approvals get an
+        // interactive-capable category, high-risk approvals a category the
+        // client renders without an inline approve action (deep-link to the
+        // Face ID-gated approval instead, D-N3).
         SseEvent::ApprovalNeeded {
             request_id,
             thread_id,
+            risk,
             ..
         } => {
+            let category = match risk {
+                ApprovalRisk::Low => CATEGORY_APPROVAL_LOW,
+                ApprovalRisk::High => CATEGORY_APPROVAL_HIGH,
+            };
             let mut tc = serde_json::json!({ "request_id": request_id });
             if let Some(thread_id) = thread_id {
                 tc["thread_id"] = serde_json::Value::String(thread_id.clone());
             }
             Some(PushDecision {
                 kind: PushKind::Alert,
-                category: Some(CATEGORY_APPROVAL),
+                category: Some(category),
                 collapse_id: Some(format!("approval-{request_id}")),
                 activity_id: None,
-                payload: alert_payload(CATEGORY_APPROVAL, Some("time-sensitive"), tc),
+                payload: alert_payload(category, Some("time-sensitive"), tc),
             })
         }
 
@@ -453,7 +472,21 @@ mod tests {
             tool_name: tool.to_string(),
             description: "please approve".to_string(),
             parameters: params.to_string(),
+            risk: super::super::approval_risk::classify(tool, params),
             thread_id: thread_id.map(str::to_string),
+        }
+    }
+
+    /// Build an approval event with an explicit risk tier, for exercising the
+    /// category split independent of the classifier.
+    fn approval_with_risk(request_id: &str, risk: ApprovalRisk) -> SseEvent {
+        SseEvent::ApprovalNeeded {
+            request_id: request_id.to_string(),
+            tool_name: "tool".to_string(),
+            description: "please approve".to_string(),
+            parameters: "{}".to_string(),
+            risk,
+            thread_id: None,
         }
     }
 
@@ -511,8 +544,9 @@ mod tests {
     }
 
     #[test]
-    fn approval_maps_to_time_sensitive_approval_alert() {
+    fn high_risk_approval_maps_to_time_sensitive_high_category_alert() {
         let mut state = DevicePushState::default();
+        // shell.execute classifies High.
         let decision = decide(
             &approval("req-9", Some("t1"), "shell.execute", "rm -rf /secret/path"),
             &mut state,
@@ -520,7 +554,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decision.kind, PushKind::Alert);
-        assert_eq!(decision.category, Some(CATEGORY_APPROVAL));
+        assert_eq!(decision.category, Some(CATEGORY_APPROVAL_HIGH));
+        assert_eq!(decision.payload["aps"]["category"], CATEGORY_APPROVAL_HIGH);
         assert_eq!(decision.collapse_id.as_deref(), Some("approval-req-9"));
         assert_eq!(
             decision.payload["aps"]["interruption-level"],
@@ -530,6 +565,46 @@ mod tests {
         assert_eq!(decision.payload["tc"]["thread_id"], "t1");
         // Never the tool name or parameters.
         assert_content_free(&decision.payload, &["shell.execute", "rm -rf /secret/path"]);
+    }
+
+    #[test]
+    fn low_risk_approval_maps_to_low_category_alert() {
+        let mut state = DevicePushState::default();
+        // read_file classifies Low.
+        let decision = decide(
+            &approval(
+                "req-10",
+                Some("t1"),
+                "read_file",
+                "{\"path\":\"/etc/hosts\"}",
+            ),
+            &mut state,
+            0,
+        )
+        .unwrap();
+        assert_eq!(decision.kind, PushKind::Alert);
+        assert_eq!(decision.category, Some(CATEGORY_APPROVAL_LOW));
+        assert_eq!(decision.payload["aps"]["category"], CATEGORY_APPROVAL_LOW);
+        assert_eq!(decision.collapse_id.as_deref(), Some("approval-req-10"));
+    }
+
+    #[test]
+    fn approval_category_follows_event_risk_tier() {
+        let mut state = DevicePushState::default();
+        let high = decide(
+            &approval_with_risk("r-hi", ApprovalRisk::High),
+            &mut state,
+            0,
+        )
+        .unwrap();
+        assert_eq!(high.category, Some(CATEGORY_APPROVAL_HIGH));
+        let low = decide(
+            &approval_with_risk("r-lo", ApprovalRisk::Low),
+            &mut state,
+            0,
+        )
+        .unwrap();
+        assert_eq!(low.category, Some(CATEGORY_APPROVAL_LOW));
     }
 
     #[test]

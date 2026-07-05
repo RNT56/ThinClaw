@@ -847,6 +847,427 @@ public struct Client: APIProtocol {
             }
         )
     }
+    /// - Remark: HTTP `PUT /api/devices/me/live-activity-start-token`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)`.
+    public func devicesMeLiveActivityStartTokenRegisterHandler(_ input: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input) async throws -> Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/live-activity-start-token",
+                    parameters: []
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .put
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                let body: OpenAPIRuntime.HTTPBody?
+                switch input.body {
+                case let .json(value):
+                    body = try converter.setRequiredRequestBodyAsJSON(
+                        value,
+                        headerFields: &request.headerFields,
+                        contentType: "application/json; charset=utf-8"
+                    )
+                }
+                return (request, body)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.DeviceInfo.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 400:
+                    return .badRequest(.init())
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                case 404:
+                    return .notFound(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/live-activity-start-token`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)`.
+    public func devicesMeLiveActivityStartTokenRemoveHandler(_ input: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input) async throws -> Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/live-activity-start-token",
+                    parameters: []
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .delete
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                return (request, nil)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.DeviceInfo.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                case 404:
+                    return .notFound(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
+    /// - Remark: HTTP `PUT /api/devices/me/live-activity/{activity_id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)`.
+    public func devicesMeLiveActivityRegisterHandler(_ input: Operations.DevicesMeLiveActivityRegisterHandler.Input) async throws -> Operations.DevicesMeLiveActivityRegisterHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMeLiveActivityRegisterHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/live-activity/{}",
+                    parameters: [
+                        input.path.activityId
+                    ]
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .put
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                let body: OpenAPIRuntime.HTTPBody?
+                switch input.body {
+                case let .json(value):
+                    body = try converter.setRequiredRequestBodyAsJSON(
+                        value,
+                        headerFields: &request.headerFields,
+                        contentType: "application/json; charset=utf-8"
+                    )
+                }
+                return (request, body)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMeLiveActivityRegisterHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.DeviceInfo.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 400:
+                    return .badRequest(.init())
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                case 404:
+                    return .notFound(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/live-activity/{activity_id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)`.
+    public func devicesMeLiveActivityRemoveHandler(_ input: Operations.DevicesMeLiveActivityRemoveHandler.Input) async throws -> Operations.DevicesMeLiveActivityRemoveHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMeLiveActivityRemoveHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/live-activity/{}",
+                    parameters: [
+                        input.path.activityId
+                    ]
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .delete
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                return (request, nil)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMeLiveActivityRemoveHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.DeviceInfo.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                case 404:
+                    return .notFound(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
+    /// - Remark: HTTP `PUT /api/devices/me/push`.
+    /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)`.
+    public func devicesMePushRegisterHandler(_ input: Operations.DevicesMePushRegisterHandler.Input) async throws -> Operations.DevicesMePushRegisterHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMePushRegisterHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/push",
+                    parameters: []
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .put
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                let body: OpenAPIRuntime.HTTPBody?
+                switch input.body {
+                case let .json(value):
+                    body = try converter.setRequiredRequestBodyAsJSON(
+                        value,
+                        headerFields: &request.headerFields,
+                        contentType: "application/json; charset=utf-8"
+                    )
+                }
+                return (request, body)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMePushRegisterHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.DeviceInfo.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 400:
+                    return .badRequest(.init())
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                case 404:
+                    return .notFound(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/push`.
+    /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)`.
+    public func devicesMePushRemoveHandler(_ input: Operations.DevicesMePushRemoveHandler.Input) async throws -> Operations.DevicesMePushRemoveHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMePushRemoveHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/push",
+                    parameters: []
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .delete
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                return (request, nil)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMePushRemoveHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.DeviceInfo.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                case 404:
+                    return .notFound(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
     /// - Remark: HTTP `POST /api/devices/pair/complete`.
     /// - Remark: Generated from `#/paths//api/devices/pair/complete/post(devices_pair_complete_handler)`.
     public func devicesPairCompleteHandler(_ input: Operations.DevicesPairCompleteHandler.Input) async throws -> Operations.DevicesPairCompleteHandler.Output {

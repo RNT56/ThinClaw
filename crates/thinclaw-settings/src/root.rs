@@ -235,6 +235,10 @@ pub struct Settings {
     #[serde(default)]
     pub repo_projects: RepoProjectsSettings,
 
+    /// Optional LAN discovery (mDNS/Bonjour) settings.
+    #[serde(default)]
+    pub discovery: DiscoverySettings,
+
     /// Persisted per-channel / per-group tool access policy.
     #[serde(default)]
     pub tool_policies: ToolPolicyManager,

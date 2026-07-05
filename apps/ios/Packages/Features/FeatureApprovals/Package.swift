@@ -17,7 +17,7 @@ let package = Package(
     dependencies: [
         .package(path: "../../ThinClawCore"),
         .package(path: "../../ThinClawDesign"),
-
+        .package(path: "../../ThinClawTransport"),
     ],
     targets: [
         .target(
@@ -25,7 +25,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ThinClawCore", package: "ThinClawCore"),
                 .product(name: "ThinClawDesign", package: "ThinClawDesign"),
-
+                .product(name: "ThinClawTransport", package: "ThinClawTransport"),
             ]
         )
     ]

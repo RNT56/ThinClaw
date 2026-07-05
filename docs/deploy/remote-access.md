@@ -117,6 +117,24 @@ Then connect from the private address:
 http://<host-or-tailnet-ip>:3000/?token=<gateway-token>
 ```
 
+### iOS LAN discovery (mDNS, opt-in)
+
+The native iOS surface can relocate a paired gateway on the local network
+through mDNS/Bonjour instead of a hard-coded address. This is **off by
+default** and settings-gated — the gateway advertises `_thinclaw._tcp` only
+when the operator sets `discovery.enabled = true` in settings or exports
+`MDNS_ENABLED=1`, and only in builds compiled with the `mdns` feature
+(included in the `light`/`full` profiles, excluded from `edge`/`desktop`).
+
+Discovery is a **locator only** (`docs/MOBILE_SECURITY.md` D-X3): the
+advertised TXT record carries non-sensitive hints (`version`, `api`, `name`,
+and `fp` = base64url(sha256(instance-id))) — never tokens, secrets, or
+filesystem paths — and a loopback-bound gateway is never advertised. A
+rediscovered endpoint must still present the pinned TLS SPKI and the
+pairing-time instance id before the device sends its scoped token, so mDNS
+neither grants access nor replaces pairing. It is a convenience for LAN
+operators; tailnet and SSH-tunnel access do not need it.
+
 ## Reverse Proxy Or Public Exposure
 
 Keep `GATEWAY_AUTH_TOKEN` required. TLS, proxy auth, firewall rules, rate
