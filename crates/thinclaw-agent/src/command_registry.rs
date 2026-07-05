@@ -141,6 +141,16 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         help_text: "Rewind conversation and files to an earlier turn",
     },
     CommandSpec {
+        name: "/plan",
+        aliases: &[],
+        system_command: Some("plan"),
+        arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
+        in_help: true,
+        tui_forwarded: true,
+        tui_autocomplete: true,
+        help_text: "Toggle plan mode: propose actions, approve before running",
+    },
+    CommandSpec {
         name: "/version",
         aliases: &[],
         system_command: Some("version"),

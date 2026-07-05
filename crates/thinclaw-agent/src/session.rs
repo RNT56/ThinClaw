@@ -407,6 +407,12 @@ pub struct Thread {
     /// Pending auth token request (thread is in auth mode).
     #[serde(default)]
     pub pending_auth: Option<PendingAuth>,
+    /// Plan mode: when true, mutating (non-read) tools are hidden from the LLM's
+    /// tool list and, if attempted, require operator approval before running —
+    /// so the agent proposes actions and the operator confirms. Toggled by
+    /// `/plan`; survives restart via the runtime snapshot.
+    #[serde(default)]
+    pub plan_mode: bool,
 }
 
 impl Thread {
@@ -423,6 +429,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            plan_mode: false,
         }
     }
 
@@ -439,6 +446,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            plan_mode: false,
         }
     }
 
@@ -471,12 +479,14 @@ impl Thread {
             provider_context_refs: Vec::new(),
             active_message_row_count: None,
             undo_checkpoints: Vec::new(),
+            plan_mode: self.plan_mode,
         }
     }
 
     pub fn restore_runtime_snapshot(&mut self, runtime: ThreadRuntimeSnapshot) {
         self.pending_approval = runtime.pending_approval.map(Into::into);
         self.pending_auth = runtime.pending_auth.map(Into::into);
+        self.plan_mode = runtime.plan_mode;
         self.state = match ThreadState::from(runtime.state) {
             ThreadState::Processing => {
                 if let Some(turn) = self.turns.last_mut() {
@@ -1301,6 +1311,7 @@ mod tests {
             provider_context_refs: Vec::new(),
             active_message_row_count: None,
             undo_checkpoints: Vec::new(),
+            plan_mode: false,
         });
 
         assert_eq!(thread.state, ThreadState::Interrupted);
@@ -1333,6 +1344,7 @@ mod tests {
             provider_context_refs: vec!["provider:1".to_string(), "provider:2".to_string()],
             active_message_row_count: Some(4),
             undo_checkpoints: Vec::new(),
+            plan_mode: false,
         };
 
         let encoded = serde_json::to_string(&runtime).expect("serialize runtime");
@@ -1661,6 +1673,24 @@ mod tests {
                 .iter()
                 .any(|m| m.role == Role::Tool && m.content.contains("[error] boom"))
         );
+    }
+
+    #[test]
+    fn test_plan_mode_survives_runtime_snapshot_round_trip() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        assert!(!thread.plan_mode);
+        thread.plan_mode = true;
+
+        let snapshot = thread.runtime_snapshot(None, None, Vec::new(), Vec::new(), None);
+        assert!(snapshot.plan_mode);
+
+        // Serde round-trip (the snapshot is persisted as JSON).
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored: ThreadRuntimeSnapshot = serde_json::from_str(&json).unwrap();
+
+        let mut fresh = Thread::new(Uuid::new_v4());
+        fresh.restore_runtime_snapshot(restored);
+        assert!(fresh.plan_mode, "plan mode lost across snapshot round-trip");
     }
 
     #[test]

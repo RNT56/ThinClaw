@@ -205,6 +205,10 @@ pub struct ThreadRuntimeSnapshot {
     /// losing all undo history.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undo_checkpoints: Vec<crate::undo::Checkpoint>,
+    /// Whether the thread is in plan mode (mutating tools deferred for approval),
+    /// so `/plan` survives a process restart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_mode: bool,
 }
 
 /// Target used for status, proactive messages, and broadcasts.

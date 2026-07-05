@@ -23,6 +23,7 @@ The following commands can be typed directly into the agent's chat input:
 - `/suggest` — Ask the agent to suggest next steps based on the current context.
 - `/rollback` — Filesystem-only checkpoint family (list/diff/restore shadow-git snapshots).
 - `/rewind [n|list]` — Unified rewind: `/rewind list` is a dry run showing conversation rewind points and turn-tagged filesystem checkpoints; `/rewind <n>` restores **both** the conversation (to the start of turn `n`) and the working files (to that turn's checkpoint) in one step.
+- `/plan [on|off]` — Toggle plan mode. While on, the agent investigates with read-only tools and proposes a numbered plan; every state-changing tool it calls pauses for operator approval before running. Survives restart.
 - `/undo` — Undo the last turn in a thread (also exposed in ThinClaw Desktop as the `thinclaw_undo` command + a cockpit toolbar button).
 - `/redo` — Redo a previously undone turn (desktop: `thinclaw_redo` command + toolbar button).
 

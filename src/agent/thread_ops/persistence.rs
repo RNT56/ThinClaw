@@ -312,6 +312,7 @@ impl Agent {
                     provider_context_refs: runtime.provider_context_refs.clone(),
                     active_message_row_count: runtime.active_message_row_count,
                     undo_checkpoints: runtime.undo_checkpoints.clone(),
+                    plan_mode: runtime.plan_mode,
                 }
             });
             let snapshot = thinclaw_agent::thread_ops::runtime_snapshot_for_persistence(

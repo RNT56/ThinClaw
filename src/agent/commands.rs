@@ -480,6 +480,56 @@ impl Agent {
                 self.process_rewind(session, thread_id, args).await
             }
 
+            "plan" => {
+                let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
+                    return Ok(SubmissionResult::error(
+                        "Could not find the active session for this thread.",
+                    ));
+                };
+                let desired = match args
+                    .first()
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("on") | Some("enable") => Some(true),
+                    Some("off") | Some("disable") => Some(false),
+                    None | Some("") | Some("status") => None,
+                    Some(other) => {
+                        return Ok(SubmissionResult::error(format!(
+                            "Usage: /plan [on|off]  (got '{other}')"
+                        )));
+                    }
+                };
+
+                let (now_on, changed) = {
+                    let mut sess = session.lock().await;
+                    let Some(thread) = sess.threads.get_mut(&thread_id) else {
+                        return Ok(SubmissionResult::error("Could not find the active thread."));
+                    };
+                    match desired {
+                        Some(value) => {
+                            let changed = thread.plan_mode != value;
+                            thread.plan_mode = value;
+                            (value, changed)
+                        }
+                        None => (thread.plan_mode, false),
+                    }
+                };
+                if changed {
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                        .await;
+                }
+
+                let body = if now_on {
+                    "Plan mode ON — I'll propose actions and ask for approval before running anything \
+                     that changes state (files, shell, sending messages). Read-only tools still run \
+                     freely. Turn it off with `/plan off`."
+                } else {
+                    "Plan mode OFF — tools run normally."
+                };
+                Ok(SubmissionResult::ok_with_message(body))
+            }
+
             "identity" => {
                 let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
                     return Ok(SubmissionResult::error(

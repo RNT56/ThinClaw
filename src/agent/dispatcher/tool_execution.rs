@@ -109,6 +109,18 @@ impl Agent {
             None => std::collections::HashSet::new(),
         };
 
+        // Plan mode: when on, every state-changing (non-read) tool the model
+        // proposes is escalated to require operator approval, even tools that
+        // would normally run without one — so the agent proposes and the
+        // operator confirms. Read the flag once for this batch.
+        let plan_mode = {
+            let sess = session.lock().await;
+            sess.threads
+                .get(&thread_id)
+                .map(|thread| thread.plan_mode)
+                .unwrap_or(false)
+        };
+
         for (idx, original_tc) in tool_calls.iter().enumerate() {
             let mut tc = original_tc.clone();
 
@@ -170,9 +182,15 @@ impl Agent {
             // commands from NEVER_AUTO_APPROVE_PATTERNS like rm -rf,
             // DROP DATABASE, etc.) which always require human approval.
             if let Some(tool) = self.tools().get(&tc.name).await {
-                use crate::tools::ApprovalRequirement;
+                use crate::tools::{ApprovalRequirement, ToolSideEffectLevel};
                 let approval = tool.requires_approval(&tc.arguments);
-                let needs_approval = if self.config.auto_approve_tools {
+                // In plan mode, any non-read tool is proposed for approval
+                // regardless of its own approval class or auto-approve setting.
+                let mutating_in_plan_mode =
+                    plan_mode && tool.metadata().side_effect_level != ToolSideEffectLevel::Read;
+                let needs_approval = if mutating_in_plan_mode {
+                    true
+                } else if self.config.auto_approve_tools {
                     // Auto-approve mode: only block Always-approval
                     // tools (destructive shell commands, hardware access).
                     matches!(approval, ApprovalRequirement::Always)

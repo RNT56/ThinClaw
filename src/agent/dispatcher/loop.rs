@@ -39,6 +39,26 @@ impl Agent {
             advisor_state: AdvisorTurnState::default(),
         };
 
+        // Plan mode: tell the model it is planning so it proposes concrete steps
+        // rather than assuming execution. Enforcement is at the tool-approval
+        // gate (dispatcher/tool_execution.rs); this only shapes behavior.
+        let plan_mode = {
+            let sess = session.lock().await;
+            sess.threads
+                .get(&thread_id)
+                .map(|thread| thread.plan_mode)
+                .unwrap_or(false)
+        };
+        if plan_mode {
+            turn.context_messages.push(ChatMessage::system(
+                "PLAN MODE is active. Investigate with read-only tools, then present a concise, \
+                 numbered plan of the state-changing actions you intend to take (file edits, shell \
+                 commands, sends) and why. Any state-changing tool you call will pause for the \
+                 operator to approve before it runs, so propose deliberately rather than assuming \
+                 execution. Plan mode ends when the operator runs `/plan off`.",
+            ));
+        }
+
         let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
