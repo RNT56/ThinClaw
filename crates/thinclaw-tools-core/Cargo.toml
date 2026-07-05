@@ -16,7 +16,12 @@ thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false }
 tracing = { workspace = true }
+utoipa = { workspace = true, optional = true }
 uuid = { version = "1", features = ["serde"] }
+
+[features]
+# Derive utoipa schemas for DTOs embedded in the gateway OpenAPI contract.
+openapi = ["dep:utoipa"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

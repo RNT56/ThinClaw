@@ -39,6 +39,19 @@ use thinclaw_gateway::web::ports::{
 pub(crate) use thinclaw_gateway::web::submission::gateway_submission_error;
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
+#[utoipa::path(
+    post,
+    path = "/api/chat/send",
+    tag = "chat",
+    request_body = SendMessageRequest,
+    responses(
+        (status = 202, description = "Message accepted for async processing; results stream over SSE/WS", body = SendMessageResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 429, description = "Chat rate limit exceeded"),
+        (status = 503, description = "Agent loop unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -71,6 +84,19 @@ pub(crate) async fn chat_send_handler(
     Ok((StatusCode::ACCEPTED, Json(send_message_response(msg_id))))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/chat/approval",
+    tag = "chat",
+    request_body = ApprovalRequest,
+    responses(
+        (status = 202, description = "Approval decision accepted", body = SendMessageResponse),
+        (status = 400, description = "Unknown approval action or malformed request id"),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 503, description = "Agent loop unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -155,6 +181,18 @@ async fn submit_thread_command(
     Ok((StatusCode::ACCEPTED, Json(thread_command_response(msg_id))))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/chat/abort",
+    tag = "chat",
+    request_body = ThreadCommandRequest,
+    responses(
+        (status = 202, description = "Interrupt submitted to the agent loop", body = ThreadCommandResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 503, description = "Agent loop unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_abort_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -364,6 +402,20 @@ pub(crate) async fn chat_ws_handler(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/chat/history",
+    tag = "chat",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "Turns for the requested (or active) thread", body = HistoryResponse),
+        (status = 400, description = "Malformed thread id or pagination cursor"),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 404, description = "Thread not found or not visible to this identity"),
+        (status = 503, description = "Session manager unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -477,6 +529,18 @@ pub(crate) async fn chat_history_handler(
     Ok(Json(history_response(thread_id, Vec::new(), false, None)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/chat/threads",
+    tag = "chat",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "Assistant thread plus regular conversation threads", body = ThreadListResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 503, description = "Session manager unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -611,6 +675,18 @@ pub(crate) async fn chat_thread_export_handler(
     Err(chat_store_unavailable_error())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/chat/thread/new",
+    tag = "chat",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "New side thread created and persisted", body = ThreadInfo),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 503, description = "Session manager unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -709,6 +785,24 @@ async fn persist_gateway_side_thread(
     Ok(())
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/chat/thread/{id}",
+    tag = "chat",
+    params(
+        ("id" = String, Path, description = "Thread UUID to delete"),
+        HistoryQuery,
+    ),
+    responses(
+        (status = 200, description = "Thread deletion outcome", body = ChatThreadDeleteResponse),
+        (status = 400, description = "Malformed thread id"),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 403, description = "The pinned assistant thread cannot be deleted"),
+        (status = 404, description = "Thread not found or not visible to this identity"),
+        (status = 503, description = "Database unavailable"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn chat_delete_thread_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,

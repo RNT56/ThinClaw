@@ -1,0 +1,3632 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ThinClaw Gateway API",
+    "description": "The v1 mobile contract of the ThinClaw web gateway: chat, threads, approvals, read-only jobs, and gateway status. Streaming events are delivered over `/api/chat/events` (SSE) or `/api/chat/ws` (WebSocket); both carry the `SseEvent` component schema.",
+    "contact": {
+      "name": "RNT56 (ThinClaw)"
+    },
+    "license": {
+      "name": "MIT OR Apache-2.0",
+      "identifier": "MIT OR Apache-2.0"
+    },
+    "version": "v1"
+  },
+  "paths": {
+    "/api/chat/abort": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "operationId": "chat_abort_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Interrupt submitted to the agent loop",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadCommandResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "503": {
+            "description": "Agent loop unavailable"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/approval": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "operationId": "chat_approval_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Approval decision accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown approval action or malformed request id"
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "503": {
+            "description": "Agent loop unavailable"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/events": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "description": "Server-Sent Events stream of agent events. Each `data:` line is a JSON-encoded `SseEvent` discriminated by its `type` field. The stream has no replay: after a reconnect, clients must reconcile missed turns via `GET /api/chat/history`. Browser EventSource clients may pass the bearer token as a `token` query parameter; native clients must use the Authorization header.",
+        "operationId": "chat_events_sse",
+        "responses": {
+          "200": {
+            "description": "Event stream (never terminates normally)",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SseEvent"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/history": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "operationId": "chat_history_handler",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Turns for the requested (or active) thread",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed thread id or pagination cursor"
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "404": {
+            "description": "Thread not found or not visible to this identity"
+          },
+          "503": {
+            "description": "Session manager unavailable"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/send": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "operationId": "chat_send_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Message accepted for async processing; results stream over SSE/WS",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "429": {
+            "description": "Chat rate limit exceeded"
+          },
+          "503": {
+            "description": "Agent loop unavailable"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/thread/new": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "operationId": "chat_new_thread_handler",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New side thread created and persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "503": {
+            "description": "Session manager unavailable"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/thread/{id}": {
+      "delete": {
+        "tags": [
+          "chat"
+        ],
+        "operationId": "chat_delete_thread_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Thread UUID to delete",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Thread deletion outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatThreadDeleteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed thread id"
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "403": {
+            "description": "The pinned assistant thread cannot be deleted"
+          },
+          "404": {
+            "description": "Thread not found or not visible to this identity"
+          },
+          "503": {
+            "description": "Database unavailable"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/threads": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "operationId": "chat_threads_handler",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assistant thread plus regular conversation threads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "503": {
+            "description": "Session manager unavailable"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/chat/ws": {
+      "get": {
+        "tags": [
+          "chat"
+        ],
+        "description": "WebSocket upgrade for bidirectional chat. Client frames are JSON-encoded `WsClientMessage`; server frames are JSON-encoded `WsServerMessage` (SSE events in an envelope plus `pong`).",
+        "operationId": "chat_ws",
+        "requestBody": {
+          "description": "Not a conventional request body: after the 101 upgrade, the client sends `WsClientMessage` frames.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WsClientMessage"
+              }
+            }
+          }
+        },
+        "responses": {
+          "101": {
+            "description": "Switching protocols; server frames are `WsServerMessage`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WsServerMessage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/gateway/status": {
+      "get": {
+        "tags": [
+          "status"
+        ],
+        "operationId": "gateway_status_handler",
+        "responses": {
+          "200": {
+            "description": "Connection counts, uptime, cost/budget usage, runtime routing, and channel setup state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "status"
+        ],
+        "summary": "Readiness probe for `/api/health`.",
+        "description": "Returns `503` (so load balancers route away from a broken instance) unless\nthe database is reachable within 2s *and* at least one LLM provider is\nconfigured. A deployment with no persistence configured (`store == None`) is\ntreated as DB-ready. The pure decision lives in\n`thinclaw_gateway::web::status::readiness_response` (unit-tested there).",
+        "operationId": "health_handler",
+        "responses": {
+          "200": {
+            "description": "Gateway is ready (database reachable, LLM provider configured)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Gateway is degraded; load balancers should route away",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "jobs_list_handler",
+        "responses": {
+          "200": {
+            "description": "Direct and sandbox jobs owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/jobs/summary": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "jobs_summary_handler",
+        "responses": {
+          "200": {
+            "description": "Job counts grouped by state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSummaryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/jobs/{id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "jobs_detail_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job detail including state transitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed job id"
+          },
+          "401": {
+            "description": "Missing or invalid gateway bearer token"
+          },
+          "404": {
+            "description": "Job not found or not visible to this identity"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApprovalRequest": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "\"approve\", \"always\", or \"deny\""
+          },
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Thread that owns the pending approval (so the agent loop finds the right session)."
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ChannelSetupStatus": {
+        "type": "object",
+        "required": [
+          "slack",
+          "telegram",
+          "gmail",
+          "apple_mail",
+          "nostr",
+          "matrix",
+          "voice_call",
+          "apns",
+          "browser_push"
+        ],
+        "properties": {
+          "apns": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
+          "apple_mail": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
+          "browser_push": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
+          "gmail": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
+          "matrix": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
+          "nostr": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
+          "slack": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
+          "telegram": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
+          "voice_call": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          }
+        }
+      },
+      "ChatThreadDeleteResponse": {
+        "type": "object",
+        "required": [
+          "deleted",
+          "thread_id"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string"
+          }
+        }
+      },
+      "GatewayStatusResponse": {
+        "type": "object",
+        "required": [
+          "sse_connections",
+          "ws_connections",
+          "total_connections",
+          "uptime_secs",
+          "channel_setup"
+        ],
+        "properties": {
+          "actions_this_hour": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "active_cheap_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "active_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "budget_limit_usd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel_setup": {
+            "$ref": "#/components/schemas/ChannelSetupStatus"
+          },
+          "daily_cost": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hourly_action_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "model_usage": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ModelUsageEntry"
+            }
+          },
+          "primary_provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "routing_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "routing_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_reload_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "sse_connections": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total_connections": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uptime_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "ws_connections": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "channel"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "HistoryResponse": {
+        "type": "object",
+        "required": [
+          "thread_id",
+          "turns"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether there are older messages available."
+          },
+          "oldest_timestamp": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor for the next page (ISO8601 timestamp of the oldest message returned)."
+          },
+          "thread_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TurnInfo"
+            }
+          }
+        }
+      },
+      "JobDetailResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "description",
+          "state",
+          "user_id",
+          "created_at",
+          "transitions"
+        ],
+        "properties": {
+          "browse_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "elapsed_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "execution_backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "interactive": {
+            "type": "boolean"
+          },
+          "job_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "network_isolation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_dir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "runtime_family": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "transitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransitionInfo"
+            }
+          },
+          "unknown_job_mode_raw": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "JobInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "state",
+          "user_id",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "execution_backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "runtime_family": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "unknown_job_mode_raw": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "JobListResponse": {
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobInfo"
+            }
+          }
+        }
+      },
+      "JobSummaryResponse": {
+        "type": "object",
+        "required": [
+          "total",
+          "pending",
+          "in_progress",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted",
+          "stuck"
+        ],
+        "properties": {
+          "cancelled": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "in_progress": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "interrupted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "stuck": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ModelInfo": {
+        "type": "object",
+        "description": "Information about an available LLM model.",
+        "required": [
+          "name",
+          "is_primary"
+        ],
+        "properties": {
+          "is_primary": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ModelUsageEntry": {
+        "type": "object",
+        "required": [
+          "model",
+          "input_tokens",
+          "output_tokens",
+          "cost"
+        ],
+        "properties": {
+          "cost": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "PartialChannelSetupStatus": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "configured"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "connected_relay_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "control_ready": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "invalid_private_key": {
+            "type": "boolean"
+          },
+          "missing_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "needs_oauth": {
+            "type": "boolean"
+          },
+          "needs_private_key": {
+            "type": "boolean"
+          },
+          "owner_configured": {
+            "type": "boolean"
+          },
+          "owner_pubkey_hex": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner_pubkey_npub": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "public_key_hex": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "public_key_npub": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "relay_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "relay_health": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "social_dm_enabled": {
+            "type": "boolean"
+          },
+          "tool_ready": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ResponseAttachment": {
+        "type": "object",
+        "required": [
+          "mime_type",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "filename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mime_type": {
+            "type": "string"
+          }
+        }
+      },
+      "SendMessageRequest": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SendMessageResponse": {
+        "type": "object",
+        "required": [
+          "message_id",
+          "status"
+        ],
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "SseEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "content",
+              "thread_id",
+              "type"
+            ],
+            "properties": {
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ResponseAttachment"
+                }
+              },
+              "content": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "response"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "thinking"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Extended thinking / chain-of-thought reasoning from the LLM.\nSent alongside the Response event when extended thinking is enabled.",
+            "required": [
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reasoning_content"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "success",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "success": {
+                "type": "boolean"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_completed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "preview",
+              "type"
+            ],
+            "properties": {
+              "artifacts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ToolArtifact"
+                }
+              },
+              "name": {
+                "type": "string"
+              },
+              "preview": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "stream_chunk"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "entries",
+              "type"
+            ],
+            "properties": {
+              "entries": {
+                "type": "array",
+                "items": {}
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan_update"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "input_tokens",
+              "output_tokens",
+              "type"
+            ],
+            "properties": {
+              "cost_usd": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "input_tokens": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "output_tokens": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "usage_update"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "thread_id",
+              "reason",
+              "type"
+            ],
+            "properties": {
+              "channel": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "conversation_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "thread_id",
+              "type"
+            ],
+            "properties": {
+              "thread_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "conversation_deleted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "agent_id",
+              "name",
+              "task",
+              "task_packet",
+              "memory_mode",
+              "tool_mode",
+              "skill_mode",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "allowed_skills": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowed_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "memory_mode": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "skill_mode": {
+                "type": "string"
+              },
+              "task": {
+                "type": "string"
+              },
+              "task_packet": {
+                "$ref": "#/components/schemas/SubagentTaskPacket"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "tool_mode": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "subagent_spawned"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "agent_id",
+              "message",
+              "category",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "category": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "subagent_progress"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "agent_id",
+              "name",
+              "success",
+              "response",
+              "duration_ms",
+              "iterations",
+              "task_packet",
+              "memory_mode",
+              "tool_mode",
+              "skill_mode",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "allowed_skills": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowed_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "duration_ms": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "iterations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "memory_mode": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "response": {
+                "type": "string"
+              },
+              "skill_mode": {
+                "type": "string"
+              },
+              "success": {
+                "type": "boolean"
+              },
+              "task_packet": {
+                "$ref": "#/components/schemas/SubagentTaskPacket"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "tool_mode": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "subagent_completed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "job_id",
+              "title",
+              "browse_url",
+              "type"
+            ],
+            "properties": {
+              "browse_url": {
+                "type": "string"
+              },
+              "job_id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "request_id",
+              "tool_name",
+              "description",
+              "parameters",
+              "type"
+            ],
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool_name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "approval_needed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "extension_name",
+              "auth_mode",
+              "auth_status",
+              "type"
+            ],
+            "properties": {
+              "auth_mode": {
+                "type": "string"
+              },
+              "auth_status": {
+                "type": "string"
+              },
+              "auth_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "extension_name": {
+                "type": "string"
+              },
+              "instructions": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "missing_scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "setup_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "shared_auth_provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auth_required"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Agent requests a credential; the browser renders an inline masked-input\ncard that POSTs the value straight to `/api/repo-projects/credentials`.\nCarries NO secret value — only the name to store under and a reason.",
+            "required": [
+              "prompt_id",
+              "secret_name",
+              "provider",
+              "reason",
+              "type"
+            ],
+            "properties": {
+              "prompt_id": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "secret_name": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "credential_prompt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "extension_name",
+              "success",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "auth_mode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "auth_status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "extension_name": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "missing_scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "shared_auth_provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "success": {
+                "type": "boolean"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auth_completed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "heartbeat"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "job_id",
+              "role",
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "job_id": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_message"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "job_id",
+              "tool_name",
+              "input",
+              "type"
+            ],
+            "properties": {
+              "input": {},
+              "job_id": {
+                "type": "string"
+              },
+              "tool_name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_tool_use"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "job_id",
+              "tool_name",
+              "output",
+              "type"
+            ],
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "output": {
+                "type": "string"
+              },
+              "output_json": {},
+              "output_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool_name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_tool_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "job_id",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "job_id",
+              "status",
+              "type"
+            ],
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "success": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_session_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "job_id",
+              "status",
+              "type"
+            ],
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "success": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Extension activation status change (WASM channels).",
+            "required": [
+              "extension_name",
+              "status",
+              "type"
+            ],
+            "properties": {
+              "extension_name": {
+                "type": "string"
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "extension_status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Channel connectivity status change (channel came online/offline/degraded).",
+            "required": [
+              "channel",
+              "status",
+              "type"
+            ],
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "channel_status_change"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Routine lifecycle event (started, completed, failed).",
+            "required": [
+              "routine_name",
+              "event",
+              "type"
+            ],
+            "properties": {
+              "event": {
+                "type": "string"
+              },
+              "result_summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "routine_name": {
+                "type": "string"
+              },
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "routine_lifecycle"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Cost budget alert (approaching or exceeding daily/hourly limits).",
+            "required": [
+              "alert_type",
+              "current_cost_usd",
+              "limit_usd",
+              "type"
+            ],
+            "properties": {
+              "alert_type": {
+                "type": "string"
+              },
+              "current_cost_usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "limit_usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "cost_alert"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Canvas / A2UI panel update pushed to the frontend.",
+            "required": [
+              "panel_id",
+              "action",
+              "type"
+            ],
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "content": {},
+              "panel_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "canvas_update"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "opportunity_id",
+              "status",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "opportunity_id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "experiment_opportunity_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "campaign_id",
+              "status",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "campaign_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "experiment_campaign_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "campaign_id",
+              "trial_id",
+              "status",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "campaign_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "trial_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "experiment_trial_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "runner_id",
+              "status",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "runner_id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "experiment_runner_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "project_id",
+              "state",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "repo_project_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "project_id",
+              "task_id",
+              "state",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "repo_task_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "project_id",
+              "worker_run_id",
+              "state",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "repo_worker_run_updated"
+                ]
+              },
+              "worker_run_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "project_id",
+              "event_type",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "event_type": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "repo_project_event"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "project_id",
+              "state",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "repo_merge_gate_updated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Agent completed its bootstrap ritual (BOOTSTRAP.md deleted).\nFrontend should update bootstrapNeeded → false.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "bootstrap_completed"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "SubagentProvidedContext": {
+        "type": "object",
+        "required": [
+          "title",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "SubagentTaskPacket": {
+        "type": "object",
+        "required": [
+          "objective"
+        ],
+        "properties": {
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "constraints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "objective": {
+            "type": "string"
+          },
+          "parent_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provided_context": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubagentProvidedContext"
+            }
+          },
+          "todos": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ThreadCommandRequest": {
+        "type": "object",
+        "properties": {
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ThreadCommandResponse": {
+        "type": "object",
+        "required": [
+          "message_id",
+          "status"
+        ],
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ThreadInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "state",
+          "turn_count",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "thread_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turn_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        }
+      },
+      "ThreadListResponse": {
+        "type": "object",
+        "required": [
+          "threads"
+        ],
+        "properties": {
+          "active_thread": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "assistant_thread": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadInfo",
+                "description": "The pinned assistant thread (always present after first load)."
+              }
+            ]
+          },
+          "threads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThreadInfo"
+            },
+            "description": "Regular conversation threads."
+          }
+        }
+      },
+      "ToolArtifact": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "mime_type",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "image"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "mime_type",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "audio"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "uri",
+              "type"
+            ],
+            "properties": {
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mimeType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "resource_link"
+                ]
+              },
+              "uri": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "uri",
+              "type"
+            ],
+            "properties": {
+              "blob": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mimeType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "embedded_resource"
+                ]
+              },
+              "uri": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {},
+              "type": {
+                "type": "string",
+                "enum": [
+                  "structured"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Optional rich tool artifacts that can be rendered alongside the JSON result."
+      },
+      "ToolCallInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "has_result",
+          "has_error"
+        ],
+        "properties": {
+          "has_error": {
+            "type": "boolean"
+          },
+          "has_result": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "TransitionInfo": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "timestamp"
+        ],
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        }
+      },
+      "TurnInfo": {
+        "type": "object",
+        "required": [
+          "turn_number",
+          "user_input",
+          "state",
+          "started_at",
+          "tool_calls"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hide_user_input": {
+            "type": "boolean"
+          },
+          "response": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolCallInfo"
+            }
+          },
+          "turn_number": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "user_input": {
+            "type": "string"
+          }
+        }
+      },
+      "WsClientMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Send a chat message to the agent.",
+            "required": [
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Approve or deny a pending tool execution.",
+            "required": [
+              "request_id",
+              "action",
+              "type"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "description": "\"approve\", \"always\", or \"deny\""
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Thread that owns the pending approval."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "approval"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Submit an auth token for an extension (bypasses message pipeline).",
+            "required": [
+              "extension_name",
+              "token",
+              "type"
+            ],
+            "properties": {
+              "extension_name": {
+                "type": "string"
+              },
+              "token": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auth_token"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Cancel an in-progress auth flow.",
+            "required": [
+              "extension_name",
+              "type"
+            ],
+            "properties": {
+              "extension_name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auth_cancel"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Client heartbeat ping.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ping"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Protocol version handshake (sent on connect).",
+            "required": [
+              "protocol_version",
+              "type"
+            ],
+            "properties": {
+              "client_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Client name/identifier."
+              },
+              "protocol_version": {
+                "type": "string",
+                "description": "Client protocol version (semver, e.g. \"1.0.0\")."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "version"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Set a configuration value on the orchestrator.",
+            "required": [
+              "key",
+              "value",
+              "type"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Dot-separated config key (e.g. \"agent.model\", \"agent.temperature\")."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "config_set"
+                ]
+              },
+              "value": {
+                "description": "New value (JSON)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Set a secret on the orchestrator's keychain.",
+            "required": [
+              "key",
+              "value",
+              "type"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Secret key name (e.g. \"OPENAI_API_KEY\")."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "secret_set"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "description": "The secret value."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Request the list of available models.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "model_list"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Message sent by a WebSocket client to the server."
+      },
+      "WsServerMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "An SSE-style event forwarded over WebSocket.",
+            "required": [
+              "event_type",
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "description": "The event payload as a JSON value."
+              },
+              "event_type": {
+                "type": "string",
+                "description": "The event sub-type (response, thinking, tool_started, etc.)"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "event"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Server heartbeat pong.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "pong"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Error message.",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Protocol version info (response to client's Version message).",
+            "required": [
+              "protocol_version",
+              "server_name",
+              "server_version",
+              "compatible",
+              "type"
+            ],
+            "properties": {
+              "compatible": {
+                "type": "boolean",
+                "description": "Whether the client version is compatible."
+              },
+              "protocol_version": {
+                "type": "string",
+                "description": "Server protocol version."
+              },
+              "server_name": {
+                "type": "string",
+                "description": "Server name."
+              },
+              "server_version": {
+                "type": "string",
+                "description": "Server software version."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "version_info"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Result of a config_set operation.",
+            "required": [
+              "key",
+              "success",
+              "type"
+            ],
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Error message if failed."
+              },
+              "key": {
+                "type": "string",
+                "description": "The key that was set."
+              },
+              "success": {
+                "type": "boolean",
+                "description": "Whether the operation succeeded."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "config_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Result of a secret_set operation.",
+            "required": [
+              "key",
+              "success",
+              "type"
+            ],
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Error message if failed."
+              },
+              "key": {
+                "type": "string",
+                "description": "The key that was set."
+              },
+              "success": {
+                "type": "boolean",
+                "description": "Whether the operation succeeded."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "secret_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "List of available models.",
+            "required": [
+              "models",
+              "type"
+            ],
+            "properties": {
+              "models": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelInfo"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "model_list_result"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Message sent by the server to a WebSocket client."
+      }
+    },
+    "securitySchemes": {
+      "gateway_token": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Gateway bearer token (GATEWAY_AUTH_TOKEN or, once the device-identity layer ships, a per-device `tcd_` token)."
+      }
+    }
+  }
+}

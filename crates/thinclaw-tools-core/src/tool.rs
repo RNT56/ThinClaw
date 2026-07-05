@@ -314,6 +314,7 @@ impl ToolOutput {
 
 /// Optional rich tool artifacts that can be rendered alongside the JSON result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolArtifact {
     Text {

@@ -1,0 +1,4 @@
+#include "Base.xcconfig"
+
+PRODUCT_NAME = ThinClaw
+INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES

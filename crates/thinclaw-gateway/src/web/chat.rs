@@ -98,6 +98,7 @@ pub struct GatewayThreadExportMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ChatThreadDeleteResponse {
     pub deleted: bool,
     pub thread_id: String,

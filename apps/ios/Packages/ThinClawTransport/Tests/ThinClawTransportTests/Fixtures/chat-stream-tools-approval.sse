@@ -1,0 +1,16 @@
+data: {"type":"thinking","message":"Checking the workspace...","thread_id":"web-1720000001"}
+
+data: {"type":"tool_started","name":"read_file","thread_id":"web-1720000001"}
+
+data: {"type":"tool_completed","name":"read_file","success":true,"thread_id":"web-1720000001"}
+
+data: {"type":"approval_needed","request_id":"appr_7f3a","tool_name":"shell_command","description":"Run a shell command","parameters":"{\"command\":\"rm -rf /tmp/scratch\"}","thread_id":"web-1720000001"}
+
+data: {"type":"heartbeat"}
+
+data: {"type":"tool_started","name":"shell_command","thread_id":"web-1720000001"}
+
+data: {"type":"tool_completed","name":"shell_command","success":false,"thread_id":"web-1720000001"}
+
+data: {"type":"error","message":"shell_command failed: exit status 1","thread_id":"web-1720000001"}
+

@@ -19,6 +19,7 @@ pub(crate) mod handlers;
 pub mod identity_helpers;
 pub mod log_layer;
 pub mod openai_compat;
+pub mod openapi;
 pub mod rate_limiter;
 pub mod server;
 pub mod sse;

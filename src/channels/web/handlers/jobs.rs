@@ -224,6 +224,16 @@ async fn load_owned_direct_job(
     Ok(job)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/jobs",
+    tag = "jobs",
+    responses(
+        (status = 200, description = "Direct and sandbox jobs owned by the caller", body = JobListResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -260,6 +270,16 @@ pub(crate) async fn jobs_list_handler(
     Ok(Json(job_list_response(jobs)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/jobs/summary",
+    tag = "jobs",
+    responses(
+        (status = 200, description = "Job counts grouped by state", body = JobSummaryResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn jobs_summary_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -277,6 +297,19 @@ pub(crate) async fn jobs_summary_handler(
     Ok(Json(job_summary_response(&summary)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/jobs/{id}",
+    tag = "jobs",
+    params(("id" = String, Path, description = "Job UUID")),
+    responses(
+        (status = 200, description = "Job detail including state transitions", body = JobDetailResponse),
+        (status = 400, description = "Malformed job id"),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+        (status = 404, description = "Job not found or not visible to this identity"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,

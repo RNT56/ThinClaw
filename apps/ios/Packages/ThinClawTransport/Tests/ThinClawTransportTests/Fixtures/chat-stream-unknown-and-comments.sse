@@ -1,0 +1,14 @@
+: keep-alive comment before anything interesting
+retry: 5000
+id: evt-001
+data: {"type":"plan_update","entries":[{"step":"outline","status":"done"}],"thread_id":"web-1720000002"}
+
+: another comment between events
+id: evt-002
+event: message
+data: {"type":"subagent_spawned","agent_id":"sub_1","name":"researcher","task":"dig into logs","memory_mode":"isolated","tool_mode":"inherit","skill_mode":"inherit","timestamp":"2026-07-04T12:00:00Z","thread_id":"web-1720000002"}
+
+data: {"type":"stream_chunk","content":"still works after unknowns","thread_id":"web-1720000002"}
+
+data: {"type":"response","content":"still works after unknowns","thread_id":"web-1720000002"}
+

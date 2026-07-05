@@ -217,6 +217,7 @@ rm -rf "$tmp"
 | `document-extraction` | PDF/DOCX/PPTX/XLSX text extraction | pdf-extract, zip |
 | `timezones` | Timezone handling via chrono-tz | chrono-tz |
 | `web-gateway` | Compatibility flag for the always-available local HTTP web UI + API server | (uses axum, already a base dep) |
+| `openapi` (crate feature of `thinclaw-gateway`) | utoipa schema derives for the gateway's v1 mobile contract; always enabled by the root package, which serves `/api/openapi.json` and ships the `export-openapi` bin (`generate`/`check` against `clients/openapi/thinclaw-gateway.openapi.json`) | utoipa |
 | `acp` | ACP integration surface | (no extra system deps) |
 | `repl` | Interactive REPL mode + boot screen | (no extra deps) |
 | `tunnel` | VPN tunnel integration | (uses tailscale binary externally) |

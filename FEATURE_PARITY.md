@@ -437,22 +437,26 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 
 ## 11. Mobile Apps
 
+> The native iOS surface is now in active development. Roadmap, milestones, and
+> the backend contract live in `docs/MOBILE_APP.md`; the security model lives in
+> `docs/MOBILE_SECURITY.md`.
+
 | Feature | OpenClaw | ThinClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
-| iOS app (SwiftUI) | ✅ | 🚫 | - | Out of scope initially |
-| Android app (Kotlin) | ✅ | 🚫 | - | Out of scope initially |
-| Apple Watch companion | ✅ | 🚫 | - | Send/receive messages MVP |
-| Gateway WebSocket client | ✅ | 🚫 | - | |
-| Camera/photo access | ✅ | 🚫 | - | |
-| Voice input | ✅ | 🚫 | - | |
+| iOS app (SwiftUI) | ✅ | 🚧 | P1 | In development — native SwiftUI app at `apps/ios/` (Tuist workspace scaffolded); milestones M1–M5 in `docs/MOBILE_APP.md` |
+| Android app (Kotlin) | ✅ | 🚫 | - | Out of scope |
+| Apple Watch companion | ✅ | 🚧 | P2 | Planned (milestone M4): actionable approvals + dictated prompts via WatchConnectivity relay, status complication |
+| Gateway WebSocket client | ✅ | 🚧 | P2 | Mobile client is SSE-primary with WS available behind the same transport protocol; streaming layer scaffolded in `apps/ios` |
+| Camera/photo access | ✅ | 🚫 | - | Post-M5 candidate |
+| Voice input | ✅ | 🚫 | - | Watch dictation arrives with M4; broader voice input later |
 | Push-to-talk | ✅ | 🚫 | - | |
 | Location sharing | ✅ | 🚫 | - | |
-| Node pairing | ✅ | 🚫 | - | |
-| APNs push notifications | ✅ | 🚫 | - | Mobile client remains out of scope; ThinClaw backend APNs registration/delivery pipeline is tracked above as complete with live Apple delivery smoke still credential-gated |
-| Share to OpenClaw (iOS) | ✅ | 🚫 | - | iOS share sheet integration |
+| Node pairing | ✅ | 🚧 | P1 | Device-identity pairing designed (QR + per-device revocable scoped tokens); backend milestone B1 — see `docs/MOBILE_SECURITY.md` |
+| APNs push notifications | ✅ | 🚧 | P2 | Backend APNs registration/delivery pipeline tracked above as complete (live Apple smoke still credential-gated); first-party device push with content-free payloads + Live Activity planned (B2/M2) |
+| Share to OpenClaw (iOS) | ✅ | 🚫 | - | iOS share sheet integration; post-M5 candidate |
 | Background listening toggle | ✅ | 🚫 | - | iOS background audio |
 
-### Owner: ThinClaw Agent (if ever prioritized)
+### Owner: ThinClaw Agent
 
 ---
 

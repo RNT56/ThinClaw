@@ -1,0 +1,3 @@
+// Copy this file to Signing.local.xcconfig (gitignored) and fill in your
+// Apple Developer team. CI writes Signing.local.xcconfig from repo secrets.
+DEVELOPMENT_TEAM = YOURTEAMID

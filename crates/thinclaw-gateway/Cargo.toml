@@ -33,4 +33,14 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+utoipa = { workspace = true, optional = true }
 uuid = { version = "1", features = ["serde"] }
+
+[features]
+# Derive utoipa schemas for the v1 mobile-contract DTOs (chat, jobs, status,
+# SSE/WS envelopes) so hosts can export an OpenAPI document.
+openapi = [
+    "dep:utoipa",
+    "thinclaw-tools-core/openapi",
+    "thinclaw-types/openapi",
+]

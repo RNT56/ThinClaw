@@ -1366,6 +1366,10 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        .route(
+            "/api/openapi.json",
+            get(super::openapi::openapi_json_handler),
+        )
         .route("/api/cache/stats", get(cache_stats_handler))
         // Cost dashboard (rich historical data from CostTracker)
         .route("/api/costs/summary", get(costs_summary_handler))

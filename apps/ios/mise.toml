@@ -1,0 +1,7 @@
+# Pinned toolchain for the ThinClaw Apple workspace.
+#   mise install && tuist install && tuist generate
+# swift-format ships with the Xcode 26 toolchain (xcrun swift-format).
+# swift-openapi-generator is invoked by scripts/generate-api.sh via mise.
+[tools]
+tuist = "4.44.0"
+"spm:apple/swift-openapi-generator" = "1.7.0"

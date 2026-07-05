@@ -32,6 +32,7 @@ tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 futures = "0.3"
+utoipa = { version = "5", features = ["uuid"] }
 
 [package]
 name = "thinclaw"
@@ -65,7 +66,7 @@ thinclaw-channels-core = { version = "0.1.0", path = "crates/thinclaw-channels-c
 thinclaw-config = { version = "0.1.0", path = "crates/thinclaw-config" }
 thinclaw-context = { version = "0.1.0", path = "crates/thinclaw-context" }
 thinclaw-experiments = { version = "0.1.0", path = "crates/thinclaw-experiments" }
-thinclaw-gateway = { version = "0.1.0", path = "crates/thinclaw-gateway" }
+thinclaw-gateway = { version = "0.1.0", path = "crates/thinclaw-gateway", features = ["openapi"] }
 thinclaw-history = { version = "0.1.0", path = "crates/thinclaw-history" }
 thinclaw-identity = { version = "0.1.0", path = "crates/thinclaw-identity" }
 thinclaw-llm = { version = "0.1.0", path = "crates/thinclaw-llm" }
@@ -94,6 +95,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# OpenAPI contract generation (gateway v1 mobile contract)
+utoipa = { workspace = true }
 
 # Database - PostgreSQL (default, feature-gated)
 deadpool-postgres = { version = "0.14", optional = true }

@@ -25,6 +25,15 @@ use thinclaw_gateway::web::status::{
 /// configured. A deployment with no persistence configured (`store == None`) is
 /// treated as DB-ready. The pure decision lives in
 /// `thinclaw_gateway::web::status::readiness_response` (unit-tested there).
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    tag = "status",
+    responses(
+        (status = 200, description = "Gateway is ready (database reachable, LLM provider configured)", body = HealthResponse),
+        (status = 503, description = "Gateway is degraded; load balancers should route away", body = HealthResponse),
+    ),
+)]
 pub(crate) async fn health_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> (StatusCode, Json<HealthResponse>) {
@@ -64,6 +73,16 @@ pub(crate) async fn gateway_restart_handler(
     Json(gateway_restart_accepted_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/gateway/status",
+    tag = "status",
+    responses(
+        (status = 200, description = "Connection counts, uptime, cost/budget usage, runtime routing, and channel setup state", body = GatewayStatusResponse),
+        (status = 401, description = "Missing or invalid gateway bearer token"),
+    ),
+    security(("gateway_token" = [])),
+)]
 pub(crate) async fn gateway_status_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,

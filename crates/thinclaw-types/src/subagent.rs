@@ -25,12 +25,14 @@ pub enum SubagentSkillMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SubagentProvidedContext {
     pub title: String,
     pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SubagentTaskPacket {
     pub objective: String,
     #[serde(default)]

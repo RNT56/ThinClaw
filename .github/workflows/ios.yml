@@ -1,0 +1,84 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/ios/**"
+      - "clients/openapi/**"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - "clients/openapi/**"
+      - ".github/workflows/ios.yml"
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: swift-format lint
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint Swift sources
+        working-directory: apps/ios
+        run: |
+          if xcrun --find swift-format >/dev/null 2>&1; then
+            xcrun swift-format lint --strict --recursive --configuration .swift-format \
+              Packages App Widgets Watch WatchWidgets
+          else
+            echo "::warning::swift-format not available in this Xcode toolchain; skipping"
+          fi
+
+  test-packages:
+    name: swift test (${{ matrix.package }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - ThinClawTransport
+          - ThinClawCore
+          - ThinClawSnapshotKit
+          - ThinClawAuth
+          - ThinClawAPI
+          - ThinClawPersistence
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: swift test --package-path apps/ios/Packages/${{ matrix.package }}
+
+  generated-drift:
+    name: generated client drift
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check generated client freshness
+        run: apps/ios/scripts/check-generated-drift.sh
+
+  # Full app build via Tuist. Requires an Xcode 26 runner image; marked
+  # continue-on-error until GitHub's runner images confirm Xcode 26
+  # availability — the package test matrix above is the hard gate meanwhile.
+  build-app:
+    name: tuist build (best effort)
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: apps/ios
+      - name: Generate and build
+        working-directory: apps/ios
+        run: |
+          cp Config/Signing.example.xcconfig Config/Signing.local.xcconfig
+          tuist install
+          tuist generate --no-open
+          xcodebuild build \
+            -workspace ThinClaw.xcworkspace \
+            -scheme ThinClaw \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
