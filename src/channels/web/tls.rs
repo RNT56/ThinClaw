@@ -190,13 +190,16 @@ mod imp {
         bytes.try_into().ok()
     }
 
-    /// Write PEM key material with `0600` permissions (owner read/write only).
+    /// Write PEM key material with owner-only permissions.
     ///
-    /// The file is *created* with `0600` (via `OpenOptions::mode`) rather
-    /// than written then chmod'd — a write-then-chmod sequence leaves a
-    /// window where the private key is readable under the process umask on
-    /// a multi-user host. `set_permissions` afterwards covers the
-    /// pre-existing-file case, where `mode` does not apply.
+    /// On Unix the file is *created* with `0600` (via `OpenOptions::mode`)
+    /// rather than written then chmod'd — a write-then-chmod sequence leaves a
+    /// window where the private key is readable under the process umask on a
+    /// multi-user host. `set_permissions` afterwards covers the pre-existing-
+    /// file case, where `mode` does not apply. On Windows the `0600` bit has
+    /// no direct equivalent; the key inherits the (user-scoped) `~/.thinclaw`
+    /// directory ACL, so a plain write is used.
+    #[cfg(unix)]
     fn write_private_pem(path: &Path, contents: &str) -> io::Result<()> {
         use std::io::Write as _;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -209,6 +212,11 @@ mod imp {
         file.write_all(contents.as_bytes())?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn write_private_pem(path: &Path, contents: &str) -> io::Result<()> {
+        std::fs::write(path, contents)
     }
 
     /// Non-loopback local IPs to embed as SAN entries.
@@ -553,6 +561,7 @@ mod imp {
             assert_eq!(material.fingerprint_prefix().len(), 12.min(fp.len()));
         }
 
+        #[cfg(unix)]
         #[test]
         fn key_file_has_owner_only_permissions() {
             use std::os::unix::fs::PermissionsExt;
