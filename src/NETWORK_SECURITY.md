@@ -63,6 +63,49 @@ Both paths use **constant-time comparison** via `subtle::ConstantTimeEq` (`ct_eq
 
 If `GATEWAY_AUTH_TOKEN` is not set, a random hex token is generated at startup.
 
+#### RBAC principals (opt-in)
+
+The primary `GATEWAY_AUTH_TOKEN` always has **admin** rights. Operators may
+layer additional **principals** on top, each with its own token and a role that
+bounds what it can do. This is **opt-in and additive**: with no principals
+configured the gateway behaves exactly as before (single admin token).
+
+Principals are configured either in settings (`channels.gateway_principals`) or
+at runtime via the `GATEWAY_PRINCIPALS` env var (a JSON array; a malformed value
+is a hard config error, not a silent drop). Each entry is
+`{ "token", "principal_id", "actor_id"?, "role" }`. Blank-token entries are
+dropped at load so they can never authenticate. Principal tokens live alongside
+the primary token and are protected by the same file permissions.
+
+| Role | Capabilities |
+|------|--------------|
+| `read_only` | Read-only observation: safe methods (`GET`/`HEAD`/`OPTIONS`) on non-admin routes |
+| `operator` | Read + drive the agent (chat, sessions, jobs, memory, skills) — any non-config state change |
+| `admin` | Full control, including configuration/security/code-execution surfaces |
+
+**Capability model.** Each request is classified into one coarse capability by
+method and path, and the caller's role must grant it (`role_grants`):
+
+- Any request to an **admin surface** (`/api/settings`, `/api/providers`,
+  `/api/tool-policies`, `/api/security`, `/api/extensions`, `/api/mcp`,
+  `/api/hooks`, `/api/principals`) → `ManageConfig` (**admin only**, read *and*
+  write — reads there can expose config and the write side installs/executes
+  code).
+- Otherwise a safe/read method → `ReadState`.
+- Otherwise a state-changing method → `Chat`.
+
+Enforcement happens in the same `auth_middleware` immediately after the caller's
+identity+role is resolved: an insufficient role returns `403 Forbidden`. Because
+the primary token and trusted-proxy identities resolve to `admin`, and admin
+grants every capability, the enforcement is a no-op for the default deployment.
+The token→role→capability path (including the `?token=` fallback still being
+role-gated) is covered by end-to-end middleware tests.
+
+**References:** `crates/thinclaw-gateway/src/web/rbac.rs`
+(`capability_for_request`, `role_grants`), `crates/thinclaw-gateway/src/web/auth.rs`
+(`auth_middleware`, `enforce_capability`),
+`thinclaw_settings::gateway_rbac` (`GatewayRole`, `GatewayPrincipalConfig`)
+
 ### Unauthenticated Routes
 
 | Route | Purpose | Response |

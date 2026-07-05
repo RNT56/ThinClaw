@@ -865,8 +865,11 @@ impl LocalExecutionBackend for LocalHostExecutionBackend {
         request: CommandExecutionRequest,
     ) -> Result<ExecutionResult, ToolError> {
         let confine_root = host_fs_confine_root(&request.workdir);
-        let mut command =
-            build_shell_command(&request.command, request.allow_network, confine_root.as_deref());
+        let mut command = build_shell_command(
+            &request.command,
+            request.allow_network,
+            confine_root.as_deref(),
+        );
         configure_spawn(
             &mut command,
             &request.workdir,
@@ -1172,9 +1175,8 @@ fn macos_network_deny_profile() -> &'static str {
 #[cfg(target_os = "macos")]
 fn macos_confined_profile(confine_root: &Path, allow_network: bool) -> String {
     let root = confine_root.to_string_lossy();
-    let mut profile = String::from(
-        "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n",
-    );
+    let mut profile =
+        String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n");
     profile.push_str(&format!("  (subpath \"{root}\")\n"));
     profile.push_str("  (subpath \"/private/tmp\")\n  (subpath \"/tmp\")\n");
     if let Ok(tmpdir) = std::env::var("TMPDIR") {

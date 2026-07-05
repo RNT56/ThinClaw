@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 
 use thinclaw_channels_core::StreamMode;
-use thinclaw_settings::Settings;
+use thinclaw_settings::{GatewayPrincipalConfig, Settings, parse_gateway_principals};
 use thinclaw_types::error::ConfigError;
 
 use crate::helpers::{optional_env, parse_bool_env};
@@ -74,6 +74,9 @@ pub struct GatewayConfig {
     pub auth_token: Option<String>,
     pub user_id: String,
     pub actor_id: Option<String>,
+    /// Extra RBAC principals (token + role) layered on the primary `auth_token`,
+    /// which always has admin rights. Empty by default (RBAC inactive).
+    pub principals: Vec<GatewayPrincipalConfig>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -197,6 +200,27 @@ impl ChannelsConfig {
                     .filter(|token| !token.trim().is_empty()),
                 user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
                 actor_id: optional_env("GATEWAY_ACTOR_ID")?,
+                // Prefer `GATEWAY_PRINCIPALS` (JSON array) when set; otherwise use
+                // the settings-file principals. A malformed env value is a config
+                // error rather than a silent drop, so the operator learns RBAC
+                // was misconfigured instead of quietly getting no principals.
+                principals: match optional_env("GATEWAY_PRINCIPALS")? {
+                    Some(raw) => {
+                        parse_gateway_principals(&raw).map_err(|message| {
+                            ConfigError::InvalidValue {
+                                key: "GATEWAY_PRINCIPALS".to_string(),
+                                message,
+                            }
+                        })?
+                    }
+                    None => settings
+                        .channels
+                        .gateway_principals
+                        .iter()
+                        .filter(|principal| principal.is_valid())
+                        .cloned()
+                        .collect(),
+                },
             })
         } else {
             None

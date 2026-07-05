@@ -440,6 +440,7 @@ impl Channel for GatewayChannel {
             addr,
             self.state.clone(),
             self.auth_token.clone(),
+            self.config.principals.clone(),
             self.webhook_routes.clone(),
         )
         .await?;
@@ -636,6 +637,7 @@ mod tests {
             auth_token: Some("test-token".to_string()),
             user_id: "household-user".to_string(),
             actor_id: Some("desk-actor".to_string()),
+            principals: Vec::new(),
         });
 
         let diagnostics = gateway
@@ -661,6 +663,7 @@ mod tests {
             auth_token: Some("test-token".to_string()),
             user_id: "household-user".to_string(),
             actor_id: Some("desk-actor".to_string()),
+            principals: Vec::new(),
         });
         let mut events = Box::pin(
             gateway
@@ -698,6 +701,7 @@ mod tests {
                 auth_token: Some(empty.to_string()),
                 user_id: "u".to_string(),
                 actor_id: None,
+                principals: Vec::new(),
             });
             let token = gateway.auth_token();
             assert!(
@@ -716,6 +720,7 @@ mod tests {
             auth_token: Some("configured-secret".to_string()),
             user_id: "u".to_string(),
             actor_id: None,
+            principals: Vec::new(),
         });
         assert_eq!(gateway.auth_token(), "configured-secret");
     }

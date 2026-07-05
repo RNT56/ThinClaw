@@ -9,7 +9,7 @@
 
 use axum::{
     extract::{ConnectInfo, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, Uri},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -18,9 +18,27 @@ use std::net::{IpAddr, SocketAddr};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use thinclaw_settings::{GatewayPrincipalConfig, GatewayRole};
 
 use crate::web::identity::{GatewayAuthSource, GatewayRequestIdentity};
 use crate::web::ports::IdentityLookupPort;
+use crate::web::rbac::role_allows_request;
+
+/// Where a presented bearer token came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenSource {
+    Header,
+    Query,
+}
+
+impl TokenSource {
+    fn auth_source(self) -> GatewayAuthSource {
+        match self {
+            TokenSource::Header => GatewayAuthSource::BearerHeader,
+            TokenSource::Query => GatewayAuthSource::BearerQuery,
+        }
+    }
+}
 
 /// Shared auth state injected via axum middleware state.
 #[derive(Clone)]
@@ -38,6 +56,11 @@ pub struct AuthState {
     pub fallback_actor_id: String,
     /// Optional store so bearer-token requests can infer the primary principal.
     pub store: Option<Arc<dyn IdentityLookupPort>>,
+    /// Extra RBAC principals layered on top of the primary token. Each has its
+    /// own token and role; the primary `token` above always authenticates as
+    /// [`thinclaw_settings::GatewayRole::Admin`]. Empty by default, so RBAC is
+    /// inactive unless the operator configures principals.
+    pub principals: Vec<GatewayPrincipalConfig>,
 }
 
 /// Check if an IP is trusted for proxy auth.
@@ -112,12 +135,19 @@ pub async fn auth_middleware(
                     .into_response();
             }
             let actor_id = principal_id.to_string();
-            request.extensions_mut().insert(GatewayRequestIdentity::new(
+            // A trusted upstream proxy has authenticated the user; grant admin,
+            // preserving pre-RBAC trusted-proxy behavior.
+            let identity = GatewayRequestIdentity::new(
                 principal_id,
                 actor_id,
                 GatewayAuthSource::TrustedProxy,
                 false,
-            ));
+            )
+            .with_role(GatewayRole::Admin);
+            if let Some(denied) = enforce_capability(&request, &identity) {
+                return denied;
+            }
+            request.extensions_mut().insert(identity);
             tracing::debug!(
                 proxy_header = %proxy_header,
                 source_ip = %ip,
@@ -127,38 +157,47 @@ pub async fn auth_middleware(
         }
     }
 
-    // Try Authorization header (constant-time comparison)
-    if let Some(auth_header) = headers.get("authorization")
-        && let Ok(value) = auth_header.to_str()
-        && let Some(token) = value.strip_prefix("Bearer ")
-        && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
-    {
-        let identity = fallback_request_identity(&auth, GatewayAuthSource::BearerHeader).await;
-        request.extensions_mut().insert(identity);
-        return next.run(request).await;
+    // Collect presented tokens in precedence order: Authorization header first,
+    // then the `?token=` query fallback for SSE EventSource clients that cannot
+    // set headers. Owned copies so the borrow of `headers`/`request` ends before
+    // we mutate the request below.
+    let mut candidates: Vec<(String, TokenSource)> = Vec::new();
+    if let Some(token) = header_bearer_token(&headers) {
+        candidates.push((token, TokenSource::Header));
+    }
+    if let Some(token) = query_token(request.uri()) {
+        candidates.push((token, TokenSource::Query));
     }
 
-    // Fall back to query parameter for SSE EventSource (constant-time comparison)
-    if let Some(query) = request.uri().query() {
-        for pair in query.split('&') {
-            if let Some(token) = pair.strip_prefix("token=")
-                && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
-            {
-                // RFC 6750 §2.3: tokens in URLs can leak via access logs, proxies,
-                // and Referer headers. This path exists only for SSE EventSource
-                // clients that cannot set an Authorization header; warn once so the
-                // operator is aware of the log-exposure trade-off.
-                static QUERY_AUTH_WARNED: std::sync::Once = std::sync::Once::new();
-                QUERY_AUTH_WARNED.call_once(|| {
-                    tracing::warn!(
-                        "gateway accepted bearer auth via `?token=` query parameter \
-                         (SSE EventSource fallback); per RFC 6750 §2.3 tokens in URLs \
-                         can leak through logs/proxies/Referer — prefer the \
-                         Authorization header where the client supports it"
-                    );
-                });
-                let identity =
-                    fallback_request_identity(&auth, GatewayAuthSource::BearerQuery).await;
+    for (token, source) in &candidates {
+        // Primary token → full admin rights (backward compatible).
+        if ct_eq_str(token, &auth.token) {
+            if *source == TokenSource::Query {
+                warn_query_token_auth();
+            }
+            let identity = fallback_request_identity(&auth, source.auth_source()).await;
+            if let Some(denied) = enforce_capability(&request, &identity) {
+                return denied;
+            }
+            request.extensions_mut().insert(identity);
+            return next.run(request).await;
+        }
+        // Extra RBAC principals → scoped identity + role.
+        for principal in &auth.principals {
+            if ct_eq_str(token, &principal.token) {
+                if *source == TokenSource::Query {
+                    warn_query_token_auth();
+                }
+                let identity = GatewayRequestIdentity::new(
+                    principal.principal_id.clone(),
+                    principal.effective_actor_id().to_string(),
+                    source.auth_source(),
+                    false,
+                )
+                .with_role(principal.role);
+                if let Some(denied) = enforce_capability(&request, &identity) {
+                    return denied;
+                }
                 request.extensions_mut().insert(identity);
                 return next.run(request).await;
             }
@@ -166,6 +205,63 @@ pub async fn auth_middleware(
     }
 
     (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
+}
+
+/// Extract a `Bearer <token>` value from the Authorization header, if present.
+fn header_bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get("authorization")?.to_str().ok()?;
+    value.strip_prefix("Bearer ").map(str::to_string)
+}
+
+/// Extract a `token=<value>` query parameter, if present.
+fn query_token(uri: &Uri) -> Option<String> {
+    uri.query()?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token=").map(str::to_string))
+}
+
+/// Constant-time string comparison (differing lengths short-circuit to false,
+/// matching the prior bearer-compare behavior).
+fn ct_eq_str(presented: &str, expected: &str) -> bool {
+    bool::from(presented.as_bytes().ct_eq(expected.as_bytes()))
+}
+
+/// Warn once that a token was accepted via `?token=` (RFC 6750 §2.3: tokens in
+/// URLs can leak via access logs, proxies, and Referer headers). This path
+/// exists only for SSE EventSource clients that cannot set a header.
+fn warn_query_token_auth() {
+    static QUERY_AUTH_WARNED: std::sync::Once = std::sync::Once::new();
+    QUERY_AUTH_WARNED.call_once(|| {
+        tracing::warn!(
+            "gateway accepted bearer auth via `?token=` query parameter \
+             (SSE EventSource fallback); per RFC 6750 §2.3 tokens in URLs \
+             can leak through logs/proxies/Referer — prefer the \
+             Authorization header where the client supports it"
+        );
+    });
+}
+
+/// Enforce the request's RBAC capability against the caller's role. Returns
+/// `Some(403)` when the role is insufficient, `None` when allowed. Admin roles
+/// always pass, so this is a no-op for the primary token and trusted proxies.
+fn enforce_capability(request: &Request, identity: &GatewayRequestIdentity) -> Option<Response> {
+    if role_allows_request(identity.role, request.method(), request.uri().path()) {
+        return None;
+    }
+    tracing::debug!(
+        principal = %identity.principal_id,
+        role = %identity.role.as_str(),
+        method = %request.method(),
+        path = %request.uri().path(),
+        "RBAC denied request"
+    );
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            "Insufficient role for this operation",
+        )
+            .into_response(),
+    )
 }
 
 async fn fallback_request_identity(
@@ -185,7 +281,9 @@ async fn fallback_request_identity(
         auth.fallback_principal_id.clone()
     };
     let actor_id = default_gateway_actor_id_from_auth(auth, &principal_id);
+    // The primary gateway token is the admin credential.
     GatewayRequestIdentity::new(principal_id, actor_id, auth_source, true)
+        .with_role(GatewayRole::Admin)
 }
 
 fn default_gateway_actor_id_from_auth(auth: &AuthState, principal_id: &str) -> String {
@@ -211,6 +309,7 @@ mod tests {
             fallback_principal_id: "test-user".to_string(),
             fallback_actor_id: "test-actor".to_string(),
             store: None,
+            principals: vec![],
         };
         let cloned = state.clone();
         assert_eq!(cloned.token, "test-token");
@@ -272,6 +371,7 @@ mod tests {
             fallback_principal_id: "user-1".to_string(),
             fallback_actor_id: "actor-1".to_string(),
             store: None,
+            principals: vec![],
         };
         assert_eq!(
             state.trusted_proxy_header.as_deref(),
@@ -289,6 +389,7 @@ mod tests {
             fallback_principal_id: "user-1".to_string(),
             fallback_actor_id: "actor-1".to_string(),
             store: None,
+            principals: vec![],
         };
 
         let identity = fallback_request_identity(&state, GatewayAuthSource::BearerHeader).await;
@@ -296,5 +397,297 @@ mod tests {
         assert_eq!(identity.actor_id, "actor-1");
         assert!(identity.compatibility_fallback);
         assert_eq!(identity.auth_source.as_str(), "bearer_header");
+        // The primary token is the admin credential.
+        assert_eq!(identity.role, GatewayRole::Admin);
+    }
+
+    // --- End-to-end middleware tests (token → identity+role → capability gate) ---
+
+    mod middleware {
+        use super::*;
+        use axum::{
+            Router,
+            body::Body,
+            http::Method,
+            middleware::from_fn_with_state,
+            routing::{get, post},
+        };
+        use thinclaw_settings::{GatewayPrincipalConfig, GatewayRole};
+        use tower::ServiceExt;
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+
+        fn base_auth(principals: Vec<GatewayPrincipalConfig>) -> AuthState {
+            AuthState {
+                token: "admin-token".to_string(),
+                trusted_proxy_header: None,
+                trusted_proxy_ips: vec![],
+                fallback_principal_id: "root".to_string(),
+                fallback_actor_id: "root".to_string(),
+                store: None,
+                principals,
+            }
+        }
+
+        fn principal(token: &str, id: &str, role: GatewayRole) -> GatewayPrincipalConfig {
+            GatewayPrincipalConfig {
+                token: token.to_string(),
+                principal_id: id.to_string(),
+                actor_id: None,
+                role,
+            }
+        }
+
+        /// Drive one request through the auth middleware; returns the status.
+        /// `bearer` sets an `Authorization: Bearer` header; `query` appends
+        /// `?token=` to exercise the SSE fallback path.
+        async fn status(
+            auth: &AuthState,
+            method: Method,
+            path: &str,
+            bearer: Option<&str>,
+            query_token: Option<&str>,
+        ) -> StatusCode {
+            let app = Router::new()
+                .route("/api/chat/history", get(ok_handler))
+                .route("/api/chat/send", post(ok_handler))
+                .route("/api/settings/save", post(ok_handler))
+                .route_layer(from_fn_with_state(auth.clone(), auth_middleware));
+
+            let uri = match query_token {
+                Some(tok) => format!("{path}?token={tok}"),
+                None => path.to_string(),
+            };
+            let mut builder = Request::builder().method(method).uri(uri);
+            if let Some(tok) = bearer {
+                builder = builder.header("authorization", format!("Bearer {tok}"));
+            }
+            let request = builder.body(Body::empty()).unwrap();
+            app.oneshot(request).await.unwrap().status()
+        }
+
+        #[tokio::test]
+        async fn primary_token_is_admin_everywhere() {
+            let auth = base_auth(vec![]);
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::GET,
+                    "/api/chat/history",
+                    Some("admin-token"),
+                    None
+                )
+                .await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::POST,
+                    "/api/chat/send",
+                    Some("admin-token"),
+                    None
+                )
+                .await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::POST,
+                    "/api/settings/save",
+                    Some("admin-token"),
+                    None
+                )
+                .await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn readonly_principal_reads_only() {
+            let auth = base_auth(vec![principal("ro-token", "alice", GatewayRole::ReadOnly)]);
+            // Read allowed.
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::GET,
+                    "/api/chat/history",
+                    Some("ro-token"),
+                    None
+                )
+                .await,
+                StatusCode::OK
+            );
+            // Non-admin write forbidden.
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::POST,
+                    "/api/chat/send",
+                    Some("ro-token"),
+                    None
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            // Admin surface forbidden.
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::POST,
+                    "/api/settings/save",
+                    Some("ro-token"),
+                    None
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn operator_principal_chats_but_not_config() {
+            let auth = base_auth(vec![principal("op-token", "bob", GatewayRole::Operator)]);
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::GET,
+                    "/api/chat/history",
+                    Some("op-token"),
+                    None
+                )
+                .await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::POST,
+                    "/api/chat/send",
+                    Some("op-token"),
+                    None
+                )
+                .await,
+                StatusCode::OK
+            );
+            // Config surface still Admin-only.
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::POST,
+                    "/api/settings/save",
+                    Some("op-token"),
+                    None
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn explicit_admin_principal_has_full_access() {
+            let auth = base_auth(vec![principal("admin2-token", "carol", GatewayRole::Admin)]);
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::POST,
+                    "/api/settings/save",
+                    Some("admin2-token"),
+                    None
+                )
+                .await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn unknown_and_missing_tokens_are_unauthorized() {
+            let auth = base_auth(vec![principal("ro-token", "alice", GatewayRole::ReadOnly)]);
+            assert_eq!(
+                status(&auth, Method::GET, "/api/chat/history", Some("nope"), None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                status(&auth, Method::GET, "/api/chat/history", None, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn rbac_applies_over_query_token_fallback() {
+            let auth = base_auth(vec![principal("ro-token", "alice", GatewayRole::ReadOnly)]);
+            // ReadOnly via ?token= can read...
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::GET,
+                    "/api/chat/history",
+                    None,
+                    Some("ro-token")
+                )
+                .await,
+                StatusCode::OK
+            );
+            // ...but the role still blocks a write over the same fallback.
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::POST,
+                    "/api/chat/send",
+                    None,
+                    Some("ro-token")
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn wrong_header_falls_back_to_valid_query_token() {
+            // Backward-compat: a present-but-wrong header must not prevent the
+            // valid `?token=` fallback from authenticating.
+            let auth = base_auth(vec![]);
+            assert_eq!(
+                status(
+                    &auth,
+                    Method::GET,
+                    "/api/chat/history",
+                    Some("wrong"),
+                    Some("admin-token")
+                )
+                .await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn trusted_proxy_identity_is_admin() {
+            use axum::extract::ConnectInfo;
+            use std::net::SocketAddr;
+
+            let mut auth = base_auth(vec![]);
+            auth.trusted_proxy_header = Some("x-forwarded-user".to_string());
+            // Empty trusted_proxy_ips ⇒ only loopback is trusted.
+
+            let app = Router::new()
+                .route("/api/settings/save", post(ok_handler))
+                .route_layer(from_fn_with_state(auth.clone(), auth_middleware));
+
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/api/settings/save")
+                .header("x-forwarded-user", "proxied-alice")
+                .body(Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo("127.0.0.1:5555".parse::<SocketAddr>().unwrap()));
+
+            // Trusted proxy from loopback → admin → may reach an admin surface.
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
     }
 }

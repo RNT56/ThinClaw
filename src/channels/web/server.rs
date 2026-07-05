@@ -796,6 +796,7 @@ pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth_token: String,
+    principals: Vec<thinclaw_settings::GatewayPrincipalConfig>,
     extra_public_routes: Vec<axum::Router>,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -872,6 +873,13 @@ pub async fn start_server(
                 "Trusted-proxy auth mode enabled"
             );
         }
+        if !principals.is_empty() {
+            tracing::info!(
+                count = principals.len(),
+                "Gateway RBAC enabled: {} extra principal(s) beyond the admin token",
+                principals.len()
+            );
+        }
         AuthState {
             token: auth_token,
             trusted_proxy_header,
@@ -882,6 +890,7 @@ pub async fn start_server(
                 Arc::new(DatabaseGatewayIdentityStore(Arc::clone(store)))
                     as Arc<dyn IdentityLookupPort>
             }),
+            principals,
         }
     };
     let protected = Router::new()
