@@ -30,6 +30,14 @@ async fn setup_store_credential_and_enroll_roundtrip() {
     )
     .await
     .unwrap();
+    store_repo_credential(
+        &secrets,
+        "default",
+        "github_fork_token".to_string(),
+        "ghp_fork_test_value".to_string(),
+    )
+    .await
+    .unwrap();
 
     // Enable the supervisor + policy.
     let input = RepoProjectsConfigureInput {
@@ -43,10 +51,12 @@ async fn setup_store_credential_and_enroll_roundtrip() {
         .unwrap();
     assert!(readiness.enabled);
     assert_eq!(readiness.github_token_secret_present, Some(true));
+    assert_eq!(readiness.github_fork_token_secret_present, Some(true));
     assert_eq!(readiness.credential_mode, "github_token");
     assert!(readiness.ready_for_live_runs);
     assert!(readiness.auto_merge_default);
     assert_eq!(readiness.default_coding_backend, "codex_code");
+    assert_eq!(readiness.default_write_mode, "fork_pr");
 
     // Create a project (now that the feature is enabled) + enroll a 2nd repo.
     create_project(
@@ -58,6 +68,9 @@ async fn setup_store_credential_and_enroll_roundtrip() {
             default_branch: None,
             local_path: None,
             description: None,
+            write_mode: None,
+            fork_owner: None,
+            fork_repo: None,
         },
     )
     .await
@@ -70,6 +83,8 @@ async fn setup_store_credential_and_enroll_roundtrip() {
         RepoEnrollInput {
             repo_url: "acme/gadgets".to_string(),
             default_branch: Some("develop".to_string()),
+            fork_owner: None,
+            fork_repo: None,
         },
     )
     .await
@@ -156,6 +171,9 @@ async fn connector_lists_installation_repos_and_connects_selected() {
             default_branch: None,
             local_path: None,
             description: None,
+            write_mode: None,
+            fork_owner: None,
+            fork_repo: None,
         },
     )
     .await
@@ -174,6 +192,7 @@ async fn connector_lists_installation_repos_and_connects_selected() {
     let gadgets = listing.repos.iter().find(|r| r.repo == "gadgets").unwrap();
     assert!(!gadgets.enrolled);
     assert_eq!(gadgets.default_branch, "develop");
+    assert_eq!(gadgets.recommended_write_mode, "read_only_clone");
 
     // Select specific repos: gadgets is new, widgets already enrolled → skipped.
     let result = connect_repos(
@@ -183,6 +202,9 @@ async fn connector_lists_installation_repos_and_connects_selected() {
         RepoConnectInput {
             repos: vec!["acme/gadgets".to_string(), "acme/widgets".to_string()],
             all: false,
+            write_mode: None,
+            fork_owner: None,
+            fork_repo: None,
         },
     )
     .await
@@ -190,5 +212,55 @@ async fn connector_lists_installation_repos_and_connects_selected() {
     assert_eq!(result.connected, vec!["acme/gadgets".to_string()]);
     assert_eq!(result.skipped, vec!["acme/widgets".to_string()]);
     let projects = db.list_repo_projects().await.unwrap();
-    assert!(projects.iter().any(|project| project.name == "gadgets"));
+    let gadgets_project = projects
+        .iter()
+        .find(|project| project.name == "gadgets")
+        .expect("gadgets project");
+    assert_eq!(gadgets_project.policy.write_mode, RepoWriteMode::ForkPr);
+}
+
+#[tokio::test]
+async fn maintainer_write_mode_requires_worker_push_token_even_with_github_app() {
+    let (db, _guard) = crate::testing::test_db().await;
+    let secrets = test_secrets();
+    store_repo_credential(
+        &secrets,
+        "default",
+        "repo_projects_github_private_key".to_string(),
+        "pem".to_string(),
+    )
+    .await
+    .unwrap();
+
+    let readiness = configure_supervisor(
+        &db,
+        Some(&secrets),
+        "default",
+        RepoProjectsConfigureInput {
+            enabled: Some(true),
+            app_id: Some(123),
+            installation_id: Some(456),
+            private_key_secret: Some("repo_projects_github_private_key".to_string()),
+            default_write_mode: Some("maintainer_branch_pr".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(readiness.credential_mode, "github_app");
+    assert!(!readiness.ready_for_live_runs);
+    assert_eq!(readiness.github_token_secret_present, Some(false));
+
+    store_repo_credential(
+        &secrets,
+        "default",
+        "github_token".to_string(),
+        "ghp_upstream_push".to_string(),
+    )
+    .await
+    .unwrap();
+    let readiness = repo_projects_readiness(&db, Some(&secrets), "default")
+        .await
+        .unwrap();
+    assert!(readiness.ready_for_live_runs);
 }

@@ -10,7 +10,7 @@ use thinclaw_repo_projects::{
     CodingBackend, GitHubAuthMode, MergeGateDecision, MergeGateDenialReason, MergeMethod,
     ProjectPolicy, RepoProject, RepoProjectEvent, RepoProjectEventKind, RepoProjectRepo,
     RepoProjectRun, RepoProjectRunState, RepoProjectState, RepoProjectTask, RepoProjectTaskState,
-    RepoWebhookDelivery, RepoWorkerRun, RepoWorkerRunState,
+    RepoWebhookDelivery, RepoWorkerRun, RepoWorkerRunState, RepoWriteMode,
 };
 
 use crate::db_contract::support::contract_db_or_skip;
@@ -31,6 +31,7 @@ async fn repo_project_store_full_lifecycle_contract() {
         state: RepoProjectState::Active,
         policy: ProjectPolicy {
             auto_merge: true,
+            write_mode: RepoWriteMode::MaintainerAutoMerge,
             merge_method: MergeMethod::Squash,
             default_coding_backend: CodingBackend::CodexCode,
             github_auth_mode: GitHubAuthMode::GitHubApp,

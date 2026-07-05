@@ -172,6 +172,7 @@ pub fn merge_gate_message(task: &RepoProjectTask, decision: &MergeGateDecision) 
 pub fn denial_reason_label(reason: MergeGateDenialReason) -> &'static str {
     match reason {
         MergeGateDenialReason::AutoMergeDisabled => "auto_merge_disabled",
+        MergeGateDenialReason::WriteModeDisallowsMerge => "write_mode_disallows_merge",
         MergeGateDenialReason::RepoNotEnrolled => "repo_not_enrolled",
         MergeGateDenialReason::ChecksNotGreen => "checks_not_green",
         MergeGateDenialReason::BranchOutOfDate => "branch_out_of_date",
@@ -201,6 +202,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use thinclaw_repo_projects::{
         CodingBackend, GitHubAuthMode, MergeMethod, RepoProjectEvent, RepoProjectTaskState,
+        RepoWriteMode,
     };
 
     fn now() -> DateTime<Utc> {
@@ -210,6 +212,7 @@ mod tests {
     fn policy(auto_merge: bool) -> ProjectPolicy {
         ProjectPolicy {
             auto_merge,
+            write_mode: RepoWriteMode::MaintainerAutoMerge,
             merge_method: MergeMethod::Squash,
             default_coding_backend: CodingBackend::CodexCode,
             github_auth_mode: GitHubAuthMode::GitHubApp,

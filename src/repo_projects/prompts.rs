@@ -86,6 +86,7 @@ fn build_packet(
         "task_id": input.task.id,
         "branch_name": input.task.branch_name,
         "base_branch": input.task.base_branch,
+        "write_mode": input.project.policy.write_mode.as_str(),
         "pull_request_number": input.task.pull_request_number,
     });
 
@@ -113,6 +114,10 @@ fn build_prompt(
     lines.push(format!("packet_id: {packet_id}"));
     lines.push(format!("mode: {}", packet_kind_label(kind)));
     lines.push(format!("backend: {}", backend_label(backend)));
+    lines.push(format!(
+        "write_mode: {}",
+        input.project.policy.write_mode.as_str()
+    ));
     lines.push(format!(
         "project: {} ({})",
         redact_sensitive_text(&input.project.name),
@@ -300,6 +305,7 @@ fn denial_reason_list(reasons: &[MergeGateDenialReason]) -> String {
 fn denial_reason_label(reason: MergeGateDenialReason) -> &'static str {
     match reason {
         MergeGateDenialReason::AutoMergeDisabled => "auto_merge_disabled",
+        MergeGateDenialReason::WriteModeDisallowsMerge => "write_mode_disallows_merge",
         MergeGateDenialReason::RepoNotEnrolled => "repo_not_enrolled",
         MergeGateDenialReason::ChecksNotGreen => "checks_not_green",
         MergeGateDenialReason::BranchOutOfDate => "branch_out_of_date",

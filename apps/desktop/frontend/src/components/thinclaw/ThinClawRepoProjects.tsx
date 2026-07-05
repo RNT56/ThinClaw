@@ -49,6 +49,7 @@ const SHELL_PROJECTS: thinclaw.ThinClawRepoProject[] = [
         docker_agents: 'ready',
         credentials: 'partial',
         concurrency_limit: 3,
+        write_mode: 'maintainer_branch_pr',
         auto_merge_policy: 'approved_only',
         notifications: 'enabled',
         updated_at: '2026-06-13T09:42:00Z',
@@ -59,6 +60,7 @@ const SHELL_PROJECTS: thinclaw.ThinClawRepoProject[] = [
             { key: 'coding_backend', label: 'Coding backend', state: 'complete', detail: 'Default backend: worker' },
             { key: 'credentials', label: 'Credentials', state: 'pending', detail: 'CI token missing deploy scope' },
             { key: 'concurrency', label: 'Concurrency', state: 'complete', detail: 'Limit set to 3' },
+            { key: 'write_mode', label: 'Write mode', state: 'complete', detail: 'Maintainer branch PR' },
             { key: 'auto_merge_policy', label: 'Auto-merge policy', state: 'complete', detail: 'Approved PRs with green checks' },
             { key: 'notifications', label: 'Notifications', state: 'complete', detail: 'Desktop and Slack enabled' },
         ],
@@ -119,6 +121,7 @@ const SHELL_PROJECTS: thinclaw.ThinClawRepoProject[] = [
         docker_agents: 'ready',
         credentials: 'ready',
         concurrency_limit: 2,
+        write_mode: 'fork_pr',
         auto_merge_policy: 'manual',
         notifications: 'enabled',
         updated_at: '2026-06-13T08:15:00Z',
@@ -129,6 +132,7 @@ const SHELL_PROJECTS: thinclaw.ThinClawRepoProject[] = [
             { key: 'coding_backend', label: 'Coding backend', state: 'complete', detail: 'Default backend: worker' },
             { key: 'credentials', label: 'Credentials', state: 'complete', detail: 'All scopes present' },
             { key: 'concurrency', label: 'Concurrency', state: 'complete', detail: 'Limit set to 2' },
+            { key: 'write_mode', label: 'Write mode', state: 'complete', detail: 'Fork PR' },
             { key: 'auto_merge_policy', label: 'Auto-merge policy', state: 'pending', detail: 'Manual merge required' },
             { key: 'notifications', label: 'Notifications', state: 'complete', detail: 'Desktop enabled' },
         ],
@@ -275,6 +279,12 @@ function derivedReadinessItems(
             label: 'Concurrency',
             state: project.concurrency_limit > 0 ? 'complete' : 'blocked',
             detail: `${project.concurrency_limit || 0} task${project.concurrency_limit === 1 ? '' : 's'} per project`,
+        },
+        {
+            key: 'write_mode',
+            label: 'Write mode',
+            state: 'complete',
+            detail: statusLabel(project.write_mode),
         },
         {
             key: 'auto_merge_policy',
@@ -774,6 +784,10 @@ export function ThinClawRepoProjects() {
                                     <div>
                                         <p className="text-[10px] font-bold uppercase text-muted-foreground">Backend</p>
                                         <p className="mt-1 text-xs">{statusLabel(projectCodingBackend(selectedProject))}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-[10px] font-bold uppercase text-muted-foreground">Write mode</p>
+                                        <p className="mt-1 text-xs">{statusLabel(selectedProject.write_mode)}</p>
                                     </div>
                                     <div>
                                         <p className="text-[10px] font-bold uppercase text-muted-foreground">Auto-merge</p>

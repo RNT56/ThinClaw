@@ -402,6 +402,10 @@ impl GitHubApiClient {
         self.get_query("user/repos".to_string(), query).await
     }
 
+    pub async fn get_authenticated_user(&self) -> Result<GitHubUser, GitHubApiError> {
+        self.get("user".to_string()).await
+    }
+
     pub async fn get_branch(
         &self,
         owner: &str,

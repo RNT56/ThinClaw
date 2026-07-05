@@ -7,14 +7,14 @@ This runbook covers the Continuous GitHub Project Supervisor subsystem from an o
 Implemented:
 
 - Durable repo-project, repo, task, worker-run, event, and merge-gate tables for LibSQL and Postgres.
-- Settings and env resolution for the feature flag, concurrency limits, coding backend default, auto-merge default, workspace root, and GitHub App fields.
+- Settings and env resolution for the feature flag, concurrency limits, coding backend default, write-mode default, auto-merge default, workspace root, and GitHub App fields.
 - Local/web/agent-tool APIs for creating projects, changing project state, enqueueing backlog tasks, listing events, and reading merge-gate status.
 - A background supervisor loop that wakes from a bounded channel and a watchdog interval, reconciles durable state, dispatches queued tasks to sandbox jobs when a job manager is available, and records worker-run/task events.
-- Deterministic task packets for sandbox Codex/Claude/worker jobs, isolated git worktree provisioning, restart-visible worker-run records, and sandbox job persistence.
+- Deterministic task packets for sandbox Codex/Claude/worker jobs, isolated git worktree provisioning, restart-visible worker-run records, sandbox job persistence, and write-mode-specific credential grants (`read_only_clone`, `fork_pr`, `maintainer_branch_pr`, `maintainer_auto_merge`).
 - GitHub App helper code for webhook HMAC verification, delivery dedupe, webhook envelope parsing, App JWT signing, installation-token retrieval, and typed GitHub REST calls for repository metadata, refs, pull requests, checks, workflow runs/jobs/logs, reviews, comments, labels, issues, branch compare, ref deletion, and merge requests.
 - Public GitHub webhook route for repo projects that verifies signatures, dedupes in memory, normalizes envelopes, broadcasts project events, and wakes the live supervisor (the supervisor handle is now plumbed into the gateway through a shared cell).
 - An authenticated GitHub client provider that mints a GitHub App installation-token client (private key resolved from the secrets store) or falls back to a `github_token` client, selected per enrolled repo.
-- A live GitHub pipeline that advances `WaitingCi`/`WaitingReview` tasks: ensure/open a PR for the task branch, poll and classify check runs / workflow jobs (with redacted log triage and PR comments), bounded CI-repair re-dispatch into the sandbox, gather live review + branch-freshness evidence, evaluate the guarded merge gate against real evidence, and perform a squash merge with branch deletion only when the gate approves.
+- A live GitHub pipeline that advances `WaitingCi`/`WaitingReview` tasks: ensure/open a PR from the configured write target, poll and classify check runs / workflow jobs (with redacted log triage and PR comments), bounded CI-repair re-dispatch into the sandbox, gather live review + branch-freshness evidence, evaluate the guarded merge gate against real evidence, and perform a squash merge with branch deletion only when the gate approves and the project is in `maintainer_auto_merge`.
 - Restart recovery that reconciles sandbox jobs completed while the supervisor was down and blocks any task left `Running` with no worker record.
 - Live SSE for `repo_project_updated`, `repo_task_updated`, `repo_worker_run_updated`, `repo_project_event`, and `repo_merge_gate_updated`.
 - Durable, restart-surviving webhook delivery storage (`repo_webhook_deliveries`) used for idempotency and audit; the in-memory deduper remains a fast pre-check.
@@ -50,11 +50,17 @@ a thin adapter over it.
    (`https://github.com/apps/<slug>/installations/new`) so the user can install
    the App and grant repo access.
 2. **Select** — `list_connectable_repos` lists the repositories the credential
-   can act on, each flagged with whether it is already supervised. The user
-   picks specific repos or selects all.
+   can act on, each flagged with whether it is already supervised, its
+   permissions, and the recommended write mode. The user picks specific repos
+   or selects all.
 3. **Engage** — `connect_repos` creates a draft project per selected repo
    (skipping ones already enrolled); the project is then started/planned with
-   the normal controls.
+   the normal controls. Without an explicit override, discovered repos use the
+   safe recommendation: public repos discovered with a user token default to
+   fork PR, GitHub App-only public repos stay read-only until fork metadata is
+   supplied or the operator overrides, archived/disabled repos are read-only,
+   and private repos only use maintainer branch PR when the credential has push
+   permission.
 
 **Per-surface entry points:**
 
@@ -71,7 +77,10 @@ a thin adapter over it.
 desktop card and WebUI panel submit directly to the secrets store
 (`thinclaw_repo_projects_set_credential` / `POST /api/repo-projects/credentials`)
 so the value bypasses the model entirely; settings only ever hold the secret's
-*name*.
+*name*. Fork PR workers receive `github_fork_token`; upstream maintainer-mode
+workers receive `github_token`; read-only workers receive no GitHub write
+credential. GitHub App installation tokens can handle supervisor-side API calls,
+but they are not injected into sandbox jobs as git push credentials.
 
 ## Enablement
 
@@ -83,6 +92,7 @@ enabled = true
 max_concurrent_projects = 1
 max_concurrent_tasks_per_project = 1
 default_coding_backend = "worker"
+default_write_mode = "fork_pr"
 auto_merge_default = false
 watchdog_interval_secs = 60
 workspace_base_dir = "/var/lib/thinclaw/repo-projects"
@@ -108,6 +118,7 @@ Env overrides:
 | `REPO_PROJECTS_MAX_CONCURRENT_PROJECTS` | Intended project-level concurrency ceiling. | `1` |
 | `REPO_PROJECTS_MAX_CONCURRENT_TASKS_PER_PROJECT` | Intended per-project task concurrency and new project policy default. | `1` |
 | `REPO_PROJECTS_DEFAULT_CODING_BACKEND` | `worker`, `claude_code`, or `codex_code`. | `worker` |
+| `REPO_PROJECTS_DEFAULT_WRITE_MODE` | `read_only_clone`, `fork_pr`, `maintainer_branch_pr`, or `maintainer_auto_merge`. | `fork_pr` |
 | `REPO_PROJECTS_AUTO_MERGE_DEFAULT` | New project policy default for guarded auto-merge. | `false` |
 | `REPO_PROJECTS_WATCHDOG_INTERVAL_SECS` | Intended supervisor watchdog cadence. | `60` |
 | `REPO_PROJECTS_WORKSPACE_BASE_DIR` | Base directory for repo clones/worktrees. | platform ThinClaw data dir under `repo_projects` |
@@ -118,7 +129,26 @@ Env overrides:
 | `REPO_PROJECTS_REVIEW_SUMMARY` | Post a one-shot review-readiness summary comment on PRs at the review stage. | `false` |
 | `REPO_PROJECTS_REVIEWER_BACKEND` | Run a one-shot sandbox code review (`claude_code`/`codex_code`/`worker`) of the pushed branch before the merge gate. Unset = off. | unset |
 
-Operational note: the webhook route resolves the configured webhook secret, and the supervisor now constructs a live GitHub App installation-token client by resolving `private_key_secret` from the secrets store at startup. If the App id or private key is missing/unreadable, the supervisor logs a warning and falls back to a `github_token` secret for API calls, so a misconfigured App degrades gracefully rather than disabling the pipeline.
+Operational note: the webhook route resolves the configured webhook secret, and the supervisor now constructs a live GitHub App installation-token client by resolving `private_key_secret` from the secrets store at startup. If the App id or private key is missing/unreadable, the supervisor logs a warning and falls back to a `github_token` secret for API calls, so a misconfigured App degrades gracefully rather than disabling the pipeline. In the default `fork_pr` mode, setup is not live-ready until both upstream API credentials (GitHub App or `github_token`) and `github_fork_token` are present. In maintainer modes, setup also requires `github_token` because sandbox workers need an upstream git push credential.
+
+## Repository Write Modes
+
+Write mode is a project policy. It controls both worker instructions and which
+GitHub secret is injected into sandbox jobs.
+
+| Mode | Worker GitHub credential | Push target | PR target | Supervisor merge |
+|---|---|---|---|---|
+| `read_only_clone` | none | none | none | no |
+| `fork_pr` | `github_fork_token` | fork remote `thinclaw-write` | upstream base branch | no |
+| `maintainer_branch_pr` | `github_token` | upstream `origin` task branch | upstream base branch | no |
+| `maintainer_auto_merge` | `github_token` | upstream `origin` task branch | upstream base branch | yes, after gates pass |
+
+Use `fork_pr` for public repositories by default. It lets ThinClaw clone the
+upstream repo, push task branches to a fork, and open PRs without handing the
+sandbox a credential that can push to the upstream repository. `connect_repos`
+stores fork metadata automatically when discovery used a user token and the
+authenticated user can be identified. Otherwise set `fork_owner`/`fork_repo`
+when creating or enrolling the repo, and ensure the fork exists.
 
 ## GitHub App Setup
 
@@ -128,8 +158,8 @@ Recommended repository permissions for the target design:
 
 | Permission | Access | Why |
 |---|---|---|
-| Contents | Read and write | Clone/fetch, push task branches, and merge via GitHub API once implemented. |
-| Pull requests | Read and write | Create/update PRs, read reviews, and merge PRs once implemented. |
+| Contents | Read-only for fork/read-only modes; read/write only for maintainer modes | Clone/fetch, push upstream task branches only when explicitly opted in, and merge via GitHub API only in `maintainer_auto_merge`. |
+| Pull requests | Read and write | Create/update PRs, read reviews, and merge PRs only in `maintainer_auto_merge`. |
 | Checks | Read-only | Read CI/check-run status for merge gates. |
 | Commit statuses | Read-only | Read legacy status checks for merge gates. |
 | Issues | Read and write, optional | Link tasks to GitHub issues if issue-backed backlog is enabled later. |
@@ -191,11 +221,14 @@ The supervisor is trusted host runtime code. It is not a sandbox boundary. Safet
 - Durable state machine transitions for projects and tasks.
 - Human approval requirements on repo-project tools that mutate state.
 - Default `auto_merge_default = false`.
+- Default `default_write_mode = "fork_pr"`.
+- Separate worker secrets: `github_fork_token` for fork PR workers, upstream `github_token` / App credentials only for maintainer modes.
+- `read_only_clone` injects no GitHub write credential into sandbox jobs.
 - Per-project concurrency defaults of one task at a time.
 - Bounded supervisor wake channel.
 - Watchdog reconciliation from durable state after restart.
 - Workspace path and branch-fragment validation.
-- Planned short-lived GitHub installation tokens rather than long-lived repository tokens.
+- Short-lived GitHub App installation tokens where configured, with PAT fallback isolated by write mode.
 
 Current limitations:
 
@@ -220,6 +253,7 @@ Threats to protect against before enabling real merge execution:
 Minimum merge gate contract:
 
 - Project policy has `auto_merge = true`.
+- Project policy has `write_mode = maintainer_auto_merge`.
 - Repository is enrolled and mapped to the expected installation id.
 - PR head branch matches the supervisor branch pattern and expected task id.
 - PR base branch matches the enrolled repo base branch.
@@ -230,7 +264,7 @@ Minimum merge gate contract:
 - A `MergeGateEvaluated` event is recorded for the task before merge.
 - The merge method is the project policy method: `squash`, `merge`, or `rebase`.
 
-The merge-gate evaluator models those denial reasons, the decision is persisted as a `MergeGateEvaluated` event, and the supervisor now executes the squash merge **only** when the gate approves. Approval is two-phase by construction: the first review reconcile records the `MergeGateEvaluated` audit event (denied with `gate_event_missing`), and only a subsequent reconcile that sees that recorded event can approve and merge. CI is re-confirmed green inside the review step, so a push that lands during review returns the task to `WaitingCi` rather than merging stale state. Auto-merge remains gated on project `auto_merge = true` and repo enrollment; with auto-merge disabled, a green/reviewed PR is held for a human merge.
+The merge-gate evaluator models those denial reasons, the decision is persisted as a `MergeGateEvaluated` event, and the supervisor now executes the squash merge **only** when the gate approves. Approval is two-phase by construction: the first review reconcile records the `MergeGateEvaluated` audit event (denied with `gate_event_missing`), and only a subsequent reconcile that sees that recorded event can approve and merge. CI is re-confirmed green inside the review step, so a push that lands during review returns the task to `WaitingCi` rather than merging stale state. Auto-merge remains gated on project `auto_merge = true`, `write_mode = maintainer_auto_merge`, and repo enrollment; with fork/manual modes, a green/reviewed PR is held for a human merge.
 
 ## Local Smoke Checklist
 
@@ -262,7 +296,7 @@ Use this for a local non-GitHub smoke pass.
 9. Confirm the project, task, events, worker runs, and merge gates still load from the database.
 10. Pause, resume, and cancel the project. Confirm invalid transitions are rejected and valid transitions append events.
 
-Expected current result: persistence and status surfaces work; when a sandbox job manager is available, the supervisor creates an isolated worktree and dispatches a bounded coding job. When GitHub credentials are configured (App or `github_token`) and the worker pushes the task branch, the supervisor opens/updates the PR, polls and classifies CI, and — for an enrolled project with `auto_merge = true` whose merge gate is fully satisfied — performs a single squash merge. Without GitHub credentials, the loop stops after sandbox dispatch and surfaces a blocker.
+Expected current result: persistence and status surfaces work; when a sandbox job manager is available, the supervisor creates an isolated worktree and dispatches a bounded coding job. In `fork_pr`, the worker is instructed to push only to `thinclaw-write` using `github_fork_token`; in maintainer modes, it may push the task branch to `origin` only when explicitly configured. When GitHub credentials are configured and the worker pushes the task branch, the supervisor opens/updates the PR, polls and classifies CI, and — only for an enrolled project with `auto_merge = true`, `write_mode = maintainer_auto_merge`, and a fully satisfied merge gate — performs a single squash merge. Without the required credentials for the selected mode, the loop surfaces a blocker.
 
 ## Test Fixture Plan
 

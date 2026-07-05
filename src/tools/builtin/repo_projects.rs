@@ -53,6 +53,12 @@ struct CreateParams {
     local_path: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    write_mode: Option<thinclaw_repo_projects::RepoWriteMode>,
+    #[serde(default)]
+    fork_owner: Option<String>,
+    #[serde(default)]
+    fork_repo: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,7 +98,14 @@ impl Tool for RepoProjectCreateTool {
                 "repo_url": { "type": "string", "description": "GitHub repository as owner/repo or github.com/owner/repo" },
                 "default_branch": { "type": "string" },
                 "local_path": { "type": "string" },
-                "description": { "type": "string" }
+                "description": { "type": "string" },
+                "write_mode": {
+                    "type": "string",
+                    "enum": ["read_only_clone", "fork_pr", "maintainer_branch_pr", "maintainer_auto_merge"],
+                    "description": "Safe default is fork_pr. maintainer_auto_merge is the only mode that allows supervisor merges."
+                },
+                "fork_owner": { "type": "string", "description": "Fork owner used by fork_pr mode." },
+                "fork_repo": { "type": "string", "description": "Fork repo name used by fork_pr mode; defaults to repo name when fork_owner is set." }
             },
             "required": ["name", "repo_url"]
         })
@@ -121,6 +134,9 @@ impl Tool for RepoProjectCreateTool {
             default_branch: params.default_branch,
             local_path: params.local_path,
             description: params.description,
+            write_mode: params.write_mode,
+            fork_owner: params.fork_owner,
+            fork_repo: params.fork_repo,
         };
         output(
             started,
@@ -414,6 +430,11 @@ impl Tool for RepoProjectSetupTool {
                 "private_key_secret": { "type": "string", "description": "Name of the secret holding the GitHub App PEM private key." },
                 "webhook_secret_secret": { "type": "string", "description": "Name of the secret holding the GitHub webhook secret." },
                 "default_coding_backend": { "type": "string", "enum": ["worker", "claude_code", "codex_code"] },
+                "default_write_mode": {
+                    "type": "string",
+                    "enum": ["read_only_clone", "fork_pr", "maintainer_branch_pr", "maintainer_auto_merge"],
+                    "description": "Default repository write policy. Safe default is fork_pr."
+                },
                 "auto_merge_default": { "type": "boolean" },
                 "max_concurrent_projects": { "type": "integer" },
                 "max_concurrent_tasks_per_project": { "type": "integer" },
@@ -547,6 +568,10 @@ struct EnrollParams {
     repo_url: String,
     #[serde(default)]
     default_branch: Option<String>,
+    #[serde(default)]
+    fork_owner: Option<String>,
+    #[serde(default)]
+    fork_repo: Option<String>,
 }
 
 pub struct RepoProjectEnrollTool {
@@ -575,7 +600,9 @@ impl Tool for RepoProjectEnrollTool {
             "properties": {
                 "project_id": { "type": "string" },
                 "repo_url": { "type": "string", "description": "owner/repo or github.com/owner/repo" },
-                "default_branch": { "type": "string" }
+                "default_branch": { "type": "string" },
+                "fork_owner": { "type": "string", "description": "Fork owner used by fork_pr mode." },
+                "fork_repo": { "type": "string", "description": "Fork repo name used by fork_pr mode." }
             },
             "required": ["project_id", "repo_url"]
         })
@@ -603,6 +630,8 @@ impl Tool for RepoProjectEnrollTool {
         let input = repo_projects_api::RepoEnrollInput {
             repo_url: params.repo_url,
             default_branch: params.default_branch,
+            fork_owner: params.fork_owner,
+            fork_repo: params.fork_repo,
         };
         output(
             started,
@@ -669,6 +698,12 @@ struct ConnectParams {
     repos: Vec<String>,
     #[serde(default)]
     all: bool,
+    #[serde(default)]
+    write_mode: Option<thinclaw_repo_projects::RepoWriteMode>,
+    #[serde(default)]
+    fork_owner: Option<String>,
+    #[serde(default)]
+    fork_repo: Option<String>,
 }
 
 pub struct RepoProjectConnectTool {
@@ -708,7 +743,14 @@ impl Tool for RepoProjectConnectTool {
                 "all": {
                     "type": "boolean",
                     "description": "Connect every accessible repository instead of a specific list."
-                }
+                },
+                "write_mode": {
+                    "type": "string",
+                    "enum": ["read_only_clone", "fork_pr", "maintainer_branch_pr", "maintainer_auto_merge"],
+                    "description": "Optional override. Without it, discovered repos use their recommended mode."
+                },
+                "fork_owner": { "type": "string", "description": "Fork owner used by fork_pr mode." },
+                "fork_repo": { "type": "string", "description": "Fork repo name used by fork_pr mode." }
             },
             "required": []
         })
@@ -734,6 +776,9 @@ impl Tool for RepoProjectConnectTool {
         let input = repo_projects_api::RepoConnectInput {
             repos: params.repos,
             all: params.all,
+            write_mode: params.write_mode,
+            fork_owner: params.fork_owner,
+            fork_repo: params.fork_repo,
         };
         output(
             started,

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use thinclaw_repo_projects::{
     CodingBackend, GitHubAuthMode, MergeMethod, ProjectPolicy, RepoProject, RepoProjectEventKind,
     RepoProjectRepo, RepoProjectRun, RepoProjectRunState, RepoProjectState, RepoProjectTask,
-    RepoProjectTaskState, RepoWorkerRun, RepoWorkerRunState,
+    RepoProjectTaskState, RepoWorkerRun, RepoWorkerRunState, RepoWriteMode,
 };
 use uuid::Uuid;
 
@@ -173,6 +173,7 @@ fn sample_project(auto_merge: bool) -> RepoProject {
         state: RepoProjectState::Active,
         policy: ProjectPolicy {
             auto_merge,
+            write_mode: RepoWriteMode::MaintainerAutoMerge,
             merge_method: MergeMethod::Squash,
             default_coding_backend: CodingBackend::CodexCode,
             github_auth_mode: GitHubAuthMode::UserToken,

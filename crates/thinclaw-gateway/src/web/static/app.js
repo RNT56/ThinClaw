@@ -6023,6 +6023,7 @@ let repoProjectsState = {
   repos: [],
   reposLoaded: false,
   selectedRepos: {},
+  writeMode: 'recommended',
   selectedProjectId: null,
 };
 
@@ -6105,6 +6106,16 @@ function renderRepoConnectorPanel() {
   html += '</div>';
 
   html += '<div class="autonomy-section-label">Select repositories</div>';
+  html += '<div class="repo-form-actions">'
+    + '<select id="repo-write-mode" onchange="repoSetWriteMode(this.value)">'
+    + '<option value="recommended"' + (repoProjectsState.writeMode === 'recommended' ? ' selected' : '') + '>Recommended per repo</option>'
+    + '<option value="read_only_clone"' + (repoProjectsState.writeMode === 'read_only_clone' ? ' selected' : '') + '>Read-only clone</option>'
+    + '<option value="fork_pr"' + (repoProjectsState.writeMode === 'fork_pr' ? ' selected' : '') + '>Fork PR</option>'
+    + '<option value="maintainer_branch_pr"' + (repoProjectsState.writeMode === 'maintainer_branch_pr' ? ' selected' : '') + '>Maintainer branch PR</option>'
+    + '<option value="maintainer_auto_merge"' + (repoProjectsState.writeMode === 'maintainer_auto_merge' ? ' selected' : '') + '>Maintainer auto-merge</option>'
+    + '</select>'
+    + '<span class="repo-checklist-detail">Default: ' + escapeHtml((r && r.default_write_mode) || 'fork_pr') + '</span>'
+    + '</div>';
   if (!repoProjectsState.reposLoaded) {
     html += '<div class="ui-panel-empty">Store a credential, then “Discover Repos” to list what the agent can manage.</div>';
   } else if (!repoProjectsState.repos.length) {
@@ -6117,7 +6128,7 @@ function renderRepoConnectorPanel() {
         + '<input type="checkbox" ' + (checked ? 'checked' : '') + (disabled ? ' disabled' : '')
         + ' onchange="repoToggleSelect(' + idx + ', this.checked)" />'
         + '<span class="repo-picker-name">' + escapeHtml(repo.full_name) + '</span>'
-        + '<span class="repo-picker-meta">' + (repo.private ? 'private' : 'public') + ' · ' + escapeHtml(repo.default_branch || 'main') + (repo.archived ? ' · archived' : '') + '</span>'
+        + '<span class="repo-picker-meta">' + (repo.private ? 'private' : 'public') + ' · ' + escapeHtml(repo.default_branch || 'main') + (repo.archived ? ' · archived' : '') + ' · ' + escapeHtml(repo.recommended_write_mode || 'fork_pr') + '</span>'
         + (disabled ? repoBadge('completed', 'Supervised') : '') + '</label>';
     }).join('') + '</div>';
     html += '<div class="repo-form-actions"><button onclick="repoConnect(false)"' + (enabled ? '' : ' disabled') + '>Connect Selected</button></div>';
@@ -6168,6 +6179,7 @@ function renderRepoProjectDetailPanel() {
     { label: 'Queued', value: project.queued_items },
     { label: 'Open PRs', value: project.open_prs },
     { label: 'Merge Gate', value: project.merge_gate_state },
+    { label: 'Write Mode', value: project.write_mode || 'fork_pr' },
     { label: 'Auto-merge', value: project.auto_merge_policy },
     { label: 'Credentials', value: project.credentials },
   ]);
@@ -6250,6 +6262,10 @@ function repoToggleSelect(idx, checked) {
   repoProjectsState.selectedRepos[repo.full_name] = checked;
 }
 
+function repoSetWriteMode(value) {
+  repoProjectsState.writeMode = value || 'recommended';
+}
+
 function repoConnect(all) {
   let body;
   if (all) {
@@ -6258,6 +6274,9 @@ function repoConnect(all) {
     const picks = Object.keys(repoProjectsState.selectedRepos).filter(function (k) { return repoProjectsState.selectedRepos[k]; });
     if (!picks.length) { showToast('Select at least one repository', 'error'); return; }
     body = { repos: picks };
+  }
+  if (repoProjectsState.writeMode && repoProjectsState.writeMode !== 'recommended') {
+    body.write_mode = repoProjectsState.writeMode;
   }
   apiFetch('/api/repo-projects/connect', { method: 'POST', body: body }).then(function (res) {
     if (res && res.ok) {

@@ -15,8 +15,8 @@ use crate::settings::Settings;
 use thinclaw_repo_projects::{
     CodingBackend, GitHubAuthMode, MergeGateDecision, ProjectPolicy, RepoProject, RepoProjectEvent,
     RepoProjectEventKind, RepoProjectRepo, RepoProjectState, RepoProjectTask, RepoProjectTaskState,
-    RepoWorkerRun, RepoWorkerRunState, repo_local_path_fragment, validate_project_state_transition,
-    validate_task_state_transition,
+    RepoWorkerRun, RepoWorkerRunState, RepoWriteMode, repo_local_path_fragment,
+    validate_project_state_transition, validate_task_state_transition,
 };
 
 const LOCAL_USER_ID: &str = "local_user";
@@ -124,6 +124,7 @@ pub struct RepoProjectView {
     pub docker_agents: String,
     pub credentials: String,
     pub concurrency_limit: u32,
+    pub write_mode: String,
     pub auto_merge_policy: String,
     pub notifications: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,6 +163,12 @@ pub struct RepoProjectCreateInput {
     pub local_path: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub write_mode: Option<RepoWriteMode>,
+    #[serde(default)]
+    pub fork_owner: Option<String>,
+    #[serde(default)]
+    pub fork_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,7 +275,10 @@ pub async fn create_project(
         .filter(|value| !value.is_empty())
         .unwrap_or("main")
         .to_string();
-    let policy = default_policy_from_settings(store, user_id).await;
+    let mut policy = default_policy_from_settings(store, user_id).await;
+    if let Some(write_mode) = input.write_mode {
+        policy.write_mode = write_mode;
+    }
     let installation_id =
         default_installation_id_from_settings(store, user_id, policy.github_auth_mode).await;
     let now = Utc::now();
@@ -311,7 +321,12 @@ pub async fn create_project(
         enrolled: true,
         local_path,
         auth_mode: project.policy.github_auth_mode,
-        metadata: serde_json::json!({ "input_repo_url": repo_url }),
+        metadata: repo_metadata(
+            &repo_url,
+            project.policy.write_mode,
+            input.fork_owner.as_deref(),
+            input.fork_repo.as_deref(),
+        )?,
         created_at: now,
         updated_at: now,
     };
@@ -625,6 +640,7 @@ pub struct RepoProjectsConfigureInput {
     pub webhook_secret_secret: Option<String>,
     pub app_slug: Option<String>,
     pub default_coding_backend: Option<String>,
+    pub default_write_mode: Option<String>,
     pub auto_merge_default: Option<bool>,
     pub max_concurrent_projects: Option<usize>,
     pub max_concurrent_tasks_per_project: Option<usize>,
@@ -649,11 +665,14 @@ pub struct RepoProjectsReadiness {
     pub install_url: Option<String>,
     pub auto_merge_default: bool,
     pub default_coding_backend: String,
+    pub default_write_mode: String,
     pub max_concurrent_projects: usize,
     pub max_concurrent_tasks_per_project: usize,
     pub watchdog_interval_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub github_token_secret_present: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_fork_token_secret_present: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key_secret_present: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -746,6 +765,15 @@ pub async fn configure_supervisor(
         )
         .await?;
     }
+    if let Some(value) = input.default_write_mode {
+        set_repo_setting(
+            store,
+            user_id,
+            "repo_projects.default_write_mode",
+            serde_json::json!(value),
+        )
+        .await?;
+    }
     if let Some(value) = input.auto_merge_default {
         set_repo_setting(
             store,
@@ -822,10 +850,20 @@ pub async fn repo_projects_readiness(
         Some(store) => Some(store.exists(user_id, "github_token").await.unwrap_or(false)),
         None => None,
     };
+    let github_fork_token_secret_present = match secrets {
+        Some(store) => Some(
+            store
+                .exists(user_id, "github_fork_token")
+                .await
+                .unwrap_or(false),
+        ),
+        None => None,
+    };
 
     let app_ready = app.app_id.is_some()
         && app.private_key_secret.is_some()
         && private_key_secret_present != Some(false);
+    let default_write_mode = write_mode_from_setting(&rp.default_write_mode);
     let credential_mode = if app_ready {
         "github_app"
     } else if github_token_secret_present == Some(true) {
@@ -833,8 +871,16 @@ pub async fn repo_projects_readiness(
     } else {
         "none"
     };
+    let supervisor_credentials_ready = app_ready || github_token_secret_present == Some(true);
+    let worker_write_credentials_ready = match default_write_mode {
+        RepoWriteMode::ReadOnlyClone => true,
+        RepoWriteMode::ForkPr => github_fork_token_secret_present == Some(true),
+        RepoWriteMode::MaintainerBranchPr | RepoWriteMode::MaintainerAutoMerge => {
+            github_token_secret_present == Some(true)
+        }
+    };
     let ready_for_live_runs =
-        rp.enabled && (app_ready || github_token_secret_present == Some(true));
+        rp.enabled && supervisor_credentials_ready && worker_write_credentials_ready;
 
     let item = |key: &str, label: &str, state: &str, detail: Option<String>| RepoProjectSetupItem {
         key: key.to_string(),
@@ -852,18 +898,18 @@ pub async fn repo_projects_readiness(
         item(
             "credentials",
             "GitHub credentials",
-            match credential_mode {
-                "none" => "pending",
-                _ => "complete",
+            if supervisor_credentials_ready && worker_write_credentials_ready {
+                "complete"
+            } else {
+                "pending"
             },
-            match credential_mode {
-                "github_app" => Some("GitHub App installation token".to_string()),
-                "github_token" => Some("github_token secret".to_string()),
-                _ => Some(
-                    "Configure a GitHub App (app_id + private key secret) or store a github_token secret."
-                        .to_string(),
-                ),
-            },
+            Some(credential_detail(
+                credential_mode,
+                default_write_mode,
+                supervisor_credentials_ready,
+                github_token_secret_present,
+                github_fork_token_secret_present,
+            )),
         ),
         item(
             "webhook",
@@ -882,9 +928,19 @@ pub async fn repo_projects_readiness(
             Some(rp.default_coding_backend.clone()),
         ),
         item(
+            "write_mode",
+            "Write mode default",
+            "complete",
+            Some(rp.default_write_mode.clone()),
+        ),
+        item(
             "auto_merge",
             "Auto-merge default",
-            if rp.auto_merge_default { "enabled" } else { "disabled" },
+            if rp.auto_merge_default {
+                "enabled"
+            } else {
+                "disabled"
+            },
             None,
         ),
     ];
@@ -900,10 +956,12 @@ pub async fn repo_projects_readiness(
         app_slug: app.app_slug,
         auto_merge_default: rp.auto_merge_default,
         default_coding_backend: rp.default_coding_backend,
+        default_write_mode: rp.default_write_mode,
         max_concurrent_projects: rp.max_concurrent_projects,
         max_concurrent_tasks_per_project: rp.max_concurrent_tasks_per_project,
         watchdog_interval_secs: rp.watchdog_interval_secs,
         github_token_secret_present,
+        github_fork_token_secret_present,
         private_key_secret_present,
         webhook_secret_present,
         ready_for_live_runs,
@@ -950,6 +1008,10 @@ pub struct RepoEnrollInput {
     pub repo_url: String,
     #[serde(default)]
     pub default_branch: Option<String>,
+    #[serde(default)]
+    pub fork_owner: Option<String>,
+    #[serde(default)]
+    pub fork_repo: Option<String>,
 }
 
 /// Enroll an additional GitHub repository into an existing project.
@@ -991,7 +1053,12 @@ pub async fn enroll_repo(
                 .to_string(),
         ),
         auth_mode: project.policy.github_auth_mode,
-        metadata: serde_json::json!({ "input_repo_url": repo_url }),
+        metadata: repo_metadata(
+            &repo_url,
+            project.policy.write_mode,
+            input.fork_owner.as_deref(),
+            input.fork_repo.as_deref(),
+        )?,
         created_at: now,
         updated_at: now,
     };
@@ -1031,6 +1098,15 @@ fn github_app_install_url(app_slug: Option<&str>) -> Option<String> {
 /// A repository the connected GitHub credential can act on, annotated with
 /// whether it is already enrolled in a ThinClaw project.
 #[derive(Debug, Clone, Serialize)]
+pub struct ConnectableRepoPermissions {
+    pub pull: bool,
+    pub triage: bool,
+    pub push: bool,
+    pub maintain: bool,
+    pub admin: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ConnectableRepo {
     pub owner: String,
     pub repo: String,
@@ -1040,6 +1116,8 @@ pub struct ConnectableRepo {
     pub default_branch: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html_url: Option<String>,
+    pub permissions: ConnectableRepoPermissions,
+    pub recommended_write_mode: String,
     /// True when this repo is already under supervision.
     pub enrolled: bool,
     /// The project id this repo is enrolled in, if any.
@@ -1051,6 +1129,9 @@ pub struct ConnectableRepo {
 pub struct ConnectableReposResponse {
     /// How the listing was authenticated: "github_app" or "github_token".
     pub source: String,
+    /// Authenticated GitHub user login, when discovery used a user token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authenticated_user: Option<String>,
     pub total: usize,
     pub repos: Vec<ConnectableRepo>,
 }
@@ -1095,6 +1176,14 @@ async fn list_connectable_repos_with_provider(
         .discovery_client()
         .await
         .map_err(ApiError::Internal)?;
+    let authenticated_user = match mode {
+        GitHubAuthMode::UserToken | GitHubAuthMode::GhCli => client
+            .get_authenticated_user()
+            .await
+            .ok()
+            .map(|user| user.login),
+        GitHubAuthMode::GitHubApp => None,
+    };
 
     let mut raw = Vec::new();
     let mut page = 1u32;
@@ -1132,6 +1221,9 @@ async fn list_connectable_repos_with_provider(
     let enrolled = enrolled_repo_index(store).await?;
     let mut repos = Vec::with_capacity(raw.len());
     for repo in raw {
+        let permissions = connectable_permissions(repo.permissions.as_ref());
+        let recommended_write_mode =
+            recommended_write_mode_for_repo(&repo, mode, authenticated_user.as_deref());
         let owner = repo
             .owner
             .as_ref()
@@ -1158,6 +1250,8 @@ async fn list_connectable_repos_with_provider(
             archived: repo.archived,
             default_branch: repo.default_branch.unwrap_or_else(|| "main".to_string()),
             html_url: repo.html_url,
+            permissions,
+            recommended_write_mode: write_mode_label(recommended_write_mode),
             enrolled: project_id.is_some(),
             project_id,
         });
@@ -1165,6 +1259,7 @@ async fn list_connectable_repos_with_provider(
 
     Ok(ConnectableReposResponse {
         source: connector_source_label(mode),
+        authenticated_user,
         total: repos.len(),
         repos,
     })
@@ -1177,6 +1272,45 @@ fn connector_source_label(mode: GitHubAuthMode) -> String {
         GitHubAuthMode::GhCli => "gh_cli",
     }
     .to_string()
+}
+
+fn connectable_permissions(
+    permissions: Option<&crate::repo_projects::github::GitHubRepositoryPermissions>,
+) -> ConnectableRepoPermissions {
+    let permissions = permissions.cloned().unwrap_or_default();
+    ConnectableRepoPermissions {
+        pull: permissions.pull,
+        triage: permissions.triage,
+        push: permissions.push,
+        maintain: permissions.maintain,
+        admin: permissions.admin,
+    }
+}
+
+fn recommended_write_mode_for_repo(
+    repo: &crate::repo_projects::github::GitHubRepository,
+    mode: GitHubAuthMode,
+    authenticated_user: Option<&str>,
+) -> RepoWriteMode {
+    use crate::repo_projects::github::GitHubRepoPermission;
+
+    if repo.archived || repo.disabled {
+        return RepoWriteMode::ReadOnlyClone;
+    }
+    if !repo.private {
+        return if matches!(mode, GitHubAuthMode::UserToken | GitHubAuthMode::GhCli)
+            && authenticated_user.is_some()
+        {
+            RepoWriteMode::ForkPr
+        } else {
+            RepoWriteMode::ReadOnlyClone
+        };
+    }
+    if repo.has_permission(GitHubRepoPermission::Push) {
+        RepoWriteMode::MaintainerBranchPr
+    } else {
+        RepoWriteMode::ReadOnlyClone
+    }
 }
 
 /// Map of `(owner_lc, repo_lc) -> project_id` for every repo already enrolled
@@ -1215,6 +1349,15 @@ pub struct RepoConnectInput {
     /// When true, connect every repository the credential can access.
     #[serde(default)]
     pub all: bool,
+    /// Optional override. Without this, each discovered repo uses its safe
+    /// recommended write mode and undiscovered explicit repos use the configured
+    /// supervisor default.
+    #[serde(default)]
+    pub write_mode: Option<RepoWriteMode>,
+    #[serde(default)]
+    pub fork_owner: Option<String>,
+    #[serde(default)]
+    pub fork_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1223,6 +1366,14 @@ pub struct RepoConnectResponse {
     pub connected: Vec<String>,
     pub skipped: Vec<String>,
     pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct RepoConnectSelection {
+    owner: String,
+    repo: String,
+    default_branch: Option<String>,
+    write_mode: Option<RepoWriteMode>,
 }
 
 /// Bring the selected repositories under supervision by creating a draft
@@ -1238,16 +1389,57 @@ pub async fn connect_repos(
 ) -> ApiResult<RepoConnectResponse> {
     ensure_repo_projects_enabled(store, user_id).await?;
 
-    let mut wanted: Vec<(String, String)> = Vec::new();
-    if input.all {
-        let listing = list_connectable_repos(store, secrets, user_id).await?;
-        for repo in listing.repos.into_iter().filter(|repo| !repo.archived) {
-            wanted.push((repo.owner, repo.repo));
+    let listing = if input.all {
+        Some(list_connectable_repos(store, secrets, user_id).await?)
+    } else {
+        list_connectable_repos(store, secrets, user_id).await.ok()
+    };
+    let discovered = listing
+        .as_ref()
+        .map(|listing| {
+            listing
+                .repos
+                .iter()
+                .map(|repo| {
+                    (
+                        (
+                            repo.owner.to_ascii_lowercase(),
+                            repo.repo.to_ascii_lowercase(),
+                        ),
+                        repo.clone(),
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let mut wanted: Vec<RepoConnectSelection> = Vec::new();
+    if input.all
+        && let Some(listing) = listing.as_ref()
+    {
+        for repo in listing
+            .repos
+            .iter()
+            .filter(|repo| !repo.archived && !repo.enrolled)
+        {
+            wanted.push(RepoConnectSelection {
+                owner: repo.owner.clone(),
+                repo: repo.repo.clone(),
+                default_branch: Some(repo.default_branch.clone()),
+                write_mode: Some(write_mode_from_setting(&repo.recommended_write_mode)),
+            });
         }
     }
     for raw in &input.repos {
         let (owner, repo) = parse_github_repo_url(raw)?;
-        wanted.push((owner, repo));
+        let discovered = discovered.get(&(owner.to_ascii_lowercase(), repo.to_ascii_lowercase()));
+        wanted.push(RepoConnectSelection {
+            owner,
+            repo,
+            default_branch: discovered.map(|repo| repo.default_branch.clone()),
+            write_mode: discovered
+                .map(|repo| write_mode_from_setting(&repo.recommended_write_mode)),
+        });
     }
     if wanted.is_empty() {
         return Err(ApiError::InvalidInput(
@@ -1260,25 +1452,45 @@ pub async fn connect_repos(
     let mut connected = Vec::new();
     let mut skipped = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (owner, repo) in wanted {
-        let key = (owner.to_ascii_lowercase(), repo.to_ascii_lowercase());
+    for selection in wanted {
+        let key = (
+            selection.owner.to_ascii_lowercase(),
+            selection.repo.to_ascii_lowercase(),
+        );
         if !seen.insert(key.clone()) {
             continue;
         }
-        let full = format!("{owner}/{repo}");
+        let full = format!("{}/{}", selection.owner, selection.repo);
         if enrolled.contains_key(&key) {
             skipped.push(full);
             continue;
         }
+        let write_mode = input.write_mode.or(selection.write_mode);
+        let fork_owner = input.fork_owner.clone().or_else(|| {
+            write_mode
+                .filter(|mode| *mode == RepoWriteMode::ForkPr)
+                .and_then(|_| {
+                    listing
+                        .as_ref()
+                        .and_then(|listing| listing.authenticated_user.clone())
+                })
+        });
+        let fork_repo = input
+            .fork_repo
+            .clone()
+            .or_else(|| fork_owner.as_ref().map(|_| selection.repo.clone()));
         create_project(
             store,
             user_id,
             RepoProjectCreateInput {
-                name: repo.clone(),
+                name: selection.repo.clone(),
                 repo_url: full.clone(),
-                default_branch: None,
+                default_branch: selection.default_branch,
                 local_path: None,
                 description: None,
+                write_mode,
+                fork_owner,
+                fork_repo,
             },
         )
         .await?;
@@ -1437,6 +1649,7 @@ async fn default_policy_from_settings(store: &Arc<dyn Database>, user_id: &str) 
     let settings = Settings::from_db_map(&map);
     ProjectPolicy {
         auto_merge: settings.repo_projects.auto_merge_default,
+        write_mode: write_mode_from_setting(&settings.repo_projects.default_write_mode),
         default_coding_backend: coding_backend_from_setting(
             &settings.repo_projects.default_coding_backend,
         ),
@@ -1476,427 +1689,11 @@ async fn default_installation_id_from_settings(
     i64::try_from(installation_id).ok()
 }
 
-fn project_view(project: &RepoProject, parts: &RepoProjectParts) -> RepoProjectView {
-    let repo = parts
-        .repos
-        .iter()
-        .find(|repo| repo.enrolled)
-        .or_else(|| parts.repos.first());
-    let tasks = &parts.tasks;
-    let active_runs = parts
-        .worker_runs
-        .iter()
-        .filter(|run| run.state == RepoWorkerRunState::Running)
-        .count();
-    let queued_items = tasks
-        .iter()
-        .filter(|task| {
-            matches!(
-                task.state,
-                RepoProjectTaskState::Queued
-                    | RepoProjectTaskState::Planning
-                    | RepoProjectTaskState::Ready
-            )
-        })
-        .count();
-    let open_prs = tasks
-        .iter()
-        .filter(|task| {
-            task.pull_request_number.is_some() && task.state != RepoProjectTaskState::Done
-        })
-        .count();
-    let gates = merge_gate_views(project, parts);
-
-    RepoProjectView {
-        id: project.id.to_string(),
-        name: project.name.clone(),
-        repo_url: repo
-            .map(|repo| format!("github.com/{}/{}", repo.owner, repo.repo))
-            .unwrap_or_else(|| "github.com/unknown/unknown".to_string()),
-        default_branch: repo
-            .map(|repo| repo.default_branch.clone())
-            .unwrap_or_else(|| "main".to_string()),
-        local_path: repo.and_then(|repo| repo.local_path.clone()),
-        description: project.description.clone(),
-        state: project_state_view(project.state),
-        active_runs,
-        queued_items,
-        open_prs,
-        merge_gate_state: aggregate_gate_state(&gates),
-        github_app: github_app_state(project, repo),
-        docker_agents: "ready".to_string(),
-        credentials: credentials_state(project, repo),
-        concurrency_limit: project.policy.max_parallel_tasks.max(1),
-        auto_merge_policy: if project.policy.auto_merge {
-            "green_checks".to_string()
-        } else {
-            "manual".to_string()
-        },
-        notifications: "disabled".to_string(),
-        updated_at: Some(project.updated_at.to_rfc3339()),
-        setup_checklist: setup_checklist(project, repo),
-        backlog: tasks.iter().map(backlog_item).collect(),
-        worker_runs: parts.worker_runs.iter().map(worker_run_view).collect(),
-        pull_requests: tasks
-            .iter()
-            .filter(|task| task.pull_request_number.is_some() || task.pull_request_url.is_some())
-            .map(pull_request_view)
-            .collect(),
-        ci_checks: Vec::new(),
-        merge_gates: gates,
-    }
-}
-
-fn setup_checklist(
-    project: &RepoProject,
-    repo: Option<&RepoProjectRepo>,
-) -> Vec<RepoProjectSetupItem> {
-    vec![
-        RepoProjectSetupItem {
-            key: "github_app".to_string(),
-            label: "GitHub App".to_string(),
-            state: if matches!(project.policy.github_auth_mode, GitHubAuthMode::GitHubApp) {
-                "pending".to_string()
-            } else {
-                "complete".to_string()
-            },
-            detail: Some(if matches!(project.policy.github_auth_mode, GitHubAuthMode::GitHubApp) {
-                "Configured for GitHub App auth; installation verification is handled by webhook/API setup.".to_string()
-            } else {
-                "Using token or gh fallback until GitHub App credentials are configured.".to_string()
-            }),
-        },
-        RepoProjectSetupItem {
-            key: "docker_agents".to_string(),
-            label: "Docker coding agents".to_string(),
-            state: "complete".to_string(),
-            detail: Some("Supervisor records are ready for sandbox job dispatch.".to_string()),
-        },
-        RepoProjectSetupItem {
-            key: "credentials".to_string(),
-            label: "Credentials".to_string(),
-            state: credentials_state(project, repo),
-            detail: Some("Short-lived GitHub/model credential injection is enforced at worker dispatch.".to_string()),
-        },
-        RepoProjectSetupItem {
-            key: "concurrency".to_string(),
-            label: "Concurrency".to_string(),
-            state: "complete".to_string(),
-            detail: Some(format!("Limit set to {}", project.policy.max_parallel_tasks.max(1))),
-        },
-        RepoProjectSetupItem {
-            key: "auto_merge_policy".to_string(),
-            label: "Auto-merge policy".to_string(),
-            state: if project.policy.auto_merge {
-                "complete".to_string()
-            } else {
-                "pending".to_string()
-            },
-            detail: Some(if project.policy.auto_merge {
-                "Guarded auto-merge enabled for this project.".to_string()
-            } else {
-                "Manual merge required unless project policy is changed.".to_string()
-            }),
-        },
-        RepoProjectSetupItem {
-            key: "notifications".to_string(),
-            label: "Notifications".to_string(),
-            state: "pending".to_string(),
-            detail: Some("Notification routing is recorded by events and can be connected to channel settings.".to_string()),
-        },
-    ]
-}
-
-fn merge_gate_views(project: &RepoProject, parts: &RepoProjectParts) -> Vec<RepoMergeGateView> {
-    let mut gates = Vec::new();
-    gates.push(RepoMergeGateView {
-        id: "gate-policy".to_string(),
-        label: "Auto-merge policy".to_string(),
-        state: if project.policy.auto_merge {
-            "passed".to_string()
-        } else {
-            "pending".to_string()
-        },
-        required: false,
-        detail: Some(if project.policy.auto_merge {
-            "Guarded auto-merge is enabled.".to_string()
-        } else {
-            "Project requires manual merge.".to_string()
-        }),
-        updated_at: Some(project.updated_at.to_rfc3339()),
-    });
-
-    for (task_id, decision) in &parts.merge_gates {
-        gates.push(RepoMergeGateView {
-            id: format!("gate-{task_id}"),
-            label: format!("Merge gate {}", short_uuid(*task_id)),
-            state: if decision.approved {
-                "passed".to_string()
-            } else {
-                "blocked".to_string()
-            },
-            required: true,
-            detail: Some(if decision.approved {
-                format!("Approved for {} merge", enum_label(decision.merge_method))
-            } else {
-                let reasons = decision
-                    .reasons
-                    .iter()
-                    .map(|reason| enum_label(*reason))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("Denied: {reasons}")
-            }),
-            updated_at: Some(project.updated_at.to_rfc3339()),
-        });
-    }
-
-    gates
-}
-
-fn backlog_item(task: &RepoProjectTask) -> RepoBacklogItem {
-    RepoBacklogItem {
-        id: task.id.to_string(),
-        title: task.title.clone(),
-        priority: priority_label(task.priority).to_string(),
-        state: task_state_view(task.state),
-        owner: task.assigned_worker_id.clone(),
-        labels: task.labels.clone(),
-        created_at: Some(task.created_at.to_rfc3339()),
-        updated_at: Some(task.updated_at.to_rfc3339()),
-    }
-}
-
-fn worker_run_view(run: &RepoWorkerRun) -> RepoWorkerRunView {
-    let end = run.completed_at.unwrap_or_else(Utc::now);
-    RepoWorkerRunView {
-        id: run.id.to_string(),
-        backlog_id: Some(run.task_id.to_string()),
-        agent: run.worker_id.clone(),
-        state: worker_state_view(run.state),
-        branch: Some(run.branch_name.clone()),
-        started_at: run.started_at.map(|value| value.to_rfc3339()),
-        updated_at: Some(run.updated_at.to_rfc3339()),
-        duration_secs: run
-            .started_at
-            .map(|started| (end - started).num_seconds().max(0)),
-        last_event: run.summary.clone(),
-    }
-}
-
-fn pull_request_view(task: &RepoProjectTask) -> RepoPullRequestView {
-    RepoPullRequestView {
-        id: task
-            .pull_request_number
-            .map(|number| format!("pr-{number}"))
-            .unwrap_or_else(|| format!("task-{}", task.id)),
-        title: task.title.clone(),
-        number: task.pull_request_number,
-        url: task.pull_request_url.clone(),
-        branch: Some(task.branch_name.clone()),
-        state: if task.state == RepoProjectTaskState::Done {
-            "merged".to_string()
-        } else {
-            "open".to_string()
-        },
-        author: task.assigned_worker_id.clone(),
-        updated_at: Some(task.updated_at.to_rfc3339()),
-    }
-}
-
-fn event_view(event: RepoProjectEvent) -> RepoProjectEventView {
-    RepoProjectEventView {
-        id: event.id.to_string(),
-        event_type: enum_label(event.kind),
-        created_at: Some(event.created_at.to_rfc3339()),
-        data: Some(serde_json::json!({
-            "project_id": event.project_id,
-            "repo_id": event.repo_id,
-            "task_id": event.task_id,
-            "project_run_id": event.project_run_id,
-            "worker_run_id": event.worker_run_id,
-            "message": event.message,
-            "details": event.details,
-        })),
-    }
-}
-
-fn aggregate_gate_state(gates: &[RepoMergeGateView]) -> String {
-    if gates
-        .iter()
-        .any(|gate| gate.state == "blocked" || gate.state == "failed")
-    {
-        "blocked".to_string()
-    } else if gates.iter().all(|gate| gate.state == "passed") {
-        "passed".to_string()
-    } else {
-        "pending".to_string()
-    }
-}
-
-fn github_app_state(project: &RepoProject, repo: Option<&RepoProjectRepo>) -> String {
-    if matches!(project.policy.github_auth_mode, GitHubAuthMode::GitHubApp)
-        || repo
-            .map(|repo| matches!(repo.auth_mode, GitHubAuthMode::GitHubApp))
-            .unwrap_or(false)
-    {
-        "pending".to_string()
-    } else {
-        "connected".to_string()
-    }
-}
-
-fn credentials_state(project: &RepoProject, repo: Option<&RepoProjectRepo>) -> String {
-    if matches!(project.policy.github_auth_mode, GitHubAuthMode::GitHubApp)
-        || repo
-            .map(|repo| matches!(repo.auth_mode, GitHubAuthMode::GitHubApp))
-            .unwrap_or(false)
-    {
-        "partial".to_string()
-    } else {
-        "ready".to_string()
-    }
-}
-
-fn project_state_view(state: RepoProjectState) -> String {
-    match state {
-        RepoProjectState::Draft => "setup_required",
-        RepoProjectState::Planning => "queued",
-        RepoProjectState::Active => "running",
-        RepoProjectState::Blocked | RepoProjectState::AwaitingHuman => "blocked",
-        RepoProjectState::Paused => "paused",
-        RepoProjectState::Completed => "completed",
-        RepoProjectState::Failed => "failed",
-        RepoProjectState::Cancelled => "cancelled",
-    }
-    .to_string()
-}
-
-fn task_state_view(state: RepoProjectTaskState) -> String {
-    match state {
-        RepoProjectTaskState::Done => "done".to_string(),
-        RepoProjectTaskState::WaitingCi => "waiting_ci".to_string(),
-        RepoProjectTaskState::WaitingReview => "waiting_review".to_string(),
-        other => enum_label(other),
-    }
-}
-
-fn worker_state_view(state: RepoWorkerRunState) -> String {
-    match state {
-        RepoWorkerRunState::Succeeded => "completed".to_string(),
-        other => enum_label(other),
-    }
-}
-
-fn state_label(state: RepoProjectState) -> String {
-    enum_label(state)
-}
-
-fn enum_label<T>(value: T) -> String
-where
-    T: Serialize,
-{
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn parse_github_repo_url(input: &str) -> ApiResult<(String, String)> {
-    let mut value = input.trim().trim_end_matches('/').to_string();
-    if value.ends_with(".git") {
-        value.truncate(value.len() - 4);
-    }
-    for prefix in [
-        "https://github.com/",
-        "http://github.com/",
-        "ssh://git@github.com/",
-        "git@github.com:",
-        "github.com/",
-    ] {
-        if let Some(rest) = value.strip_prefix(prefix) {
-            value = rest.to_string();
-            break;
-        }
-    }
-    let parts = value.split('/').collect::<Vec<_>>();
-    if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
-        return Err(ApiError::InvalidInput(
-            "repo_url must identify a GitHub repository as owner/repo or github.com/owner/repo"
-                .to_string(),
-        ));
-    }
-    repo_local_path_fragment(parts[0], parts[1]).map_err(ApiError::InvalidInput)?;
-    Ok((parts[0].to_string(), parts[1].to_string()))
-}
-
-fn unique_project_slug(name: &str, id: Uuid) -> String {
-    let mut slug = name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else if ch == '-' || ch == '_' || ch.is_whitespace() {
-                '-'
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-    if slug.is_empty() {
-        slug = "project".to_string();
-    }
-    format!("{}-{}", slug.trim_matches('-'), short_uuid(id))
-}
-
-fn short_uuid(id: Uuid) -> String {
-    id.simple().to_string()[..8].to_string()
-}
-
-fn non_empty(value: String, field: &str) -> ApiResult<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(ApiError::InvalidInput(format!("{field} must not be empty")));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn coding_backend_from_setting(value: &str) -> CodingBackend {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "codex_code" | "codex" => CodingBackend::CodexCode,
-        "claude_code" | "claude" => CodingBackend::ClaudeCode,
-        _ => CodingBackend::Worker,
-    }
-}
-
-fn priority_value(priority: Option<&str>) -> i32 {
-    match priority.unwrap_or("medium").to_ascii_lowercase().as_str() {
-        "urgent" => 100,
-        "high" => 50,
-        "low" => -10,
-        _ => 0,
-    }
-}
-
-fn priority_label(priority: i32) -> &'static str {
-    if priority >= 75 {
-        "urgent"
-    } else if priority >= 25 {
-        "high"
-    } else if priority < 0 {
-        "low"
-    } else {
-        "medium"
-    }
-}
-
-pub fn default_user_id() -> &'static str {
-    LOCAL_USER_ID
-}
+mod views;
+use views::*;
+// Part of this module public API (external callers use the
+// repo_projects_api::default_user_id path); re-export it past the split.
+pub use views::default_user_id;
 
 #[cfg(all(test, feature = "libsql"))]
 mod tests;

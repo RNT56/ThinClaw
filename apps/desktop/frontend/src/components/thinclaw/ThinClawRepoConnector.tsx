@@ -19,6 +19,8 @@ import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 
+type WriteModeSelection = 'recommended' | thinclaw.ThinClawRepoWriteMode;
+
 /**
  * GitHub connector: connect once (GitHub App install or a personal token),
  * discover the repositories the credential can act on, and select all or
@@ -46,6 +48,7 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
     const [reposLoaded, setReposLoaded] = useState(false);
     const [selected, setSelected] = useState<Record<string, boolean>>({});
     const [filter, setFilter] = useState('');
+    const [writeMode, setWriteMode] = useState<WriteModeSelection>('recommended');
 
     const loadReadiness = useCallback(async () => {
         setLoading(true);
@@ -162,7 +165,11 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
         }
         setBusy('connect');
         try {
-            const result = await thinclaw.connectRepoProjects(all ? { all: true } : { repos: picks });
+            const input: thinclaw.ThinClawRepoConnectInput = all ? { all: true } : { repos: picks };
+            if (writeMode !== 'recommended') {
+                input.write_mode = writeMode;
+            }
+            const result = await thinclaw.connectRepoProjects(input);
             if (result.unavailable) {
                 toast.error(result.unavailable.reason);
                 return;
@@ -436,6 +443,23 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                     </div>
                                 </div>
 
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <select
+                                        value={writeMode}
+                                        onChange={(event) => setWriteMode(event.target.value as WriteModeSelection)}
+                                        className="rounded-lg border border-white/5 bg-black/20 px-2.5 py-1.5 text-[11px] outline-none focus:border-primary/40"
+                                    >
+                                        <option value="recommended">Recommended per repo</option>
+                                        <option value="read_only_clone">Read-only clone</option>
+                                        <option value="fork_pr">Fork PR</option>
+                                        <option value="maintainer_branch_pr">Maintainer branch PR</option>
+                                        <option value="maintainer_auto_merge">Maintainer auto-merge</option>
+                                    </select>
+                                    <span className="text-[10px] text-muted-foreground">
+                                        Default: {readiness?.default_write_mode ?? 'fork_pr'}
+                                    </span>
+                                </div>
+
                                 {reposLoaded && repos.length > 0 && (
                                     <input
                                         value={filter}
@@ -480,6 +504,8 @@ export function ThinClawRepoConnector({ onConnected }: { onConnected?: () => voi
                                                         <p className="text-[10px] text-muted-foreground">
                                                             {repo.private ? 'private' : 'public'} · {repo.default_branch}
                                                             {repo.archived ? ' · archived' : ''}
+                                                            {' · '}
+                                                            {repo.recommended_write_mode}
                                                         </p>
                                                     </div>
                                                     {repo.enrolled && (
