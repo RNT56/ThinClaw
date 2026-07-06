@@ -254,6 +254,15 @@ final class MockGatewayClient: APIProtocol, @unchecked Sendable {
     func devicesMeHandler(_ input: Operations.DevicesMeHandler.Input) async throws
         -> Operations.DevicesMeHandler.Output
     { throw MockError.unimplemented }
+    func devicesMeCompanionsListHandler(
+        _ input: Operations.DevicesMeCompanionsListHandler.Input
+    ) async throws -> Operations.DevicesMeCompanionsListHandler.Output { throw MockError.unimplemented }
+    func devicesMeCompanionsCreateHandler(
+        _ input: Operations.DevicesMeCompanionsCreateHandler.Input
+    ) async throws -> Operations.DevicesMeCompanionsCreateHandler.Output { throw MockError.unimplemented }
+    func devicesMeCompanionsRevokeHandler(
+        _ input: Operations.DevicesMeCompanionsRevokeHandler.Input
+    ) async throws -> Operations.DevicesMeCompanionsRevokeHandler.Output { throw MockError.unimplemented }
     func devicesMeLiveActivityRegisterHandler(
         _ input: Operations.DevicesMeLiveActivityRegisterHandler.Input
     ) async throws -> Operations.DevicesMeLiveActivityRegisterHandler.Output { throw MockError.unimplemented }
