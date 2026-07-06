@@ -25,6 +25,7 @@ jobs:
   lint:
     name: swift-format lint
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       # The packages declare swift-tools-version 6.2, which needs the Swift 6.2
@@ -49,6 +50,7 @@ jobs:
   test-packages:
     name: swift test (${{ matrix.package }})
     runs-on: macos-15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +75,7 @@ jobs:
   generated-drift:
     name: generated client drift
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Select newest Xcode
@@ -100,6 +103,7 @@ jobs:
   build-app:
     name: tuist build
     runs-on: macos-15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: Select newest Xcode
@@ -126,6 +130,48 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO
 
+  # watchOS whole-target build. The watch app (ThinClawWatch) and its embedded
+  # WidgetKit complication (ThinClawWatchWidgets) are a *separate* watchOS
+  # product that the build-app job never compiles — that job targets
+  # `generic/platform=iOS Simulator`, which does not build the paired watchOS
+  # app. This job closes that gap: it generates the workspace the same way and
+  # builds the ThinClawWatch scheme for the watchOS simulator, giving the live
+  # WatchConnectivity relay wiring (RouterGatewayProxy / WatchSessionDelegate)
+  # and the complication a real compile gate. Hard gate: the target builds clean
+  # against a freshly generated workspace. (A full phone<->watch round-trip
+  # still needs paired hardware — WatchConnectivity does not run in the
+  # simulator — so that part is on-device bring-up, not CI.)
+  watch-build:
+    name: watchOS build
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Selecting ${latest:-<none found>}"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+          swift --version
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: apps/ios
+      - name: Generate workspace (resolves SPM via xcodebuild)
+        working-directory: apps/ios
+        run: |
+          cp Config/Signing.example.xcconfig Config/Signing.local.xcconfig
+          # Same generator as build-app so the empty App/Resources dir is created
+          # before `tuist generate` (see scripts/tuist-generate.sh).
+          mise x -- ./scripts/tuist-generate.sh
+      - name: Build the watch app for the watchOS simulator
+        working-directory: apps/ios
+        run: |
+          xcodebuild build \
+            -workspace ThinClaw.xcworkspace \
+            -scheme ThinClawWatch \
+            -destination 'generic/platform=watchOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+
   # iOS-only Feature package tests on a concrete iOS 26 simulator. The
   # swift-test matrix above cannot cover these: Packages/Features/* declare
   # `.iOS(.v26)` only, so `swift test` (host-Mac build) skips them. This job
@@ -139,6 +185,11 @@ jobs:
   feature-tests:
     name: feature package tests (iOS 26 sim)
     runs-on: macos-15
+    # Bounded so a hung simulator boot / test process can never hold the run
+    # open (a stuck xcodebuild test otherwise inherits GitHub's 6h default).
+    # feature-tests.sh soft-skips a missing runtime in seconds, so a healthy
+    # run is well under this; the cap only fires on a genuine hang.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Select newest Xcode
@@ -162,6 +213,7 @@ jobs:
     name: TestFlight archive (tag ios-v*)
     if: startsWith(github.ref, 'refs/tags/ios-v')
     runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Select newest Xcode

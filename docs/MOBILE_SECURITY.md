@@ -205,7 +205,7 @@ thinclaw://pair?d=<base64url(json)>
   always allowed, and phone/full-token principals are never affected. Audit:
   `companion.created` / `companion.revoked`.
 
-  **Watch client UI authored (M4).** `apps/ios/Watch/Sources` renders the
+  **Watch client UI landed (M4).** `apps/ios/Watch/Sources` renders the
   wrist surface behind a `WatchGatewayProxy` seam (relay-first; the watch
   attaches its OWN reduced-scope token, never the phone's): a glanceable status
   (mirrored `AgentStatusSnapshot` + relay/direct/queued route badge), an
@@ -246,9 +246,9 @@ thinclaw://pair?d=<base64url(json)>
   `WCSession.sendMessage` relay, pinned-URLSession direct, and `transferUserInfo`
   queue transports. On unpair the phone `DELETE`s the companion (the parent
   cascade also covers it). Pure seams are `swift test`-covered on macOS (39
-  tests); the whole-target watchOS compile is the Build stage's job, and a full
-  phone↔watch round-trip still needs physically paired hardware (WatchConnectivity
-  does not function end-to-end in the simulator).
+  tests); the whole-target watchOS compile is a CI hard gate (the `watch-build`
+  job), and a full phone↔watch round-trip still needs physically paired hardware
+  (WatchConnectivity does not function end-to-end in the simulator).
 
 ### Push privacy
 
@@ -300,7 +300,7 @@ thinclaw://pair?d=<base64url(json)>
   cheap, unconditional privacy measure independent of the "Enhanced protection"
   toggle (which gates only the transcript file-protection class). Pure
   `PrivacyRedactionPolicy` is macOS-tested;
-  the SwiftUI overlay is verified at the Build stage.
+  the SwiftUI overlay compiles in the `build-app` hard gate.
 
 ### Gateway-side hardening (B1)
 
@@ -386,7 +386,9 @@ Phase 1 — iOS client security primitives (`ThinClawAuth`,
   `tcd_` token via a `KeychainStoring` abstraction
   (`SecItemKeychainStore`) and `DeviceToken.redacted` keeps token material out
   of logs. *Not done:* the shared access group / App Group entitlement wiring is
-  authored in the target shells but unverified (no Tuist/`xcodebuild` build).
+  in the target shells and now builds through the Tuist workspace (the `build-app`
+  / `watch-build` CI gates), but the entitlements are only enforced at runtime on a
+  signed build — that still needs on-device verification.
 
 Phase 2 — push privacy (B2, `thinclaw-gateway`/`thinclaw-channels`/root,
 Rust-tested):
@@ -426,8 +428,8 @@ Rust-tested):
   reads the same keys before rewriting an approval — `never`/`app only` (and
   `when-unlocked` while the device is locked, probed fail-closed) leave the
   generic content-free text. Pure model + persistence round-trip are
-  macOS-tested; the SwiftUI Settings screen is unverified against a
-  Tuist/`xcodebuild` build (same caveat as Phase 1).
+  macOS-tested; the SwiftUI Settings screen compiles in the `build-app` hard gate
+  (only the on-device/live-Apple behavior is still pending, as in Phase 1).
 - ✅ **D-K3 gateway-side risk classifier (single source of truth).**
   `thinclaw_gateway::web::devices::approval_risk::classify` maps a tool name to
   `ApprovalRisk::{Low, High}` from an auditable substring allowlist:
@@ -448,8 +450,8 @@ Rust-tested):
   the gateway URL + pinned fingerprint (device-management/server-detail reveal),
   and re-hides them on backgrounding. Push registration is
   device-token-authenticated via the `devices:self` scope
-  (`PUT/DELETE /api/devices/me/push`). Same Tuist/`xcodebuild` + live-Apple
-  caveat as D-N3.
+  (`PUT/DELETE /api/devices/me/push`). The screen compiles in the `build-app` hard
+  gate; the live-Apple / on-device caveat from D-N3 still applies.
 
 ## v1 simplifications (explicit, each with an upgrade path)
 

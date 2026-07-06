@@ -67,10 +67,11 @@ cargo build --release --no-default-features --features edge --bin thinclaw
 ### `light` (default)
 
 **Included:** everything in `edge` plus PostgreSQL, local WASM runtime,
-HTML-to-Markdown, document extraction (PDF/DOCX), timezones, and the optional
-gateway TLS listener (`gateway-tls`).
+HTML-to-Markdown, document extraction (PDF/DOCX), timezones, the Docker sandbox
+runtime (`docker-sandbox`), the settings-gated mDNS advertiser (`mdns`), and the
+optional gateway TLS listener (`gateway-tls`).
 
-**Excluded:** REPL/TUI boot screen, ACP server, tunnel providers, Docker sandbox, browser automation, Nostr, voice wake.
+**Excluded:** REPL/TUI boot screen, ACP server, tunnel providers, browser automation, Nostr, voice wake.
 
 Best for: CLI-only usage, cron-driven agents, headless deployments, API-only servers.
 
@@ -86,9 +87,9 @@ thinclaw
 ### `full`
 
 Everything in `light` **plus**: ACP integration, REPL/TUI mode (interactive terminal
-with boot screen), tunnel providers (Tailscale/Cloudflare), Docker sandbox
-(container isolation for untrusted code), browser automation (Chromium-based),
-and Nostr protocol integration.
+with boot screen), tunnel providers (Tailscale/Cloudflare), browser automation
+(Chromium-based), and Nostr protocol integration. (The Docker sandbox — container
+isolation for untrusted code — is already in `light`, so `full` inherits it.)
 
 Headless voice wake (`voice`) is **not** in `full` — it pulls `cpal`/ALSA, a system
 dependency we keep off the broad `full` profile and its release artifacts. It is
@@ -156,7 +157,7 @@ On Linux, `voice` requires `libasound2-dev` (ALSA headers) at build time.
 Individual features can be combined freely:
 
 ```bash
-# Light + browser automation only (no tunnel, no Docker sandbox)
+# Light + browser automation only (no tunnel, no Nostr)
 cargo build --release --features light,browser --bin thinclaw
 
 # Light + tunnel for public webhook access
@@ -283,9 +284,9 @@ That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
 
 ```
 edge     = libsql
-light    = edge + postgres + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones + gateway-tls + mdns
+light    = edge + postgres + docker-sandbox + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones + gateway-tls + mdns
 desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
-full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr
+full     = light + acp + repl + tunnel + browser + nostr
 voice    = opt-in (headless wake word; also in --all-features) — not in full
 ```
 
