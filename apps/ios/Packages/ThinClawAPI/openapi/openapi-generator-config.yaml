@@ -43,6 +43,18 @@ namingStrategy: idiomatic
 # devicesMePushPut/Delete and the Live-Activity token registrars, so the typed
 # methods are live surface, not dead code.
 #
+# The three companion endpoints are INCLUDED as of milestone M4 (watchOS
+# companion): the phone mints/lists/revokes a reduced-scope companion token for
+# its paired watch (D-K4 — the watch holds its OWN independently-revocable
+# token, not the phone's):
+#
+#   - devices_me_companions_create_handler  (POST   /api/devices/me/companions)
+#   - devices_me_companions_list_handler    (GET    /api/devices/me/companions)
+#   - devices_me_companions_revoke_handler  (DELETE /api/devices/me/companions/{id})
+#
+# The create response is the only place the companion's raw token is returned
+# ({ device_id, token, scopes, parent_device_id }).
+#
 # When a REST endpoint is added to the gateway, add its operationId here and
 # rerun generate-api.sh; new endpoints are intentionally opt-in so a streaming
 # path can never leak into the typed client by default.
@@ -57,6 +69,9 @@ filter:
     - chat_send_handler
     - chat_threads_handler
     - devices_list_handler
+    - devices_me_companions_create_handler
+    - devices_me_companions_list_handler
+    - devices_me_companions_revoke_handler
     - devices_me_handler
     - devices_me_live_activity_register_handler
     - devices_me_live_activity_remove_handler

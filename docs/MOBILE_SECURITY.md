@@ -43,7 +43,7 @@ acts on the operator's behalf).
 | T7 | Request replay | VL | M | TLS/WireGuard transport; v2 upgrade: proof-of-possession signing |
 | T8 | Compromised widget process | L | M | v1: widget shares the device token (bounded by scopes; high-risk approvals refused outside the app); upgrade: distinct widget sub-token |
 | T9 | Lock-screen leakage | H | L–M | Content-free pushes + local rewrite; Live Activity shows status enums only; per-category preview controls |
-| T10 | Lost watch | L | M | Watch holds its own reduced-scope token, independently revocable; wrist-detection lock; no transcript persistence |
+| T10 | Lost watch | L | M | Watch holds its own reduced-scope companion token (`chat`+`approvals` only), independently revocable and cascade-revoked with its parent; watch approvals enforced low-risk-only server-side (D-K4, landed M4); wrist-detection lock; no transcript persistence |
 | T11 | Evil-twin Bonjour gateway | L | H | Discovery is a locator only; endpoint must present pinned SPKI + instance id before any credential is sent |
 | T12 | Stale devices never revoked | H | M | `last_seen_at` surfacing, 90-day inactivity auto-revoke, device list UI, audit log |
 | T13 | Server-side token store theft | L | M | Only SHA-256 hashes at rest; pairing secrets single-use and TTL'd |
@@ -181,6 +181,61 @@ thinclaw://pair?d=<base64url(json)>
   `approvals` (low-risk only, enforced server-side by device class).
   *Rejected:* sharing the phone token — all-or-nothing revocation, copies
   the highest-value credential to the weakest-authenticated device.
+
+  **Backend landed (M4).** The watch token is modeled as a *companion* device:
+  a child `DeviceRecord` carrying `parent_device_id`, minted by an
+  already-paired parent at `POST /api/devices/me/companions` (`devices:self`
+  scope) with a deliberately narrowed grant of **`chat` + `approvals` only**
+  (no `jobs:read`, no `devices:self` — so the companion cannot enumerate or
+  manage devices, self-register push over HTTP, or mint sub-companions; the
+  relay-first watch does its device management through the paired phone). The
+  parent lists (`GET /api/devices/me/companions`) and revokes
+  (`DELETE /api/devices/me/companions/{id}`) its own companions, and any
+  revocation **cascades**: `DeviceStore::revoke_cascade` revokes every child
+  with the parent in one locked write, clearing push/Live-Activity
+  registrations, and the registry broadcasts each revoked id so live SSE/WS
+  streams tear down synchronously. The **low-risk-only rule is enforced
+  server-side** in the approve handler (`POST /api/chat/approval`): when the
+  authenticated principal is a watchOS companion, a `High` (or unknown, fail-
+  closed) risk tier — read from the gateway-side pending-approvals cache, the
+  D-K3 single source of truth — is refused with a generic `403`; a `deny` is
+  always allowed, and phone/full-token principals are never affected. Audit:
+  `companion.created` / `companion.revoked`.
+
+  **Watch client UI authored (M4).** `apps/ios/Watch/Sources` renders the
+  wrist surface behind a `WatchGatewayProxy` seam (relay-first; the watch
+  attaches its OWN reduced-scope token, never the phone's): a glanceable status
+  (mirrored `AgentStatusSnapshot` + relay/direct/queued route badge), an
+  approvals list that offers an **approve action for low-risk entries only** —
+  high-risk (and, fail-closed, unknown-tier) entries show "Approve on iPhone"
+  and hand off, matching the server-side refusal as defense in depth — with a
+  round-trip spinner and success/failure `WKInterfaceDevice` haptics, and a
+  dictated quick-ask with a sent/queued/failed receipt. Deny is always
+  available at any tier. `apps/ios/WatchWidgets/Sources` renders a WidgetKit
+  status complication from the watch App Group mirror. The default read-only
+  `MirroredSnapshotProxy` renders the mirror and queues every write until the
+  bridge relay proxy is wired into `WatchApp`.
+
+  **Relay + companion provisioning authored (M4).** `ThinClawWatchBridge` now
+  carries the bridge half and the `App/Sources/WatchProvisioning` hook activates
+  it while the phone is paired. The phone-side `WatchRelayHost`
+  (`WCSessionDelegate`) mints the watch a companion
+  (`POST /api/devices/me/companions`, pinned parent client) when the watch
+  reports a missing/stale credential and delivers it as
+  `updateApplicationContext` (token + gateway URLs + SPKI pin + instance id);
+  the watch persists it in its **own** keychain (`WatchCompanionCredential`,
+  distinct key). Relayed RPCs forward the **watch's own token opaquely** — the
+  phone assembles a client whose bearer is the forwarded watch token, never its
+  own, so the gateway attributes/revokes the watch independently (a unit test
+  asserts the watch token, not the phone token, rides in a relayed approve). A
+  missing token or a 401/403 from a forwarded call fails closed to
+  `reprovisionRequired`. The watch-side `WatchGatewayRouter` selects
+  relay→direct→queue (direct = pinned URLSession with the watch's credential;
+  else `transferUserInfo` queue + "pending sync") with per-route timeout
+  fall-through inside the <5s approval budget. On unpair the phone `DELETE`s the
+  companion (the parent cascade also covers it). Pure seams are `swift test`-
+  covered on macOS (39 tests); WCSession/watchOS whole-target compile is the
+  Build stage's job.
 
 ### Push privacy
 

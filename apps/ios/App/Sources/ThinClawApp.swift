@@ -15,6 +15,13 @@ struct ThinClawApp: App {
     @State private var pushCoordinator: PushCoordinator
     @Environment(\.scenePhase) private var scenePhase
 
+    #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
+        // Owns the watch companion relay host (M4, D-K4). Thin app-side hook:
+        // activation while paired + deprovision on unpair; all testable logic
+        // lives in ThinClawWatchBridge.
+        @State private var watchProvisioning = WatchProvisioning()
+    #endif
+
     #if canImport(UIKit)
         @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     #endif
@@ -65,6 +72,14 @@ struct ThinClawApp: App {
                         appDelegate.requestPushAuthorizationAndRegister()
                     }
                 #endif
+                #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
+                    // Activate the watch relay host while paired so a paired watch
+                    // provisions its own companion token and can relay approvals
+                    // through the phone (M4, D-K4). Idempotent.
+                    if dependencies.isPaired {
+                        watchProvisioning.activateIfPaired()
+                    }
+                #endif
             case .background:
                 Task { await dependencies.stopSession() }
                 // Arm the periodic BGAppRefresh safety net so widgets keep
@@ -76,6 +91,18 @@ struct ThinClawApp: App {
                 break
             }
         }
+        #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
+            .onChange(of: dependencies.isPaired) { _, paired in
+                // On unpair, best-effort revoke the watch companion and drop the
+                // relay host (the parent-revoke cascade also covers it). On a
+                // fresh pair, activate so the watch can provision.
+                if paired {
+                    watchProvisioning.activateIfPaired()
+                } else {
+                    Task { await watchProvisioning.deprovisionAndTearDown() }
+                }
+            }
+        #endif
     }
 }
 

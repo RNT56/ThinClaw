@@ -847,6 +847,211 @@ public struct Client: APIProtocol {
             }
         )
     }
+    /// - Remark: HTTP `GET /api/devices/me/companions`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)`.
+    public func devicesMeCompanionsListHandler(_ input: Operations.DevicesMeCompanionsListHandler.Input) async throws -> Operations.DevicesMeCompanionsListHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMeCompanionsListHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/companions",
+                    parameters: []
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .get
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                return (request, nil)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMeCompanionsListHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.CompanionListResponse.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
+    /// The current device mints a reduced-scope companion (e.g. its paired watch): scopes are limited to chat + approvals (low-risk only, enforced server-side by device class). The companion is revoked whenever this parent is revoked (cascade). The raw token is returned exactly once.
+    ///
+    /// - Remark: HTTP `POST /api/devices/me/companions`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)`.
+    public func devicesMeCompanionsCreateHandler(_ input: Operations.DevicesMeCompanionsCreateHandler.Input) async throws -> Operations.DevicesMeCompanionsCreateHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMeCompanionsCreateHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/companions",
+                    parameters: []
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .post
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                let body: OpenAPIRuntime.HTTPBody?
+                switch input.body {
+                case let .json(value):
+                    body = try converter.setRequiredRequestBodyAsJSON(
+                        value,
+                        headerFields: &request.headerFields,
+                        contentType: "application/json; charset=utf-8"
+                    )
+                }
+                return (request, body)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMeCompanionsCreateHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.CreateCompanionResponse.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 400:
+                    return .badRequest(.init())
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                case 404:
+                    return .notFound(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/companions/{id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)`.
+    public func devicesMeCompanionsRevokeHandler(_ input: Operations.DevicesMeCompanionsRevokeHandler.Input) async throws -> Operations.DevicesMeCompanionsRevokeHandler.Output {
+        try await client.send(
+            input: input,
+            forOperation: Operations.DevicesMeCompanionsRevokeHandler.id,
+            serializer: { input in
+                let path = try converter.renderedPath(
+                    template: "/api/devices/me/companions/{}",
+                    parameters: [
+                        input.path.id
+                    ]
+                )
+                var request: HTTPTypes.HTTPRequest = .init(
+                    soar_path: path,
+                    method: .delete
+                )
+                suppressMutabilityWarning(&request)
+                converter.setAcceptHeader(
+                    in: &request.headerFields,
+                    contentTypes: input.headers.accept
+                )
+                return (request, nil)
+            },
+            deserializer: { response, responseBody in
+                switch response.status.code {
+                case 200:
+                    let contentType = converter.extractContentTypeIfPresent(in: response.headerFields)
+                    let body: Operations.DevicesMeCompanionsRevokeHandler.Output.Ok.Body
+                    let chosenContentType = try converter.bestContentType(
+                        received: contentType,
+                        options: [
+                            "application/json"
+                        ]
+                    )
+                    switch chosenContentType {
+                    case "application/json":
+                        body = try await converter.getResponseBodyAsJSON(
+                            Components.Schemas.DeviceInfo.self,
+                            from: responseBody,
+                            transforming: { value in
+                                .json(value)
+                            }
+                        )
+                    default:
+                        preconditionFailure("bestContentType chose an invalid content type.")
+                    }
+                    return .ok(.init(body: body))
+                case 401:
+                    return .unauthorized(.init())
+                case 403:
+                    return .forbidden(.init())
+                case 404:
+                    return .notFound(.init())
+                default:
+                    return .undocumented(
+                        statusCode: response.status.code,
+                        .init(
+                            headerFields: response.headerFields,
+                            body: responseBody
+                        )
+                    )
+                }
+            }
+        )
+    }
     /// - Remark: HTTP `PUT /api/devices/me/live-activity-start-token`.
     /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)`.
     public func devicesMeLiveActivityStartTokenRegisterHandler(_ input: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input) async throws -> Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output {

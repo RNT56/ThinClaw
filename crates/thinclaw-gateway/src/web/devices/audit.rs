@@ -41,6 +41,11 @@ pub enum DeviceAuditEvent {
     DeviceAutoRevokedInactive,
     DevicePushTokenRegistered,
     DevicePushTokenRemoved,
+    /// A parent device minted a reduced-scope companion (milestone M4).
+    CompanionCreated,
+    /// A companion was revoked, either directly by its parent or as a cascade
+    /// of the parent's own revocation (milestone M4).
+    CompanionRevoked,
 }
 
 impl DeviceAuditEvent {
@@ -58,6 +63,8 @@ impl DeviceAuditEvent {
             DeviceAuditEvent::DeviceAutoRevokedInactive => "device.auto_revoked_inactive",
             DeviceAuditEvent::DevicePushTokenRegistered => "device.push_token_registered",
             DeviceAuditEvent::DevicePushTokenRemoved => "device.push_token_removed",
+            DeviceAuditEvent::CompanionCreated => "companion.created",
+            DeviceAuditEvent::CompanionRevoked => "companion.revoked",
         }
     }
 }
@@ -226,6 +233,14 @@ mod tests {
         assert_eq!(
             DeviceAuditEvent::DevicePushTokenRemoved.as_str(),
             "device.push_token_removed"
+        );
+        assert_eq!(
+            DeviceAuditEvent::CompanionCreated.as_str(),
+            "companion.created"
+        );
+        assert_eq!(
+            DeviceAuditEvent::CompanionRevoked.as_str(),
+            "companion.revoked"
         );
     }
 

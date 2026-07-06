@@ -186,6 +186,30 @@ async fn pair_complete(addr: SocketAddr, secret: &str, name: &str) -> reqwest::R
         .expect("pair/complete request failed")
 }
 
+/// Pair a fresh phone and return its `(device_id, token)`.
+async fn pair_phone(addr: SocketAddr, name: &str) -> (String, String) {
+    let start_body = pair_start(addr).await;
+    let secret = start_body["qr_payload"]["sec"].as_str().unwrap();
+    let resp = pair_complete(addr, secret, name).await;
+    assert_eq!(resp.status(), 200, "pair/complete should succeed");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    (
+        body["device_id"].as_str().unwrap().to_string(),
+        body["token"].as_str().unwrap().to_string(),
+    )
+}
+
+/// Mint a watch companion of `parent_token`, returning the raw response.
+async fn create_companion(addr: SocketAddr, parent_token: &str, name: &str) -> reqwest::Response {
+    client()
+        .post(format!("http://{addr}/api/devices/me/companions"))
+        .header("Authorization", format!("Bearer {parent_token}"))
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .expect("companion create request failed")
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -527,5 +551,318 @@ async fn test_repeated_pair_complete_with_garbage_secrets_locks_out() {
         last_status,
         reqwest::StatusCode::TOO_MANY_REQUESTS,
         "attempt after the failure limit should be locked out (429)"
+    );
+}
+
+// ============================================================================
+// Companion devices (milestone M4)
+// ============================================================================
+
+#[tokio::test]
+async fn test_companion_mint_has_reduced_scopes_and_parent_link() {
+    let (addr, _home, _state) = start_isolated_server().await;
+    let (parent_id, parent_token) = pair_phone(addr, "My Phone").await;
+
+    let resp = create_companion(addr, &parent_token, "My Watch").await;
+    assert_eq!(resp.status(), 200, "companion mint should succeed");
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    let companion_token = body["token"].as_str().expect("companion token present");
+    assert!(companion_token.starts_with("tcd_"));
+    assert_ne!(
+        companion_token, parent_token,
+        "companion gets its own token"
+    );
+    assert_eq!(body["parent_device_id"].as_str().unwrap(), parent_id);
+
+    // Reduced scopes: chat + approvals only, never jobs:read / devices:self.
+    let scopes: Vec<String> = body["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect();
+    assert!(scopes.contains(&"chat".to_string()));
+    assert!(scopes.contains(&"approvals".to_string()));
+    assert!(!scopes.contains(&"jobs:read".to_string()));
+    assert!(!scopes.contains(&"devices:self".to_string()));
+
+    // The companion can read chat (its `chat` scope).
+    let companion_id = body["device_id"].as_str().unwrap();
+    let resp = client()
+        .get(format!("http://{addr}/api/chat/threads"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "companion may read chat");
+
+    // The parent lists its companion.
+    let resp = client()
+        .get(format!("http://{addr}/api/devices/me/companions"))
+        .header("Authorization", format!("Bearer {parent_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let list: serde_json::Value = resp.json().await.unwrap();
+    let companions = list["companions"].as_array().unwrap();
+    assert_eq!(companions.len(), 1);
+    assert_eq!(companions[0]["device_id"].as_str().unwrap(), companion_id);
+    assert_eq!(
+        companions[0]["parent_device_id"].as_str().unwrap(),
+        parent_id
+    );
+}
+
+#[tokio::test]
+async fn test_companion_forbidden_on_jobs_and_companion_management() {
+    let (addr, _home, _state) = start_isolated_server().await;
+    let (_parent_id, parent_token) = pair_phone(addr, "My Phone").await;
+    let resp = create_companion(addr, &parent_token, "My Watch").await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let companion_token = body["token"].as_str().unwrap();
+
+    // jobs:read is not in the companion grant → 403.
+    let resp = client()
+        .get(format!("http://{addr}/api/jobs"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "companion must not reach jobs:read"
+    );
+
+    // devices:self is not granted → the companion cannot mint sub-companions
+    // or manage devices.
+    let resp = client()
+        .post(format!("http://{addr}/api/devices/me/companions"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .json(&serde_json::json!({ "name": "Sub" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "companion must not mint sub-companions (no devices:self)"
+    );
+
+    // And an admin route stays forbidden too.
+    let resp = client()
+        .get(format!("http://{addr}/api/devices"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status() == reqwest::StatusCode::FORBIDDEN
+            || resp.status() == reqwest::StatusCode::UNAUTHORIZED,
+        "companion must not reach the admin device list"
+    );
+}
+
+#[tokio::test]
+async fn test_parent_revoke_cascades_to_companion_token() {
+    let (addr, _home, _state) = start_isolated_server().await;
+    let (parent_id, parent_token) = pair_phone(addr, "My Phone").await;
+    let resp = create_companion(addr, &parent_token, "My Watch").await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let companion_token = body["token"].as_str().unwrap().to_string();
+
+    // Companion authenticates before revocation.
+    let resp = client()
+        .get(format!("http://{addr}/api/chat/threads"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Admin revokes the PARENT.
+    let resp = client()
+        .post(format!("http://{addr}/api/devices/{parent_id}/revoke"))
+        .header("Authorization", format!("Bearer {AUTH_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // The companion token is now invalid (cascade) → 401.
+    let resp = client()
+        .get(format!("http://{addr}/api/chat/threads"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "revoking the parent must cascade-revoke the companion token"
+    );
+}
+
+#[tokio::test]
+async fn test_parent_can_revoke_its_own_companion() {
+    let (addr, _home, _state) = start_isolated_server().await;
+    let (_parent_id, parent_token) = pair_phone(addr, "My Phone").await;
+    let resp = create_companion(addr, &parent_token, "My Watch").await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let companion_id = body["device_id"].as_str().unwrap().to_string();
+    let companion_token = body["token"].as_str().unwrap().to_string();
+
+    // Parent revokes its companion via DELETE.
+    let resp = client()
+        .delete(format!(
+            "http://{addr}/api/devices/me/companions/{companion_id}"
+        ))
+        .header("Authorization", format!("Bearer {parent_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "parent may revoke its own companion");
+
+    // Companion token no longer authenticates.
+    let resp = client()
+        .get(format!("http://{addr}/api/chat/threads"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // The parent itself is unaffected.
+    let resp = client()
+        .get(format!("http://{addr}/api/devices/me"))
+        .header("Authorization", format!("Bearer {parent_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "parent stays valid after revoking companion"
+    );
+}
+
+#[tokio::test]
+async fn test_parent_cannot_revoke_another_parents_companion() {
+    let (addr, _home, _state) = start_isolated_server().await;
+    let (_parent_a_id, parent_a_token) = pair_phone(addr, "Phone A").await;
+    let (_parent_b_id, parent_b_token) = pair_phone(addr, "Phone B").await;
+
+    let resp = create_companion(addr, &parent_a_token, "Watch A").await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let companion_a_id = body["device_id"].as_str().unwrap().to_string();
+    let companion_a_token = body["token"].as_str().unwrap().to_string();
+
+    // Parent B tries to revoke Parent A's companion → 404 (ownership check).
+    let resp = client()
+        .delete(format!(
+            "http://{addr}/api/devices/me/companions/{companion_a_id}"
+        ))
+        .header("Authorization", format!("Bearer {parent_b_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a parent must not revoke another parent's companion"
+    );
+
+    // Companion A is still valid.
+    let resp = client()
+        .get(format!("http://{addr}/api/chat/threads"))
+        .header("Authorization", format!("Bearer {companion_a_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "companion A must survive B's failed revoke"
+    );
+}
+
+#[tokio::test]
+async fn test_watch_companion_high_risk_approve_is_forbidden_but_low_risk_ok() {
+    use thinclaw_gateway::web::devices::ApprovalRisk;
+    use thinclaw_gateway::web::types::PendingApprovalEntry;
+
+    let (addr, _home, state) = start_isolated_server().await;
+    let (_parent_id, parent_token) = pair_phone(addr, "My Phone").await;
+    let resp = create_companion(addr, &parent_token, "My Watch").await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let companion_token = body["token"].as_str().unwrap().to_string();
+
+    let seed = |request_id: &str, risk: ApprovalRisk| {
+        state.pending_approvals.lock().unwrap().insert(
+            request_id.to_string(),
+            PendingApprovalEntry {
+                request_id: request_id.to_string(),
+                tool_name: "some_tool".to_string(),
+                description: String::new(),
+                parameters: "{}".to_string(),
+                risk,
+                thread_id: None,
+                created_at: "2024-01-01T00:00:00+00:00".to_string(),
+            },
+        );
+    };
+
+    // High-risk approve from the watch companion → 403, and the pending entry
+    // must survive (decision was not submitted).
+    let high_id = uuid::Uuid::new_v4().to_string();
+    seed(&high_id, ApprovalRisk::High);
+    let resp = client()
+        .post(format!("http://{addr}/api/chat/approval"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .json(&serde_json::json!({ "request_id": high_id, "action": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "watch companion must be refused a high-risk approval server-side"
+    );
+    assert!(
+        state
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .contains_key(&high_id),
+        "a rejected high-risk approval must not drop the pending entry"
+    );
+
+    // Low-risk approve from the same watch companion passes the watch gate.
+    // With no agent loop wired in this harness the submission fails 503, but
+    // crucially NOT 403 — the low-risk decision was allowed through the gate,
+    // and the pending entry is dropped (decision submitted).
+    let low_id = uuid::Uuid::new_v4().to_string();
+    seed(&low_id, ApprovalRisk::Low);
+    let resp = client()
+        .post(format!("http://{addr}/api/chat/approval"))
+        .header("Authorization", format!("Bearer {companion_token}"))
+        .json(&serde_json::json!({ "request_id": low_id, "action": "approve" }))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "watch companion must be allowed a low-risk approval"
+    );
+    assert!(
+        !state
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .contains_key(&low_id),
+        "an allowed low-risk approval drops the pending entry"
     );
 }

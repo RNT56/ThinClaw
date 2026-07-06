@@ -12,17 +12,22 @@ milestones) and [`docs/MOBILE_SECURITY.md`](../../docs/MOBILE_SECURITY.md)
 ## Status
 
 The **M1 client is implemented**, the **M2 approvals + push surfaces are
-authored**, and the **M3 widgets + Live Activity + snapshot pipeline are
-authored**: the SPM packages, the onboarding flow, the chat + sessions surfaces,
-the risk-tiered approvals surface, the home-screen widgets, the agent-run Live
-Activity manager, and the App Group snapshot pipeline are all wired, and the
-whole `ThinClaw` app target (plus its widget, watch, and Notification Service
-Extension embeds) **builds for the iOS 26 simulator**. All pure-logic packages
-pass `swift test` on macOS with no simulator; the logic behind the feature
-stores, the `RunTracker`/`LiveActivityManager`, and the `SnapshotPublisher` is
-unit-tested. What remains is real-device / live-gateway exercise, a
-whole-app/NSE/WidgetKit/ActivityKit `xcodebuild` verification, live APNs
-delivery, and the jobs/settings surfaces (M3+). See the caveats below the table.
+authored**, the **M3 widgets + Live Activity + snapshot pipeline are authored**,
+and the **M4 watchOS companion is landed backend-side + authored client-side**:
+the SPM packages, the onboarding flow, the chat + sessions surfaces, the
+risk-tiered approvals surface, the home-screen widgets, the agent-run Live
+Activity manager, the App Group snapshot pipeline, and the watch surface (relay
+bridge, companion provisioning, wrist approvals/dictation, status complication)
+are all wired, and the whole `ThinClaw` app target (plus its widget, watch, and
+Notification Service Extension embeds) **builds for the iOS 26 simulator**. The
+M4 companion-token backend (mint/list/revoke + cascade + watch low-risk-only
+enforcement) is **landed and Rust-tested** in the gateway. All pure-logic
+packages pass `swift test` on macOS with no simulator; the logic behind the
+feature stores, the `RunTracker`/`LiveActivityManager`, the `SnapshotPublisher`,
+and the watch relay/route seams is unit-tested. What remains is real-device /
+live-gateway exercise, a whole-app/NSE/WidgetKit/ActivityKit + watchOS-target
+`xcodebuild` verification, live APNs delivery, and the jobs/settings surfaces
+(M3+). See the caveats below the table.
 
 | Piece | Status |
 |---|---|
@@ -40,7 +45,11 @@ delivery, and the jobs/settings surfaces (M3+). See the caveats below the table.
 | iOS push client (`AppDelegate` APNs register/`PUT`/`DELETE`, `PushCoordinator` risk-split categories, `ThinClawNotificationService` NSE content rewrite) | 🚧 authored (M2); whole-app/NSE `xcodebuild` + live APNs delivery pending |
 | B3 discovery consumption (`BonjourBrowser` `NWBrowser` + TXT parse, `DiscoveryStore`, onboarding "Discover on this network") | ✅ wired (B3); locator-only, tested with a scripted browser; no live-LAN run |
 | Widgets (`AgentStatusWidget`, `PendingApprovalsWidget`, `QuickAskWidget`, `AgentRunLiveActivity`) | 🚧 authored (M3); read App Group snapshots via `WidgetSnapshotAccess`, inline Approve/Deny gated to low-risk rows (high/unknown → Deny + deep link), Dynamic Island renders the content-free run state; WidgetKit compile pending Build stage |
-| `FeatureJobs` / `FeatureSettings`, watch | 🚧 placeholder screens (M3+); compiled into the app build, no stores yet |
+| Companion device tokens + watch low-risk-only approvals (gateway) | ✅ landed (M4); `POST/GET /api/devices/me/companions` + `DELETE /api/devices/me/companions/{id}` (`devices:self` scope), companion grant = `chat`+`approvals` only, `DeviceStore::revoke_cascade` (parent→children), and `POST /api/chat/approval` server-side refusal of high/unknown-risk approvals from a watchOS companion (fail-closed 403). Rust unit + `device_pairing_integration` coverage; OpenAPI regenerated |
+| `ThinClawWatchBridge` (phone-side `WatchRelayHost` + companion provisioning) | 🚧 authored (M4); `WCSessionDelegate` mints the watch a companion over the pinned parent client, delivers it (token + URLs + SPKI pin + instance id) via `updateApplicationContext`, forwards relayed approve/quick-ask with the **watch's own token opaquely** (never the phone's), fails closed to `reprovisionRequired` on 401/403; `DELETE`s the companion on unpair. Pure seams tested on macOS (39 tests); WCSession/watchOS whole-target compile is Build stage |
+| Watch UI (`Watch/Sources`: `WatchRootView`, `ApprovalsListView`, `AskView`) | 🚧 authored (M4); glanceable status (mirrored `AgentStatusSnapshot` + pending count + relay/direct/queued route badge), approvals list offering Approve/Deny for **low-risk** entries only (high/unknown → "Approve on iPhone" hand-off, deny always allowed) with `WKInterfaceDevice` haptics + round-trip spinner, and a dictated quick-ask; all I/O behind a `WatchGatewayProxy` seam (relay-first, watch's own reduced-scope token). Default `MirroredSnapshotProxy` renders the App Group mirror and queues writes until the bridge relay proxy is wired. Typechecks + swift-format-clean for watchOS 26 |
+| Watch complication (`WatchWidgets/Sources/StatusComplication`) | 🚧 authored (M4); real WidgetKit complication (circular/corner/inline) reading the watch App Group mirror, resilient to a missing snapshot ("open watch app"); WidgetKit compile pending Build stage |
+| `FeatureJobs` / `FeatureSettings` | 🚧 placeholder screens (M3+); compiled into the app build, no stores yet |
 | Tuist manifests / CI `build-app` job | ✅ `tuist generate` succeeds locally and the app builds; CI `build-app` job unverified here |
 
 **M1 caveat:** the onboarding **and** chat/sessions flows are wired end to end
@@ -113,6 +122,32 @@ logic (30 tests) and the `SnapshotPublisher` mapping/debounce/privacy +
 publisher→store integration pass `swift test` on macOS; the WidgetKit/ActivityKit
 and `BGTaskScheduler` compile is the Build stage's job.
 
+**M4 caveat:** the watchOS **companion-token backend is landed and Rust-tested**;
+the **watch client (relay + UI + complication) is authored, not yet
+watchOS-build-verified**. Backend: an already-paired parent mints a reduced-scope
+companion at `POST /api/devices/me/companions` (`devices:self` scope; grant is
+`chat`+`approvals` only — no `jobs:read`, no `devices:self`), lists via `GET`
+and revokes via `DELETE /api/devices/me/companions/{id}`; revoking any device
+**cascades** to its companions (`DeviceStore::revoke_cascade` — one locked write,
+push regs cleared, live SSE/WS streams torn down). Watch approvals are enforced
+**low-risk-only server-side** in `POST /api/chat/approval` (a watchOS-companion
+principal is refused a high/unknown-risk approve with a generic 403, using the
+D-K3 gateway-side risk tier; deny always allowed; phone tokens unaffected).
+Client: the phone-side `WatchRelayHost` (`WCSessionDelegate`) provisions the
+companion and delivers it over `updateApplicationContext`; the watch persists it
+in its **own** keychain (`WatchCompanionCredential`) and, whether relaying or
+going direct, attaches its **own** token — the relay forwards it opaquely, so the
+gateway attributes/revokes the watch independently (unit-tested). The watch-side
+`WatchGatewayRouter` selects relay→direct→queue with per-route timeout
+fall-through inside the <5s approval budget. `Watch/Sources` renders the wrist
+surface (glanceable status, low-risk-only approvals with hand-off, dictated
+quick-ask) behind a `WatchGatewayProxy` seam; `WatchWidgets/Sources` renders the
+status complication from the App Group mirror. There is **no transcript
+persistence on the watch**. The pure seams pass `swift test` on macOS (39 tests);
+the WCSession + watchOS whole-target compile (and wiring the bridge relay proxy
+into `WatchApp` in place of the default `MirroredSnapshotProxy`) is the Build
+stage's job. No real-device or live-gateway watch run has happened.
+
 Milestones M1–M5 are defined in `docs/MOBILE_APP.md`.
 
 ## Toolchain
@@ -144,7 +179,7 @@ Packages/                            # all real code, local SPM packages
   ThinClawLiveActivity RunTracker reducer + LiveActivityManager (agent-run activity)
   ThinClawDesign     Liquid Glass design system
   ThinClawWidgetKitShared  timeline providers + AppIntents (approve/deny/quick-ask)
-  ThinClawWatchBridge WatchConnectivity relay (watch holds its own token)
+  ThinClawWatchBridge WatchConnectivity relay + companion provisioning (watch holds its own token)
   Features/*         one package per surface (root view + @Observable store)
 Config/              xcconfigs (deployment targets, strict concurrency, signing)
 scripts/             generate-api.sh, check-generated-drift.sh, record-fixtures.sh

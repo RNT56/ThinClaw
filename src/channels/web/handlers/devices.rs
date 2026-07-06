@@ -34,11 +34,12 @@ use serde::Serialize;
 
 use crate::channels::web::server::GatewayState;
 use thinclaw_gateway::web::devices::{
-    ConsumeOutcome, DeviceAuditEvent, DeviceAuditLog, DeviceInfo, DeviceListResponse,
-    DevicePairingStore, DevicePlatform, DeviceScope, DeviceStore, PairCompleteRequest,
-    PairCompleteResponse, PairStartResponse, PendingPairInfo, PendingPairListResponse,
-    QrPairingPayload, RegisterLiveActivityRequest, RegisterLiveActivityStartTokenRequest,
-    RegisterPushRequest, RenameDeviceRequest, RotateTokenResponse,
+    CompanionListResponse, ConsumeOutcome, CreateCompanionRequest, CreateCompanionResponse,
+    DeviceAuditEvent, DeviceAuditLog, DeviceInfo, DeviceListResponse, DevicePairingStore,
+    DevicePlatform, DeviceScope, DeviceStore, PairCompleteRequest, PairCompleteResponse,
+    PairStartResponse, PendingPairInfo, PendingPairListResponse, QrPairingPayload,
+    RegisterLiveActivityRequest, RegisterLiveActivityStartTokenRequest, RegisterPushRequest,
+    RenameDeviceRequest, RotateTokenResponse,
 };
 use thinclaw_gateway::web::identity::DeviceContext;
 
@@ -593,6 +594,165 @@ pub(crate) async fn devices_me_handler(
                 format!("device not found: {}", ctx.device_id),
             )
         })?;
+
+    Ok(Json(DeviceInfo::from(&record)))
+}
+
+// --- Companion devices (device token; devices:self scope) ---
+
+// The current device (the `DeviceContext` parent) mints/lists/revokes its own
+// companions. Companion management lives under `/api/devices/me/`, so
+// `required_scope` maps it to `devices:self` — a companion's own reduced
+// `[chat, approvals]` grant is therefore rejected before reaching these
+// handlers, so only a full parent device can manage companions (milestone M4,
+// D-K4).
+
+// --- POST /api/devices/me/companions (device token; devices:self scope) ---
+
+#[utoipa::path(
+    post,
+    path = "/api/devices/me/companions",
+    tag = "devices",
+    description = "The current device mints a reduced-scope companion (e.g. its \
+paired watch): scopes are limited to chat + approvals (low-risk only, enforced \
+server-side by device class). The companion is revoked whenever this parent is \
+revoked (cascade). The raw token is returned exactly once.",
+    request_body = CreateCompanionRequest,
+    responses(
+        (status = 200, description = "Companion minted; token returned exactly once", body = CreateCompanionResponse),
+        (status = 400, description = "Invalid companion name"),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+        (status = 404, description = "Parent device record not found"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_companions_create_handler(
+    State(state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+    Json(req): Json<CreateCompanionRequest>,
+) -> Result<Json<CreateCompanionResponse>, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "companion name must not be empty".to_string(),
+        ));
+    }
+
+    let (record, token) = device_store()
+        .insert_companion(
+            &ctx.device_id,
+            name.to_string(),
+            req.resolved_platform(),
+            DeviceScope::companion_grant(),
+        )
+        .map_err(device_store_error)?;
+    state
+        .device_registry
+        .refresh(&record.device_id)
+        .await
+        .map_err(device_store_error)?;
+
+    let _ = audit_log().record(
+        DeviceAuditEvent::CompanionCreated,
+        Some(&record.device_id),
+        Some(&record.token_prefix),
+        Some(serde_json::json!({ "parent_device_id": ctx.device_id })),
+    );
+
+    Ok(Json(CreateCompanionResponse {
+        device_id: record.device_id,
+        token,
+        scopes: record.scopes,
+        parent_device_id: ctx.device_id,
+    }))
+}
+
+// --- GET /api/devices/me/companions (device token; devices:self scope) ---
+
+#[utoipa::path(
+    get,
+    path = "/api/devices/me/companions",
+    tag = "devices",
+    responses(
+        (status = 200, description = "The calling device's companions", body = CompanionListResponse),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_companions_list_handler(
+    State(_state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+) -> Result<Json<CompanionListResponse>, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+
+    let records = device_store()
+        .list_companions(&ctx.device_id)
+        .map_err(device_store_error)?;
+
+    Ok(Json(CompanionListResponse {
+        companions: device_info_list(&records),
+    }))
+}
+
+// --- DELETE /api/devices/me/companions/{id} (device token; devices:self scope) ---
+
+#[utoipa::path(
+    delete,
+    path = "/api/devices/me/companions/{id}",
+    tag = "devices",
+    params(("id" = String, Path, description = "Companion device id")),
+    responses(
+        (status = 200, description = "Companion revoked", body = DeviceInfo),
+        (status = 401, description = "Missing or invalid device token"),
+        (status = 403, description = "Not a device-authenticated request"),
+        (status = 404, description = "Companion not found for this parent"),
+    ),
+    security(("gateway_token" = [])),
+)]
+pub(crate) async fn devices_me_companions_revoke_handler(
+    State(state): State<Arc<GatewayState>>,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
+    Path(companion_id): Path<String>,
+) -> Result<Json<DeviceInfo>, (StatusCode, String)> {
+    let ctx = require_device_ctx(device_ctx)?;
+
+    // Ownership check: the target must be a companion of *this* parent. A 404
+    // (not 403) for a non-owned / non-existent id avoids leaking whether some
+    // other parent's companion id exists.
+    let target = device_store()
+        .get(&companion_id)
+        .map_err(device_store_error)?;
+    let owned = target
+        .as_ref()
+        .is_some_and(|d| d.parent_device_id.as_deref() == Some(ctx.device_id.as_str()));
+    if !owned {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("device not found: {companion_id}"),
+        ));
+    }
+
+    // Revoke via the registry so the companion's revocation is broadcast and
+    // any live SSE/WS stream is torn down synchronously; the store clears its
+    // push/live-activity registrations in the same write. A companion has no
+    // children, so the cascade is a no-op beyond the companion itself.
+    let record = state
+        .device_registry
+        .revoke(&companion_id)
+        .await
+        .map_err(device_store_error)?;
+
+    let _ = audit_log().record(
+        DeviceAuditEvent::CompanionRevoked,
+        Some(&record.device_id),
+        Some(&record.token_prefix),
+        Some(serde_json::json!({ "parent_device_id": ctx.device_id })),
+    );
 
     Ok(Json(DeviceInfo::from(&record)))
 }

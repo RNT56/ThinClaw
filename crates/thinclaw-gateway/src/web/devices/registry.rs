@@ -22,7 +22,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{RwLock, broadcast};
 
 use super::store::{DeviceStore, DeviceStoreError, hash_token};
-use super::types::{DeviceRecord, DeviceScope};
+use super::types::{DevicePlatform, DeviceRecord, DeviceScope};
 
 /// Debounce window for flushing `last_seen_at` updates to disk.
 const LAST_SEEN_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
@@ -34,10 +34,17 @@ const REVOCATION_CHANNEL_CAPACITY: usize = 64;
 
 /// Successful authentication result: the device's identity and granted
 /// scopes, ready for scope-middleware checks.
+///
+/// `platform` and `is_companion` are carried so downstream handlers can apply
+/// device-class policy without a second store read — notably the approve
+/// handler's watch low-risk-only rule (milestone M4, D-K3/D-K4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceAuth {
     pub device_id: String,
     pub scopes: Vec<DeviceScope>,
+    pub platform: DevicePlatform,
+    /// True if this device was minted as a companion (has a parent device).
+    pub is_companion: bool,
 }
 
 #[derive(Clone)]
@@ -47,6 +54,8 @@ struct IndexEntry {
     scopes: Vec<DeviceScope>,
     blocked: bool,
     expires_at: Option<String>,
+    platform: DevicePlatform,
+    is_companion: bool,
 }
 
 struct LastSeenState {
@@ -204,6 +213,8 @@ impl DeviceRegistry {
         Some(DeviceAuth {
             device_id: entry.device_id.clone(),
             scopes: entry.scopes.clone(),
+            platform: entry.platform.clone(),
+            is_companion: entry.is_companion,
         })
     }
 
@@ -247,12 +258,22 @@ impl DeviceRegistry {
     /// Revoke a device: persists the revocation, updates the in-memory
     /// index, and broadcasts the id so live stream handlers can disconnect
     /// it synchronously.
+    ///
+    /// **Cascade (milestone M4, D-K4):** revoking a device also revokes every
+    /// companion whose `parent_device_id == device_id`. Each affected device
+    /// (parent + companions) is refreshed in the index and gets its own
+    /// revocation broadcast, so a companion's live SSE/WS stream is torn down
+    /// synchronously too and its push registrations are already cleared by the
+    /// store. Returns the primary (target) record.
     pub async fn revoke(&self, device_id: &str) -> Result<DeviceRecord, DeviceStoreError> {
-        let record = self.store.revoke(device_id)?;
-        self.refresh(device_id).await?;
-        // Best-effort: no receivers is not an error (nothing is streaming).
-        let _ = self.revocations.send(device_id.to_string());
-        Ok(record)
+        let affected = self.store.revoke_cascade(device_id)?;
+        for record in &affected {
+            self.refresh(&record.device_id).await?;
+            // Best-effort: no receivers is not an error (nothing is streaming).
+            let _ = self.revocations.send(record.device_id.clone());
+        }
+        // `revoke_cascade` guarantees the target is first and non-empty.
+        Ok(affected.into_iter().next().expect("target record present"))
     }
 
     /// Subscribe to device-revocation notifications. Stream handlers
@@ -323,6 +344,8 @@ fn index_entry(record: &DeviceRecord) -> IndexEntry {
         scopes: record.scopes.clone(),
         blocked: record.revoked_at.is_some(),
         expires_at: record.expires_at.clone(),
+        platform: record.platform.clone(),
+        is_companion: record.is_companion(),
     }
 }
 
@@ -440,6 +463,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoke_cascades_to_companions_and_broadcasts_each() {
+        let (registry, store, _dir) = test_registry().await;
+        let (parent, parent_token) = store
+            .insert(
+                "Phone".to_string(),
+                DevicePlatform::Ios,
+                DeviceScope::default_grant(),
+                None,
+            )
+            .unwrap();
+        let (companion, companion_token) = store
+            .insert_companion(
+                &parent.device_id,
+                "Watch".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap();
+        registry.refresh(&parent.device_id).await.unwrap();
+        registry.refresh(&companion.device_id).await.unwrap();
+
+        // Both authenticate before revocation.
+        assert!(registry.authenticate(&parent_token).await.is_some());
+        let companion_auth = registry.authenticate(&companion_token).await.unwrap();
+        assert_eq!(companion_auth.platform, DevicePlatform::Watchos);
+        assert!(companion_auth.is_companion);
+
+        let mut rx = registry.subscribe_revocations();
+        registry.revoke(&parent.device_id).await.unwrap();
+
+        // Both parent and companion tokens now fail auth.
+        assert!(registry.authenticate(&parent_token).await.is_none());
+        assert!(registry.authenticate(&companion_token).await.is_none());
+
+        // Both device ids were broadcast (order: target first).
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        let broadcast = [first, second];
+        assert!(broadcast.contains(&parent.device_id));
+        assert!(broadcast.contains(&companion.device_id));
+    }
+
+    #[tokio::test]
     async fn touch_debounces_disk_flush() {
         let (registry, store, _dir) = test_registry().await;
         let (record, _token) = store
@@ -549,6 +615,7 @@ mod tests {
             apns: None,
             live_activities: std::collections::BTreeMap::new(),
             live_activity_start_token: None,
+            parent_device_id: None,
             revoked_at: None,
             expires_at: None,
         };

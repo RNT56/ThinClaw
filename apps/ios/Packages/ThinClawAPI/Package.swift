@@ -20,6 +20,11 @@ let package = Package(
     platforms: [
         .macOS(.v14),
         .iOS(.v26),
+        // watchOS is declared so the watch-side direct-HTTP fallback route
+        // (ThinClawWatchBridge `WatchGatewayProxy`, D-K4) can reach the gateway
+        // with the generated REST client when relay is unavailable. Apple's
+        // openapi-runtime/urlsession both support watchOS.
+        .watchOS(.v26),
     ],
     products: [
         .library(name: "ThinClawAPI", targets: ["ThinClawAPI"])

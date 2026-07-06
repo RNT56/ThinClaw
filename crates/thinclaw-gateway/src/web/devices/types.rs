@@ -58,6 +58,14 @@ pub struct DeviceRecord {
     /// tokens above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_activity_start_token: Option<String>,
+    /// Parent device id for a *companion* device (milestone M4). A companion
+    /// (e.g. the watch) is a child device minted by an already-paired device
+    /// over `POST /api/devices/me/companions`, scoped narrower than its parent
+    /// and revoked whenever its parent is revoked (cascade). `None` for a
+    /// normal top-level paired device. Serde default so legacy `devices.json`
+    /// rows (written before companions existed) still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_device_id: Option<String>,
     /// RFC 3339 timestamp. `Some` once the device has been revoked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
@@ -68,6 +76,13 @@ pub struct DeviceRecord {
 }
 
 impl DeviceRecord {
+    /// True if this device is a companion (has a parent device). Companions
+    /// are subject to the watch low-risk-only approval rule and are cascade-
+    /// revoked with their parent (milestone M4, D-K4).
+    pub fn is_companion(&self) -> bool {
+        self.parent_device_id.is_some()
+    }
+
     /// True if the device cannot currently authenticate: explicitly revoked
     /// or past its optional `expires_at`.
     pub fn is_blocked(&self, now_rfc3339: &str) -> bool {
@@ -221,6 +236,21 @@ impl DeviceScope {
             DeviceScope::DevicesSelf,
         ]
     }
+
+    /// The reduced scope grant for a *companion* device (milestone M4, D-K4).
+    ///
+    /// A companion (the watch) is minted by an already-paired parent and is
+    /// deliberately least-privilege: it can read/send chat and act on
+    /// approvals (low-risk only, enforced server-side by device class in the
+    /// approve handler), but it gets **no** `jobs:read` and **no**
+    /// `devices:self`. Dropping `devices:self` means a companion cannot
+    /// enumerate/manage devices or self-register push tokens over HTTP — the
+    /// watch is relay-first through the paired phone (there is no Tailscale on
+    /// watchOS), so its own device-management surface is intentionally empty.
+    /// The parent owns companion lifecycle via `/api/devices/me/companions*`.
+    pub fn companion_grant() -> Vec<DeviceScope> {
+        vec![DeviceScope::Chat, DeviceScope::Approvals]
+    }
 }
 
 // --- Pairing DTOs ---
@@ -310,6 +340,10 @@ pub struct DeviceInfo {
     pub token_prefix: String,
     pub scopes: Vec<DeviceScope>,
     pub has_pubkey: bool,
+    /// Parent device id when this is a companion device (milestone M4);
+    /// `None` for a normal top-level paired device.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_device_id: Option<String>,
     pub revoked_at: Option<String>,
     pub expires_at: Option<String>,
 }
@@ -325,6 +359,7 @@ impl From<&DeviceRecord> for DeviceInfo {
             token_prefix: record.token_prefix.clone(),
             scopes: record.scopes.clone(),
             has_pubkey: record.pubkey.is_some(),
+            parent_device_id: record.parent_device_id.clone(),
             revoked_at: record.revoked_at.clone(),
             expires_at: record.expires_at.clone(),
         }
@@ -395,6 +430,52 @@ pub struct RegisterLiveActivityRequest {
 pub struct RegisterLiveActivityStartTokenRequest {
     /// APNs Live Activity push-to-start token.
     pub push_token: String,
+}
+
+// --- Companion device DTOs (milestone M4, device-token-only, `devices:self`) ---
+
+/// `POST /api/devices/me/companions` request body: the current (parent) device
+/// mints a reduced-scope companion (e.g. its paired watch). `platform`
+/// defaults to `watchos` — the only companion surface in v1 — when omitted.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreateCompanionRequest {
+    pub name: String,
+    /// Companion platform; defaults to `"watchos"` when absent or empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+impl CreateCompanionRequest {
+    /// Resolved platform: the caller-supplied value, or `watchos` when unset
+    /// or blank (the only companion surface in v1).
+    pub fn resolved_platform(&self) -> DevicePlatform {
+        match self.platform.as_deref().map(str::trim) {
+            Some(p) if !p.is_empty() => DevicePlatform::parse(p),
+            _ => DevicePlatform::Watchos,
+        }
+    }
+}
+
+/// `POST /api/devices/me/companions` response — the only place the companion's
+/// raw token is ever returned.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreateCompanionResponse {
+    pub device_id: String,
+    /// Raw `tcd_...` companion token. Returned exactly once.
+    pub token: String,
+    pub scopes: Vec<DeviceScope>,
+    /// The parent (minting) device id, echoed for the client's record.
+    pub parent_device_id: String,
+}
+
+/// `GET /api/devices/me/companions` response: the calling device's own
+/// companions (never token/hash material).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CompanionListResponse {
+    pub companions: Vec<DeviceInfo>,
 }
 
 /// A pending (not-yet-completed) pairing attempt, admin-facing view.

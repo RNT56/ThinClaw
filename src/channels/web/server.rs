@@ -1423,6 +1423,18 @@ pub async fn start_server(
         .route("/api/devices/{id}/rotate", post(devices_rotate_handler))
         // Device's own view (device-token-only; `devices:self` scope).
         .route("/api/devices/me", get(devices_me_handler))
+        // Companion devices (milestone M4): the current device mints/lists/
+        // revokes its own reduced-scope companions (e.g. the paired watch).
+        // Device-token-only; `devices:self` scope — a companion's own reduced
+        // grant lacks `devices:self`, so only a full parent reaches these.
+        .route(
+            "/api/devices/me/companions",
+            post(devices_me_companions_create_handler).get(devices_me_companions_list_handler),
+        )
+        .route(
+            "/api/devices/me/companions/{id}",
+            delete(devices_me_companions_revoke_handler),
+        )
         // Device-linked push registration (device-token-only; `devices:self`).
         // These carry small JSON bodies and go through the normal protected
         // router (no dedicated body-limit layer — the token-scoped surface is

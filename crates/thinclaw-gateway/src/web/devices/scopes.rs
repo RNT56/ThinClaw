@@ -41,6 +41,12 @@ pub fn required_scope(method: &str, path: &str) -> Option<DeviceScope> {
         return Some(DeviceScope::Chat);
     }
 
+    // Everything under `/api/devices/me/` — including companion management
+    // (`/api/devices/me/companions*`, milestone M4) and push/live-activity
+    // registration — is part of the device's own `devices:self` surface. A
+    // companion token (which holds only `chat`+`approvals`) is therefore
+    // rejected here, so only a full parent device can mint/list/revoke
+    // companions.
     if path == "/api/devices/me" || path.starts_with("/api/devices/me/") {
         return Some(DeviceScope::DevicesSelf);
     }
@@ -124,6 +130,25 @@ mod tests {
         );
         assert_eq!(
             required_scope("PUT", "/api/devices/me/push"),
+            Some(DeviceScope::DevicesSelf)
+        );
+    }
+
+    #[test]
+    fn companion_management_is_devices_self() {
+        // Companion mint/list/revoke live under the parent's `devices:self`
+        // surface (milestone M4). A companion token lacks `devices:self`, so
+        // this is what blocks a companion from managing sub-companions.
+        assert_eq!(
+            required_scope("POST", "/api/devices/me/companions"),
+            Some(DeviceScope::DevicesSelf)
+        );
+        assert_eq!(
+            required_scope("GET", "/api/devices/me/companions"),
+            Some(DeviceScope::DevicesSelf)
+        );
+        assert_eq!(
+            required_scope("DELETE", "/api/devices/me/companions/abc123"),
             Some(DeviceScope::DevicesSelf)
         );
     }

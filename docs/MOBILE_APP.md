@@ -79,6 +79,23 @@ Design summary — full protocol and rationale in
   persistence under `~/.thinclaw/`, managed via `GET /api/devices`,
   `/{id}/rename|revoke|rotate`, `GET /api/devices/me`, the web UI devices
   card, and `thinclaw devices` CLI.
+- **Companion devices (backend milestone M4).** An already-paired device can
+  mint a reduced-scope *companion* (the watch) via
+  `POST /api/devices/me/companions` (`devices:self` scope; the current device
+  is the parent). A companion is a child `DeviceRecord` with
+  `parent_device_id` set, its own independently-revocable `tcd_` token, and a
+  **narrowed grant of `chat` + `approvals` only** — no `jobs:read`, and no
+  `devices:self` (so a companion cannot enumerate/manage devices or mint
+  sub-companions). The parent lists its companions with
+  `GET /api/devices/me/companions` and revokes one with
+  `DELETE /api/devices/me/companions/{id}`. Revoking a device **cascades**:
+  every companion whose `parent_device_id` matches is revoked in the same
+  write, its push/Live-Activity registrations cleared and any live SSE/WS
+  stream torn down. Approvals from a **watchOS companion are enforced
+  low-risk-only server-side**: the approve handler (`POST /api/chat/approval`)
+  refuses a high-risk (or unknown-risk) approval from a watch companion with a
+  generic `403`, using the gateway-side risk tier as the single source of
+  truth — the phone/full-token principals are unaffected.
 
 ## Transport and connectivity
 
@@ -149,7 +166,7 @@ layout, toolchain setup (mise + Tuist), and testing guide. Summary:
 | M2 | iOS approvals + push | Risk-tiered approval cards, actionable notifications, NSE rewrite |
 | M3 | Widgets + Live Activity | Snapshot pipeline, 4 widgets, Dynamic Island via push |
 | B3 | Backend discovery | mDNS advertiser (settings-gated) |
-| M4 | watchOS | Relay + approvals + dictation + complication |
+| M4 | watchOS | Companion token backend (mint/list/revoke + cascade, watch low-risk-only enforcement), relay + approvals + dictation + complication |
 | M5 | Polish + TestFlight | Device management UI, accessibility, archive pipeline |
 
 ## Implementation status
@@ -160,6 +177,9 @@ layout, toolchain setup (mise + Tuist), and testing guide. Summary:
 | `apps/ios/` scaffold (Tuist workspace, packages, SSE parser + tests, CI) | ✅ landed (R0); `tuist generate` verified locally and the whole `ThinClaw` app target builds for the iOS 26 simulator (`xcodebuild`) |
 | Generated Swift client from the committed spec | ✅ landed (M1); `ThinClawAPI` REST client generated + committed, `swift test` passes |
 | Device identity layer (pairing, tokens, scopes, TLS listener) | ✅ landed (B1) |
+| Companion device tokens + watch low-risk-only approvals (backend) | ✅ landed (M4); `DeviceRecord.parent_device_id` (serde-default for legacy rows), `POST/GET /api/devices/me/companions` + `DELETE /api/devices/me/companions/{id}` (`devices:self` scope), companion grant = `chat`+`approvals` only, `DeviceStore::revoke_cascade` revokes all children with the parent (clearing push regs + tearing down streams), and server-side enforcement in `POST /api/chat/approval` refusing high/unknown-risk approvals from a watchOS companion (fail-closed, generic 403). `companion.created`/`companion.revoked` audit events; OpenAPI regenerated. Rust unit + `device_pairing_integration` coverage |
+| Watch relay + companion provisioning (`ThinClawWatchBridge`, `App/Sources/WatchProvisioning`) | 🚧 authored (M4); the phone-side `WatchRelayHost` (`WCSessionDelegate`) mints the watch a reduced-scope companion via `POST /api/devices/me/companions` over the pinned client and delivers it (token + gateway URLs + SPKI pin + instance id) as `updateApplicationContext`; it answers watch RPCs by forwarding **the watch's own token opaquely** (never the phone's) to `POST /api/chat/approval` / `POST /api/chat/send` via the pure `WatchRelayResponder`, and pushes glanceable snapshots on significant changes. The watch-side `WatchGatewayRouter` selects relay→direct→queue (relay-first; direct is a pinned URLSession with the watch's own credential; else `transferUserInfo` queue + "pending sync") with per-route timeout fall-through inside the <5s approval budget. Re-provision when the watch reports a missing/stale credential; `DELETE` the companion on unpair (`WatchProvisioning` hook in `App/Sources`, activated while paired). Pure seams (envelope encode/decode, route selection, provisioning payload, and the watch-token-in-relayed-approval invariant) covered by `swift test` on macOS (39 tests); WCSession/watchOS whole-target compile is the Build stage's job |
+| Watch client UI (`Watch/Sources`, `WatchWidgets/Sources`) | 🚧 authored (M4); glanceable `WatchRootView` (mirrored `AgentStatusSnapshot` phase + pending count + relay/direct/queued route badge), an approvals list offering Approve/Deny for **low-risk** entries only (high/unknown → "Approve on iPhone" hand-off, deny always allowed) with success/failure `WKInterfaceDevice` haptics and a round-trip spinner, and a dictated `AskView` (`TextField` dictation → `quickAsk`, sent/queued/failed receipt). All I/O is behind a `WatchGatewayProxy` seam (relay-first, the watch attaches its own reduced-scope token — D-K4); the default `MirroredSnapshotProxy` renders the watch App Group mirror and queues writes until the `ThinClawWatchBridge` relay proxy is wired. `StatusComplication` is a real WidgetKit complication (circular/corner/inline) reading the mirror, resilient to a missing snapshot ("open watch app"). Typechecks + swift-format-clean for watchOS 26; `ThinClawWatch` target link pending the bridge's `WatchRelayHost` watchOS cross-compile fix |
 | `GET /api/chat/approvals` pull endpoint | ✅ landed (B1) |
 | First-party push + Live Activity emitter | ✅ landed (B2); content-free policy + notifier + `PUT/DELETE /api/devices/me/push`, `/live-activity/{id}`, `/live-activity-start-token`. Credential-gated (off without APNs config); mock-tested only, real Apple/TestFlight delivery pending |
 | Live Activity run routing (backend) | ✅ landed (M3); Live Activity registration now carries `thread_id`/`job_id`, and the notifier auto-tracks a run from that association: run-progress events (`tool_started`/`status`) emit throttled Live Activity **updates** to the per-activity token, `response` emits the **end**, and a run beginning on a device with a push-to-start token but no active activity emits a one-shot **push-to-start**. A Live Activity token 410 prunes only that activity (or only the start token), never the alert registration. Notifier-level + policy unit tests with a mock `PushSender`; real Apple delivery still pending |

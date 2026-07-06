@@ -49,10 +49,10 @@ pub use store::{
     DEVICE_TOKEN_PREFIX, DeviceStore, DeviceStoreError, IssuedToken, hash_token, issue_token,
 };
 pub use types::{
-    DeviceApnsRegistration, DeviceInfo, DeviceListResponse, DeviceLiveActivityKind,
-    DeviceLiveActivityToken, DevicePlatform, DeviceRecord, DeviceScope,
-    MAX_LIVE_ACTIVITIES_PER_DEVICE, PairCompleteRequest, PairCompleteResponse, PairStartResponse,
-    PendingPairInfo, PendingPairListResponse, QrPairingPayload, RegisterLiveActivityRequest,
-    RegisterLiveActivityStartTokenRequest, RegisterPushRequest, RenameDeviceRequest,
-    RotateTokenResponse,
+    CompanionListResponse, CreateCompanionRequest, CreateCompanionResponse, DeviceApnsRegistration,
+    DeviceInfo, DeviceListResponse, DeviceLiveActivityKind, DeviceLiveActivityToken,
+    DevicePlatform, DeviceRecord, DeviceScope, MAX_LIVE_ACTIVITIES_PER_DEVICE, PairCompleteRequest,
+    PairCompleteResponse, PairStartResponse, PendingPairInfo, PendingPairListResponse,
+    QrPairingPayload, RegisterLiveActivityRequest, RegisterLiveActivityStartTokenRequest,
+    RegisterPushRequest, RenameDeviceRequest, RotateTokenResponse,
 };
