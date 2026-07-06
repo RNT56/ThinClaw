@@ -71,6 +71,7 @@ struct FixtureReplayTests {
                         toolName: "shell_command",
                         description: "Run a shell command",
                         parameters: #"{"command":"rm -rf /tmp/scratch"}"#,
+                        risk: .high,
                         threadID: thread)),
                 .heartbeat,
                 .toolStarted(name: "shell_command", threadID: thread),

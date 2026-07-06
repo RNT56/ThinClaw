@@ -26,7 +26,8 @@ struct AgentEventTests {
     func threadIDAccessor() {
         let id = ThreadID("t")
         let approval = ApprovalRequest(
-            requestID: "r", toolName: "shell", description: "d", parameters: "{}", threadID: id)
+            requestID: "r", toolName: "shell", description: "d", parameters: "{}", risk: .high,
+            threadID: id)
 
         #expect(AgentEvent.streamChunk(content: "", threadID: id).threadID == id)
         #expect(AgentEvent.response(content: "", threadID: id).threadID == id)
@@ -62,7 +63,8 @@ struct TimelineItemTests {
                 kind: .approval(
                     ApprovalRequest(
                         requestID: "req_1", toolName: "shell_command",
-                        description: "Run a command", parameters: "{\"command\":\"ls\"}"))),
+                        description: "Run a command", parameters: "{\"command\":\"ls\"}",
+                        risk: .low))),
         ]
 
         let data = try JSONEncoder().encode(items)

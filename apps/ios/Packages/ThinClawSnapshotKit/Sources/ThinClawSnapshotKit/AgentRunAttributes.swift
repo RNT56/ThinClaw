@@ -15,7 +15,7 @@
     /// requests activities and registers push tokens) and the widget
     /// extension (which renders them) share one definition.
     public struct AgentRunAttributes: ActivityAttributes {
-        public struct ContentState: Codable, Hashable {
+        public struct ContentState: Codable, Hashable, Sendable {
             /// The backend's `push_policy` emits `phase` as a bare string
             /// (`"thinking"`, `"runningTool"`, `"awaitingApproval"`, `"done"`,
             /// `"failed"`), so this must be a `String`-raw-valued enum: the
@@ -23,7 +23,7 @@
             /// enum would (de)serialize as `{"runningTool":{}}`, which does not
             /// match what the gateway sends (see
             /// `crates/thinclaw-gateway/src/web/devices/push_policy.rs`).
-            public enum RunPhase: String, Codable, Hashable {
+            public enum RunPhase: String, Codable, Hashable, Sendable {
                 case thinking
                 case runningTool
                 case awaitingApproval

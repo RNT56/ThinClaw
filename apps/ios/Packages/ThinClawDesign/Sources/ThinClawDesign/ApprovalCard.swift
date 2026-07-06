@@ -7,6 +7,11 @@ import SwiftUI
 /// the tier. Widgets and the watch never present this card for high risk;
 /// they deep-link into the app instead (docs/MOBILE_SECURITY.md, D-K3).
 public struct ApprovalCard: View {
+    /// Presentation mirror of `ThinClawCore.RiskTier`. ThinClawDesign is kept
+    /// dependency-free (widgets and the watch import it without dragging in
+    /// Core/Transport), so the canonical tier lives in Core and the app layer
+    /// maps `RiskTier` -> `ApprovalCard.RiskTier` at the call site. Keep the
+    /// two cases in lockstep.
     public enum RiskTier: Sendable, Hashable {
         case low
         case high
@@ -17,6 +22,10 @@ public struct ApprovalCard: View {
     private let risk: RiskTier
     private let onApprove: () -> Void
     private let onDeny: () -> Void
+
+    /// Under Increase Contrast, the high-risk badge switches from a tinted
+    /// orange to a filled capsule so it stays legible over the glass material.
+    @Environment(\.colorSchemeContrast) private var contrast
 
     public init(
         toolName: String,
@@ -37,16 +46,20 @@ public struct ApprovalCard: View {
             VStack(alignment: .leading, spacing: ThinClawSpacing.md) {
                 HStack(spacing: ThinClawSpacing.sm) {
                     Image(systemName: "wrench.and.screwdriver")
+                        .accessibilityHidden(true)
                     Text(toolName)
                         .font(ThinClawTypography.cardTitle)
                     Spacer()
                     if risk == .high {
-                        Label("High risk", systemImage: "exclamationmark.shield")
-                            .font(ThinClawTypography.caption)
-                            .foregroundStyle(.orange)
-                            .labelStyle(.titleAndIcon)
+                        highRiskBadge
                     }
                 }
+                // The header reads as one element: "<tool> approval, <risk> risk".
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    Text("\(toolName) approval, \(risk == .high ? "high" : "low") risk")
+                )
+                .accessibilityAddTraits(.isHeader)
                 Text(requestDescription)
                     .font(ThinClawTypography.mono)
                     .lineLimit(6)
@@ -72,5 +85,26 @@ public struct ApprovalCard: View {
             )
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// High-risk badge. In the default contrast it is a tinted orange label; in
+    /// Increase Contrast it becomes a filled orange capsule with white glyph so
+    /// the warning does not wash out against the translucent glass.
+    @ViewBuilder
+    private var highRiskBadge: some View {
+        if contrast == .increased {
+            Label("High risk", systemImage: "exclamationmark.shield")
+                .font(ThinClawTypography.caption)
+                .labelStyle(.titleAndIcon)
+                .foregroundStyle(.white)
+                .padding(.horizontal, ThinClawSpacing.sm)
+                .padding(.vertical, ThinClawSpacing.xs)
+                .background(.orange, in: .capsule)
+        } else {
+            Label("High risk", systemImage: "exclamationmark.shield")
+                .font(ThinClawTypography.caption)
+                .foregroundStyle(.orange)
+                .labelStyle(.titleAndIcon)
+        }
     }
 }

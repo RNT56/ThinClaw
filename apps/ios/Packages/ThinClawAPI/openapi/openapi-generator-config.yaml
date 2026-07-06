@@ -27,8 +27,8 @@ namingStrategy: idiomatic
 # either fail or emit a client method that cannot represent the stream. Keeping
 # them out of the generated surface is the contract, not a workaround.
 #
-# We ALSO deliberately omit the six device push-token endpoints, even though
-# they are plain REST and already present in the vendored spec:
+# The six device push-token endpoints are INCLUDED as of milestone M2, which
+# wires up APNs / Live-Activity token registration from the app:
 #
 #   - devices_me_push_register_handler          (PUT    /api/devices/me/push)
 #   - devices_me_push_remove_handler            (DELETE /api/devices/me/push)
@@ -39,11 +39,21 @@ namingStrategy: idiomatic
 #   - devices_me_live_activity_register_handler (PUT    .../live-activity/{activity_id})
 #   - devices_me_live_activity_remove_handler   (DELETE .../live-activity/{activity_id})
 #
-# Client-side push/Live-Activity token registration is milestone M2. The spec
-# itself must stay current (the vendored openapi.json carries these paths so
-# check-generated-drift.sh passes), but generating client methods the app has
-# no caller for yet would ship dead surface. Add these operationIds here when
-# M2 wires up APNs registration, not before.
+# They were held out through M1 (no caller yet); M2's PushCoordinator now calls
+# devicesMePushPut/Delete and the Live-Activity token registrars, so the typed
+# methods are live surface, not dead code.
+#
+# The three companion endpoints are INCLUDED as of milestone M4 (watchOS
+# companion): the phone mints/lists/revokes a reduced-scope companion token for
+# its paired watch (D-K4 — the watch holds its OWN independently-revocable
+# token, not the phone's):
+#
+#   - devices_me_companions_create_handler  (POST   /api/devices/me/companions)
+#   - devices_me_companions_list_handler    (GET    /api/devices/me/companions)
+#   - devices_me_companions_revoke_handler  (DELETE /api/devices/me/companions/{id})
+#
+# The create response is the only place the companion's raw token is returned
+# ({ device_id, token, scopes, parent_device_id }).
 #
 # When a REST endpoint is added to the gateway, add its operationId here and
 # rerun generate-api.sh; new endpoints are intentionally opt-in so a streaming
@@ -59,7 +69,16 @@ filter:
     - chat_send_handler
     - chat_threads_handler
     - devices_list_handler
+    - devices_me_companions_create_handler
+    - devices_me_companions_list_handler
+    - devices_me_companions_revoke_handler
     - devices_me_handler
+    - devices_me_live_activity_register_handler
+    - devices_me_live_activity_remove_handler
+    - devices_me_live_activity_start_token_register_handler
+    - devices_me_live_activity_start_token_remove_handler
+    - devices_me_push_register_handler
+    - devices_me_push_remove_handler
     - devices_pair_approve_handler
     - devices_pair_complete_handler
     - devices_pair_pending_handler

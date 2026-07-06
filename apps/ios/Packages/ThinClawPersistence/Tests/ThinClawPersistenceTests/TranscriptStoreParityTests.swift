@@ -236,7 +236,7 @@ struct GRDBTranscriptStoreTests {
             let thread = ThreadID("t")
             let approval = ApprovalRequest(
                 requestID: "r1", toolName: "shell", description: "run", parameters: "{}",
-                threadID: thread)
+                risk: .high, threadID: thread)
             let kinds: [TimelineItem.Kind] = [
                 .userMessage(text: "u"),
                 .agentMessage(text: "a"),

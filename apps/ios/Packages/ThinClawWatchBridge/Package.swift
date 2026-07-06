@@ -12,11 +12,19 @@
 // Host (iOS) and client (watchOS) halves live in one package; each target
 // compiles only the half its platform supports via canImport(WatchConnectivity)
 // availability and target-membership in the Tuist project.
+//
+// Platform note: macOS is declared **only so the pure seams** (the RPC
+// envelope, `WatchRouteSelector`, and the companion-provisioning payload) run
+// under plain `swift test` on a Mac host without a simulator — the same
+// precedent as ThinClawCore. The platform glue (`WatchRelayHost`,
+// `WatchGatewayProxy`) is behind `canImport(WatchConnectivity)` and never
+// compiles on macOS.
 import PackageDescription
 
 let package = Package(
     name: "ThinClawWatchBridge",
     platforms: [
+        .macOS(.v14),
         .iOS(.v26),
         .watchOS(.v26),
     ],
@@ -26,6 +34,8 @@ let package = Package(
     dependencies: [
         .package(path: "../ThinClawCore"),
         .package(path: "../ThinClawSnapshotKit"),
+        .package(path: "../ThinClawAuth"),
+        .package(path: "../ThinClawAPI"),
     ],
     targets: [
         .target(
@@ -33,7 +43,13 @@ let package = Package(
             dependencies: [
                 .product(name: "ThinClawCore", package: "ThinClawCore"),
                 .product(name: "ThinClawSnapshotKit", package: "ThinClawSnapshotKit"),
+                .product(name: "ThinClawAuth", package: "ThinClawAuth"),
+                .product(name: "ThinClawAPI", package: "ThinClawAPI"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "ThinClawWatchBridgeTests",
+            dependencies: ["ThinClawWatchBridge"]
+        ),
     ]
 )

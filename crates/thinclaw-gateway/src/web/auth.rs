@@ -244,9 +244,11 @@ async fn authenticate_device_request(
 
     let identity = fallback_request_identity(auth, GatewayAuthSource::DeviceToken).await;
     request.extensions_mut().insert(identity);
-    request.extensions_mut().insert(DeviceContext::new(
+    request.extensions_mut().insert(DeviceContext::with_class(
         device_auth.device_id,
         device_auth.scopes,
+        device_auth.platform,
+        device_auth.is_companion,
     ));
     next.run(request).await
 }

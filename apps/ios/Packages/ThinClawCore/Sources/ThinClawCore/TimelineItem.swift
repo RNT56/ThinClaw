@@ -19,6 +19,11 @@ public struct TimelineItem: Hashable, Sendable, Codable, Identifiable {
         case toolCall(name: String, status: ToolCallStatus)
         /// An inline approval prompt.
         case approval(ApprovalRequest)
+        /// An extension-authorization (OAuth) prompt (`auth_required`).
+        case authPrompt(AuthPrompt)
+        /// A credential request the phone cannot answer (`credential_prompt`);
+        /// rendered as a "handle on desktop" card (D-T4).
+        case credentialPrompt(CredentialPrompt)
         /// A turn-level failure.
         case failure(message: String)
     }

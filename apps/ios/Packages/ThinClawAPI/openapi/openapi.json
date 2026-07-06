@@ -621,6 +621,128 @@
         ]
       }
     },
+    "/api/devices/me/companions": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_companions_list_handler",
+        "responses": {
+          "200": {
+            "description": "The calling device's companions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanionListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "description": "The current device mints a reduced-scope companion (e.g. its paired watch): scopes are limited to chat + approvals (low-risk only, enforced server-side by device class). The companion is revoked whenever this parent is revoked (cascade). The raw token is returned exactly once.",
+        "operationId": "devices_me_companions_create_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCompanionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Companion minted; token returned exactly once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCompanionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid companion name"
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Parent device record not found"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
+    "/api/devices/me/companions/{id}": {
+      "delete": {
+        "tags": [
+          "devices"
+        ],
+        "operationId": "devices_me_companions_revoke_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Companion device id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Companion revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid device token"
+          },
+          "403": {
+            "description": "Not a device-authenticated request"
+          },
+          "404": {
+            "description": "Companion not found for this parent"
+          }
+        },
+        "security": [
+          {
+            "gateway_token": []
+          }
+        ]
+      }
+    },
     "/api/devices/me/live-activity-start-token": {
       "put": {
         "tags": [
@@ -705,6 +827,7 @@
         "tags": [
           "devices"
         ],
+        "description": "Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.",
         "operationId": "devices_me_live_activity_register_handler",
         "parameters": [
           {
@@ -1358,6 +1481,14 @@
           }
         }
       },
+      "ApprovalRisk": {
+        "type": "string",
+        "description": "Risk tier for a tool approval, computed gateway-side. Serialised\nsnake_case (`\"low\"` / `\"high\"`) on approval events and used to pick the push\ncategory. Carried on [`crate::web::types::SseEvent::ApprovalNeeded`] and\n[`crate::web::types::PendingApprovalEntry`].",
+        "enum": [
+          "low",
+          "high"
+        ]
+      },
       "ChannelSetupStatus": {
         "type": "object",
         "required": [
@@ -1413,6 +1544,69 @@
           },
           "thread_id": {
             "type": "string"
+          }
+        }
+      },
+      "CompanionListResponse": {
+        "type": "object",
+        "description": "`GET /api/devices/me/companions` response: the calling device's own\ncompanions (never token/hash material).",
+        "required": [
+          "companions"
+        ],
+        "properties": {
+          "companions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceInfo"
+            }
+          }
+        }
+      },
+      "CreateCompanionRequest": {
+        "type": "object",
+        "description": "`POST /api/devices/me/companions` request body: the current (parent) device\nmints a reduced-scope companion (e.g. its paired watch). `platform`\ndefaults to `watchos` — the only companion surface in v1 — when omitted.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Companion platform; defaults to `\"watchos\"` when absent or empty."
+          }
+        }
+      },
+      "CreateCompanionResponse": {
+        "type": "object",
+        "description": "`POST /api/devices/me/companions` response — the only place the companion's\nraw token is ever returned.",
+        "required": [
+          "device_id",
+          "token",
+          "scopes",
+          "parent_device_id"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string"
+          },
+          "parent_device_id": {
+            "type": "string",
+            "description": "The parent (minting) device id, echoed for the client's record."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceScope"
+            }
+          },
+          "token": {
+            "type": "string",
+            "description": "Raw `tcd_...` companion token. Returned exactly once."
           }
         }
       },
@@ -1474,6 +1668,13 @@
           "name": {
             "type": "string"
           },
+          "parent_device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Parent device id when this is a companion device (milestone M4);\n`None` for a normal top-level paired device."
+          },
           "platform": {
             "$ref": "#/components/schemas/DevicePlatform"
           },
@@ -1526,6 +1727,13 @@
           "updated_at"
         ],
         "properties": {
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The background job this activity mirrors, when `kind == Job`. Lets the\nnotifier route job-completion events to this activity. `None` for agent\nruns and legacy records."
+          },
           "kind": {
             "$ref": "#/components/schemas/DeviceLiveActivityKind",
             "description": "What the activity represents (agent run vs. job)."
@@ -1533,6 +1741,13 @@
           "push_token": {
             "type": "string",
             "description": "APNs Live Activity update token."
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chat thread this activity mirrors, when `kind == AgentRun`. Lets the\nfirst-party notifier route run-progress events (keyed by `thread_id`) to\nthis activity's per-activity update token. `None` for job activities and\nfor legacy records written before the association existed."
           },
           "updated_at": {
             "type": "string",
@@ -2237,6 +2452,7 @@
           "tool_name",
           "description",
           "parameters",
+          "risk",
           "created_at"
         ],
         "properties": {
@@ -2253,6 +2469,10 @@
           },
           "request_id": {
             "type": "string"
+          },
+          "risk": {
+            "$ref": "#/components/schemas/ApprovalRisk",
+            "description": "Gateway-computed risk tier (D-K3), matching\n`SseEvent::ApprovalNeeded.risk`. Always present."
           },
           "thread_id": {
             "type": [
@@ -2384,6 +2604,13 @@
           "kind"
         ],
         "properties": {
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The background job this activity mirrors (for `kind == job`). Optional;\nomit for agent-run activities."
+          },
           "kind": {
             "$ref": "#/components/schemas/DeviceLiveActivityKind",
             "description": "What the activity represents (agent run vs. job)."
@@ -2391,6 +2618,13 @@
           "push_token": {
             "type": "string",
             "description": "APNs Live Activity update token."
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chat thread this activity mirrors (for `kind == agent_run`). Lets\nthe gateway route run-progress events to this activity's update token\n(D-N2). Optional; omit for job activities."
           }
         }
       },
@@ -3061,6 +3295,7 @@
               "tool_name",
               "description",
               "parameters",
+              "risk",
               "type"
             ],
             "properties": {
@@ -3072,6 +3307,10 @@
               },
               "request_id": {
                 "type": "string"
+              },
+              "risk": {
+                "$ref": "#/components/schemas/ApprovalRisk",
+                "description": "Gateway-computed risk tier (D-K3, single source of truth). Drives\nthe client's biometric gate and push category. Always present."
               },
               "thread_id": {
                 "type": [

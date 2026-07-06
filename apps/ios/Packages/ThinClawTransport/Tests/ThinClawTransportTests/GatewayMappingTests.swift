@@ -167,6 +167,7 @@ struct GatewayMappingTests {
             description: "Write to disk",
             parameters: #"{"path":"/tmp/x"}"#,
             requestId: "req-1",
+            risk: .high,
             threadId: "t1",
             toolName: "fs_write")
         let request = GatewayMapping.approvalRequest(from: entry)
@@ -174,6 +175,7 @@ struct GatewayMappingTests {
         #expect(request.toolName == "fs_write")
         #expect(request.description == "Write to disk")
         #expect(request.parameters == #"{"path":"/tmp/x"}"#)
+        #expect(request.risk == .high)
         #expect(request.threadID == ThreadID("t1"))
     }
 
@@ -182,13 +184,14 @@ struct GatewayMappingTests {
         let response = Components.Schemas.PendingApprovalsResponse(approvals: [
             .init(
                 createdAt: "2026-07-04T10:00:00Z", description: "a", parameters: "{}",
-                requestId: "r1", threadId: "t1", toolName: "tool_a"),
+                requestId: "r1", risk: .low, threadId: "t1", toolName: "tool_a"),
             .init(
                 createdAt: "2026-07-04T10:01:00Z", description: "b", parameters: "{}",
-                requestId: "r2", threadId: "t1", toolName: "tool_b"),
+                requestId: "r2", risk: .high, threadId: "t1", toolName: "tool_b"),
         ])
         let requests = GatewayMapping.approvalRequests(from: response)
         #expect(requests.map(\.requestID) == ["r1", "r2"])
+        #expect(requests.map(\.risk) == [.low, .high])
     }
 
     @Test("an approval maps to an inline timeline row keyed by request id")
@@ -198,6 +201,7 @@ struct GatewayMappingTests {
             description: "Write",
             parameters: "{}",
             requestId: "req-9",
+            risk: .high,
             threadId: "t1",
             toolName: "fs_write")
         let item = GatewayMapping.timelineItem(from: entry)
@@ -208,6 +212,7 @@ struct GatewayMappingTests {
             return
         }
         #expect(request.requestID == "req-9")
+        #expect(request.risk == .high)
     }
 
     // MARK: - Send + timestamps

@@ -102,6 +102,7 @@ pub(crate) async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     request_identity: GatewayRequestIdentity,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     let (approved, always) = match req.action.as_str() {
@@ -112,6 +113,41 @@ pub(crate) async fn chat_approval_handler(
     };
 
     let request_id = parse_approval_request_id(&req.request_id)?;
+
+    // Milestone M4 / D-K3 / D-K4: a watch companion may only act on LOW-risk
+    // approvals. The watch UI must not surface a high-risk approve action at
+    // all, but the gateway enforces the rule server-side so a compromised or
+    // spoofed watch client cannot approve a destructive action from the wrist.
+    // The risk tier is the gateway-side single source of truth carried in the
+    // pending-approvals cache (populated from the `ApprovalNeeded` broadcast).
+    // Only an *approve* is gated — a companion may always DENY. The check runs
+    // before the cache entry is dropped below. `always` implies approve, so it
+    // is gated too. Denies fall through regardless of risk.
+    let is_watch_companion = device_ctx
+        .as_ref()
+        .is_some_and(|axum::Extension(ctx)| ctx.is_watch_companion());
+    if approved && is_watch_companion {
+        let cached_risk = state
+            .pending_approvals
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&req.request_id).map(|entry| entry.risk));
+        // Fail closed: an unknown/absent risk (cache miss — e.g. a stale
+        // request_id or a post-restart gap) is treated as high-risk and
+        // refused, matching the classifier's own least-privilege default.
+        let is_low = matches!(
+            cached_risk,
+            Some(thinclaw_gateway::web::devices::ApprovalRisk::Low)
+        );
+        if !is_low {
+            // Generic body: never leak whether the request_id existed or its
+            // exact tier to the watch principal.
+            return Err((
+                StatusCode::FORBIDDEN,
+                "this device may only approve low-risk actions".to_string(),
+            ));
+        }
+    }
 
     // Best-effort pending-approvals cache (milestone B1, `GET
     // /api/chat/approvals`): the decision is about to be submitted, so drop
@@ -1011,6 +1047,152 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
         })
+    }
+
+    fn watch_companion_ctx() -> axum::Extension<DeviceContext> {
+        axum::Extension(DeviceContext::with_class(
+            "watch-1",
+            vec![
+                thinclaw_gateway::web::devices::DeviceScope::Chat,
+                thinclaw_gateway::web::devices::DeviceScope::Approvals,
+            ],
+            thinclaw_gateway::web::devices::DevicePlatform::Watchos,
+            true,
+        ))
+    }
+
+    fn seed_pending_approval(
+        state: &GatewayState,
+        request_id: &str,
+        risk: thinclaw_gateway::web::devices::ApprovalRisk,
+    ) {
+        let entry = thinclaw_gateway::web::types::PendingApprovalEntry {
+            request_id: request_id.to_string(),
+            tool_name: "some_tool".to_string(),
+            description: String::new(),
+            parameters: "{}".to_string(),
+            risk,
+            thread_id: None,
+            created_at: "2024-01-01T00:00:00+00:00".to_string(),
+        };
+        state
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .insert(request_id.to_string(), entry);
+    }
+
+    fn approval_request(request_id: &str, action: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            request_id: request_id.to_string(),
+            action: action.to_string(),
+            thread_id: None,
+            user_id: None,
+            actor_id: None,
+        }
+    }
+
+    fn device_identity() -> GatewayRequestIdentity {
+        GatewayRequestIdentity::new(
+            "gateway-user",
+            "gateway-actor",
+            crate::channels::web::identity_helpers::GatewayAuthSource::DeviceToken,
+            true,
+        )
+    }
+
+    #[tokio::test]
+    async fn watch_companion_high_risk_approve_is_forbidden() {
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let state = test_gateway_state(session_manager, None);
+        let request_id = Uuid::new_v4().to_string();
+        seed_pending_approval(
+            &state,
+            &request_id,
+            thinclaw_gateway::web::devices::ApprovalRisk::High,
+        );
+
+        let err = chat_approval_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            device_identity(),
+            Some(watch_companion_ctx()),
+            Json(approval_request(&request_id, "approve")),
+        )
+        .await
+        .expect_err("high-risk approve from watch must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+        // The cache entry must survive a rejected decision (we did not submit).
+        assert!(
+            state
+                .pending_approvals
+                .lock()
+                .unwrap()
+                .contains_key(&request_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_companion_unknown_risk_approve_fails_closed() {
+        // No cache entry for this request_id => risk unknown => treated as
+        // high-risk and refused (fail closed).
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let state = test_gateway_state(session_manager, None);
+        let request_id = Uuid::new_v4().to_string();
+
+        let err = chat_approval_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            device_identity(),
+            Some(watch_companion_ctx()),
+            Json(approval_request(&request_id, "approve")),
+        )
+        .await
+        .expect_err("unknown-risk approve from watch must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn watch_companion_high_risk_deny_is_allowed_through_the_gate() {
+        // A DENY is never gated by the low-risk rule — it must pass the watch
+        // check regardless of risk. It reaches submission; with no configured
+        // agent loop that fails 503, but crucially NOT 403 (the watch gate did
+        // not block it) and the cache entry is dropped (decision submitted).
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let state = test_gateway_state(session_manager, None);
+        let request_id = Uuid::new_v4().to_string();
+        seed_pending_approval(
+            &state,
+            &request_id,
+            thinclaw_gateway::web::devices::ApprovalRisk::High,
+        );
+
+        let result = chat_approval_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            device_identity(),
+            Some(watch_companion_ctx()),
+            Json(approval_request(&request_id, "deny")),
+        )
+        .await;
+
+        // Not blocked by the watch gate.
+        if let Err((status, _)) = &result {
+            assert_ne!(
+                *status,
+                StatusCode::FORBIDDEN,
+                "deny must not hit the watch gate"
+            );
+        }
+        // Decision path was entered: the cache entry was dropped.
+        assert!(
+            !state
+                .pending_approvals
+                .lock()
+                .unwrap()
+                .contains_key(&request_id)
+        );
     }
 
     #[tokio::test]

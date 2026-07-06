@@ -49,6 +49,37 @@ public protocol APIProtocol: Sendable {
     /// - Remark: HTTP `GET /api/devices/me`.
     /// - Remark: Generated from `#/paths//api/devices/me/get(devices_me_handler)`.
     func devicesMeHandler(_ input: Operations.DevicesMeHandler.Input) async throws -> Operations.DevicesMeHandler.Output
+    /// - Remark: HTTP `GET /api/devices/me/companions`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)`.
+    func devicesMeCompanionsListHandler(_ input: Operations.DevicesMeCompanionsListHandler.Input) async throws -> Operations.DevicesMeCompanionsListHandler.Output
+    /// The current device mints a reduced-scope companion (e.g. its paired watch): scopes are limited to chat + approvals (low-risk only, enforced server-side by device class). The companion is revoked whenever this parent is revoked (cascade). The raw token is returned exactly once.
+    ///
+    /// - Remark: HTTP `POST /api/devices/me/companions`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)`.
+    func devicesMeCompanionsCreateHandler(_ input: Operations.DevicesMeCompanionsCreateHandler.Input) async throws -> Operations.DevicesMeCompanionsCreateHandler.Output
+    /// - Remark: HTTP `DELETE /api/devices/me/companions/{id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)`.
+    func devicesMeCompanionsRevokeHandler(_ input: Operations.DevicesMeCompanionsRevokeHandler.Input) async throws -> Operations.DevicesMeCompanionsRevokeHandler.Output
+    /// - Remark: HTTP `PUT /api/devices/me/live-activity-start-token`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)`.
+    func devicesMeLiveActivityStartTokenRegisterHandler(_ input: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input) async throws -> Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output
+    /// - Remark: HTTP `DELETE /api/devices/me/live-activity-start-token`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)`.
+    func devicesMeLiveActivityStartTokenRemoveHandler(_ input: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input) async throws -> Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output
+    /// Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.
+    ///
+    /// - Remark: HTTP `PUT /api/devices/me/live-activity/{activity_id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)`.
+    func devicesMeLiveActivityRegisterHandler(_ input: Operations.DevicesMeLiveActivityRegisterHandler.Input) async throws -> Operations.DevicesMeLiveActivityRegisterHandler.Output
+    /// - Remark: HTTP `DELETE /api/devices/me/live-activity/{activity_id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)`.
+    func devicesMeLiveActivityRemoveHandler(_ input: Operations.DevicesMeLiveActivityRemoveHandler.Input) async throws -> Operations.DevicesMeLiveActivityRemoveHandler.Output
+    /// - Remark: HTTP `PUT /api/devices/me/push`.
+    /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)`.
+    func devicesMePushRegisterHandler(_ input: Operations.DevicesMePushRegisterHandler.Input) async throws -> Operations.DevicesMePushRegisterHandler.Output
+    /// - Remark: HTTP `DELETE /api/devices/me/push`.
+    /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)`.
+    func devicesMePushRemoveHandler(_ input: Operations.DevicesMePushRemoveHandler.Input) async throws -> Operations.DevicesMePushRemoveHandler.Output
     /// - Remark: HTTP `POST /api/devices/pair/complete`.
     /// - Remark: Generated from `#/paths//api/devices/pair/complete/post(devices_pair_complete_handler)`.
     func devicesPairCompleteHandler(_ input: Operations.DevicesPairCompleteHandler.Input) async throws -> Operations.DevicesPairCompleteHandler.Output
@@ -197,6 +228,93 @@ extension APIProtocol {
     /// - Remark: Generated from `#/paths//api/devices/me/get(devices_me_handler)`.
     public func devicesMeHandler(headers: Operations.DevicesMeHandler.Input.Headers = .init()) async throws -> Operations.DevicesMeHandler.Output {
         try await devicesMeHandler(Operations.DevicesMeHandler.Input(headers: headers))
+    }
+    /// - Remark: HTTP `GET /api/devices/me/companions`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)`.
+    public func devicesMeCompanionsListHandler(headers: Operations.DevicesMeCompanionsListHandler.Input.Headers = .init()) async throws -> Operations.DevicesMeCompanionsListHandler.Output {
+        try await devicesMeCompanionsListHandler(Operations.DevicesMeCompanionsListHandler.Input(headers: headers))
+    }
+    /// The current device mints a reduced-scope companion (e.g. its paired watch): scopes are limited to chat + approvals (low-risk only, enforced server-side by device class). The companion is revoked whenever this parent is revoked (cascade). The raw token is returned exactly once.
+    ///
+    /// - Remark: HTTP `POST /api/devices/me/companions`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)`.
+    public func devicesMeCompanionsCreateHandler(
+        headers: Operations.DevicesMeCompanionsCreateHandler.Input.Headers = .init(),
+        body: Operations.DevicesMeCompanionsCreateHandler.Input.Body
+    ) async throws -> Operations.DevicesMeCompanionsCreateHandler.Output {
+        try await devicesMeCompanionsCreateHandler(Operations.DevicesMeCompanionsCreateHandler.Input(
+            headers: headers,
+            body: body
+        ))
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/companions/{id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)`.
+    public func devicesMeCompanionsRevokeHandler(
+        path: Operations.DevicesMeCompanionsRevokeHandler.Input.Path,
+        headers: Operations.DevicesMeCompanionsRevokeHandler.Input.Headers = .init()
+    ) async throws -> Operations.DevicesMeCompanionsRevokeHandler.Output {
+        try await devicesMeCompanionsRevokeHandler(Operations.DevicesMeCompanionsRevokeHandler.Input(
+            path: path,
+            headers: headers
+        ))
+    }
+    /// - Remark: HTTP `PUT /api/devices/me/live-activity-start-token`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)`.
+    public func devicesMeLiveActivityStartTokenRegisterHandler(
+        headers: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input.Headers = .init(),
+        body: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input.Body
+    ) async throws -> Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output {
+        try await devicesMeLiveActivityStartTokenRegisterHandler(Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input(
+            headers: headers,
+            body: body
+        ))
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/live-activity-start-token`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)`.
+    public func devicesMeLiveActivityStartTokenRemoveHandler(headers: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input.Headers = .init()) async throws -> Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output {
+        try await devicesMeLiveActivityStartTokenRemoveHandler(Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input(headers: headers))
+    }
+    /// Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.
+    ///
+    /// - Remark: HTTP `PUT /api/devices/me/live-activity/{activity_id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)`.
+    public func devicesMeLiveActivityRegisterHandler(
+        path: Operations.DevicesMeLiveActivityRegisterHandler.Input.Path,
+        headers: Operations.DevicesMeLiveActivityRegisterHandler.Input.Headers = .init(),
+        body: Operations.DevicesMeLiveActivityRegisterHandler.Input.Body
+    ) async throws -> Operations.DevicesMeLiveActivityRegisterHandler.Output {
+        try await devicesMeLiveActivityRegisterHandler(Operations.DevicesMeLiveActivityRegisterHandler.Input(
+            path: path,
+            headers: headers,
+            body: body
+        ))
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/live-activity/{activity_id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)`.
+    public func devicesMeLiveActivityRemoveHandler(
+        path: Operations.DevicesMeLiveActivityRemoveHandler.Input.Path,
+        headers: Operations.DevicesMeLiveActivityRemoveHandler.Input.Headers = .init()
+    ) async throws -> Operations.DevicesMeLiveActivityRemoveHandler.Output {
+        try await devicesMeLiveActivityRemoveHandler(Operations.DevicesMeLiveActivityRemoveHandler.Input(
+            path: path,
+            headers: headers
+        ))
+    }
+    /// - Remark: HTTP `PUT /api/devices/me/push`.
+    /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)`.
+    public func devicesMePushRegisterHandler(
+        headers: Operations.DevicesMePushRegisterHandler.Input.Headers = .init(),
+        body: Operations.DevicesMePushRegisterHandler.Input.Body
+    ) async throws -> Operations.DevicesMePushRegisterHandler.Output {
+        try await devicesMePushRegisterHandler(Operations.DevicesMePushRegisterHandler.Input(
+            headers: headers,
+            body: body
+        ))
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/push`.
+    /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)`.
+    public func devicesMePushRemoveHandler(headers: Operations.DevicesMePushRemoveHandler.Input.Headers = .init()) async throws -> Operations.DevicesMePushRemoveHandler.Output {
+        try await devicesMePushRemoveHandler(Operations.DevicesMePushRemoveHandler.Input(headers: headers))
     }
     /// - Remark: HTTP `POST /api/devices/pair/complete`.
     /// - Remark: Generated from `#/paths//api/devices/pair/complete/post(devices_pair_complete_handler)`.
@@ -352,6 +470,16 @@ public enum Components {
                 case userId = "user_id"
             }
         }
+        /// Risk tier for a tool approval, computed gateway-side. Serialised
+        /// snake_case (`"low"` / `"high"`) on approval events and used to pick the push
+        /// category. Carried on [`crate::web::types::SseEvent::ApprovalNeeded`] and
+        /// [`crate::web::types::PendingApprovalEntry`].
+        ///
+        /// - Remark: Generated from `#/components/schemas/ApprovalRisk`.
+        @frozen public enum ApprovalRisk: String, Codable, Hashable, Sendable, CaseIterable {
+            case low = "low"
+            case high = "high"
+        }
         /// - Remark: Generated from `#/components/schemas/ChannelSetupStatus`.
         public struct ChannelSetupStatus: Codable, Hashable, Sendable {
             /// - Remark: Generated from `#/components/schemas/ChannelSetupStatus/apns`.
@@ -440,6 +568,95 @@ public enum Components {
                 case threadId = "thread_id"
             }
         }
+        /// `GET /api/devices/me/companions` response: the calling device's own
+        /// companions (never token/hash material).
+        ///
+        /// - Remark: Generated from `#/components/schemas/CompanionListResponse`.
+        public struct CompanionListResponse: Codable, Hashable, Sendable {
+            /// - Remark: Generated from `#/components/schemas/CompanionListResponse/companions`.
+            public var companions: [Components.Schemas.DeviceInfo]
+            /// Creates a new `CompanionListResponse`.
+            ///
+            /// - Parameters:
+            ///   - companions:
+            public init(companions: [Components.Schemas.DeviceInfo]) {
+                self.companions = companions
+            }
+            public enum CodingKeys: String, CodingKey {
+                case companions
+            }
+        }
+        /// `POST /api/devices/me/companions` request body: the current (parent) device
+        /// mints a reduced-scope companion (e.g. its paired watch). `platform`
+        /// defaults to `watchos` — the only companion surface in v1 — when omitted.
+        ///
+        /// - Remark: Generated from `#/components/schemas/CreateCompanionRequest`.
+        public struct CreateCompanionRequest: Codable, Hashable, Sendable {
+            /// - Remark: Generated from `#/components/schemas/CreateCompanionRequest/name`.
+            public var name: Swift.String
+            /// Companion platform; defaults to `"watchos"` when absent or empty.
+            ///
+            /// - Remark: Generated from `#/components/schemas/CreateCompanionRequest/platform`.
+            public var platform: Swift.String?
+            /// Creates a new `CreateCompanionRequest`.
+            ///
+            /// - Parameters:
+            ///   - name:
+            ///   - platform: Companion platform; defaults to `"watchos"` when absent or empty.
+            public init(
+                name: Swift.String,
+                platform: Swift.String? = nil
+            ) {
+                self.name = name
+                self.platform = platform
+            }
+            public enum CodingKeys: String, CodingKey {
+                case name
+                case platform
+            }
+        }
+        /// `POST /api/devices/me/companions` response — the only place the companion's
+        /// raw token is ever returned.
+        ///
+        /// - Remark: Generated from `#/components/schemas/CreateCompanionResponse`.
+        public struct CreateCompanionResponse: Codable, Hashable, Sendable {
+            /// - Remark: Generated from `#/components/schemas/CreateCompanionResponse/device_id`.
+            public var deviceId: Swift.String
+            /// The parent (minting) device id, echoed for the client's record.
+            ///
+            /// - Remark: Generated from `#/components/schemas/CreateCompanionResponse/parent_device_id`.
+            public var parentDeviceId: Swift.String
+            /// - Remark: Generated from `#/components/schemas/CreateCompanionResponse/scopes`.
+            public var scopes: [Components.Schemas.DeviceScope]
+            /// Raw `tcd_...` companion token. Returned exactly once.
+            ///
+            /// - Remark: Generated from `#/components/schemas/CreateCompanionResponse/token`.
+            public var token: Swift.String
+            /// Creates a new `CreateCompanionResponse`.
+            ///
+            /// - Parameters:
+            ///   - deviceId:
+            ///   - parentDeviceId: The parent (minting) device id, echoed for the client's record.
+            ///   - scopes:
+            ///   - token: Raw `tcd_...` companion token. Returned exactly once.
+            public init(
+                deviceId: Swift.String,
+                parentDeviceId: Swift.String,
+                scopes: [Components.Schemas.DeviceScope],
+                token: Swift.String
+            ) {
+                self.deviceId = deviceId
+                self.parentDeviceId = parentDeviceId
+                self.scopes = scopes
+                self.token = token
+            }
+            public enum CodingKeys: String, CodingKey {
+                case deviceId = "device_id"
+                case parentDeviceId = "parent_device_id"
+                case scopes
+                case token
+            }
+        }
         /// Public view of a device (never includes token/hash material).
         ///
         /// - Remark: Generated from `#/components/schemas/DeviceInfo`.
@@ -456,6 +673,11 @@ public enum Components {
             public var lastSeenAt: Swift.String
             /// - Remark: Generated from `#/components/schemas/DeviceInfo/name`.
             public var name: Swift.String
+            /// Parent device id when this is a companion device (milestone M4);
+            /// `None` for a normal top-level paired device.
+            ///
+            /// - Remark: Generated from `#/components/schemas/DeviceInfo/parent_device_id`.
+            public var parentDeviceId: Swift.String?
             /// - Remark: Generated from `#/components/schemas/DeviceInfo/platform`.
             public var platform: Components.Schemas.DevicePlatform
             /// - Remark: Generated from `#/components/schemas/DeviceInfo/revoked_at`.
@@ -473,6 +695,7 @@ public enum Components {
             ///   - hasPubkey:
             ///   - lastSeenAt:
             ///   - name:
+            ///   - parentDeviceId: Parent device id when this is a companion device (milestone M4);
             ///   - platform:
             ///   - revokedAt:
             ///   - scopes:
@@ -484,6 +707,7 @@ public enum Components {
                 hasPubkey: Swift.Bool,
                 lastSeenAt: Swift.String,
                 name: Swift.String,
+                parentDeviceId: Swift.String? = nil,
                 platform: Components.Schemas.DevicePlatform,
                 revokedAt: Swift.String? = nil,
                 scopes: [Components.Schemas.DeviceScope],
@@ -495,6 +719,7 @@ public enum Components {
                 self.hasPubkey = hasPubkey
                 self.lastSeenAt = lastSeenAt
                 self.name = name
+                self.parentDeviceId = parentDeviceId
                 self.platform = platform
                 self.revokedAt = revokedAt
                 self.scopes = scopes
@@ -507,6 +732,7 @@ public enum Components {
                 case hasPubkey = "has_pubkey"
                 case lastSeenAt = "last_seen_at"
                 case name
+                case parentDeviceId = "parent_device_id"
                 case platform
                 case revokedAt = "revoked_at"
                 case scopes
@@ -529,6 +755,15 @@ public enum Components {
             public enum CodingKeys: String, CodingKey {
                 case devices
             }
+        }
+        /// The kind of Live Activity a registered push token drives (D-N2). Mirrors
+        /// the two activity surfaces the mobile app runs: an agent run and a
+        /// background job.
+        ///
+        /// - Remark: Generated from `#/components/schemas/DeviceLiveActivityKind`.
+        @frozen public enum DeviceLiveActivityKind: String, Codable, Hashable, Sendable, CaseIterable {
+            case agentRun = "agent_run"
+            case job = "job"
         }
         /// Platform family of a paired device.
         ///
@@ -1443,6 +1678,11 @@ public enum Components {
             public var parameters: Swift.String
             /// - Remark: Generated from `#/components/schemas/PendingApprovalEntry/request_id`.
             public var requestId: Swift.String
+            /// Gateway-computed risk tier (D-K3), matching
+            /// `SseEvent::ApprovalNeeded.risk`. Always present.
+            ///
+            /// - Remark: Generated from `#/components/schemas/PendingApprovalEntry/risk`.
+            public var risk: Components.Schemas.ApprovalRisk
             /// - Remark: Generated from `#/components/schemas/PendingApprovalEntry/thread_id`.
             public var threadId: Swift.String?
             /// - Remark: Generated from `#/components/schemas/PendingApprovalEntry/tool_name`.
@@ -1454,6 +1694,7 @@ public enum Components {
             ///   - description:
             ///   - parameters: Pretty-printed JSON, matching `SseEvent::ApprovalNeeded.parameters`.
             ///   - requestId:
+            ///   - risk: Gateway-computed risk tier (D-K3), matching
             ///   - threadId:
             ///   - toolName:
             public init(
@@ -1461,6 +1702,7 @@ public enum Components {
                 description: Swift.String,
                 parameters: Swift.String,
                 requestId: Swift.String,
+                risk: Components.Schemas.ApprovalRisk,
                 threadId: Swift.String? = nil,
                 toolName: Swift.String
             ) {
@@ -1468,6 +1710,7 @@ public enum Components {
                 self.description = description
                 self.parameters = parameters
                 self.requestId = requestId
+                self.risk = risk
                 self.threadId = threadId
                 self.toolName = toolName
             }
@@ -1476,6 +1719,7 @@ public enum Components {
                 case description
                 case parameters
                 case requestId = "request_id"
+                case risk
                 case threadId = "thread_id"
                 case toolName = "tool_name"
             }
@@ -1630,6 +1874,105 @@ public enum Components {
                 case sec
                 case urls
                 case v
+            }
+        }
+        /// `PUT /api/devices/me/live-activity/{activity_id}` request body: register
+        /// (or replace) the Live Activity update-push token for one activity.
+        ///
+        /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest`.
+        public struct RegisterLiveActivityRequest: Codable, Hashable, Sendable {
+            /// The background job this activity mirrors (for `kind == job`). Optional;
+            /// omit for agent-run activities.
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest/job_id`.
+            public var jobId: Swift.String?
+            /// What the activity represents (agent run vs. job).
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest/kind`.
+            public var kind: Components.Schemas.DeviceLiveActivityKind
+            /// APNs Live Activity update token.
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest/push_token`.
+            public var pushToken: Swift.String
+            /// The chat thread this activity mirrors (for `kind == agent_run`). Lets
+            /// the gateway route run-progress events to this activity's update token
+            /// (D-N2). Optional; omit for job activities.
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityRequest/thread_id`.
+            public var threadId: Swift.String?
+            /// Creates a new `RegisterLiveActivityRequest`.
+            ///
+            /// - Parameters:
+            ///   - jobId: The background job this activity mirrors (for `kind == job`). Optional;
+            ///   - kind: What the activity represents (agent run vs. job).
+            ///   - pushToken: APNs Live Activity update token.
+            ///   - threadId: The chat thread this activity mirrors (for `kind == agent_run`). Lets
+            public init(
+                jobId: Swift.String? = nil,
+                kind: Components.Schemas.DeviceLiveActivityKind,
+                pushToken: Swift.String,
+                threadId: Swift.String? = nil
+            ) {
+                self.jobId = jobId
+                self.kind = kind
+                self.pushToken = pushToken
+                self.threadId = threadId
+            }
+            public enum CodingKeys: String, CodingKey {
+                case jobId = "job_id"
+                case kind
+                case pushToken = "push_token"
+                case threadId = "thread_id"
+            }
+        }
+        /// `PUT /api/devices/me/live-activity-start-token` request body: register (or
+        /// replace) the device's Live Activity push-to-start token.
+        ///
+        /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityStartTokenRequest`.
+        public struct RegisterLiveActivityStartTokenRequest: Codable, Hashable, Sendable {
+            /// APNs Live Activity push-to-start token.
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterLiveActivityStartTokenRequest/push_token`.
+            public var pushToken: Swift.String
+            /// Creates a new `RegisterLiveActivityStartTokenRequest`.
+            ///
+            /// - Parameters:
+            ///   - pushToken: APNs Live Activity push-to-start token.
+            public init(pushToken: Swift.String) {
+                self.pushToken = pushToken
+            }
+            public enum CodingKeys: String, CodingKey {
+                case pushToken = "push_token"
+            }
+        }
+        /// `PUT /api/devices/me/push` request body: register (or replace) the
+        /// device's APNs token for content-free pushes.
+        ///
+        /// - Remark: Generated from `#/components/schemas/RegisterPushRequest`.
+        public struct RegisterPushRequest: Codable, Hashable, Sendable {
+            /// APNs device token (hex from `didRegisterForRemoteNotifications`).
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterPushRequest/apns_token`.
+            public var apnsToken: Swift.String
+            /// APNs environment: `"development"` or `"production"`.
+            ///
+            /// - Remark: Generated from `#/components/schemas/RegisterPushRequest/environment`.
+            public var environment: Swift.String
+            /// Creates a new `RegisterPushRequest`.
+            ///
+            /// - Parameters:
+            ///   - apnsToken: APNs device token (hex from `didRegisterForRemoteNotifications`).
+            ///   - environment: APNs environment: `"development"` or `"production"`.
+            public init(
+                apnsToken: Swift.String,
+                environment: Swift.String
+            ) {
+                self.apnsToken = apnsToken
+                self.environment = environment
+            }
+            public enum CodingKeys: String, CodingKey {
+                case apnsToken = "apns_token"
+                case environment
             }
         }
         /// `POST /api/devices/{id}/rename` request body.
@@ -4166,6 +4509,2134 @@ public enum Operations {
             /// - Throws: An error if `self` is not `.notFound`.
             /// - SeeAlso: `.notFound`.
             public var notFound: Operations.DevicesMeHandler.Output.NotFound {
+                get throws {
+                    switch self {
+                    case let .notFound(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "notFound",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// - Remark: HTTP `GET /api/devices/me/companions`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)`.
+    public enum DevicesMeCompanionsListHandler {
+        public static let id: Swift.String = "devices_me_companions_list_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/companions/GET/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeCompanionsListHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeCompanionsListHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMeCompanionsListHandler.Input.Headers
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - headers:
+            public init(headers: Operations.DevicesMeCompanionsListHandler.Input.Headers = .init()) {
+                self.headers = headers
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/companions/GET/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/companions/GET/responses/200/content/application\/json`.
+                    case json(Components.Schemas.CompanionListResponse)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.CompanionListResponse {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMeCompanionsListHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMeCompanionsListHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// The calling device's companions
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMeCompanionsListHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMeCompanionsListHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMeCompanionsListHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMeCompanionsListHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMeCompanionsListHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/get(devices_me_companions_list_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMeCompanionsListHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// The current device mints a reduced-scope companion (e.g. its paired watch): scopes are limited to chat + approvals (low-risk only, enforced server-side by device class). The companion is revoked whenever this parent is revoked (cascade). The raw token is returned exactly once.
+    ///
+    /// - Remark: HTTP `POST /api/devices/me/companions`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)`.
+    public enum DevicesMeCompanionsCreateHandler {
+        public static let id: Swift.String = "devices_me_companions_create_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/companions/POST/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeCompanionsCreateHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeCompanionsCreateHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMeCompanionsCreateHandler.Input.Headers
+            /// - Remark: Generated from `#/paths/api/devices/me/companions/POST/requestBody`.
+            @frozen public enum Body: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/companions/POST/requestBody/content/application\/json`.
+                case json(Components.Schemas.CreateCompanionRequest)
+            }
+            public var body: Operations.DevicesMeCompanionsCreateHandler.Input.Body
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - headers:
+            ///   - body:
+            public init(
+                headers: Operations.DevicesMeCompanionsCreateHandler.Input.Headers = .init(),
+                body: Operations.DevicesMeCompanionsCreateHandler.Input.Body
+            ) {
+                self.headers = headers
+                self.body = body
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/companions/POST/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/companions/POST/responses/200/content/application\/json`.
+                    case json(Components.Schemas.CreateCompanionResponse)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.CreateCompanionResponse {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMeCompanionsCreateHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMeCompanionsCreateHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// Companion minted; token returned exactly once
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMeCompanionsCreateHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMeCompanionsCreateHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct BadRequest: Sendable, Hashable {
+                /// Creates a new `BadRequest`.
+                public init() {}
+            }
+            /// Invalid companion name
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/400`.
+            ///
+            /// HTTP response code: `400 badRequest`.
+            case badRequest(Operations.DevicesMeCompanionsCreateHandler.Output.BadRequest)
+            /// Invalid companion name
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/400`.
+            ///
+            /// HTTP response code: `400 badRequest`.
+            public static var badRequest: Self {
+                .badRequest(.init())
+            }
+            /// The associated value of the enum case if `self` is `.badRequest`.
+            ///
+            /// - Throws: An error if `self` is not `.badRequest`.
+            /// - SeeAlso: `.badRequest`.
+            public var badRequest: Operations.DevicesMeCompanionsCreateHandler.Output.BadRequest {
+                get throws {
+                    switch self {
+                    case let .badRequest(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "badRequest",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMeCompanionsCreateHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMeCompanionsCreateHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMeCompanionsCreateHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMeCompanionsCreateHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct NotFound: Sendable, Hashable {
+                /// Creates a new `NotFound`.
+                public init() {}
+            }
+            /// Parent device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            case notFound(Operations.DevicesMeCompanionsCreateHandler.Output.NotFound)
+            /// Parent device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/post(devices_me_companions_create_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            public static var notFound: Self {
+                .notFound(.init())
+            }
+            /// The associated value of the enum case if `self` is `.notFound`.
+            ///
+            /// - Throws: An error if `self` is not `.notFound`.
+            /// - SeeAlso: `.notFound`.
+            public var notFound: Operations.DevicesMeCompanionsCreateHandler.Output.NotFound {
+                get throws {
+                    switch self {
+                    case let .notFound(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "notFound",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/companions/{id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)`.
+    public enum DevicesMeCompanionsRevokeHandler {
+        public static let id: Swift.String = "devices_me_companions_revoke_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/companions/{id}/DELETE/path`.
+            public struct Path: Sendable, Hashable {
+                /// Companion device id
+                ///
+                /// - Remark: Generated from `#/paths/api/devices/me/companions/{id}/DELETE/path/id`.
+                public var id: Swift.String
+                /// Creates a new `Path`.
+                ///
+                /// - Parameters:
+                ///   - id: Companion device id
+                public init(id: Swift.String) {
+                    self.id = id
+                }
+            }
+            public var path: Operations.DevicesMeCompanionsRevokeHandler.Input.Path
+            /// - Remark: Generated from `#/paths/api/devices/me/companions/{id}/DELETE/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeCompanionsRevokeHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeCompanionsRevokeHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMeCompanionsRevokeHandler.Input.Headers
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - path:
+            ///   - headers:
+            public init(
+                path: Operations.DevicesMeCompanionsRevokeHandler.Input.Path,
+                headers: Operations.DevicesMeCompanionsRevokeHandler.Input.Headers = .init()
+            ) {
+                self.path = path
+                self.headers = headers
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/companions/{id}/DELETE/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/companions/{id}/DELETE/responses/200/content/application\/json`.
+                    case json(Components.Schemas.DeviceInfo)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.DeviceInfo {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMeCompanionsRevokeHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMeCompanionsRevokeHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// Companion revoked
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMeCompanionsRevokeHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMeCompanionsRevokeHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMeCompanionsRevokeHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMeCompanionsRevokeHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMeCompanionsRevokeHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMeCompanionsRevokeHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct NotFound: Sendable, Hashable {
+                /// Creates a new `NotFound`.
+                public init() {}
+            }
+            /// Companion not found for this parent
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            case notFound(Operations.DevicesMeCompanionsRevokeHandler.Output.NotFound)
+            /// Companion not found for this parent
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/companions/{id}/delete(devices_me_companions_revoke_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            public static var notFound: Self {
+                .notFound(.init())
+            }
+            /// The associated value of the enum case if `self` is `.notFound`.
+            ///
+            /// - Throws: An error if `self` is not `.notFound`.
+            /// - SeeAlso: `.notFound`.
+            public var notFound: Operations.DevicesMeCompanionsRevokeHandler.Output.NotFound {
+                get throws {
+                    switch self {
+                    case let .notFound(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "notFound",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// - Remark: HTTP `PUT /api/devices/me/live-activity-start-token`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)`.
+    public enum DevicesMeLiveActivityStartTokenRegisterHandler {
+        public static let id: Swift.String = "devices_me_live_activity_start_token_register_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/live-activity-start-token/PUT/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeLiveActivityStartTokenRegisterHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeLiveActivityStartTokenRegisterHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input.Headers
+            /// - Remark: Generated from `#/paths/api/devices/me/live-activity-start-token/PUT/requestBody`.
+            @frozen public enum Body: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/live-activity-start-token/PUT/requestBody/content/application\/json`.
+                case json(Components.Schemas.RegisterLiveActivityStartTokenRequest)
+            }
+            public var body: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input.Body
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - headers:
+            ///   - body:
+            public init(
+                headers: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input.Headers = .init(),
+                body: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input.Body
+            ) {
+                self.headers = headers
+                self.body = body
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/live-activity-start-token/PUT/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/live-activity-start-token/PUT/responses/200/content/application\/json`.
+                    case json(Components.Schemas.DeviceInfo)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.DeviceInfo {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// Push-to-start token registered
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct BadRequest: Sendable, Hashable {
+                /// Creates a new `BadRequest`.
+                public init() {}
+            }
+            /// Invalid (empty or oversized) push token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/400`.
+            ///
+            /// HTTP response code: `400 badRequest`.
+            case badRequest(Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.BadRequest)
+            /// Invalid (empty or oversized) push token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/400`.
+            ///
+            /// HTTP response code: `400 badRequest`.
+            public static var badRequest: Self {
+                .badRequest(.init())
+            }
+            /// The associated value of the enum case if `self` is `.badRequest`.
+            ///
+            /// - Throws: An error if `self` is not `.badRequest`.
+            /// - SeeAlso: `.badRequest`.
+            public var badRequest: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.BadRequest {
+                get throws {
+                    switch self {
+                    case let .badRequest(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "badRequest",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct NotFound: Sendable, Hashable {
+                /// Creates a new `NotFound`.
+                public init() {}
+            }
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            case notFound(Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.NotFound)
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/put(devices_me_live_activity_start_token_register_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            public static var notFound: Self {
+                .notFound(.init())
+            }
+            /// The associated value of the enum case if `self` is `.notFound`.
+            ///
+            /// - Throws: An error if `self` is not `.notFound`.
+            /// - SeeAlso: `.notFound`.
+            public var notFound: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output.NotFound {
+                get throws {
+                    switch self {
+                    case let .notFound(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "notFound",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/live-activity-start-token`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)`.
+    public enum DevicesMeLiveActivityStartTokenRemoveHandler {
+        public static let id: Swift.String = "devices_me_live_activity_start_token_remove_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/live-activity-start-token/DELETE/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeLiveActivityStartTokenRemoveHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeLiveActivityStartTokenRemoveHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input.Headers
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - headers:
+            public init(headers: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input.Headers = .init()) {
+                self.headers = headers
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/live-activity-start-token/DELETE/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/live-activity-start-token/DELETE/responses/200/content/application\/json`.
+                    case json(Components.Schemas.DeviceInfo)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.DeviceInfo {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// Push-to-start token removed
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct NotFound: Sendable, Hashable {
+                /// Creates a new `NotFound`.
+                public init() {}
+            }
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            case notFound(Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.NotFound)
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity-start-token/delete(devices_me_live_activity_start_token_remove_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            public static var notFound: Self {
+                .notFound(.init())
+            }
+            /// The associated value of the enum case if `self` is `.notFound`.
+            ///
+            /// - Throws: An error if `self` is not `.notFound`.
+            /// - SeeAlso: `.notFound`.
+            public var notFound: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output.NotFound {
+                get throws {
+                    switch self {
+                    case let .notFound(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "notFound",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// Register a Live Activity update token for one activity. Include `thread_id` (agent runs) or `job_id` (jobs) so the gateway can route run-progress events to this activity's per-activity update token.
+    ///
+    /// - Remark: HTTP `PUT /api/devices/me/live-activity/{activity_id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)`.
+    public enum DevicesMeLiveActivityRegisterHandler {
+        public static let id: Swift.String = "devices_me_live_activity_register_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/PUT/path`.
+            public struct Path: Sendable, Hashable {
+                /// Live Activity id
+                ///
+                /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/PUT/path/activity_id`.
+                public var activityId: Swift.String
+                /// Creates a new `Path`.
+                ///
+                /// - Parameters:
+                ///   - activityId: Live Activity id
+                public init(activityId: Swift.String) {
+                    self.activityId = activityId
+                }
+            }
+            public var path: Operations.DevicesMeLiveActivityRegisterHandler.Input.Path
+            /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/PUT/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeLiveActivityRegisterHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeLiveActivityRegisterHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMeLiveActivityRegisterHandler.Input.Headers
+            /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/PUT/requestBody`.
+            @frozen public enum Body: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/PUT/requestBody/content/application\/json`.
+                case json(Components.Schemas.RegisterLiveActivityRequest)
+            }
+            public var body: Operations.DevicesMeLiveActivityRegisterHandler.Input.Body
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - path:
+            ///   - headers:
+            ///   - body:
+            public init(
+                path: Operations.DevicesMeLiveActivityRegisterHandler.Input.Path,
+                headers: Operations.DevicesMeLiveActivityRegisterHandler.Input.Headers = .init(),
+                body: Operations.DevicesMeLiveActivityRegisterHandler.Input.Body
+            ) {
+                self.path = path
+                self.headers = headers
+                self.body = body
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/PUT/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/PUT/responses/200/content/application\/json`.
+                    case json(Components.Schemas.DeviceInfo)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.DeviceInfo {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMeLiveActivityRegisterHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMeLiveActivityRegisterHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// Live Activity token registered
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMeLiveActivityRegisterHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMeLiveActivityRegisterHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct BadRequest: Sendable, Hashable {
+                /// Creates a new `BadRequest`.
+                public init() {}
+            }
+            /// Invalid (empty or oversized) push token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/400`.
+            ///
+            /// HTTP response code: `400 badRequest`.
+            case badRequest(Operations.DevicesMeLiveActivityRegisterHandler.Output.BadRequest)
+            /// Invalid (empty or oversized) push token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/400`.
+            ///
+            /// HTTP response code: `400 badRequest`.
+            public static var badRequest: Self {
+                .badRequest(.init())
+            }
+            /// The associated value of the enum case if `self` is `.badRequest`.
+            ///
+            /// - Throws: An error if `self` is not `.badRequest`.
+            /// - SeeAlso: `.badRequest`.
+            public var badRequest: Operations.DevicesMeLiveActivityRegisterHandler.Output.BadRequest {
+                get throws {
+                    switch self {
+                    case let .badRequest(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "badRequest",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMeLiveActivityRegisterHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMeLiveActivityRegisterHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMeLiveActivityRegisterHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMeLiveActivityRegisterHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct NotFound: Sendable, Hashable {
+                /// Creates a new `NotFound`.
+                public init() {}
+            }
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            case notFound(Operations.DevicesMeLiveActivityRegisterHandler.Output.NotFound)
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/put(devices_me_live_activity_register_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            public static var notFound: Self {
+                .notFound(.init())
+            }
+            /// The associated value of the enum case if `self` is `.notFound`.
+            ///
+            /// - Throws: An error if `self` is not `.notFound`.
+            /// - SeeAlso: `.notFound`.
+            public var notFound: Operations.DevicesMeLiveActivityRegisterHandler.Output.NotFound {
+                get throws {
+                    switch self {
+                    case let .notFound(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "notFound",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/live-activity/{activity_id}`.
+    /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)`.
+    public enum DevicesMeLiveActivityRemoveHandler {
+        public static let id: Swift.String = "devices_me_live_activity_remove_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/DELETE/path`.
+            public struct Path: Sendable, Hashable {
+                /// Live Activity id
+                ///
+                /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/DELETE/path/activity_id`.
+                public var activityId: Swift.String
+                /// Creates a new `Path`.
+                ///
+                /// - Parameters:
+                ///   - activityId: Live Activity id
+                public init(activityId: Swift.String) {
+                    self.activityId = activityId
+                }
+            }
+            public var path: Operations.DevicesMeLiveActivityRemoveHandler.Input.Path
+            /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/DELETE/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeLiveActivityRemoveHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMeLiveActivityRemoveHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMeLiveActivityRemoveHandler.Input.Headers
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - path:
+            ///   - headers:
+            public init(
+                path: Operations.DevicesMeLiveActivityRemoveHandler.Input.Path,
+                headers: Operations.DevicesMeLiveActivityRemoveHandler.Input.Headers = .init()
+            ) {
+                self.path = path
+                self.headers = headers
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/DELETE/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/live-activity/{activity_id}/DELETE/responses/200/content/application\/json`.
+                    case json(Components.Schemas.DeviceInfo)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.DeviceInfo {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMeLiveActivityRemoveHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMeLiveActivityRemoveHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// Live Activity token removed
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMeLiveActivityRemoveHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMeLiveActivityRemoveHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMeLiveActivityRemoveHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMeLiveActivityRemoveHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMeLiveActivityRemoveHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMeLiveActivityRemoveHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct NotFound: Sendable, Hashable {
+                /// Creates a new `NotFound`.
+                public init() {}
+            }
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            case notFound(Operations.DevicesMeLiveActivityRemoveHandler.Output.NotFound)
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/live-activity/{activity_id}/delete(devices_me_live_activity_remove_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            public static var notFound: Self {
+                .notFound(.init())
+            }
+            /// The associated value of the enum case if `self` is `.notFound`.
+            ///
+            /// - Throws: An error if `self` is not `.notFound`.
+            /// - SeeAlso: `.notFound`.
+            public var notFound: Operations.DevicesMeLiveActivityRemoveHandler.Output.NotFound {
+                get throws {
+                    switch self {
+                    case let .notFound(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "notFound",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// - Remark: HTTP `PUT /api/devices/me/push`.
+    /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)`.
+    public enum DevicesMePushRegisterHandler {
+        public static let id: Swift.String = "devices_me_push_register_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/push/PUT/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMePushRegisterHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMePushRegisterHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMePushRegisterHandler.Input.Headers
+            /// - Remark: Generated from `#/paths/api/devices/me/push/PUT/requestBody`.
+            @frozen public enum Body: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/push/PUT/requestBody/content/application\/json`.
+                case json(Components.Schemas.RegisterPushRequest)
+            }
+            public var body: Operations.DevicesMePushRegisterHandler.Input.Body
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - headers:
+            ///   - body:
+            public init(
+                headers: Operations.DevicesMePushRegisterHandler.Input.Headers = .init(),
+                body: Operations.DevicesMePushRegisterHandler.Input.Body
+            ) {
+                self.headers = headers
+                self.body = body
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/push/PUT/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/push/PUT/responses/200/content/application\/json`.
+                    case json(Components.Schemas.DeviceInfo)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.DeviceInfo {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMePushRegisterHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMePushRegisterHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// APNs push token registered
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMePushRegisterHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMePushRegisterHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct BadRequest: Sendable, Hashable {
+                /// Creates a new `BadRequest`.
+                public init() {}
+            }
+            /// Invalid environment or (empty/oversized) push token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/400`.
+            ///
+            /// HTTP response code: `400 badRequest`.
+            case badRequest(Operations.DevicesMePushRegisterHandler.Output.BadRequest)
+            /// Invalid environment or (empty/oversized) push token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/400`.
+            ///
+            /// HTTP response code: `400 badRequest`.
+            public static var badRequest: Self {
+                .badRequest(.init())
+            }
+            /// The associated value of the enum case if `self` is `.badRequest`.
+            ///
+            /// - Throws: An error if `self` is not `.badRequest`.
+            /// - SeeAlso: `.badRequest`.
+            public var badRequest: Operations.DevicesMePushRegisterHandler.Output.BadRequest {
+                get throws {
+                    switch self {
+                    case let .badRequest(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "badRequest",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMePushRegisterHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMePushRegisterHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMePushRegisterHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMePushRegisterHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct NotFound: Sendable, Hashable {
+                /// Creates a new `NotFound`.
+                public init() {}
+            }
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            case notFound(Operations.DevicesMePushRegisterHandler.Output.NotFound)
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/put(devices_me_push_register_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            public static var notFound: Self {
+                .notFound(.init())
+            }
+            /// The associated value of the enum case if `self` is `.notFound`.
+            ///
+            /// - Throws: An error if `self` is not `.notFound`.
+            /// - SeeAlso: `.notFound`.
+            public var notFound: Operations.DevicesMePushRegisterHandler.Output.NotFound {
+                get throws {
+                    switch self {
+                    case let .notFound(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "notFound",
+                            response: self
+                        )
+                    }
+                }
+            }
+            /// Undocumented response.
+            ///
+            /// A response with a code that is not documented in the OpenAPI document.
+            case undocumented(statusCode: Swift.Int, OpenAPIRuntime.UndocumentedPayload)
+        }
+        @frozen public enum AcceptableContentType: AcceptableProtocol {
+            case json
+            case other(Swift.String)
+            public init?(rawValue: Swift.String) {
+                switch rawValue.lowercased() {
+                case "application/json":
+                    self = .json
+                default:
+                    self = .other(rawValue)
+                }
+            }
+            public var rawValue: Swift.String {
+                switch self {
+                case let .other(string):
+                    return string
+                case .json:
+                    return "application/json"
+                }
+            }
+            public static var allCases: [Self] {
+                [
+                    .json
+                ]
+            }
+        }
+    }
+    /// - Remark: HTTP `DELETE /api/devices/me/push`.
+    /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)`.
+    public enum DevicesMePushRemoveHandler {
+        public static let id: Swift.String = "devices_me_push_remove_handler"
+        public struct Input: Sendable, Hashable {
+            /// - Remark: Generated from `#/paths/api/devices/me/push/DELETE/header`.
+            public struct Headers: Sendable, Hashable {
+                public var accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMePushRemoveHandler.AcceptableContentType>]
+                /// Creates a new `Headers`.
+                ///
+                /// - Parameters:
+                ///   - accept:
+                public init(accept: [OpenAPIRuntime.AcceptHeaderContentType<Operations.DevicesMePushRemoveHandler.AcceptableContentType>] = .defaultValues()) {
+                    self.accept = accept
+                }
+            }
+            public var headers: Operations.DevicesMePushRemoveHandler.Input.Headers
+            /// Creates a new `Input`.
+            ///
+            /// - Parameters:
+            ///   - headers:
+            public init(headers: Operations.DevicesMePushRemoveHandler.Input.Headers = .init()) {
+                self.headers = headers
+            }
+        }
+        @frozen public enum Output: Sendable, Hashable {
+            public struct Ok: Sendable, Hashable {
+                /// - Remark: Generated from `#/paths/api/devices/me/push/DELETE/responses/200/content`.
+                @frozen public enum Body: Sendable, Hashable {
+                    /// - Remark: Generated from `#/paths/api/devices/me/push/DELETE/responses/200/content/application\/json`.
+                    case json(Components.Schemas.DeviceInfo)
+                    /// The associated value of the enum case if `self` is `.json`.
+                    ///
+                    /// - Throws: An error if `self` is not `.json`.
+                    /// - SeeAlso: `.json`.
+                    public var json: Components.Schemas.DeviceInfo {
+                        get throws {
+                            switch self {
+                            case let .json(body):
+                                return body
+                            }
+                        }
+                    }
+                }
+                /// Received HTTP response body
+                public var body: Operations.DevicesMePushRemoveHandler.Output.Ok.Body
+                /// Creates a new `Ok`.
+                ///
+                /// - Parameters:
+                ///   - body: Received HTTP response body
+                public init(body: Operations.DevicesMePushRemoveHandler.Output.Ok.Body) {
+                    self.body = body
+                }
+            }
+            /// APNs push token removed
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)/responses/200`.
+            ///
+            /// HTTP response code: `200 ok`.
+            case ok(Operations.DevicesMePushRemoveHandler.Output.Ok)
+            /// The associated value of the enum case if `self` is `.ok`.
+            ///
+            /// - Throws: An error if `self` is not `.ok`.
+            /// - SeeAlso: `.ok`.
+            public var ok: Operations.DevicesMePushRemoveHandler.Output.Ok {
+                get throws {
+                    switch self {
+                    case let .ok(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "ok",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Unauthorized: Sendable, Hashable {
+                /// Creates a new `Unauthorized`.
+                public init() {}
+            }
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            case unauthorized(Operations.DevicesMePushRemoveHandler.Output.Unauthorized)
+            /// Missing or invalid device token
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)/responses/401`.
+            ///
+            /// HTTP response code: `401 unauthorized`.
+            public static var unauthorized: Self {
+                .unauthorized(.init())
+            }
+            /// The associated value of the enum case if `self` is `.unauthorized`.
+            ///
+            /// - Throws: An error if `self` is not `.unauthorized`.
+            /// - SeeAlso: `.unauthorized`.
+            public var unauthorized: Operations.DevicesMePushRemoveHandler.Output.Unauthorized {
+                get throws {
+                    switch self {
+                    case let .unauthorized(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "unauthorized",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct Forbidden: Sendable, Hashable {
+                /// Creates a new `Forbidden`.
+                public init() {}
+            }
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            case forbidden(Operations.DevicesMePushRemoveHandler.Output.Forbidden)
+            /// Not a device-authenticated request
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)/responses/403`.
+            ///
+            /// HTTP response code: `403 forbidden`.
+            public static var forbidden: Self {
+                .forbidden(.init())
+            }
+            /// The associated value of the enum case if `self` is `.forbidden`.
+            ///
+            /// - Throws: An error if `self` is not `.forbidden`.
+            /// - SeeAlso: `.forbidden`.
+            public var forbidden: Operations.DevicesMePushRemoveHandler.Output.Forbidden {
+                get throws {
+                    switch self {
+                    case let .forbidden(response):
+                        return response
+                    default:
+                        try throwUnexpectedResponseStatus(
+                            expectedStatus: "forbidden",
+                            response: self
+                        )
+                    }
+                }
+            }
+            public struct NotFound: Sendable, Hashable {
+                /// Creates a new `NotFound`.
+                public init() {}
+            }
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            case notFound(Operations.DevicesMePushRemoveHandler.Output.NotFound)
+            /// Device record not found
+            ///
+            /// - Remark: Generated from `#/paths//api/devices/me/push/delete(devices_me_push_remove_handler)/responses/404`.
+            ///
+            /// HTTP response code: `404 notFound`.
+            public static var notFound: Self {
+                .notFound(.init())
+            }
+            /// The associated value of the enum case if `self` is `.notFound`.
+            ///
+            /// - Throws: An error if `self` is not `.notFound`.
+            /// - SeeAlso: `.notFound`.
+            public var notFound: Operations.DevicesMePushRemoveHandler.Output.NotFound {
                 get throws {
                     switch self {
                     case let .notFound(response):

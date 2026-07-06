@@ -32,6 +32,12 @@ public actor GatewaySession {
 
     /// Per-thread subscribers for routed live events.
     private var eventSubscribers: [ThreadID: [UUID: AsyncStream<AgentEvent>.Continuation]] = [:]
+    /// Session-wide subscribers for `approval_needed` events, independent of
+    /// which thread (if any) is open. The approvals surface is global — a
+    /// pending tool call must reach it even when no chat screen is mounted, and
+    /// even when the event carries no `thread_id` — so approvals fan out here
+    /// rather than through the per-thread routing that drops thread-less events.
+    private var approvalSubscribers: [UUID: AsyncStream<ApprovalRequest>.Continuation] = [:]
     /// Per-thread coalescers for in-flight streaming text.
     private var coalescers: [ThreadID: StreamChunkCoalescer] = [:]
 
@@ -87,6 +93,8 @@ public actor GatewaySession {
             for continuation in continuations.values { continuation.finish() }
         }
         eventSubscribers.removeAll()
+        for continuation in approvalSubscribers.values { continuation.finish() }
+        approvalSubscribers.removeAll()
         coalescers.removeAll()
 
         updateConnectionState(.idle)
@@ -134,6 +142,26 @@ public actor GatewaySession {
         if eventSubscribers[thread]?.isEmpty == true { eventSubscribers[thread] = nil }
     }
 
+    // MARK: - Approval event routing
+
+    /// A session-wide stream of live ``ApprovalRequest`` values, one per
+    /// `approval_needed` event, regardless of the event's thread. The approvals
+    /// surface subscribes here so a pending tool call reaches it whether or not
+    /// the owning thread is currently open (or attached at all).
+    public func approvalEvents() -> AsyncStream<ApprovalRequest> {
+        AsyncStream { continuation in
+            let id = UUID()
+            approvalSubscribers[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.dropApprovalSubscriber(id) }
+            }
+        }
+    }
+
+    private func dropApprovalSubscriber(_ id: UUID) {
+        approvalSubscribers[id] = nil
+    }
+
     // MARK: - Actions
 
     /// Send a message. Returns the gateway-issued message id.
@@ -158,7 +186,48 @@ public actor GatewaySession {
         }
     }
 
+    /// Submit a decision for a pending tool approval
+    /// (`POST /api/chat/approval`). The caller is responsible for any biometric
+    /// gate (D-K3) *before* invoking this — the session performs no gating.
+    ///
+    /// - Parameters:
+    ///   - requestID: The gateway-issued approval request id to decide.
+    ///   - decision: Approve, approve-always, or deny.
+    ///   - thread: The thread that owns the pending approval, so the agent loop
+    ///     resumes the right session. Pass the request's `threadID` when known.
+    public func respondToApproval(
+        _ requestID: String,
+        decision: ApprovalDecision,
+        thread: ThreadID? = nil
+    ) async throws {
+        do {
+            _ = try await client.chatApprovalHandler(
+                .init(
+                    body: .json(
+                        .init(
+                            action: decision.wire,
+                            requestId: requestID,
+                            threadId: thread?.rawValue))))
+        } catch {
+            throw APIError.from(error)
+        }
+    }
+
     // MARK: - Reads
+
+    /// Cold-load the currently-pending tool approvals
+    /// (`GET /api/chat/approvals`), oldest-first. Best-effort and lossy by
+    /// contract (the gateway cache is in-memory), so treat an empty result as
+    /// "none known", not "definitely none".
+    public func pendingApprovals() async throws -> [ApprovalRequest] {
+        do {
+            let output = try await client.chatApprovalsHandler(.init())
+            let response = try output.ok.body.json
+            return GatewayMapping.approvalRequests(from: response)
+        } catch {
+            throw APIError.from(error)
+        }
+    }
 
     /// List the conversation threads visible to this device.
     public func threads() async throws -> [ChatThread] {
@@ -231,6 +300,13 @@ public actor GatewaySession {
     /// Route one decoded event to its thread's subscribers, folding
     /// `stream_chunk` through the per-thread coalescer.
     private func route(_ event: AgentEvent) {
+        // Approvals fan out session-wide first (independent of thread routing),
+        // so the global approvals surface sees every pending tool call — even
+        // one whose event omitted `thread_id`.
+        if case .approvalNeeded(let request) = event {
+            for continuation in approvalSubscribers.values { continuation.yield(request) }
+        }
+
         guard let thread = event.threadID else {
             // Thread-less events (e.g. heartbeat) are not routed to any UI.
             return

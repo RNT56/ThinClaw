@@ -45,6 +45,7 @@ public struct ChatScreen: View {
     private var offlineBanner: some View {
         HStack(spacing: ThinClawSpacing.sm) {
             Image(systemName: "wifi.slash")
+                .accessibilityHidden(true)
             Text("Offline — messages will send when reconnected")
                 .font(ThinClawTypography.caption)
             Spacer()
@@ -57,6 +58,10 @@ public struct ChatScreen: View {
         .padding(.vertical, ThinClawSpacing.sm)
         .frame(maxWidth: .infinity)
         .background(.orange.opacity(0.15))
+        // Group the icon + copy as one label; the Retry button stays a
+        // separately focusable action.
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("Offline. Messages will send when reconnected."))
     }
 
     private var historyLoader: some View {
@@ -104,7 +109,22 @@ struct TimelineRow: View {
     /// Invoked when a failure row is tapped (retry). No-op for other kinds.
     var onRetry: () -> Void = {}
 
+    /// Opens external URLs (the `auth_required` OAuth flow). The mobile client
+    /// only *opens* the consent page — per D-T4 it never captures the returned
+    /// token, so completing the flow hands off to the desktop.
+    @Environment(\.openURL) private var openURL
+
     var body: some View {
+        rowContent
+            // VoiceOver: one spoken element per row, worded by the pure
+            // `TimelineAccessibility` descriptor in ThinClawCore. Streaming
+            // replies keep a stable label and announce growth via the value.
+            .accessibilityElement(children: .combine)
+            .modifier(TimelineAccessibilityModifier(descriptor: item.accessibility))
+    }
+
+    @ViewBuilder
+    private var rowContent: some View {
         switch item.kind {
         case .userMessage(let text):
             Text(text)
@@ -124,6 +144,19 @@ struct TimelineRow: View {
         case .approval(let request):
             Text("Approval requested: \(request.toolName)")
                 .font(ThinClawTypography.caption)
+        case .authPrompt(let prompt):
+            AuthPromptCard(
+                extensionName: prompt.extensionName,
+                instructions: prompt.instructions,
+                hasAuthURL: prompt.authURL != nil,
+                onOpenAuth: {
+                    if let url = prompt.authURL { openURL(url) }
+                })
+        case .credentialPrompt(let prompt):
+            CredentialPromptCard(
+                provider: prompt.provider,
+                secretName: prompt.secretName,
+                reason: prompt.reason)
         case .failure(let message):
             Button(action: onRetry) {
                 Label(message, systemImage: "exclamationmark.triangle")
@@ -131,5 +164,19 @@ struct TimelineRow: View {
             }
             .buttonStyle(.plain)
         }
+    }
+}
+
+/// Applies a pure ``TimelineAccessibility`` descriptor to a row: label, an
+/// optional value (streaming prose, announced politely on change), and an
+/// optional action hint.
+private struct TimelineAccessibilityModifier: ViewModifier {
+    let descriptor: TimelineAccessibility
+
+    func body(content: Content) -> some View {
+        content
+            .accessibilityLabel(Text(descriptor.label))
+            .accessibilityValue(Text(descriptor.value ?? ""))
+            .accessibilityHint(Text(descriptor.hint ?? ""))
     }
 }

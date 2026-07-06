@@ -3,6 +3,8 @@
 use serde::Serialize;
 use thinclaw_types::SubagentTaskPacket;
 
+use crate::web::devices::ApprovalRisk;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -154,6 +156,9 @@ pub enum SseEvent {
         tool_name: String,
         description: String,
         parameters: String,
+        /// Gateway-computed risk tier (D-K3, single source of truth). Drives
+        /// the client's biometric gate and push category. Always present.
+        risk: ApprovalRisk,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },

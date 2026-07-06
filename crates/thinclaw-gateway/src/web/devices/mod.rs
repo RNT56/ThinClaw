@@ -8,6 +8,8 @@
 //! can wire them up without pulling in root `thinclaw` crates.
 //!
 //! Submodules, by responsibility:
+//! - [`approval_risk`]: gateway-side approval risk-tier classifier (D-K3),
+//!   the single source of truth for the `risk` carried on approval events.
 //! - [`types`]: `DeviceRecord`, `DeviceScope`, `DevicePlatform`, and the
 //!   request/response DTOs for the `/api/devices/*` endpoints.
 //! - [`store`]: persisted `~/.thinclaw/devices.json` CRUD + token issuance.
@@ -21,6 +23,7 @@
 //!   (throttle, wake budget, Live Activity revisions), consumed by the runtime
 //!   first-party push notifier.
 
+pub mod approval_risk;
 pub mod audit;
 pub mod pairing;
 pub mod push_policy;
@@ -29,6 +32,7 @@ pub mod scopes;
 pub mod store;
 pub mod types;
 
+pub use approval_risk::{ApprovalRisk, classify as classify_approval_risk};
 pub use audit::{DeviceAuditError, DeviceAuditEvent, DeviceAuditLog};
 pub use pairing::{
     ConsumeOutcome, CreatedPairing, DevicePairingError, DevicePairingStore, PAIRING_FAILED_LIMIT,
@@ -37,6 +41,7 @@ pub use pairing::{
 pub use push_policy::{
     BACKGROUND_WAKE_BUDGET, BACKGROUND_WAKE_WINDOW_SECS, DevicePushState,
     LIVE_ACTIVITY_MIN_INTERVAL_SECS, PushDecision, PushKind, decide, decide_background_wake,
+    live_activity_start,
 };
 pub use registry::{DeviceAuth, DeviceRegistry, StreamGuard};
 pub use scopes::required_scope;
@@ -44,10 +49,10 @@ pub use store::{
     DEVICE_TOKEN_PREFIX, DeviceStore, DeviceStoreError, IssuedToken, hash_token, issue_token,
 };
 pub use types::{
-    DeviceApnsRegistration, DeviceInfo, DeviceListResponse, DeviceLiveActivityKind,
-    DeviceLiveActivityToken, DevicePlatform, DeviceRecord, DeviceScope,
-    MAX_LIVE_ACTIVITIES_PER_DEVICE, PairCompleteRequest, PairCompleteResponse, PairStartResponse,
-    PendingPairInfo, PendingPairListResponse, QrPairingPayload, RegisterLiveActivityRequest,
-    RegisterLiveActivityStartTokenRequest, RegisterPushRequest, RenameDeviceRequest,
-    RotateTokenResponse,
+    CompanionListResponse, CreateCompanionRequest, CreateCompanionResponse, DeviceApnsRegistration,
+    DeviceInfo, DeviceListResponse, DeviceLiveActivityKind, DeviceLiveActivityToken,
+    DevicePlatform, DeviceRecord, DeviceScope, MAX_LIVE_ACTIVITIES_PER_DEVICE, PairCompleteRequest,
+    PairCompleteResponse, PairStartResponse, PendingPairInfo, PendingPairListResponse,
+    QrPairingPayload, RegisterLiveActivityRequest, RegisterLiveActivityStartTokenRequest,
+    RegisterPushRequest, RenameDeviceRequest, RotateTokenResponse,
 };

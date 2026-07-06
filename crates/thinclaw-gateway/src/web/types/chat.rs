@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::web::devices::ApprovalRisk;
+
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SendMessageRequest {
@@ -118,6 +120,9 @@ pub struct PendingApprovalEntry {
     pub description: String,
     /// Pretty-printed JSON, matching `SseEvent::ApprovalNeeded.parameters`.
     pub parameters: String,
+    /// Gateway-computed risk tier (D-K3), matching
+    /// `SseEvent::ApprovalNeeded.risk`. Always present.
+    pub risk: ApprovalRisk,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     /// RFC 3339 timestamp; entries are returned sorted oldest-first.

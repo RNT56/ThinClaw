@@ -327,6 +327,7 @@ mod tests {
             tool_name: "shell".to_string(),
             description: "Run ls".to_string(),
             parameters: "{}".to_string(),
+            risk: thinclaw_gateway::web::devices::ApprovalRisk::High,
             thread_id: Some("t1".to_string()),
         };
         let ws = WsServerMessage::from_sse_event(&sse);

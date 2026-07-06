@@ -219,6 +219,7 @@ rm -rf "$tmp"
 | `timezones` | Timezone handling via chrono-tz | chrono-tz |
 | `web-gateway` | Compatibility flag for the always-available local HTTP web UI + API server | (uses axum, already a base dep) |
 | `gateway-tls` | Optional rustls TLS listener for the gateway, self-signed cert pinned via SPKI fingerprint (`docs/MOBILE_SECURITY.md` D-X1); policy via `GATEWAY_TLS=off\|auto\|on` (default `auto`), port via `GATEWAY_TLS_PORT` (default 3443) | axum-server, rcgen, if-addrs |
+| `mdns` | Optional mDNS/Bonjour LAN discovery responder advertising the gateway on `_thinclaw._tcp` (milestone B3, `docs/MOBILE_SECURITY.md` D-X3 — a locator only). Default-off; advertises only when `discovery.enabled = true` in settings **or** `MDNS_ENABLED` is set. TXT record carries non-sensitive hints (`version`, `api`, `name`, and `fp` = base64url(sha256(instance-id))) — never tokens/secrets/paths. Included in `light`/`full`; excluded from `edge`/`desktop`. Pure-Rust, no Avahi/Bonjour daemon | mdns-sd |
 | `openapi` (crate feature of `thinclaw-gateway`) | utoipa schema derives for the gateway's v1 mobile contract; always enabled by the root package, which serves `/api/openapi.json` and ships the `export-openapi` bin (`generate`/`check` against `clients/openapi/thinclaw-gateway.openapi.json`) | utoipa |
 | `acp` | ACP integration surface | (no extra system deps) |
 | `repl` | Interactive REPL mode + boot screen | (no extra deps) |
@@ -282,7 +283,7 @@ That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
 
 ```
 edge     = libsql
-light    = edge + postgres + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones + gateway-tls
+light    = edge + postgres + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones + gateway-tls + mdns
 desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
 full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr
 voice    = opt-in (headless wake word; also in --all-features) — not in full

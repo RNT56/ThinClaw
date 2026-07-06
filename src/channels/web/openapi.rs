@@ -62,6 +62,7 @@ impl Modify for GatewayTokenSecurity {
         SseEvent,
         WsClientMessage,
         WsServerMessage,
+        thinclaw_gateway::web::devices::ApprovalRisk,
         thinclaw_gateway::web::types::PendingApprovalEntry,
         thinclaw_gateway::web::types::PendingApprovalsResponse
     ))
@@ -88,6 +89,9 @@ struct JobsApiDoc;
         super::handlers::devices::devices_revoke_handler,
         super::handlers::devices::devices_rotate_handler,
         super::handlers::devices::devices_me_handler,
+        super::handlers::devices::devices_me_companions_create_handler,
+        super::handlers::devices::devices_me_companions_list_handler,
+        super::handlers::devices::devices_me_companions_revoke_handler,
         super::handlers::devices::devices_me_push_register_handler,
         super::handlers::devices::devices_me_push_remove_handler,
         super::handlers::devices::devices_me_live_activity_register_handler,
@@ -114,6 +118,9 @@ struct JobsApiDoc;
         thinclaw_gateway::web::devices::RegisterPushRequest,
         thinclaw_gateway::web::devices::RegisterLiveActivityRequest,
         thinclaw_gateway::web::devices::RegisterLiveActivityStartTokenRequest,
+        thinclaw_gateway::web::devices::CreateCompanionRequest,
+        thinclaw_gateway::web::devices::CreateCompanionResponse,
+        thinclaw_gateway::web::devices::CompanionListResponse,
         super::handlers::devices::PairPendingConfirmResponse,
     ))
 )]
@@ -289,6 +296,8 @@ mod tests {
         "/api/devices/{id}/revoke",
         "/api/devices/{id}/rotate",
         "/api/devices/me",
+        "/api/devices/me/companions",
+        "/api/devices/me/companions/{id}",
         "/api/devices/me/push",
         "/api/devices/me/live-activity/{activity_id}",
         "/api/devices/me/live-activity-start-token",

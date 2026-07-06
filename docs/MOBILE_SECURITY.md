@@ -1,12 +1,15 @@
 # Mobile Security Model
 
-> **Status: design specification.** Canonical security spec for the ThinClaw
-> iOS/watchOS surface. Implementation is phased (see
-> [`docs/MOBILE_APP.md`](MOBILE_APP.md) milestones); until a phase lands,
-> the corresponding sections describe intent, not current behavior.
+> **Status: canonical security spec; all phased milestones (B1→B3, M1→M5) have
+> landed in code.** Canonical security spec for the ThinClaw iOS/watchOS
+> surface. Every decision below is now implemented — the gateway-side controls
+> are Rust-tested, and the client-side controls are `swift test`-covered with the
+> whole app building for the iOS 26 simulator — with the honest exception that
+> nothing has been exercised against a real device or Apple's live push
+> infrastructure (see [`docs/MOBILE_APP.md`](MOBILE_APP.md) → Remaining work).
 > `src/NETWORK_SECURITY.md` remains the authority for what the gateway
-> enforces *today* and gains a "Paired device client" trust boundary when
-> milestone B1 ships.
+> enforces *today*; it gained the "Paired device client" trust boundary with
+> milestone B1.
 
 ## Grounding constraints (verified against the codebase)
 
@@ -43,7 +46,7 @@ acts on the operator's behalf).
 | T7 | Request replay | VL | M | TLS/WireGuard transport; v2 upgrade: proof-of-possession signing |
 | T8 | Compromised widget process | L | M | v1: widget shares the device token (bounded by scopes; high-risk approvals refused outside the app); upgrade: distinct widget sub-token |
 | T9 | Lock-screen leakage | H | L–M | Content-free pushes + local rewrite; Live Activity shows status enums only; per-category preview controls |
-| T10 | Lost watch | L | M | Watch holds its own reduced-scope token, independently revocable; wrist-detection lock; no transcript persistence |
+| T10 | Lost watch | L | M | Watch holds its own reduced-scope companion token (`chat`+`approvals` only), independently revocable and cascade-revoked with its parent; watch approvals enforced low-risk-only server-side (D-K4, landed M4); wrist-detection lock; no transcript persistence |
 | T11 | Evil-twin Bonjour gateway | L | H | Discovery is a locator only; endpoint must present pinned SPKI + instance id before any credential is sent |
 | T12 | Stale devices never revoked | H | M | `last_seen_at` surfacing, 90-day inactivity auto-revoke, device list UI, audit log |
 | T13 | Server-side token store theft | L | M | Only SHA-256 hashes at rest; pairing secrets single-use and TTL'd |
@@ -182,6 +185,61 @@ thinclaw://pair?d=<base64url(json)>
   *Rejected:* sharing the phone token — all-or-nothing revocation, copies
   the highest-value credential to the weakest-authenticated device.
 
+  **Backend landed (M4).** The watch token is modeled as a *companion* device:
+  a child `DeviceRecord` carrying `parent_device_id`, minted by an
+  already-paired parent at `POST /api/devices/me/companions` (`devices:self`
+  scope) with a deliberately narrowed grant of **`chat` + `approvals` only**
+  (no `jobs:read`, no `devices:self` — so the companion cannot enumerate or
+  manage devices, self-register push over HTTP, or mint sub-companions; the
+  relay-first watch does its device management through the paired phone). The
+  parent lists (`GET /api/devices/me/companions`) and revokes
+  (`DELETE /api/devices/me/companions/{id}`) its own companions, and any
+  revocation **cascades**: `DeviceStore::revoke_cascade` revokes every child
+  with the parent in one locked write, clearing push/Live-Activity
+  registrations, and the registry broadcasts each revoked id so live SSE/WS
+  streams tear down synchronously. The **low-risk-only rule is enforced
+  server-side** in the approve handler (`POST /api/chat/approval`): when the
+  authenticated principal is a watchOS companion, a `High` (or unknown, fail-
+  closed) risk tier — read from the gateway-side pending-approvals cache, the
+  D-K3 single source of truth — is refused with a generic `403`; a `deny` is
+  always allowed, and phone/full-token principals are never affected. Audit:
+  `companion.created` / `companion.revoked`.
+
+  **Watch client UI authored (M4).** `apps/ios/Watch/Sources` renders the
+  wrist surface behind a `WatchGatewayProxy` seam (relay-first; the watch
+  attaches its OWN reduced-scope token, never the phone's): a glanceable status
+  (mirrored `AgentStatusSnapshot` + relay/direct/queued route badge), an
+  approvals list that offers an **approve action for low-risk entries only** —
+  high-risk (and, fail-closed, unknown-tier) entries show "Approve on iPhone"
+  and hand off, matching the server-side refusal as defense in depth — with a
+  round-trip spinner and success/failure `WKInterfaceDevice` haptics, and a
+  dictated quick-ask with a sent/queued/failed receipt. Deny is always
+  available at any tier. `apps/ios/WatchWidgets/Sources` renders a WidgetKit
+  status complication from the watch App Group mirror. The default read-only
+  `MirroredSnapshotProxy` renders the mirror and queues every write until the
+  bridge relay proxy is wired into `WatchApp`.
+
+  **Relay + companion provisioning authored (M4).** `ThinClawWatchBridge` now
+  carries the bridge half and the `App/Sources/WatchProvisioning` hook activates
+  it while the phone is paired. The phone-side `WatchRelayHost`
+  (`WCSessionDelegate`) mints the watch a companion
+  (`POST /api/devices/me/companions`, pinned parent client) when the watch
+  reports a missing/stale credential and delivers it as
+  `updateApplicationContext` (token + gateway URLs + SPKI pin + instance id);
+  the watch persists it in its **own** keychain (`WatchCompanionCredential`,
+  distinct key). Relayed RPCs forward the **watch's own token opaquely** — the
+  phone assembles a client whose bearer is the forwarded watch token, never its
+  own, so the gateway attributes/revokes the watch independently (a unit test
+  asserts the watch token, not the phone token, rides in a relayed approve). A
+  missing token or a 401/403 from a forwarded call fails closed to
+  `reprovisionRequired`. The watch-side `WatchGatewayRouter` selects
+  relay→direct→queue (direct = pinned URLSession with the watch's credential;
+  else `transferUserInfo` queue + "pending sync") with per-route timeout
+  fall-through inside the <5s approval budget. On unpair the phone `DELETE`s the
+  companion (the parent cascade also covers it). Pure seams are `swift test`-
+  covered on macOS (39 tests); WCSession/watchOS whole-target compile is the
+  Build stage's job.
+
 ### Push privacy
 
 - **D-N1 — Content-free pushes + local rewrite.** APNs payloads carry only
@@ -192,7 +250,12 @@ thinclaw://pair?d=<base64url(json)>
   finding the mobile path must not reuse. *Rejected:* content-in-payload —
   ships transcript fragments through Apple, trivially avoidable.
 - **D-N2 — Live Activity payloads:** status enum + progress + short job id
-  only; no prompt text, no tool arguments.
+  only; no prompt text, no tool arguments. The Live Activity *registration*
+  also associates the activity with the `thread_id`/`job_id` it mirrors so the
+  gateway can route run events to the right per-activity update token; these
+  are opaque ids, never content. Update/end pushes go only to the
+  per-activity token and push-to-start only to the start token — a rejected
+  Live Activity token prunes just that entry, never the alert registration.
 - **D-N3 — Per-category controls:** previews always/when-unlocked/never;
   approvals can be set "app only"; interactive approve-from-notification
   offered only for low-risk categories.
@@ -201,15 +264,33 @@ thinclaw://pair?d=<base64url(json)>
 
 - Transcript cache: `NSFileProtectionCompleteUntilFirstUserAuthentication`;
   optional "Enhanced protection" upgrades to `Complete` (documented cost:
-  no locked-screen refresh).
+  no locked-screen refresh). **Client wiring landed (M5).** The Settings toggle
+  drives `GRDBTranscriptStore.applyFileProtection(enhanced:)`, which re-tags the
+  cache directory + SQLite sidecars to `Complete`/`CompleteUntilFirstUserAuth`,
+  and persists the choice under the shared
+  `com.thinclaw.ios.settings.enhancedProtection` defaults key. This toggle gates
+  the heavier data-at-rest file-protection class only; the app-switcher
+  redaction overlay below is always on, independent of it.
 - Never cached on device: secrets-store values, `credential_prompt`
   contents, the pairing secret (freed after pairing).
 - Widget snapshots carry at most: thread title, truncated preview
-  (respecting the preview setting), approval title + risk badge.
+  (respecting the preview setting), approval title + risk badge. Enforced
+  client-side (M3) by `SnapshotPrivacyPolicy` in the `SnapshotPublisher`
+  pipeline: every human-authored string is truncated to a character cap before
+  it reaches the App Group container, and the "app only" preview setting drops
+  titles/descriptions entirely, leaving only status enums, counts, ids, and the
+  risk tier. Tool names and risk tiers are structural (not operator prose) and
+  are always retained so a redacted widget can still label and gate a row.
 - OSLog: tokens/URLs logged with `privacy: .private`; no body logging.
 - Gateway: `tcd_` registered in the `LeakDetector` scrub patterns; device
-  tokens rejected on the `?token=` query path; optional app-switcher
-  redaction overlay on the client.
+  tokens rejected on the `?token=` query path.
+- **App-switcher redaction overlay landed (M5).** `App/Sources/PrivacyOverlay`
+  covers the window whenever `scenePhase` goes `.inactive`/`.background`, so the
+  app-switcher snapshot never shows transcript content. It is **always on** — a
+  cheap, unconditional privacy measure independent of the "Enhanced protection"
+  toggle (which gates only the transcript file-protection class). Pure
+  `PrivacyRedactionPolicy` is macOS-tested;
+  the SwiftUI overlay is verified at the Build stage.
 
 ### Gateway-side hardening (B1)
 
@@ -243,10 +324,12 @@ thinclaw://pair?d=<base64url(json)>
    90-day-inactivity selection logic (unit-tested), but nothing schedules or
    calls it yet — there is no running daily auto-revoke sweep.
 
-## Client & push implementation status (M1 / B2)
+## Client & push implementation status (M1–M5 / B2)
 
 Annotates the decisions above against what the iOS client (`apps/ios/`) and the
-first-party push notifier actually implement today. The security primitives are
+first-party push notifier actually implement today. All client milestones
+(M1–M5) have landed in code; the caveats below are about real-device / live-Apple
+exercise, not missing implementation. The security primitives are
 unit-tested Swift package layers; the **onboarding/pairing and chat/sessions
 features are now wired end to end in code** (`OnboardingStore` state machine +
 VisionKit QR scanner + app credential gating; `ChatStore`/`SessionsStore` over
@@ -302,12 +385,61 @@ Rust-tested):
   a generic `aps.alert` (`mutable-content: 1`) plus an id-only `tc` dict; tests
   assert no message text, tool name, or parameters ever serialize into the
   payload. The runtime notifier carries the payload verbatim and never logs it.
-- ✅ **D-N2 Live Activity payloads.** Content-state carries only
-  `{phase, progress?, revision}` with a monotonic revision and a ≥15 s/activity
-  throttle; the tool name never rides in the state. Background wakes are bounded
-  by a per-device 3/hour budget.
-- 📋 **D-N3 per-category controls** and the Notification Service Extension
-  rewrite are client-side (M2), not yet implemented.
+- ✅ **D-N2 Live Activity payloads.** The gateway-**pushed** content-state
+  carries only `{phase, progress?, revision}` with a monotonic revision and a
+  ≥15 s/activity throttle; the tool name never rides in a pushed state.
+  Background wakes are bounded by a per-device 3/hour budget. On the client
+  (M3), `ThinClawLiveActivity`'s `LiveActivityManager` drives the activity
+  **locally** while foregrounded and may include the tool name in a *local*
+  update only — that state never transits APNs, and a late gateway push is
+  superseded by the higher-`revision` local update the widget already applied.
+  The `LiveActivity` **registration** associates the activity with its
+  `thread_id` (`kind: agent_run`), an opaque id, so the notifier can route run
+  events to the per-activity update token; on run end the client `DELETE`s that
+  registration. The device's push-to-start token is registered so a killed app
+  can be spawned.
+- ✅ **D-N3 per-category controls** and the Notification Service Extension
+  rewrite (client-side, M2/M5, landed in code): authored in `apps/ios`. The app registers four
+  categories — `THINCLAW_MESSAGE`, `THINCLAW_APPROVAL_LOW` (inline Approve/Deny),
+  `THINCLAW_APPROVAL_HIGH` (Open-only → deep-link → in-app Face ID), and
+  `THINCLAW_JOB` — so an inline approve action is offered for low-risk approvals
+  only. The `ThinClawNotificationService` extension re-fetches approval content
+  over the shared pinned connection (`GET /api/chat/approvals`, device token from
+  the shared Keychain group) and rewrites the visible title/body locally,
+  leaving the generic text when the gateway is unreachable. Content-free pushes
+  carry only the `tc` id dict end to end. **Per-category preview toggles landed
+  (M5).** `ThinClawCore.NotificationPreferences` models per-category modes
+  (message/approval/job × always/when-unlocked/never, plus approvals-only
+  "app only"); the in-app Settings surface persists them through
+  `NotificationPreferencesStore` into the shared App Group defaults
+  (`notif.preview.<category>`), and the `ThinClawNotificationService` extension
+  reads the same keys before rewriting an approval — `never`/`app only` (and
+  `when-unlocked` while the device is locked, probed fail-closed) leave the
+  generic content-free text. Pure model + persistence round-trip are
+  macOS-tested; the SwiftUI Settings screen is unverified against a
+  Tuist/`xcodebuild` build (same caveat as Phase 1).
+- ✅ **D-K3 gateway-side risk classifier (single source of truth).**
+  `thinclaw_gateway::web::devices::approval_risk::classify` maps a tool name to
+  `ApprovalRisk::{Low, High}` from an auditable substring allowlist:
+  read-only/informational verbs (`read`/`search`/`list`/`get`/…) are `low`;
+  side-effecting, egress, browser, filesystem-mutating, deploy/send, and **any
+  unrecognised** tool default to `high` (least-privilege — over-gating costs one
+  Face ID prompt, under-gating approves a destructive action from a lock screen).
+  A high-risk substring wins even when a read-ish word co-occurs. The tier
+  serialises snake_case onto the `approval_needed` SSE event and the
+  `GET /api/chat/approvals` pending entries, and the push notifier derives the
+  APNs category from it — the client and NSE never approximate risk locally
+  (Rust-tested; carried through the OpenAPI snapshot to the generated client).
+- ✅ **D-K3 client biometric gate (landed in code, M2/M5).** `ApprovalsStore` fires an
+  injected `BiometricGating` (`LAContext` Face ID) before a **high-risk approve**
+  and never before deny or a low-risk decision; the widget/watch omit the approve
+  action for high-risk entirely (deep-link into the app). The M5 Settings surface
+  (`SettingsStore`) reuses the same `BiometricGating` seam to gate the reveal of
+  the gateway URL + pinned fingerprint (device-management/server-detail reveal),
+  and re-hides them on backgrounding. Push registration is
+  device-token-authenticated via the `devices:self` scope
+  (`PUT/DELETE /api/devices/me/push`). Same Tuist/`xcodebuild` + live-Apple
+  caveat as D-N3.
 
 ## v1 simplifications (explicit, each with an upgrade path)
 

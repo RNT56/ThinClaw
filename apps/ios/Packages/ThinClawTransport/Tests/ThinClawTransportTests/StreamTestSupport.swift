@@ -188,10 +188,14 @@ final class MockGatewayClient: APIProtocol, @unchecked Sendable {
     /// can assert the session forwards thread/before/limit (rather than
     /// silently dropping them, which was the original bug).
     private(set) var historyQueries: [Operations.ChatHistoryHandler.Input.Query] = []
+    /// Approval decisions captured from `chatApprovalHandler`, so tests can
+    /// assert the session forwards action/request-id/thread.
+    private(set) var approvalDecisions: [Components.Schemas.ApprovalRequest] = []
 
     var sendResponse = Components.Schemas.SendMessageResponse(messageId: "m-1", status: "accepted")
     var threadsResponse = Components.Schemas.ThreadListResponse(threads: [])
     var historyResponse = Components.Schemas.HistoryResponse(threadId: "t1", turns: [])
+    var approvalsResponse = Components.Schemas.PendingApprovalsResponse(approvals: [])
 
     func chatSendHandler(
         _ input: Operations.ChatSendHandler.Input
@@ -224,13 +228,20 @@ final class MockGatewayClient: APIProtocol, @unchecked Sendable {
 
     enum MockError: Error { case unexpected, unimplemented }
 
-    // Unused operations trap loudly if a test ever reaches them.
     func chatApprovalHandler(_ input: Operations.ChatApprovalHandler.Input) async throws
         -> Operations.ChatApprovalHandler.Output
-    { throw MockError.unimplemented }
+    {
+        guard case let .json(body) = input.body else { throw MockError.unexpected }
+        lock.withLock { approvalDecisions.append(body) }
+        return .accepted(.init(body: .json(.init(messageId: "", status: "accepted"))))
+    }
     func chatApprovalsHandler(_ input: Operations.ChatApprovalsHandler.Input) async throws
         -> Operations.ChatApprovalsHandler.Output
-    { throw MockError.unimplemented }
+    {
+        .ok(.init(body: .json(approvalsResponse)))
+    }
+
+    // Unused operations trap loudly if a test ever reaches them.
     func chatNewThreadHandler(_ input: Operations.ChatNewThreadHandler.Input) async throws
         -> Operations.ChatNewThreadHandler.Output
     { throw MockError.unimplemented }
@@ -243,6 +254,37 @@ final class MockGatewayClient: APIProtocol, @unchecked Sendable {
     func devicesMeHandler(_ input: Operations.DevicesMeHandler.Input) async throws
         -> Operations.DevicesMeHandler.Output
     { throw MockError.unimplemented }
+    func devicesMeCompanionsListHandler(
+        _ input: Operations.DevicesMeCompanionsListHandler.Input
+    ) async throws -> Operations.DevicesMeCompanionsListHandler.Output { throw MockError.unimplemented }
+    func devicesMeCompanionsCreateHandler(
+        _ input: Operations.DevicesMeCompanionsCreateHandler.Input
+    ) async throws -> Operations.DevicesMeCompanionsCreateHandler.Output { throw MockError.unimplemented }
+    func devicesMeCompanionsRevokeHandler(
+        _ input: Operations.DevicesMeCompanionsRevokeHandler.Input
+    ) async throws -> Operations.DevicesMeCompanionsRevokeHandler.Output { throw MockError.unimplemented }
+    func devicesMeLiveActivityRegisterHandler(
+        _ input: Operations.DevicesMeLiveActivityRegisterHandler.Input
+    ) async throws -> Operations.DevicesMeLiveActivityRegisterHandler.Output { throw MockError.unimplemented }
+    func devicesMeLiveActivityRemoveHandler(
+        _ input: Operations.DevicesMeLiveActivityRemoveHandler.Input
+    ) async throws -> Operations.DevicesMeLiveActivityRemoveHandler.Output { throw MockError.unimplemented }
+    func devicesMeLiveActivityStartTokenRegisterHandler(
+        _ input: Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Input
+    ) async throws -> Operations.DevicesMeLiveActivityStartTokenRegisterHandler.Output {
+        throw MockError.unimplemented
+    }
+    func devicesMeLiveActivityStartTokenRemoveHandler(
+        _ input: Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Input
+    ) async throws -> Operations.DevicesMeLiveActivityStartTokenRemoveHandler.Output {
+        throw MockError.unimplemented
+    }
+    func devicesMePushRegisterHandler(
+        _ input: Operations.DevicesMePushRegisterHandler.Input
+    ) async throws -> Operations.DevicesMePushRegisterHandler.Output { throw MockError.unimplemented }
+    func devicesMePushRemoveHandler(
+        _ input: Operations.DevicesMePushRemoveHandler.Input
+    ) async throws -> Operations.DevicesMePushRemoveHandler.Output { throw MockError.unimplemented }
     func devicesPairCompleteHandler(_ input: Operations.DevicesPairCompleteHandler.Input)
         async throws -> Operations.DevicesPairCompleteHandler.Output
     { throw MockError.unimplemented }

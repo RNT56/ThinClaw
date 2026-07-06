@@ -33,6 +33,9 @@ import ThinClawCore
 /// requires a migration.
 public final class GRDBTranscriptStore: TranscriptStoring {
     private let dbPool: DatabasePool
+    /// The database file path, retained so the "Enhanced protection" toggle can
+    /// re-tag the file and its directory at runtime (``applyFileProtection``).
+    private let dbURL: URL
 
     /// Open (creating if needed) the transcript database at `url`.
     ///
@@ -40,6 +43,7 @@ public final class GRDBTranscriptStore: TranscriptStoring {
     ///   created if missing and, on iOS, tagged
     ///   `CompleteUntilFirstUserAuthentication`.
     public init(path url: URL) throws {
+        self.dbURL = url
         try Self.prepareDirectory(for: url)
 
         var configuration = Configuration()
@@ -82,6 +86,48 @@ public final class GRDBTranscriptStore: TranscriptStoring {
                 ])
         #else
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        #endif
+    }
+
+    // MARK: - Enhanced protection (M5)
+
+    /// Re-tag the transcript cache with the requested file-protection level
+    /// (docs/MOBILE_SECURITY.md, "Data at rest"). `enhanced == true` upgrades the
+    /// database file and its directory to `NSFileProtectionComplete` — the
+    /// operator's "Enhanced protection" choice — at the documented cost of no
+    /// locked-screen refresh (the file becomes unreadable while locked). `false`
+    /// restores the default `CompleteUntilFirstUserAuthentication`, which stays
+    /// readable for a background refresh after first unlock.
+    ///
+    /// Applies to the directory and every SQLite sidecar (`-wal`, `-shm`) so the
+    /// whole cache is covered, not just the main file. A no-op on non-iOS (the
+    /// file-protection API is iOS-only), where it returns `false`.
+    @discardableResult
+    public func applyFileProtection(enhanced: Bool) -> Bool {
+        #if os(iOS)
+            let level: FileProtectionType =
+                enhanced ? .complete : .completeUntilFirstUserAuthentication
+            let fileManager = FileManager.default
+            let attributes: [FileAttributeKey: Any] = [.protectionKey: level]
+            let dir = dbURL.deletingLastPathComponent()
+            // SQLite WAL sidecars are the db path with a literal `-wal`/`-shm`
+            // suffix appended to the full filename.
+            let targets =
+                [dir, dbURL]
+                + ["-wal", "-shm"].map {
+                    URL(fileURLWithPath: dbURL.path + $0)
+                }
+            var allApplied = true
+            for url in targets where fileManager.fileExists(atPath: url.path) {
+                do {
+                    try fileManager.setAttributes(attributes, ofItemAtPath: url.path)
+                } catch {
+                    allApplied = false
+                }
+            }
+            return allApplied
+        #else
+            return false
         #endif
     }
 

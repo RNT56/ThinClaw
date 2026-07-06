@@ -127,7 +127,7 @@ struct ChatTimelineReducerTests {
         var reducer = makeReducer()
         let request = ApprovalRequest(
             requestID: "r1", toolName: "shell", description: "run", parameters: "{}",
-            threadID: thread)
+            risk: .high, threadID: thread)
         reducer.apply(.approvalNeeded(request))
         reducer.apply(.approvalNeeded(request))  // e.g. redelivered after reconnect
         #expect(reducer.items.count == 1)
@@ -169,5 +169,57 @@ struct ChatTimelineReducerTests {
                 .toolCall(name: "calc", status: .succeeded),
                 .agentMessage(text: "The answer is 42."),
             ])
+    }
+
+    @Test("auth_required folds into an inline auth-prompt card")
+    func authPromptCard() {
+        var reducer = makeReducer()
+        let prompt = AuthPrompt(
+            extensionName: "gmail",
+            instructions: "Authorize access",
+            authURL: URL(string: "https://example.com/oauth"),
+            threadID: thread)
+        reducer.apply(.authRequired(prompt))
+
+        #expect(reducer.items.count == 1)
+        #expect(reducer.items[0].kind == .authPrompt(prompt))
+    }
+
+    @Test("a re-broadcast auth_required for the same extension dedupes in place")
+    func authPromptDedupes() {
+        var reducer = makeReducer()
+        let first = AuthPrompt(extensionName: "gmail", threadID: thread)
+        let second = AuthPrompt(
+            extensionName: "gmail", instructions: "updated", threadID: thread)
+        reducer.apply(.authRequired(first))
+        reducer.apply(.authRequired(second))
+
+        #expect(reducer.items.count == 1, "same extension must update, not stack")
+        #expect(reducer.items[0].kind == .authPrompt(second))
+    }
+
+    @Test("credential_prompt folds into a handle-on-desktop card")
+    func credentialPromptCard() {
+        var reducer = makeReducer()
+        let prompt = CredentialPrompt(
+            promptID: "p1", secretName: "GITHUB_TOKEN", provider: "github",
+            reason: "clone a private repo", threadID: thread)
+        reducer.apply(.credentialPrompt(prompt))
+
+        #expect(reducer.items.count == 1)
+        #expect(reducer.items[0].kind == .credentialPrompt(prompt))
+    }
+
+    @Test("prompt cards for another thread are ignored")
+    func promptWrongThreadIgnored() {
+        var reducer = makeReducer()
+        reducer.apply(.authRequired(AuthPrompt(extensionName: "gmail", threadID: other)))
+        reducer.apply(
+            .credentialPrompt(
+                CredentialPrompt(
+                    promptID: "p1", secretName: "S", provider: "p", reason: "r",
+                    threadID: other)))
+
+        #expect(reducer.items.isEmpty)
     }
 }

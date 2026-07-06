@@ -4,7 +4,7 @@ data: {"type":"tool_started","name":"read_file","thread_id":"web-1720000001"}
 
 data: {"type":"tool_completed","name":"read_file","success":true,"thread_id":"web-1720000001"}
 
-data: {"type":"approval_needed","request_id":"appr_7f3a","tool_name":"shell_command","description":"Run a shell command","parameters":"{\"command\":\"rm -rf /tmp/scratch\"}","thread_id":"web-1720000001"}
+data: {"type":"approval_needed","request_id":"appr_7f3a","tool_name":"shell_command","description":"Run a shell command","parameters":"{\"command\":\"rm -rf /tmp/scratch\"}","risk":"high","thread_id":"web-1720000001"}
 
 data: {"type":"heartbeat"}
 

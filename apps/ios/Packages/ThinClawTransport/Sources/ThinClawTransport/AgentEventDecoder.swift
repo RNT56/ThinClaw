@@ -76,6 +76,29 @@ public struct AgentEventDecoder: Sendable {
                     toolName: p.toolName,
                     description: p.description,
                     parameters: p.parameters,
+                    // Unknown/absent risk decodes to `.high` — never downgrade
+                    // an approval on an unrecognized tier (D-K3).
+                    risk: RiskTier(wire: p.risk),
+                    threadID: p.threadId.map(ThreadID.init)))
+        case "auth_required":
+            let p = try payload(AuthRequiredPayload.self)
+            return .authRequired(
+                AuthPrompt(
+                    extensionName: p.extensionName,
+                    instructions: p.instructions,
+                    // Tolerate a malformed URL by dropping it rather than
+                    // failing the decode: the card degrades to text-only.
+                    authURL: p.authUrl.flatMap { URL(string: $0) },
+                    setupURL: p.setupUrl.flatMap { URL(string: $0) },
+                    threadID: p.threadId.map(ThreadID.init)))
+        case "credential_prompt":
+            let p = try payload(CredentialPromptPayload.self)
+            return .credentialPrompt(
+                CredentialPrompt(
+                    promptID: p.promptId,
+                    secretName: p.secretName,
+                    provider: p.provider,
+                    reason: p.reason,
                     threadID: p.threadId.map(ThreadID.init)))
         case "usage_update":
             let p = try payload(UsageUpdatePayload.self)
@@ -160,6 +183,9 @@ private struct ApprovalNeededPayload: Decodable {
     let toolName: String
     let description: String
     let parameters: String
+    /// Raw wire tier (`"low"`/`"high"`). Optional so a missing or unknown
+    /// value never fails the decode — it maps to `.high` via `RiskTier(wire:)`.
+    let risk: String?
     let threadId: String?
 
     enum CodingKeys: String, CodingKey {
@@ -167,6 +193,39 @@ private struct ApprovalNeededPayload: Decodable {
         case toolName = "tool_name"
         case description
         case parameters
+        case risk
+        case threadId = "thread_id"
+    }
+}
+
+private struct AuthRequiredPayload: Decodable {
+    let extensionName: String
+    let instructions: String?
+    let authUrl: String?
+    let setupUrl: String?
+    let threadId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case extensionName = "extension_name"
+        case instructions
+        case authUrl = "auth_url"
+        case setupUrl = "setup_url"
+        case threadId = "thread_id"
+    }
+}
+
+private struct CredentialPromptPayload: Decodable {
+    let promptId: String
+    let secretName: String
+    let provider: String
+    let reason: String
+    let threadId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case promptId = "prompt_id"
+        case secretName = "secret_name"
+        case provider
+        case reason
         case threadId = "thread_id"
     }
 }

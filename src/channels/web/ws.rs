@@ -288,6 +288,31 @@ async fn handle_client_message(
                 }
             };
 
+            // D-K4 / D-K3: a watch companion may only approve LOW-risk actions,
+            // enforced server-side so a compromised watch client cannot approve
+            // a destructive tool over the WebSocket. Mirrors the HTTP
+            // `/api/chat/approval` gate; only an approve/always is gated (deny is
+            // always allowed) and a cache miss fails closed (treated high-risk).
+            if approved && device_ctx.is_some_and(|ctx| ctx.is_watch_companion()) {
+                let cached_risk = state
+                    .pending_approvals
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.get(&request_id).map(|entry| entry.risk));
+                let is_low = matches!(
+                    cached_risk,
+                    Some(thinclaw_gateway::web::devices::ApprovalRisk::Low)
+                );
+                if !is_low {
+                    let _ = direct_tx
+                        .send(WsServerMessage::Error {
+                            message: "this device may only approve low-risk actions".to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            }
+
             let request_uuid = match Uuid::parse_str(&request_id) {
                 Ok(id) => id,
                 Err(_) => {
@@ -700,6 +725,150 @@ mod tests {
         assert!(incoming.content.contains("ExecApproval"));
         // Thread should be forwarded onto the IncomingMessage.
         assert_eq!(incoming.thread_id.as_deref(), Some("thread-42"));
+    }
+
+    /// Seed a pending-approval entry with the given risk so the watch-companion
+    /// gate can look it up.
+    fn seed_pending_approval(
+        state: &GatewayState,
+        request_id: &str,
+        risk: thinclaw_gateway::web::devices::ApprovalRisk,
+    ) {
+        let entry = thinclaw_gateway::web::types::PendingApprovalEntry {
+            request_id: request_id.to_string(),
+            tool_name: "execute_shell".to_string(),
+            description: "run a command".to_string(),
+            parameters: "{}".to_string(),
+            risk,
+            thread_id: Some("thread-42".to_string()),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        state
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .insert(request_id.to_string(), entry);
+    }
+
+    fn watch_companion_ctx() -> DeviceContext {
+        DeviceContext::with_class(
+            "watch-1",
+            vec![DeviceScope::Chat, DeviceScope::Approvals],
+            thinclaw_gateway::web::devices::DevicePlatform::Watchos,
+            true,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_watch_companion_high_risk_ws_approve_is_refused() {
+        // D-K4: a watch companion must not be able to approve a HIGH-risk tool
+        // over the WebSocket. The gate is server-side, not just UI.
+        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let state = make_test_state(Some(agent_tx)).await;
+        let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
+        let request_id = Uuid::new_v4().to_string();
+        seed_pending_approval(
+            &state,
+            &request_id,
+            thinclaw_gateway::web::devices::ApprovalRisk::High,
+        );
+        let ctx = watch_companion_ctx();
+
+        handle_client_message(
+            WsClientMessage::Approval {
+                request_id: request_id.clone(),
+                action: "approve".to_string(),
+                thread_id: Some("thread-42".to_string()),
+            },
+            &state,
+            &identity,
+            Some(&ctx),
+            &direct_tx,
+            None,
+        )
+        .await;
+
+        // Refused with an error, and NO approval submitted to the agent.
+        match direct_rx.recv().await.unwrap() {
+            WsServerMessage::Error { message } => {
+                assert!(message.contains("low-risk"), "got: {message}");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(
+            agent_rx.try_recv().is_err(),
+            "high-risk approval must not reach the agent loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_companion_low_risk_ws_approve_and_deny_pass() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let state = make_test_state(Some(agent_tx)).await;
+        let (direct_tx, _direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
+        let ctx = watch_companion_ctx();
+
+        // Low-risk approve is allowed through.
+        let low_id = Uuid::new_v4().to_string();
+        seed_pending_approval(
+            &state,
+            &low_id,
+            thinclaw_gateway::web::devices::ApprovalRisk::Low,
+        );
+        handle_client_message(
+            WsClientMessage::Approval {
+                request_id: low_id,
+                action: "approve".to_string(),
+                thread_id: Some("thread-42".to_string()),
+            },
+            &state,
+            &identity,
+            Some(&ctx),
+            &direct_tx,
+            None,
+        )
+        .await;
+        assert!(
+            agent_rx
+                .recv()
+                .await
+                .unwrap()
+                .content
+                .contains("ExecApproval"),
+            "low-risk approve should reach the agent"
+        );
+
+        // Deny is always allowed, even for a HIGH-risk entry.
+        let high_id = Uuid::new_v4().to_string();
+        seed_pending_approval(
+            &state,
+            &high_id,
+            thinclaw_gateway::web::devices::ApprovalRisk::High,
+        );
+        handle_client_message(
+            WsClientMessage::Approval {
+                request_id: high_id,
+                action: "deny".to_string(),
+                thread_id: Some("thread-42".to_string()),
+            },
+            &state,
+            &identity,
+            Some(&ctx),
+            &direct_tx,
+            None,
+        )
+        .await;
+        assert!(
+            agent_rx
+                .recv()
+                .await
+                .unwrap()
+                .content
+                .contains("ExecApproval"),
+            "deny should always reach the agent regardless of risk"
+        );
     }
 
     #[tokio::test]

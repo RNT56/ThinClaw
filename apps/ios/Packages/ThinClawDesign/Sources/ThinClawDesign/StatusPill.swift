@@ -18,6 +18,17 @@ public struct StatusPill: View {
             }
         }
 
+        /// Spoken form for VoiceOver — the color dot conveys state visually, so
+        /// the accessibility label names the connection state explicitly.
+        var accessibilityLabel: String {
+            switch self {
+            case .connected: "Connection status: connected"
+            case .connecting: "Connection status: connecting"
+            case .degraded: "Connection status: degraded"
+            case .offline: "Connection status: offline"
+            }
+        }
+
         var tint: Color {
             switch self {
             case .connected: .green
@@ -52,6 +63,8 @@ public struct StatusPill: View {
         .padding(.horizontal, ThinClawSpacing.md)
         .padding(.vertical, ThinClawSpacing.xs)
         .glassEffect(.regular, in: .capsule)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(status.accessibilityLabel))
+        .accessibilityValue(detail.map(Text.init) ?? Text(""))
     }
 }

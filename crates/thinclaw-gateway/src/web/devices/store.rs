@@ -221,6 +221,7 @@ impl DeviceStore {
             apns: None,
             live_activities: std::collections::BTreeMap::new(),
             live_activity_start_token: None,
+            parent_device_id: None,
             revoked_at: None,
             expires_at: None,
         };
@@ -231,6 +232,73 @@ impl DeviceStore {
         FileExt::unlock(&file)?;
 
         Ok((record, issued.token))
+    }
+
+    /// Insert a *companion* device (milestone M4): a reduced-scope child minted
+    /// by an already-paired `parent_device_id` (e.g. its watch). Fails with
+    /// `NotFound` if the parent does not exist and `Revoked` if the parent is
+    /// already revoked — a revoked parent must never spawn a live companion.
+    /// Returns the created record and the raw token (visible exactly once).
+    pub fn insert_companion(
+        &self,
+        parent_device_id: &str,
+        name: String,
+        platform: DevicePlatform,
+        scopes: Vec<DeviceScope>,
+    ) -> Result<(DeviceRecord, String), DeviceStoreError> {
+        let issued = issue_token();
+        let now = now_iso();
+
+        let (mut file, mut data) = self.read_locked()?;
+        // Validate the parent inside the same locked read-modify-write so the
+        // check cannot race a concurrent parent revoke/delete.
+        let parent = data
+            .devices
+            .iter()
+            .find(|d| d.device_id == parent_device_id)
+            .ok_or_else(|| DeviceStoreError::NotFound(parent_device_id.to_string()))?;
+        if parent.revoked_at.is_some() {
+            return Err(DeviceStoreError::Revoked(parent_device_id.to_string()));
+        }
+
+        let record = DeviceRecord {
+            device_id: Uuid::new_v4().to_string(),
+            name,
+            platform,
+            created_at: now.clone(),
+            last_seen_at: now,
+            token_hash: issued.token_hash,
+            token_prefix: issued.token_prefix,
+            scopes,
+            pubkey: None,
+            apns: None,
+            live_activities: std::collections::BTreeMap::new(),
+            live_activity_start_token: None,
+            parent_device_id: Some(parent_device_id.to_string()),
+            revoked_at: None,
+            expires_at: None,
+        };
+        data.devices.push(record.clone());
+        self.write_locked(&mut file, &data)?;
+        FileExt::unlock(&file)?;
+
+        Ok((record, issued.token))
+    }
+
+    /// List the companion devices whose `parent_device_id == parent_device_id`.
+    /// Returns an empty vec if the parent has no companions (or does not
+    /// exist); companion lifecycle is validated by the caller.
+    pub fn list_companions(
+        &self,
+        parent_device_id: &str,
+    ) -> Result<Vec<DeviceRecord>, DeviceStoreError> {
+        let (file, data) = self.read_locked()?;
+        FileExt::unlock(&file)?;
+        Ok(data
+            .devices
+            .into_iter()
+            .filter(|d| d.parent_device_id.as_deref() == Some(parent_device_id))
+            .collect())
     }
 
     /// Rename a device. Returns `NotFound` if the id does not exist.
@@ -259,24 +327,60 @@ impl DeviceStore {
     /// deletion on revoke"). Clearing is unconditional (not gated on the
     /// idempotency guard) so a re-revoke still guarantees no push state
     /// lingers.
+    ///
+    /// **Cascade (milestone M4, D-K4):** revoking a device also revokes every
+    /// companion whose `parent_device_id == device_id`, in the *same* locked
+    /// write, so a parent revoke can never leave a live child token behind.
+    /// Returns the primary (target) record; use [`revoke_cascade`] to also see
+    /// the affected companion records (e.g. to broadcast/refresh each id).
+    ///
+    /// [`revoke_cascade`]: DeviceStore::revoke_cascade
     pub fn revoke(&self, device_id: &str) -> Result<DeviceRecord, DeviceStoreError> {
+        let mut affected = self.revoke_cascade(device_id)?;
+        // `revoke_cascade` returns the target record first, then companions.
+        Ok(affected.remove(0))
+    }
+
+    /// Revoke `device_id` and cascade to all its companions in one locked
+    /// write. Returns the affected records: the target first, then each
+    /// companion (in stored order). Clearing push/Live Activity state is
+    /// unconditional per record, matching [`revoke`]'s idempotency guarantee.
+    ///
+    /// [`revoke`]: DeviceStore::revoke
+    pub fn revoke_cascade(&self, device_id: &str) -> Result<Vec<DeviceRecord>, DeviceStoreError> {
         let (mut file, mut data) = self.read_locked()?;
         let now = now_iso();
-        let record = data
-            .devices
-            .iter_mut()
-            .find(|d| d.device_id == device_id)
-            .ok_or_else(|| DeviceStoreError::NotFound(device_id.to_string()))?;
-        if record.revoked_at.is_none() {
-            record.revoked_at = Some(now);
+
+        // The target must exist. Companions are best-effort: absent companions
+        // simply don't contribute to the affected list.
+        if !data.devices.iter().any(|d| d.device_id == device_id) {
+            return Err(DeviceStoreError::NotFound(device_id.to_string()));
         }
-        record.apns = None;
-        record.live_activities.clear();
-        record.live_activity_start_token = None;
-        let updated = record.clone();
+
+        let mut affected = Vec::new();
+        for record in data.devices.iter_mut() {
+            let is_target = record.device_id == device_id;
+            let is_companion = record.parent_device_id.as_deref() == Some(device_id);
+            if !is_target && !is_companion {
+                continue;
+            }
+            if record.revoked_at.is_none() {
+                record.revoked_at = Some(now.clone());
+            }
+            record.apns = None;
+            record.live_activities.clear();
+            record.live_activity_start_token = None;
+            if is_target {
+                // Target first so callers can rely on affected[0] == target.
+                affected.insert(0, record.clone());
+            } else {
+                affected.push(record.clone());
+            }
+        }
+
         self.write_locked(&mut file, &data)?;
         FileExt::unlock(&file)?;
-        Ok(updated)
+        Ok(affected)
     }
 
     /// Issue a fresh token for an existing device, replacing the previous
@@ -358,6 +462,8 @@ impl DeviceStore {
         activity_id: &str,
         push_token: String,
         kind: DeviceLiveActivityKind,
+        thread_id: Option<String>,
+        job_id: Option<String>,
     ) -> Result<DeviceRecord, DeviceStoreError> {
         let (mut file, mut data) = self.read_locked()?;
         let now = now_iso();
@@ -394,6 +500,8 @@ impl DeviceStore {
             DeviceLiveActivityToken {
                 push_token,
                 kind,
+                thread_id,
+                job_id,
                 updated_at: now,
             },
         );
@@ -750,11 +858,14 @@ mod tests {
                 "run-1",
                 "la-token-1".to_string(),
                 DeviceLiveActivityKind::AgentRun,
+                Some("thread-1".to_string()),
+                None,
             )
             .unwrap();
         let entry = updated.live_activities.get("run-1").unwrap();
         assert_eq!(entry.push_token, "la-token-1");
         assert_eq!(entry.kind, DeviceLiveActivityKind::AgentRun);
+        assert_eq!(entry.thread_id.as_deref(), Some("thread-1"));
 
         // Replacing the same activity_id updates in place, no duplicate.
         let updated = store
@@ -763,6 +874,8 @@ mod tests {
                 "run-1",
                 "la-token-2".to_string(),
                 DeviceLiveActivityKind::Job,
+                None,
+                Some("job-9".to_string()),
             )
             .unwrap();
         assert_eq!(updated.live_activities.len(), 1);
@@ -770,6 +883,12 @@ mod tests {
         assert_eq!(
             updated.live_activities["run-1"].kind,
             DeviceLiveActivityKind::Job
+        );
+        // Replacement swaps the association too: thread cleared, job set.
+        assert_eq!(updated.live_activities["run-1"].thread_id, None);
+        assert_eq!(
+            updated.live_activities["run-1"].job_id.as_deref(),
+            Some("job-9")
         );
 
         let cleared = store
@@ -803,6 +922,8 @@ mod tests {
                     &format!("run-{i}"),
                     format!("tok-{i}"),
                     DeviceLiveActivityKind::AgentRun,
+                    None,
+                    None,
                 )
                 .unwrap();
         }
@@ -834,6 +955,8 @@ mod tests {
                 "run-new",
                 "tok-new".to_string(),
                 DeviceLiveActivityKind::Job,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -880,6 +1003,8 @@ mod tests {
                 "run-1",
                 "la-token".to_string(),
                 DeviceLiveActivityKind::AgentRun,
+                None,
+                None,
             )
             .unwrap();
         store
@@ -931,6 +1056,8 @@ mod tests {
                 "run-1",
                 "la-token".to_string(),
                 DeviceLiveActivityKind::AgentRun,
+                None,
+                None,
             )
             .unwrap_err();
         assert!(matches!(err, DeviceStoreError::Revoked(_)));
@@ -981,6 +1108,189 @@ mod tests {
     }
 
     #[test]
+    fn insert_companion_links_parent_and_reduced_scopes() {
+        let (store, _dir) = test_store();
+        let parent = insert_phone(&store);
+
+        let (companion, token) = store
+            .insert_companion(
+                &parent.device_id,
+                "Watch".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap();
+
+        assert!(token.starts_with(DEVICE_TOKEN_PREFIX));
+        assert_eq!(
+            companion.parent_device_id.as_deref(),
+            Some(parent.device_id.as_str())
+        );
+        assert!(companion.is_companion());
+        assert_eq!(companion.platform, DevicePlatform::Watchos);
+        assert_eq!(
+            companion.scopes,
+            vec![DeviceScope::Chat, DeviceScope::Approvals]
+        );
+        // Companion is a distinct record, persisted.
+        assert_ne!(companion.device_id, parent.device_id);
+        assert!(store.get(&companion.device_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn insert_companion_rejects_missing_or_revoked_parent() {
+        let (store, _dir) = test_store();
+
+        let err = store
+            .insert_companion(
+                "missing-parent",
+                "Watch".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, DeviceStoreError::NotFound(_)));
+
+        let parent = insert_phone(&store);
+        store.revoke(&parent.device_id).unwrap();
+        let err = store
+            .insert_companion(
+                &parent.device_id,
+                "Watch".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, DeviceStoreError::Revoked(_)));
+    }
+
+    #[test]
+    fn list_companions_filters_by_parent() {
+        let (store, _dir) = test_store();
+        let parent_a = insert_phone(&store);
+        let parent_b = insert_phone(&store);
+
+        let (c1, _) = store
+            .insert_companion(
+                &parent_a.device_id,
+                "Watch A1".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap();
+        store
+            .insert_companion(
+                &parent_b.device_id,
+                "Watch B1".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap();
+
+        let a_companions = store.list_companions(&parent_a.device_id).unwrap();
+        assert_eq!(a_companions.len(), 1);
+        assert_eq!(a_companions[0].device_id, c1.device_id);
+        // The top-level parents themselves are not companions of anyone.
+        assert!(
+            store
+                .list_companions(&parent_a.device_id)
+                .unwrap()
+                .iter()
+                .all(|d| d.device_id != parent_a.device_id)
+        );
+    }
+
+    #[test]
+    fn revoke_cascades_to_companions() {
+        let (store, _dir) = test_store();
+        let parent = insert_phone(&store);
+        let (companion, _) = store
+            .insert_companion(
+                &parent.device_id,
+                "Watch".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap();
+        // Give the companion a push token so we can assert it is cleared.
+        store
+            .set_push(
+                &companion.device_id,
+                "apns-tok".to_string(),
+                "production".to_string(),
+            )
+            .unwrap();
+
+        let affected = store.revoke_cascade(&parent.device_id).unwrap();
+        // Target first, then the companion.
+        assert_eq!(affected.len(), 2);
+        assert_eq!(affected[0].device_id, parent.device_id);
+        assert_eq!(affected[1].device_id, companion.device_id);
+
+        let fetched_parent = store.get(&parent.device_id).unwrap().unwrap();
+        let fetched_companion = store.get(&companion.device_id).unwrap().unwrap();
+        assert!(fetched_parent.revoked_at.is_some());
+        assert!(fetched_companion.revoked_at.is_some());
+        assert!(
+            fetched_companion.apns.is_none(),
+            "cascade clears companion push state"
+        );
+    }
+
+    #[test]
+    fn revoke_of_companion_does_not_touch_parent() {
+        let (store, _dir) = test_store();
+        let parent = insert_phone(&store);
+        let (companion, _) = store
+            .insert_companion(
+                &parent.device_id,
+                "Watch".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap();
+
+        store.revoke(&companion.device_id).unwrap();
+        assert!(
+            store
+                .get(&companion.device_id)
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
+        assert!(
+            store
+                .get(&parent.device_id)
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_none(),
+            "revoking a companion must not revoke its parent"
+        );
+    }
+
+    #[test]
+    fn parent_device_id_defaults_for_legacy_rows() {
+        // A legacy devices.json row written before companions existed omits
+        // `parent_device_id`; it must deserialize to None (top-level device).
+        let (store, dir) = test_store();
+        let record = insert_phone(&store);
+        let raw_path = dir.path().join(DEVICES_FILE_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&raw_path).unwrap()).unwrap();
+        value["devices"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_device_id");
+        fs::write(&raw_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let fetched = store.get(&record.device_id).unwrap().unwrap();
+        assert!(fetched.parent_device_id.is_none());
+        assert!(!fetched.is_companion());
+    }
+
+    #[test]
     fn is_blocked_reflects_revocation_and_expiry() {
         let mut record = DeviceRecord {
             device_id: "d1".into(),
@@ -995,6 +1305,7 @@ mod tests {
             apns: None,
             live_activities: std::collections::BTreeMap::new(),
             live_activity_start_token: None,
+            parent_device_id: None,
             revoked_at: None,
             expires_at: None,
         };

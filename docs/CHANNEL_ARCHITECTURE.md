@@ -333,6 +333,18 @@ notifier, and it is a distinct surface from the chat channel:
   tool names, or parameters. Live Activity payloads carry only
   `{phase, progress?, revision}`. A Notification Service Extension fetches real
   content over the pinned connection and rewrites locally.
+- **Approval pushes are risk-tiered.** Each `approval_needed` event carries a
+  `risk` tier computed **gateway-side**
+  (`thinclaw_gateway::web::devices::approval_risk::classify`, single source of
+  truth per `docs/MOBILE_SECURITY.md` D-K3): read-only/informational tools are
+  `low`, anything side-effecting, egressing, or unrecognised defaults to `high`.
+  The notifier picks the APNs category from that tier —
+  `THINCLAW_APPROVAL_LOW` (the client offers an inline Approve/Deny action) vs
+  `THINCLAW_APPROVAL_HIGH` (Open-only; the client deep-links into the app for a
+  Face ID-gated approval). Message and job alerts keep the fixed
+  `THINCLAW_MESSAGE` / `THINCLAW_JOB` categories. This split is operator-facing:
+  a device only ever gets an actionable-from-lock-screen approval for a low-risk
+  tool.
 - **Delivery reuses the APNs transport, not the chat channel.** The runtime
   notifier (`src/channels/first_party_push.rs`) subscribes to the gateway SSE
   broadcast *without consuming a client slot*, runs the policy per registered

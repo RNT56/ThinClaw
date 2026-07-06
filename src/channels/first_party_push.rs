@@ -13,6 +13,18 @@
 //! each device's soft runtime state, and delivers any resulting content-free
 //! [`PushDecision`] through an APNs [`PushSender`].
 //!
+//! ## Live Activity run routing
+//!
+//! A Live Activity registration carries the `thread_id` (or `job_id`) it
+//! mirrors. Before deciding, the notifier reconciles each device's tracked
+//! runs against that association: a run-progress event on a thread the device
+//! registered an activity for auto-tracks the run so `decide` emits throttled
+//! Live Activity **updates** to the per-activity token, and the closing
+//! `response` emits the **end**. If the device instead has a push-to-start
+//! token and no active activity for the thread, the notifier emits a one-shot
+//! Live Activity **push-to-start** to the start token so a killed app can spawn
+//! the activity; the app's later per-activity registration takes over updates.
+//!
 //! ## Privacy invariants (owned by the policy, enforced here)
 //!
 //! - Payload shaping is done entirely in the pure policy module; this runtime
@@ -30,7 +42,8 @@
 //! the registry index, and writes a `device.push_token_removed` audit line —
 //! never logging the token itself. An alert/background rejection clears the
 //! device's APNs alert registration; a Live Activity rejection clears only
-//! that activity's per-activity token, leaving the alert registration intact.
+//! that activity's per-activity token, and a push-to-start rejection clears
+//! only the start token — both leave the alert registration intact.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,7 +56,8 @@ use thinclaw_channels::{
 };
 use thinclaw_gateway::web::devices::push_policy::{PushDecision, PushKind, can_produce_push};
 use thinclaw_gateway::web::devices::{
-    DeviceAuditEvent, DeviceAuditLog, DevicePushState, DeviceRecord, DeviceRegistry, decide,
+    DeviceAuditEvent, DeviceAuditLog, DeviceLiveActivityKind, DevicePushState, DeviceRecord,
+    DeviceRegistry, decide, live_activity_start,
 };
 use tokio::sync::broadcast;
 
@@ -177,6 +191,11 @@ impl FirstPartyPushNotifier {
         // reflects push-registration and revocation changes.
         let devices = self.registry.snapshot().await;
         let now_secs = now_secs();
+        // The thread this event pertains to (if any) drives Live Activity
+        // routing: a device that registered a per-activity update token for
+        // this thread has its run auto-tracked so `decide` emits Live Activity
+        // updates instead of alerts (D-N2).
+        let event_thread = event_thread_id(event).map(str::to_string);
         for device in devices {
             // A revoked device must never be pushed to, even if a stale APNs
             // registration somehow lingered (defense-in-depth alongside the
@@ -188,6 +207,16 @@ impl FirstPartyPushNotifier {
             if device.apns.is_none() {
                 continue;
             }
+            // Reconcile Live Activity run tracking against this device's
+            // registered activities *before* deciding, and possibly emit a
+            // push-to-start for a killed app. This is what turns a registered
+            // Live Activity token into actual run-driven update pushes.
+            if let Some(thread_id) = event_thread.as_deref()
+                && is_run_progress_event(event)
+            {
+                self.reconcile_live_activity(&device, thread_id, now_secs)
+                    .await;
+            }
             let state = self
                 .device_state
                 .entry(device.device_id.clone())
@@ -197,6 +226,138 @@ impl FirstPartyPushNotifier {
             };
             self.deliver(&device, decision).await;
         }
+    }
+
+    /// Reconcile Live Activity run tracking for one device against a
+    /// run-progress event on `thread_id`:
+    ///
+    /// - If the device has a registered per-activity update token bound to
+    ///   `thread_id`, auto-track the run under that `activity_id` so `decide`
+    ///   emits throttled Live Activity updates to the per-activity token.
+    /// - Otherwise, if the device has a push-to-start token and no active
+    ///   activity for the thread, emit a one-shot push-to-start so a killed app
+    ///   can spawn the activity, then track the run under a synthesized
+    ///   activity id (the app's later per-activity registration, carrying the
+    ///   same `thread_id`, takes over on the next event).
+    async fn reconcile_live_activity(
+        &mut self,
+        device: &DeviceRecord,
+        thread_id: &str,
+        now_secs: u64,
+    ) {
+        // A registered per-activity update token bound to this thread wins: the
+        // app is alive and already has an activity we can drive directly.
+        if let Some(activity_id) = registered_activity_for_thread(device, thread_id) {
+            let state = self
+                .device_state
+                .entry(device.device_id.clone())
+                .or_default();
+            state.ensure_tracked(thread_id, activity_id);
+            return;
+        }
+
+        // No per-activity token for this thread. If the device offers a
+        // push-to-start token and we are not already tracking a run for the
+        // thread, emit a one-shot start so a killed app spawns the activity.
+        let Some(start_token) = device.live_activity_start_token.clone() else {
+            return;
+        };
+        let start_decision = {
+            let state = self
+                .device_state
+                .entry(device.device_id.clone())
+                .or_default();
+            if state.is_tracking(thread_id) {
+                return;
+            }
+            // Synthesize an activity id for tracking; the app's own activity id
+            // (registered via the per-activity endpoint after it spawns) will
+            // replace it on the next event via `ensure_tracked`.
+            let activity_id = format!("start-{thread_id}");
+            state.ensure_tracked(thread_id, &activity_id);
+            if !state.mark_start_emitted(thread_id) {
+                return;
+            }
+            live_activity_start(thread_id, &activity_id, now_secs)
+        };
+        self.deliver_start(device, &start_token, start_decision)
+            .await;
+    }
+
+    /// Deliver a Live Activity push-to-start to the device's dedicated
+    /// push-to-start token (never a per-activity or alert token). A token
+    /// rejection clears **only** the start token, leaving the alert
+    /// registration and any per-activity tokens intact (D-N2).
+    async fn deliver_start(
+        &self,
+        device: &DeviceRecord,
+        start_token: &str,
+        decision: PushDecision,
+    ) {
+        let environment = device
+            .apns
+            .as_ref()
+            .map(|a| a.environment.clone())
+            .unwrap_or_else(|| "production".to_string());
+        let sandbox = environment == "development";
+        let spec = decision_to_spec(&decision);
+        match self.sender.send(start_token, sandbox, spec).await {
+            Ok(ApnsSendOutcome::Delivered) => {
+                tracing::debug!(
+                    device_id = %device.device_id,
+                    "push notifier: delivered live-activity push-to-start"
+                );
+            }
+            Ok(ApnsSendOutcome::Unregistered { reason }) => {
+                self.prune_start_token(device, &reason).await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    device_id = %device.device_id,
+                    %error,
+                    "push notifier: push-to-start delivery failed"
+                );
+            }
+        }
+    }
+
+    /// Clear a rejected push-to-start token (and only that token), refreshing
+    /// the registry and writing an audit line without the token.
+    async fn prune_start_token(&self, device: &DeviceRecord, reason: &str) {
+        tracing::info!(
+            device_id = %device.device_id,
+            reason,
+            "push notifier: pruning unregistered live-activity start token"
+        );
+        if let Err(error) = self
+            .registry
+            .store()
+            .clear_live_activity_start_token(&device.device_id)
+        {
+            tracing::warn!(
+                device_id = %device.device_id,
+                %error,
+                "push notifier: failed to clear pruned start token"
+            );
+            return;
+        }
+        if let Err(error) = self.registry.refresh(&device.device_id).await {
+            tracing::warn!(
+                device_id = %device.device_id,
+                %error,
+                "push notifier: failed to refresh registry after start-token prune"
+            );
+        }
+        let _ = self.audit.record(
+            DeviceAuditEvent::DevicePushTokenRemoved,
+            Some(&device.device_id),
+            Some(&device.token_prefix),
+            Some(serde_json::json!({
+                "reason": reason,
+                "source": "apns_prune",
+                "live_activity_start_token": true,
+            })),
+        );
     }
 
     /// Deliver one [`PushDecision`] to `device`, applying live-stream
@@ -282,6 +443,9 @@ impl FirstPartyPushNotifier {
                     .unwrap_or_else(|| "production".to_string());
                 Some((token.push_token.clone(), environment))
             }
+            // Push-to-start is delivered by `deliver_start` against the device's
+            // dedicated start token, never through the generic `deliver` path.
+            PushKind::LiveActivityStart => None,
         }
     }
 
@@ -323,6 +487,9 @@ impl FirstPartyPushNotifier {
                     }),
                 )
             }
+            // Push-to-start rejections are handled by `prune_start_token`;
+            // they never reach the generic `deliver`/`prune_rejected` path.
+            PushKind::LiveActivityStart => return,
         };
 
         if let Err(error) = result {
@@ -356,13 +523,55 @@ fn decision_to_spec(decision: &PushDecision) -> ApnsPushSpec {
     let push_type = match decision.kind {
         PushKind::Alert => ApnsPushType::Alert,
         PushKind::Background => ApnsPushType::Background,
-        PushKind::LiveActivityUpdate | PushKind::LiveActivityEnd => ApnsPushType::LiveActivity,
+        PushKind::LiveActivityStart | PushKind::LiveActivityUpdate | PushKind::LiveActivityEnd => {
+            ApnsPushType::LiveActivity
+        }
     };
     let mut spec = ApnsPushSpec::new(push_type, decision.payload.clone());
     if let Some(collapse_id) = &decision.collapse_id {
         spec = spec.with_collapse_id(collapse_id.clone());
     }
     spec
+}
+
+/// The thread id an event pertains to, if it carries one. Mirrors the policy's
+/// own thread extraction so the notifier can route Live Activity tracking.
+fn event_thread_id(event: &SseEvent) -> Option<&str> {
+    match event {
+        SseEvent::Response { thread_id, .. } => Some(thread_id.as_str()),
+        SseEvent::ApprovalNeeded { thread_id, .. }
+        | SseEvent::ToolStarted { thread_id, .. }
+        | SseEvent::Status { thread_id, .. } => thread_id.as_deref(),
+        _ => None,
+    }
+}
+
+/// Whether an event is run *progress* (as opposed to a terminal `Response`):
+/// these are the events that begin/continue a Live Activity run and so drive
+/// auto-tracking and push-to-start. `Response` is deliberately excluded — it
+/// *ends* a run, handled by `decide`'s `LiveActivityEnd`, and must never
+/// (re)start tracking.
+fn is_run_progress_event(event: &SseEvent) -> bool {
+    matches!(
+        event,
+        SseEvent::ToolStarted { .. } | SseEvent::Status { .. }
+    )
+}
+
+/// The `activity_id` of a per-activity Live Activity update token this device
+/// registered for `thread_id`, if any (agent-run activities only).
+fn registered_activity_for_thread<'a>(
+    device: &'a DeviceRecord,
+    thread_id: &str,
+) -> Option<&'a str> {
+    device
+        .live_activities
+        .iter()
+        .find_map(|(activity_id, token)| {
+            (token.kind == DeviceLiveActivityKind::AgentRun
+                && token.thread_id.as_deref() == Some(thread_id))
+            .then_some(activity_id.as_str())
+        })
 }
 
 /// Current monotonic-ish wall clock in seconds, for policy throttle/budget
@@ -512,13 +721,15 @@ mod tests {
         (registry, record.device_id)
     }
 
-    /// Register a per-activity Live Activity update token in the store and
-    /// refresh the registry snapshot so the notifier can see it.
+    /// Register a per-activity Live Activity update token in the store,
+    /// associated with `thread_id`, and refresh the registry snapshot so the
+    /// notifier can see it.
     async fn register_live_activity(
         registry: &DeviceRegistry,
         device_id: &str,
         activity_id: &str,
         push_token: &str,
+        thread_id: Option<&str>,
     ) {
         use thinclaw_gateway::web::devices::DeviceLiveActivityKind;
         registry
@@ -528,6 +739,8 @@ mod tests {
                 activity_id,
                 push_token.to_string(),
                 DeviceLiveActivityKind::AgentRun,
+                thread_id.map(str::to_string),
+                None,
             )
             .unwrap();
         registry.refresh(device_id).await.unwrap();
@@ -622,16 +835,12 @@ mod tests {
     async fn live_activity_update_is_not_suppressed_while_streaming() {
         let dir = tempfile::TempDir::new().unwrap();
         let (registry, device_id) = registry_with_pushable_device(dir.path(), "production").await;
-        // Register the per-activity Live Activity token the update will target.
-        register_live_activity(&registry, &device_id, "act-1", "la-token-act-1").await;
+        // Register the per-activity Live Activity token bound to thread t1. The
+        // notifier auto-tracks the run from this registration — no manual
+        // track_run — which is the wiring under test.
+        register_live_activity(&registry, &device_id, "act-1", "la-token-act-1", Some("t1")).await;
         let sender = MockSender::delivering();
         let mut n = notifier(registry.clone(), sender.clone(), dir.path());
-
-        // Track a run for this device so ToolStarted drives a Live Activity update.
-        n.device_state
-            .entry(device_id.clone())
-            .or_default()
-            .track_run("t1", "act-1");
 
         let _guard = registry.stream_opened(&device_id);
         n.handle_event(&SseEvent::ToolStarted {
@@ -647,6 +856,151 @@ mod tests {
         assert_eq!(
             sends[0].0, "la-token-act-1",
             "Live Activity push must target the per-activity token"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_event_on_registered_thread_auto_tracks_and_updates() {
+        // The core M3 wiring: a run-progress Status event for a thread the
+        // device registered a Live Activity for produces a LiveActivityUpdate
+        // to that per-activity token, with no manual track_run.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (registry, device_id) = registry_with_pushable_device(dir.path(), "production").await;
+        register_live_activity(&registry, &device_id, "act-1", "la-token-act-1", Some("t1")).await;
+        let sender = MockSender::delivering();
+        let mut n = notifier(registry, sender.clone(), dir.path());
+
+        n.handle_event(&SseEvent::Status {
+            message: "thinking hard".to_string(),
+            thread_id: Some("t1".to_string()),
+        })
+        .await;
+
+        let sends = sender.sends();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0, "la-token-act-1");
+        assert_eq!(sends[0].2, ApnsPushType::LiveActivity);
+    }
+
+    #[tokio::test]
+    async fn response_ends_auto_tracked_live_activity() {
+        // After a run is auto-tracked from a Status event, a Response for the
+        // same thread ends the Live Activity (LiveActivityEnd to the activity
+        // token), not a message alert.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (registry, device_id) = registry_with_pushable_device(dir.path(), "production").await;
+        register_live_activity(&registry, &device_id, "act-1", "la-token-act-1", Some("t1")).await;
+        let sender = MockSender::delivering();
+        let mut n = notifier(registry, sender.clone(), dir.path());
+
+        // First, a progress event auto-tracks and emits an update.
+        n.handle_event(&SseEvent::ToolStarted {
+            name: "shell.execute".to_string(),
+            thread_id: Some("t1".to_string()),
+        })
+        .await;
+        // Then the Response ends it.
+        n.handle_event(&response("t1")).await;
+
+        let sends = sender.sends();
+        assert_eq!(sends.len(), 2);
+        // Both went to the per-activity token; both are Live Activity pushes
+        // (the second is the end, not a message alert).
+        assert!(sends.iter().all(|s| s.0 == "la-token-act-1"));
+        assert!(sends.iter().all(|s| s.2 == ApnsPushType::LiveActivity));
+    }
+
+    #[tokio::test]
+    async fn untracked_thread_progress_produces_no_push() {
+        // A run-progress event for a thread the device has NOT registered a
+        // Live Activity for (and no start token) produces nothing: no alert,
+        // no Live Activity.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (registry, device_id) = registry_with_pushable_device(dir.path(), "production").await;
+        // Registered activity is bound to a *different* thread.
+        register_live_activity(
+            &registry,
+            &device_id,
+            "act-other",
+            "la-other",
+            Some("other"),
+        )
+        .await;
+        let sender = MockSender::delivering();
+        let mut n = notifier(registry, sender.clone(), dir.path());
+
+        n.handle_event(&SseEvent::Status {
+            message: "thinking".to_string(),
+            thread_id: Some("t1".to_string()),
+        })
+        .await;
+
+        assert!(
+            sender.sends().is_empty(),
+            "an untracked thread's progress must not push"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_to_start_fires_once_when_start_token_present_and_no_activity() {
+        // A killed app: device has a push-to-start token but no active activity
+        // for the thread. The first run-progress event emits a push-to-start to
+        // the start token; subsequent events do not re-fire it.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (registry, device_id) = registry_with_pushable_device(dir.path(), "production").await;
+        registry
+            .store()
+            .set_live_activity_start_token(&device_id, "start-token".to_string())
+            .unwrap();
+        registry.refresh(&device_id).await.unwrap();
+        let sender = MockSender::delivering();
+        let mut n = notifier(registry, sender.clone(), dir.path());
+
+        n.handle_event(&SseEvent::ToolStarted {
+            name: "shell.execute".to_string(),
+            thread_id: Some("t1".to_string()),
+        })
+        .await;
+        // A second progress event must not fire another start.
+        n.handle_event(&SseEvent::Status {
+            message: "still going".to_string(),
+            thread_id: Some("t1".to_string()),
+        })
+        .await;
+
+        let sends = sender.sends();
+        assert_eq!(sends.len(), 1, "push-to-start fires exactly once");
+        assert_eq!(sends[0].0, "start-token", "delivered to the start token");
+        assert_eq!(sends[0].2, ApnsPushType::LiveActivity);
+    }
+
+    #[tokio::test]
+    async fn no_push_to_start_when_activity_already_registered() {
+        // If the device already has a per-activity token for the thread (app is
+        // alive), no push-to-start is emitted even with a start token present —
+        // updates go to the per-activity token instead.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (registry, device_id) = registry_with_pushable_device(dir.path(), "production").await;
+        register_live_activity(&registry, &device_id, "act-1", "la-token-act-1", Some("t1")).await;
+        registry
+            .store()
+            .set_live_activity_start_token(&device_id, "start-token".to_string())
+            .unwrap();
+        registry.refresh(&device_id).await.unwrap();
+        let sender = MockSender::delivering();
+        let mut n = notifier(registry, sender.clone(), dir.path());
+
+        n.handle_event(&SseEvent::ToolStarted {
+            name: "shell.execute".to_string(),
+            thread_id: Some("t1".to_string()),
+        })
+        .await;
+
+        let sends = sender.sends();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(
+            sends[0].0, "la-token-act-1",
+            "an alive app is driven via its per-activity token, not push-to-start"
         );
     }
 
@@ -714,14 +1068,10 @@ mod tests {
         // the device's APNs alert registration must survive.
         let dir = tempfile::TempDir::new().unwrap();
         let (registry, device_id) = registry_with_pushable_device(dir.path(), "production").await;
-        register_live_activity(&registry, &device_id, "act-1", "la-token-act-1").await;
+        register_live_activity(&registry, &device_id, "act-1", "la-token-act-1", Some("t1")).await;
 
         let sender = MockSender::rejecting("Unregistered");
         let mut n = notifier(registry.clone(), sender.clone(), dir.path());
-        n.device_state
-            .entry(device_id.clone())
-            .or_default()
-            .track_run("t1", "act-1");
 
         n.handle_event(&SseEvent::ToolStarted {
             name: "shell.execute".to_string(),

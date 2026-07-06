@@ -19,3 +19,7 @@ Config/Signing.local.xcconfig
 # SPM per-package lockfiles — direct deps are pinned exact: in the manifests;
 # workspace resolution is what CI uses. Track none rather than some (hygiene).
 Packages/**/Package.resolved
+
+# stray swift build output dirs
+build/
+**/build/

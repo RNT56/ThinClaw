@@ -63,6 +63,32 @@ pub fn resolve_data_dir(relative: impl AsRef<Path>) -> PathBuf {
     resolve_thinclaw_home().join(relative)
 }
 
+/// Path to the stable gateway instance-id file (`~/.thinclaw/instance-id`).
+///
+/// The instance id is written once (at first pairing) by the gateway devices
+/// handler and read by other surfaces — the mDNS advertiser fingerprints it so
+/// a rediscovered endpoint can be matched against the pairing-time instance id
+/// (D-X3: discovery is a locator, never an authenticator). Both the writer and
+/// every reader must resolve the path through this helper so they never drift.
+pub fn instance_id_path() -> PathBuf {
+    resolve_thinclaw_home().join("instance-id")
+}
+
+/// Read the persisted gateway instance id, if present and non-empty.
+///
+/// Returns `None` when the file does not exist yet (no pairing has happened) or
+/// is empty/unreadable. Callers that must create the id use the gateway devices
+/// handler's `resolve_or_create_instance_id`; readers on other surfaces use this.
+pub fn read_instance_id() -> Option<String> {
+    let contents = std::fs::read_to_string(instance_id_path()).ok()?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 pub fn resolve_temp_path(relative: impl AsRef<Path>) -> PathBuf {
     std::env::temp_dir().join(relative)
 }

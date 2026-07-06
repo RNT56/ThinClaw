@@ -10,17 +10,56 @@ import ThinClawDesign
 
 @main
 struct ThinClawApp: App {
-    @State private var dependencies = AppDependencies()
-    @State private var router = AppRouter()
+    @State private var dependencies: AppDependencies
+    @State private var router: AppRouter
+    @State private var pushCoordinator: PushCoordinator
     @Environment(\.scenePhase) private var scenePhase
+
+    #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
+        // Owns the watch companion relay host (M4, D-K4). Thin app-side hook:
+        // activation while paired + deprovision on unpair; all testable logic
+        // lives in ThinClawWatchBridge.
+        @State private var watchProvisioning = WatchProvisioning()
+    #endif
+
+    #if canImport(UIKit)
+        @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #endif
+
+    init() {
+        // Build the graph, then the notification coordinator over it. `@State`
+        // wrappers are initialized directly (not `= …` defaults) because the
+        // coordinator needs the same `dependencies`/`router` instances the rest
+        // of the app observes.
+        let dependencies = AppDependencies()
+        let router = AppRouter()
+        _dependencies = State(initialValue: dependencies)
+        _router = State(initialValue: router)
+        _pushCoordinator = State(
+            initialValue: PushCoordinator(dependencies: dependencies, router: router))
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(dependencies)
                 .environment(router)
+                // App-switcher / snapshot redaction: always cover the window
+                // while the scene is inactive/backgrounded so the multitasking
+                // snapshot never leaks transcript content (M5,
+                // docs/MOBILE_SECURITY.md).
+                .privacyOverlay()
                 .onOpenURL { url in
                     router.handle(deepLink: url)
+                }
+                .task {
+                    // Install the notification-center delegate + categories and
+                    // hand the delegate its dependencies once, at launch.
+                    pushCoordinator.configure()
+                    #if canImport(UIKit)
+                        appDelegate.dependencies = dependencies
+                        appDelegate.pushCoordinator = pushCoordinator
+                    #endif
                 }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -30,12 +69,45 @@ struct ThinClawApp: App {
             switch phase {
             case .active:
                 Task { await dependencies.startSessionIfPaired() }
+                #if canImport(UIKit)
+                    // Register for APNs each foreground while paired; the OS
+                    // dedupes and returns a token to the delegate. Content-free
+                    // pushes (D-N1) then flow to PushCoordinator.
+                    if dependencies.isPaired {
+                        appDelegate.requestPushAuthorizationAndRegister()
+                    }
+                #endif
+                #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
+                    // Activate the watch relay host while paired so a paired watch
+                    // provisions its own companion token and can relay approvals
+                    // through the phone (M4, D-K4). Idempotent.
+                    if dependencies.isPaired {
+                        watchProvisioning.activateIfPaired()
+                    }
+                #endif
             case .background:
                 Task { await dependencies.stopSession() }
+                // Arm the periodic BGAppRefresh safety net so widgets keep
+                // updating even if no silent push arrives while backgrounded.
+                #if canImport(UIKit)
+                    BackgroundRefresh.scheduleAppRefresh()
+                #endif
             default:
                 break
             }
         }
+        #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
+            .onChange(of: dependencies.isPaired) { _, paired in
+                // On unpair, best-effort revoke the watch companion and drop the
+                // relay host (the parent-revoke cascade also covers it). On a
+                // fresh pair, activate so the watch can provision.
+                if paired {
+                    watchProvisioning.activateIfPaired()
+                } else {
+                    Task { await watchProvisioning.deprovisionAndTearDown() }
+                }
+            }
+        #endif
     }
 }
 
@@ -62,18 +134,32 @@ struct RootView: View {
                 }
                 Tab("Jobs", systemImage: "clock.badge.checkmark", value: AppTab.jobs) {
                     NavigationStack(path: $router.jobsPath) {
-                        JobsScreen()
+                        JobsScreen(store: { dependencies.makeJobsStore() })
                     }
                 }
                 Tab("Settings", systemImage: "gearshape", value: AppTab.settings) {
                     NavigationStack(path: $router.settingsPath) {
-                        SettingsScreen()
+                        if let store = dependencies.makeSettingsStore() {
+                            SettingsScreen(store: store)
+                        } else {
+                            ContentUnavailableView(
+                                "Settings unavailable",
+                                systemImage: "gearshape",
+                                description: Text(
+                                    "Reconnect to your gateway to manage this device."))
+                        }
                     }
                 }
             }
             .sheet(isPresented: $router.showsApprovals) {
                 NavigationStack {
-                    ApprovalsScreen()
+                    if let store = dependencies.makeApprovalsStore() {
+                        ApprovalsScreen(store: store)
+                    } else {
+                        ContentUnavailableView(
+                            "No pending approvals",
+                            systemImage: "checkmark.shield")
+                    }
                 }
             }
         } else {
@@ -113,7 +199,24 @@ struct ChatTab: View {
             if router.selectedThread == nil, resolvedThread == nil {
                 resolvedThread = await dependencies.defaultThread()
             }
+            startLiveActivityForActiveThread()
         }
+        .onChange(of: router.selectedThread) { _, _ in
+            startLiveActivityForActiveThread()
+        }
+    }
+
+    /// Point the Live Activity manager at the Chat tab's active thread so an
+    /// agent run on it drives the Dynamic Island / lock-screen activity. The
+    /// manager owns at most one activity per thread and is idempotent per
+    /// thread, so re-calling on every thread change is safe. The thread id is
+    /// used as a best-effort activity title until a richer title is threaded
+    /// through the resolver.
+    private func startLiveActivityForActiveThread() {
+        #if canImport(ActivityKit)
+            guard let thread = router.selectedThread ?? resolvedThread else { return }
+            dependencies.startLiveActivity(for: thread, title: thread.rawValue)
+        #endif
     }
 }
 

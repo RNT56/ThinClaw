@@ -1184,6 +1184,7 @@ mod tests {
             tool_name: "shell".to_string(),
             description: "run a command".to_string(),
             parameters: "{}".to_string(),
+            risk: crate::web::devices::ApprovalRisk::High,
             thread_id: None,
             created_at: created_at.to_string(),
         }
