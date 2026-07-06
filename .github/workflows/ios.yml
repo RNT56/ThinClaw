@@ -7,6 +7,10 @@ on:
       - "apps/ios/**"
       - "clients/openapi/**"
       - ".github/workflows/ios.yml"
+    # Tag pushes matching ios-v* trigger the TestFlight archive job below.
+    # (The path filter above does not apply to tag pushes.)
+    tags:
+      - "ios-v*"
   pull_request:
     paths:
       - "apps/ios/**"
@@ -113,3 +117,53 @@ jobs:
             -scheme ThinClaw \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO
+
+  # TestFlight archive + export + upload. Runs only on an `ios-v*` tag push.
+  # Credential-gated: without the App Store Connect API key secrets (which the
+  # public repo does not carry), the signing steps are skipped with a clear
+  # message rather than failing — the archive requires an operator's own Apple
+  # team. No fastlane, no match, no committed provisioning profiles.
+  archive:
+    name: TestFlight archive (tag ios-v*)
+    if: startsWith(github.ref, 'refs/tags/ios-v')
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Selecting ${latest:-<none found>}"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+          swift --version
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: apps/ios
+      # Surface whether distribution credentials are configured. Secrets cannot
+      # be referenced in job/step `if:` expressions, so we gate on an env var.
+      - name: Check for distribution credentials
+        id: creds
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+        run: |
+          if [ -n "$DEVELOPMENT_TEAM" ] \
+            && [ -n "$APP_STORE_CONNECT_KEY_ID" ] \
+            && [ -n "$APP_STORE_CONNECT_ISSUER_ID" ] \
+            && [ -n "$APP_STORE_CONNECT_KEY_P8" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Distribution credentials present — will archive, export, and upload."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::App Store Connect credentials not configured; skipping TestFlight archive. Set APPLE_DEVELOPMENT_TEAM, APP_STORE_CONNECT_KEY_ID, APP_STORE_CONNECT_ISSUER_ID, and APP_STORE_CONNECT_KEY_P8 secrets to enable it."
+          fi
+      - name: Archive, export, and upload to TestFlight
+        if: steps.creds.outputs.present == 'true'
+        working-directory: apps/ios
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+        run: scripts/archive.sh --upload

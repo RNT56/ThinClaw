@@ -45,6 +45,7 @@ public struct ChatScreen: View {
     private var offlineBanner: some View {
         HStack(spacing: ThinClawSpacing.sm) {
             Image(systemName: "wifi.slash")
+                .accessibilityHidden(true)
             Text("Offline — messages will send when reconnected")
                 .font(ThinClawTypography.caption)
             Spacer()
@@ -57,6 +58,10 @@ public struct ChatScreen: View {
         .padding(.vertical, ThinClawSpacing.sm)
         .frame(maxWidth: .infinity)
         .background(.orange.opacity(0.15))
+        // Group the icon + copy as one label; the Retry button stays a
+        // separately focusable action.
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("Offline. Messages will send when reconnected."))
     }
 
     private var historyLoader: some View {
@@ -110,6 +115,16 @@ struct TimelineRow: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
+        rowContent
+            // VoiceOver: one spoken element per row, worded by the pure
+            // `TimelineAccessibility` descriptor in ThinClawCore. Streaming
+            // replies keep a stable label and announce growth via the value.
+            .accessibilityElement(children: .combine)
+            .modifier(TimelineAccessibilityModifier(descriptor: item.accessibility))
+    }
+
+    @ViewBuilder
+    private var rowContent: some View {
         switch item.kind {
         case .userMessage(let text):
             Text(text)
@@ -149,5 +164,19 @@ struct TimelineRow: View {
             }
             .buttonStyle(.plain)
         }
+    }
+}
+
+/// Applies a pure ``TimelineAccessibility`` descriptor to a row: label, an
+/// optional value (streaming prose, announced politely on change), and an
+/// optional action hint.
+private struct TimelineAccessibilityModifier: ViewModifier {
+    let descriptor: TimelineAccessibility
+
+    func body(content: Content) -> some View {
+        content
+            .accessibilityLabel(Text(descriptor.label))
+            .accessibilityValue(Text(descriptor.value ?? ""))
+            .accessibilityHint(Text(descriptor.hint ?? ""))
     }
 }

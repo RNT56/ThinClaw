@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import ThinClawAPI
 import ThinClawAuth
 import UserNotifications
@@ -73,6 +74,12 @@ final class NotificationService: UNNotificationServiceExtension {
 
         switch category {
         case categoryApprovalLow, categoryApprovalHigh, categoryApproval:
+            // D-N3: honor the operator's per-category preview preference. When the
+            // approval preview is `never`/`app_only`, or `when_unlocked` while the
+            // device is likely locked, leave the generic content-free text.
+            guard NotificationPreviewPreference.load(for: .approval).allowsRewrite() else {
+                return nil
+            }
             return await approvalRewrite(client: client, requestID: ids.requestID)
         default:
             // Messages/jobs have no dedicated content-fetch endpoint in the v1
@@ -125,3 +132,86 @@ private struct PushIDs {
 private let categoryApproval = "THINCLAW_APPROVAL"
 private let categoryApprovalLow = "THINCLAW_APPROVAL_LOW"
 private let categoryApprovalHigh = "THINCLAW_APPROVAL_HIGH"
+
+/// The operator's per-category preview preference (docs/MOBILE_SECURITY.md
+/// **D-N3**), read straight from the shared App Group defaults so the extension
+/// links no app code. The keys + raw values are the stable cross-process
+/// contract written by `ThinClawCore.NotificationPreferencesStore`; kept local
+/// here to keep the NSE's dependency surface minimal.
+private enum NotificationPreviewPreference {
+    /// Push categories the operator can gate. Only `approval` is consulted in the
+    /// NSE today (the only category with a content rewrite), but the enum mirrors
+    /// the full model so the key contract stays honest.
+    enum Category: String {
+        case message
+        case approval
+        case job
+    }
+
+    /// Preview modes, mirroring `ThinClawCore.PreviewMode` raw values exactly.
+    enum Mode: String {
+        case always
+        case whenUnlocked
+        case never
+        case appOnly
+    }
+
+    /// The App Group suite the app + NSE share (D-K2).
+    private static let appGroupID = "group.com.thinclaw.shared"
+
+    /// Load the persisted mode for `category`, defaulting to `whenUnlocked` when
+    /// unset/unrecognized — the same default the app-side store applies.
+    static func load(for category: Category) -> Mode {
+        guard
+            let defaults = UserDefaults(suiteName: appGroupID),
+            let raw = defaults.string(forKey: "notif.preview.\(category.rawValue)"),
+            let mode = Mode(rawValue: raw)
+        else {
+            return .whenUnlocked
+        }
+        return mode
+    }
+}
+
+extension NotificationPreviewPreference.Mode {
+    /// Whether the NSE may perform its local content rewrite under this mode.
+    /// `never`/`appOnly` never rewrite; `whenUnlocked` rewrites only while the
+    /// device is unlocked (probed via ``deviceIsUnlocked``, failing closed when
+    /// the probe is inconclusive); `always` always rewrites.
+    func allowsRewrite() -> Bool {
+        switch self {
+        case .always:
+            return true
+        case .never, .appOnly:
+            return false
+        case .whenUnlocked:
+            return deviceIsUnlocked()
+        }
+    }
+}
+
+/// Best-effort device-unlocked probe for the NSE: attempt to read a Keychain
+/// item classed `WhenUnlockedThisDeviceOnly`. A successful read means the device
+/// is unlocked; `errSecInteractionNotAllowed` means locked. Any other error (or
+/// a missing probe item — never provisioned) is treated as **locked** so the
+/// `whenUnlocked` preview fails closed to the generic content-free text.
+///
+/// The probe item is optional infrastructure: when absent the NSE simply keeps
+/// previews off for `whenUnlocked`, which is the private-by-default outcome.
+private func deviceIsUnlocked() -> Bool {
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "com.thinclaw.lockprobe",
+        kSecReturnData as String: false,
+        kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+    let status = SecItemCopyMatching(query as CFDictionary, nil)
+    switch status {
+    case errSecSuccess:
+        return true
+    default:
+        // errSecInteractionNotAllowed (locked), errSecItemNotFound (no probe),
+        // or anything else → treat as locked / fail closed.
+        return false
+    }
+}

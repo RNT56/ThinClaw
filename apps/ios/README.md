@@ -11,23 +11,31 @@ milestones) and [`docs/MOBILE_SECURITY.md`](../../docs/MOBILE_SECURITY.md)
 
 ## Status
 
-The **M1 client is implemented**, the **M2 approvals + push surfaces are
-authored**, the **M3 widgets + Live Activity + snapshot pipeline are authored**,
-and the **M4 watchOS companion is landed backend-side + authored client-side**:
-the SPM packages, the onboarding flow, the chat + sessions surfaces, the
-risk-tiered approvals surface, the home-screen widgets, the agent-run Live
-Activity manager, the App Group snapshot pipeline, and the watch surface (relay
-bridge, companion provisioning, wrist approvals/dictation, status complication)
-are all wired, and the whole `ThinClaw` app target (plus its widget, watch, and
-Notification Service Extension embeds) **builds for the iOS 26 simulator**. The
-M4 companion-token backend (mint/list/revoke + cascade + watch low-risk-only
-enforcement) is **landed and Rust-tested** in the gateway. All pure-logic
-packages pass `swift test` on macOS with no simulator; the logic behind the
-feature stores, the `RunTracker`/`LiveActivityManager`, the `SnapshotPublisher`,
-and the watch relay/route seams is unit-tested. What remains is real-device /
-live-gateway exercise, a whole-app/NSE/WidgetKit/ActivityKit + watchOS-target
-`xcodebuild` verification, live APNs delivery, and the jobs/settings surfaces
-(M3+). See the caveats below the table.
+**All planned milestones have landed in code (R0→M5, B1→B3).** The SPM
+packages, the onboarding flow, chat + sessions, the risk-tiered approvals
+surface, the home-screen widgets, the agent-run Live Activity manager, the App
+Group snapshot pipeline, the watch surface (relay bridge, companion
+provisioning, wrist approvals/dictation, status complication), the read-only
+jobs glance, in-app device management (self + companions only), per-category
+notification preview controls, the app-switcher redaction overlay, accessibility
+passes, and the credential-gated TestFlight archive pipeline are all wired, and
+the whole `ThinClaw` app target (plus its widget, watch, and Notification Service
+Extension embeds) **builds for the iOS 26 simulator**. The gateway-side backends
+(device identity B1, push B2, discovery B3, companion tokens M4) are **landed and
+Rust-tested**. All pure-logic packages pass `swift test` on macOS with no
+simulator; the logic behind every feature store (`ChatStore`, `SessionsStore`,
+`ApprovalsStore`, `JobsStore`, `SettingsStore`), the
+`RunTracker`/`LiveActivityManager`, the `SnapshotPublisher`, and the watch
+relay/route seams is unit-tested.
+
+**What remains is bring-up, not new milestones:** no real-device or live-gateway
+end-to-end run has happened; the ActivityKit/WidgetKit/`BGTaskScheduler` paths
+and the **watchOS whole-target compile** (wiring the `ThinClawWatchBridge` relay
+proxy into `WatchApp` in place of the default `MirroredSnapshotProxy`) are the
+Build stage's job; live APNs / Live Activity delivery is untested against Apple;
+and the TestFlight archive has never actually run because **the repo carries no
+Apple team**. See the caveats below the table and
+[`docs/MOBILE_APP.md`](../../docs/MOBILE_APP.md) → Remaining work.
 
 | Piece | Status |
 |---|---|
@@ -49,7 +57,10 @@ live-gateway exercise, a whole-app/NSE/WidgetKit/ActivityKit + watchOS-target
 | `ThinClawWatchBridge` (phone-side `WatchRelayHost` + companion provisioning) | 🚧 authored (M4); `WCSessionDelegate` mints the watch a companion over the pinned parent client, delivers it (token + URLs + SPKI pin + instance id) via `updateApplicationContext`, forwards relayed approve/quick-ask with the **watch's own token opaquely** (never the phone's), fails closed to `reprovisionRequired` on 401/403; `DELETE`s the companion on unpair. Pure seams tested on macOS (39 tests); WCSession/watchOS whole-target compile is Build stage |
 | Watch UI (`Watch/Sources`: `WatchRootView`, `ApprovalsListView`, `AskView`) | 🚧 authored (M4); glanceable status (mirrored `AgentStatusSnapshot` + pending count + relay/direct/queued route badge), approvals list offering Approve/Deny for **low-risk** entries only (high/unknown → "Approve on iPhone" hand-off, deny always allowed) with `WKInterfaceDevice` haptics + round-trip spinner, and a dictated quick-ask; all I/O behind a `WatchGatewayProxy` seam (relay-first, watch's own reduced-scope token). Default `MirroredSnapshotProxy` renders the App Group mirror and queues writes until the bridge relay proxy is wired. Typechecks + swift-format-clean for watchOS 26 |
 | Watch complication (`WatchWidgets/Sources/StatusComplication`) | 🚧 authored (M4); real WidgetKit complication (circular/corner/inline) reading the watch App Group mirror, resilient to a missing snapshot ("open watch app"); WidgetKit compile pending Build stage |
-| `FeatureJobs` / `FeatureSettings` | 🚧 placeholder screens (M3+); compiled into the app build, no stores yet |
+| `FeatureJobs` (read-only jobs glance over `ThinClawCore.JobsStore`) | ✅ implemented (M5); lists jobs + summary and loads detail over the generated client (`GET /api/jobs`, `/api/jobs/{id}`, `jobs:read`), tails events by **polling** `GET /api/jobs/{id}/events` (JSON snapshot, not SSE) with an id-cursor fold + backoff; UI has pull-to-refresh, summary chips, empty state, a "view only — can't cancel/restart from this device" footer, and a detail tail. `JobsStore` macOS-tested; SwiftUI screen at Build stage |
+| `FeatureSettings` (device management + notification prefs over `ThinClawCore.SettingsStore`) | ✅ implemented (M5); shows this device (`GET /api/devices/me`), lists companions with per-companion Revoke (`DELETE /api/devices/me/companions/{id}`), Unpairs (`AppDependencies.unpair()`) — **no self-rename/rotate** (admin-only routes reject a device token). Per-category notification preview prefs persist to shared App Group defaults the NSE reads; connection row from live `GatewaySession` state + Keychain identity (never `/api/gateway/status`); URL/pin reveal Face-ID-gated (D-K3); "Enhanced protection" drives `GRDBTranscriptStore.applyFileProtection(enhanced:)` (file-protection class only; the app-switcher overlay is always on). Stores macOS-tested; SwiftUI screen at Build stage |
+| Accessibility + app-switcher redaction (`PrivacyRedactionPolicy`, `TimelineAccessibility`, `App/Sources/PrivacyOverlay`) | ✅ implemented (M5); pure redaction/VoiceOver logic macOS-tested, overlay always covers the window on background/inactive `scenePhase`, `FeatureChat`/`ThinClawDesign` honor VoiceOver + Reduce Motion; overlay verified at Build stage |
+| TestFlight archive pipeline (`scripts/archive.sh`, `Config/ExportOptions.plist`, CI `archive` job) | ✅ implemented (M5); fastlane-free `xcodebuild archive` → `-exportArchive` → `xcrun altool`, App Store Connect API key auth, tag-triggered (`ios-v*`), credential-gated no-op-with-message when secrets absent. actionlint-validated; real archive unrun (no Apple team in repo) |
 | Tuist manifests / CI `build-app` job | ✅ `tuist generate` succeeds locally and the app builds; CI `build-app` job unverified here |
 
 **M1 caveat:** the onboarding **and** chat/sessions flows are wired end to end
@@ -148,7 +159,22 @@ the WCSession + watchOS whole-target compile (and wiring the bridge relay proxy
 into `WatchApp` in place of the default `MirroredSnapshotProxy`) is the Build
 stage's job. No real-device or live-gateway watch run has happened.
 
-Milestones M1–M5 are defined in `docs/MOBILE_APP.md`.
+**M5 caveat:** the polish milestone is **landed in code, not real-device /
+TestFlight-verified**. The read-only jobs glance, in-app device management (self +
+companions only — the phone token can't manage arbitrary devices, and self-rename/
+rotate are deliberately absent because those routes are admin-only), per-category
+notification preview controls, the app-switcher redaction overlay, the
+biometric-gated connection-detail reveal, "Enhanced protection", and accessibility
+passes are all wired; the pure logic and stores (`JobsStore`, `SettingsStore`,
+`NotificationPreferences`, `PrivacyRedactionPolicy`, `TimelineAccessibility`) are
+`swift test`-covered on macOS. The fastlane-free archive pipeline is wired and
+actionlint-validated but **has never actually run** — the repo carries no Apple
+team, so cutting a TestFlight build requires an operator's own Apple Developer
+team + App Store Connect API key. The SwiftUI screens, the overlay, and the whole
+archive are Build-stage / operator work.
+
+Milestones M1–M5 are defined in `docs/MOBILE_APP.md`; the honest cross-program
+remaining-work list lives there under **Remaining work**.
 
 ## Toolchain
 
@@ -218,6 +244,32 @@ scripts/generate-api.sh   # vendors the spec, runs swift-openapi-generator
 
 Generated sources are committed; `scripts/check-generated-drift.sh` gates CI.
 Never hand-edit generated code or the vendored spec.
+
+## TestFlight (fastlane-free archive)
+
+TestFlight builds use raw `xcodebuild archive` + `-exportArchive` +
+`xcrun altool`, authenticated by an App Store Connect API key. No fastlane, no
+`match`, no committed provisioning profiles — signing is resolved with
+`-allowProvisioningUpdates` at export time.
+
+```bash
+# Local, with your own Apple team:
+export DEVELOPMENT_TEAM=ABCDE12345
+export APP_STORE_CONNECT_KEY_ID=XXXXXXXXXX
+export APP_STORE_CONNECT_ISSUER_ID=00000000-0000-0000-0000-000000000000
+export APP_STORE_CONNECT_KEY_P8="$(base64 -i AuthKey_XXXXXXXXXX.p8 | tr -d '\n')"
+scripts/archive.sh --upload      # omit --upload to just produce the .ipa
+```
+
+CI cuts a build when you push an `ios-v*` tag (the `archive` job in
+`.github/workflows/ios.yml`), reading the same four values from GitHub secrets
+(`APPLE_DEVELOPMENT_TEAM`, `APP_STORE_CONNECT_KEY_ID`,
+`APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_P8`). The pipeline is
+**credential-gated**: with no team configured it is a no-op-with-message, so it
+never fails CI for contributors. Export options live in
+`Config/ExportOptions.plist` (`teamID` is a placeholder substituted at export
+time). Nothing secret is committed. See `docs/MOBILE_APP.md` for the full
+secret table.
 
 ## Security invariants (enforced by review)
 

@@ -44,6 +44,11 @@ struct ThinClawApp: App {
             RootView()
                 .environment(dependencies)
                 .environment(router)
+                // App-switcher / snapshot redaction: always cover the window
+                // while the scene is inactive/backgrounded so the multitasking
+                // snapshot never leaks transcript content (M5,
+                // docs/MOBILE_SECURITY.md).
+                .privacyOverlay()
                 .onOpenURL { url in
                     router.handle(deepLink: url)
                 }
@@ -129,12 +134,20 @@ struct RootView: View {
                 }
                 Tab("Jobs", systemImage: "clock.badge.checkmark", value: AppTab.jobs) {
                     NavigationStack(path: $router.jobsPath) {
-                        JobsScreen()
+                        JobsScreen(store: { dependencies.makeJobsStore() })
                     }
                 }
                 Tab("Settings", systemImage: "gearshape", value: AppTab.settings) {
                     NavigationStack(path: $router.settingsPath) {
-                        SettingsScreen()
+                        if let store = dependencies.makeSettingsStore() {
+                            SettingsScreen(store: store)
+                        } else {
+                            ContentUnavailableView(
+                                "Settings unavailable",
+                                systemImage: "gearshape",
+                                description: Text(
+                                    "Reconnect to your gateway to manage this device."))
+                        }
                     }
                 }
             }

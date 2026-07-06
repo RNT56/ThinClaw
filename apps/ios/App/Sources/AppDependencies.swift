@@ -1,7 +1,9 @@
 import FeatureApprovals
 import FeatureChat
+import FeatureJobs
 import FeatureOnboarding
 import FeatureSessions
+import FeatureSettings
 import Foundation
 import OpenAPIRuntime
 import OpenAPIURLSession
@@ -309,6 +311,70 @@ final class AppDependencies {
     func makeSessionsStore() -> SessionsStore? {
         guard let session = ensureSession() else { return nil }
         return SessionsStore(session: session, store: transcriptStore)
+    }
+
+    /// Build the M5 Settings store, wired to the paired credential: a
+    /// device-management adapter over the pinned client
+    /// (`GET /api/devices/me`, companions, revoke), the paired-gateway identity
+    /// from the credential, the App Group defaults for notification-preview
+    /// preferences (so the NSE reads the same values), a real Face ID gate for
+    /// the connection-detail reveal (D-K3), the live connection-state stream, and
+    /// an enhanced-protection control that persists the shared overlay preference
+    /// and re-tags the transcript cache. Nil until paired.
+    func makeSettingsStore() -> SettingsStore? {
+        guard let credential = (try? DeviceCredential.load(from: keychain)) ?? nil,
+            let client = makePushClient(),
+            let session = ensureSession()
+        else { return nil }
+
+        let identity = PairedGatewayIdentity(credential: credential)
+        let store = transcriptStore
+        let protection = ClosureProtectionControl(
+            current: UserDefaults.standard.bool(
+                forKey: PrivacySettingsKey.enhancedProtection)
+        ) { enabled in
+            // Persist for the app-switcher redaction overlay's @AppStorage read…
+            UserDefaults.standard.set(
+                enabled, forKey: PrivacySettingsKey.enhancedProtection)
+            // …and re-tag the transcript cache if it is the file-backed store.
+            if let grdb = store as? GRDBTranscriptStore {
+                return grdb.applyFileProtection(enhanced: enabled)
+            }
+            return false
+        }
+
+        return SettingsStore(
+            devices: GatewayDeviceManager(client: client),
+            identity: identity,
+            biometrics: SettingsBiometricGate(),
+            unpairer: ClosureUnpairing { [weak self] in await self?.unpair() },
+            keyValueStore: AppGroupDefaultsStore(),
+            protectionControl: protection,
+            connectionSource: GatewaySessionConnectionSource(session: session))
+    }
+
+    /// Build the read-only Jobs glance store, wired to the generated REST client
+    /// (list/summary/detail) and a hand-rolled pinned fetch for the per-job event
+    /// tail (`GET /api/jobs/{id}/events`, which is not part of the generated
+    /// surface). Over the **same** pinned-session policy as the rest of the graph
+    /// (D-X2). Nil until paired. The phone token holds `jobs:read` only, so the
+    /// resulting store is read-only by construction.
+    func makeJobsStore() -> JobsStore? {
+        guard let credential = (try? DeviceCredential.load(from: keychain)) ?? nil,
+            let baseURL = credential.preferredBaseURL
+        else { return nil }
+
+        let token = credential.deviceToken
+        let tokenProvider: @Sendable () -> String? = { token }
+        let pinnedSession = PinnedSessionDelegate(
+            pinnedFingerprint: credential.serverFingerprint
+        ).makeSession()
+        let client = GatewayClient.make(
+            baseURL: baseURL, token: tokenProvider, session: pinnedSession)
+
+        let adapter = GatewayJobsAdapter(
+            client: client, baseURL: baseURL, token: tokenProvider, session: pinnedSession)
+        return JobsStore(gateway: adapter)
     }
 
     /// The shared approvals store, wired to the live session and the real

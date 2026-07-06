@@ -1,12 +1,15 @@
 # Mobile Security Model
 
-> **Status: design specification.** Canonical security spec for the ThinClaw
-> iOS/watchOS surface. Implementation is phased (see
-> [`docs/MOBILE_APP.md`](MOBILE_APP.md) milestones); until a phase lands,
-> the corresponding sections describe intent, not current behavior.
+> **Status: canonical security spec; all phased milestones (B1→B3, M1→M5) have
+> landed in code.** Canonical security spec for the ThinClaw iOS/watchOS
+> surface. Every decision below is now implemented — the gateway-side controls
+> are Rust-tested, and the client-side controls are `swift test`-covered with the
+> whole app building for the iOS 26 simulator — with the honest exception that
+> nothing has been exercised against a real device or Apple's live push
+> infrastructure (see [`docs/MOBILE_APP.md`](MOBILE_APP.md) → Remaining work).
 > `src/NETWORK_SECURITY.md` remains the authority for what the gateway
-> enforces *today* and gains a "Paired device client" trust boundary when
-> milestone B1 ships.
+> enforces *today*; it gained the "Paired device client" trust boundary with
+> milestone B1.
 
 ## Grounding constraints (verified against the codebase)
 
@@ -261,7 +264,13 @@ thinclaw://pair?d=<base64url(json)>
 
 - Transcript cache: `NSFileProtectionCompleteUntilFirstUserAuthentication`;
   optional "Enhanced protection" upgrades to `Complete` (documented cost:
-  no locked-screen refresh).
+  no locked-screen refresh). **Client wiring landed (M5).** The Settings toggle
+  drives `GRDBTranscriptStore.applyFileProtection(enhanced:)`, which re-tags the
+  cache directory + SQLite sidecars to `Complete`/`CompleteUntilFirstUserAuth`,
+  and persists the choice under the shared
+  `com.thinclaw.ios.settings.enhancedProtection` defaults key. This toggle gates
+  the heavier data-at-rest file-protection class only; the app-switcher
+  redaction overlay below is always on, independent of it.
 - Never cached on device: secrets-store values, `credential_prompt`
   contents, the pairing secret (freed after pairing).
 - Widget snapshots carry at most: thread title, truncated preview
@@ -274,8 +283,14 @@ thinclaw://pair?d=<base64url(json)>
   are always retained so a redacted widget can still label and gate a row.
 - OSLog: tokens/URLs logged with `privacy: .private`; no body logging.
 - Gateway: `tcd_` registered in the `LeakDetector` scrub patterns; device
-  tokens rejected on the `?token=` query path; optional app-switcher
-  redaction overlay on the client.
+  tokens rejected on the `?token=` query path.
+- **App-switcher redaction overlay landed (M5).** `App/Sources/PrivacyOverlay`
+  covers the window whenever `scenePhase` goes `.inactive`/`.background`, so the
+  app-switcher snapshot never shows transcript content. It is **always on** — a
+  cheap, unconditional privacy measure independent of the "Enhanced protection"
+  toggle (which gates only the transcript file-protection class). Pure
+  `PrivacyRedactionPolicy` is macOS-tested;
+  the SwiftUI overlay is verified at the Build stage.
 
 ### Gateway-side hardening (B1)
 
@@ -309,10 +324,12 @@ thinclaw://pair?d=<base64url(json)>
    90-day-inactivity selection logic (unit-tested), but nothing schedules or
    calls it yet — there is no running daily auto-revoke sweep.
 
-## Client & push implementation status (M1 / B2)
+## Client & push implementation status (M1–M5 / B2)
 
 Annotates the decisions above against what the iOS client (`apps/ios/`) and the
-first-party push notifier actually implement today. The security primitives are
+first-party push notifier actually implement today. All client milestones
+(M1–M5) have landed in code; the caveats below are about real-device / live-Apple
+exercise, not missing implementation. The security primitives are
 unit-tested Swift package layers; the **onboarding/pairing and chat/sessions
 features are now wired end to end in code** (`OnboardingStore` state machine +
 VisionKit QR scanner + app credential gating; `ChatStore`/`SessionsStore` over
@@ -381,8 +398,8 @@ Rust-tested):
   events to the per-activity update token; on run end the client `DELETE`s that
   registration. The device's push-to-start token is registered so a killed app
   can be spawned.
-- 🟡 **D-N3 per-category controls** and the Notification Service Extension
-  rewrite (client-side, M2): authored in `apps/ios`. The app registers four
+- ✅ **D-N3 per-category controls** and the Notification Service Extension
+  rewrite (client-side, M2/M5, landed in code): authored in `apps/ios`. The app registers four
   categories — `THINCLAW_MESSAGE`, `THINCLAW_APPROVAL_LOW` (inline Approve/Deny),
   `THINCLAW_APPROVAL_HIGH` (Open-only → deep-link → in-app Face ID), and
   `THINCLAW_JOB` — so an inline approve action is offered for low-risk approvals
@@ -390,9 +407,17 @@ Rust-tested):
   over the shared pinned connection (`GET /api/chat/approvals`, device token from
   the shared Keychain group) and rewrites the visible title/body locally,
   leaving the generic text when the gateway is unreachable. Content-free pushes
-  carry only the `tc` id dict end to end. Per-category *preview* toggles
-  (always/when-unlocked/never) are the remaining D-N3 surface, not yet built.
-  Unverified against a Tuist/`xcodebuild` build (same caveat as Phase 1).
+  carry only the `tc` id dict end to end. **Per-category preview toggles landed
+  (M5).** `ThinClawCore.NotificationPreferences` models per-category modes
+  (message/approval/job × always/when-unlocked/never, plus approvals-only
+  "app only"); the in-app Settings surface persists them through
+  `NotificationPreferencesStore` into the shared App Group defaults
+  (`notif.preview.<category>`), and the `ThinClawNotificationService` extension
+  reads the same keys before rewriting an approval — `never`/`app only` (and
+  `when-unlocked` while the device is locked, probed fail-closed) leave the
+  generic content-free text. Pure model + persistence round-trip are
+  macOS-tested; the SwiftUI Settings screen is unverified against a
+  Tuist/`xcodebuild` build (same caveat as Phase 1).
 - ✅ **D-K3 gateway-side risk classifier (single source of truth).**
   `thinclaw_gateway::web::devices::approval_risk::classify` maps a tool name to
   `ApprovalRisk::{Low, High}` from an auditable substring allowlist:
@@ -405,10 +430,13 @@ Rust-tested):
   `GET /api/chat/approvals` pending entries, and the push notifier derives the
   APNs category from it — the client and NSE never approximate risk locally
   (Rust-tested; carried through the OpenAPI snapshot to the generated client).
-- 🚧 **D-K3 client biometric gate (authored, M2).** `ApprovalsStore` fires an
+- ✅ **D-K3 client biometric gate (landed in code, M2/M5).** `ApprovalsStore` fires an
   injected `BiometricGating` (`LAContext` Face ID) before a **high-risk approve**
   and never before deny or a low-risk decision; the widget/watch omit the approve
-  action for high-risk entirely (deep-link into the app). Push registration is
+  action for high-risk entirely (deep-link into the app). The M5 Settings surface
+  (`SettingsStore`) reuses the same `BiometricGating` seam to gate the reveal of
+  the gateway URL + pinned fingerprint (device-management/server-detail reveal),
+  and re-hides them on backgrounding. Push registration is
   device-token-authenticated via the `devices:self` scope
   (`PUT/DELETE /api/devices/me/push`). Same Tuist/`xcodebuild` + live-Apple
   caveat as D-N3.

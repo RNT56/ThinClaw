@@ -15,17 +15,17 @@ let package = Package(
         .library(name: "FeatureJobs", targets: ["FeatureJobs"])
     ],
     dependencies: [
+        .package(path: "../../ThinClawAPI"),
         .package(path: "../../ThinClawCore"),
         .package(path: "../../ThinClawDesign"),
-
     ],
     targets: [
         .target(
             name: "FeatureJobs",
             dependencies: [
+                .product(name: "ThinClawAPI", package: "ThinClawAPI"),
                 .product(name: "ThinClawCore", package: "ThinClawCore"),
                 .product(name: "ThinClawDesign", package: "ThinClawDesign"),
-
             ]
         )
     ]

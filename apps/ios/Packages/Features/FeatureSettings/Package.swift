@@ -18,6 +18,8 @@ let package = Package(
         .package(path: "../../ThinClawCore"),
         .package(path: "../../ThinClawDesign"),
         .package(path: "../../ThinClawAuth"),
+        .package(path: "../../ThinClawAPI"),
+        .package(path: "../../ThinClawTransport"),
     ],
     targets: [
         .target(
@@ -26,6 +28,8 @@ let package = Package(
                 .product(name: "ThinClawCore", package: "ThinClawCore"),
                 .product(name: "ThinClawDesign", package: "ThinClawDesign"),
                 .product(name: "ThinClawAuth", package: "ThinClawAuth"),
+                .product(name: "ThinClawAPI", package: "ThinClawAPI"),
+                .product(name: "ThinClawTransport", package: "ThinClawTransport"),
             ]
         )
     ]
