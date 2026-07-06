@@ -89,12 +89,17 @@ jobs:
         run: apps/ios/scripts/check-generated-drift.sh
 
   # Full app build via Tuist. Needs Xcode 26 (Swift 6.2) plus mise-managed
-  # tuist. Kept best-effort until the whole iOS pipeline is confirmed green on
-  # the GitHub runner image — the package test matrix above is the hard gate.
+  # tuist. This is now a hard gate: the previous best-effort failure was a
+  # reproducible, CI-only bug (see scripts/tuist-generate.sh) — the app target
+  # declares resources: ["App/Resources/**"], the repo commits no files there,
+  # and git does not track empty directories, so on a fresh checkout that dir
+  # is ABSENT and `tuist generate` errors during "Loading and constructing the
+  # graph" (exit 1, bare log reference). scripts/tuist-generate.sh creates the
+  # missing declared resource dir before generation, which fixes it. Verified
+  # locally by deleting App/Resources: generate goes from exit 1 -> exit 0.
   build-app:
-    name: tuist build (best effort)
+    name: tuist build
     runs-on: macos-15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Select newest Xcode
@@ -106,17 +111,47 @@ jobs:
       - uses: jdx/mise-action@v2
         with:
           working_directory: apps/ios
-      - name: Generate and build
+      - name: Generate workspace (resolves SPM via xcodebuild)
         working-directory: apps/ios
         run: |
           cp Config/Signing.example.xcconfig Config/Signing.local.xcconfig
-          tuist install
-          tuist generate --no-open
+          # Run the generator under mise so the pinned tuist 4.44 is used.
+          mise x -- ./scripts/tuist-generate.sh
+      - name: Build app for the iOS simulator
+        working-directory: apps/ios
+        run: |
           xcodebuild build \
             -workspace ThinClaw.xcworkspace \
             -scheme ThinClaw \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO
+
+  # iOS-only Feature package tests on a concrete iOS 26 simulator. The
+  # swift-test matrix above cannot cover these: Packages/Features/* declare
+  # `.iOS(.v26)` only, so `swift test` (host-Mac build) skips them. This job
+  # runs their XCTest targets (e.g. FeatureOnboarding's DiscoveryStoreTests +
+  # OnboardingStoreTests) via `xcodebuild test -scheme <Package>` on a booted
+  # iOS 26 simulator. scripts/feature-tests.sh auto-discovers every feature
+  # package that has tests and soft-skips (exit 0 with a ::warning::) if the
+  # runner ships no iOS 26 runtime, so runner-image drift never blocks
+  # contributors. Set FEATURE_TESTS_REQUIRE_SIM=1 to harden it once the image
+  # is known to always carry an iOS 26 runtime.
+  feature-tests:
+    name: feature package tests (iOS 26 sim)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Selecting ${latest:-<none found>}"
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+          swift --version
+      - name: List available simulators
+        run: xcrun simctl list devices available | grep -i ios || true
+      - name: Run Feature package tests
+        working-directory: apps/ios
+        run: ./scripts/feature-tests.sh
 
   # TestFlight archive + export + upload. Runs only on an `ios-v*` tag push.
   # Credential-gated: without the App Store Connect API key secrets (which the

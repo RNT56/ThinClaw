@@ -241,7 +241,7 @@ new milestones — see [Remaining work](#remaining-work-honest).
 | Device identity layer (pairing, tokens, scopes, TLS listener) | ✅ landed (B1) |
 | Companion device tokens + watch low-risk-only approvals (backend) | ✅ landed (M4); `DeviceRecord.parent_device_id` (serde-default for legacy rows), `POST/GET /api/devices/me/companions` + `DELETE /api/devices/me/companions/{id}` (`devices:self` scope), companion grant = `chat`+`approvals` only, `DeviceStore::revoke_cascade` revokes all children with the parent (clearing push regs + tearing down streams), and server-side enforcement in `POST /api/chat/approval` refusing high/unknown-risk approvals from a watchOS companion (fail-closed, generic 403). `companion.created`/`companion.revoked` audit events; OpenAPI regenerated. Rust unit + `device_pairing_integration` coverage |
 | Watch relay + companion provisioning (`ThinClawWatchBridge`, `App/Sources/WatchProvisioning`) | 🚧 authored (M4); the phone-side `WatchRelayHost` (`WCSessionDelegate`) mints the watch a reduced-scope companion via `POST /api/devices/me/companions` over the pinned client and delivers it (token + gateway URLs + SPKI pin + instance id) as `updateApplicationContext`; it answers watch RPCs by forwarding **the watch's own token opaquely** (never the phone's) to `POST /api/chat/approval` / `POST /api/chat/send` via the pure `WatchRelayResponder`, and pushes glanceable snapshots on significant changes. The watch-side `WatchGatewayRouter` selects relay→direct→queue (relay-first; direct is a pinned URLSession with the watch's own credential; else `transferUserInfo` queue + "pending sync") with per-route timeout fall-through inside the <5s approval budget. Re-provision when the watch reports a missing/stale credential; `DELETE` the companion on unpair (`WatchProvisioning` hook in `App/Sources`, activated while paired). Pure seams (envelope encode/decode, route selection, provisioning payload, and the watch-token-in-relayed-approval invariant) covered by `swift test` on macOS (39 tests); WCSession/watchOS whole-target compile is the Build stage's job |
-| Watch client UI (`Watch/Sources`, `WatchWidgets/Sources`) | 🚧 authored (M4); glanceable `WatchRootView` (mirrored `AgentStatusSnapshot` phase + pending count + relay/direct/queued route badge), an approvals list offering Approve/Deny for **low-risk** entries only (high/unknown → "Approve on iPhone" hand-off, deny always allowed) with success/failure `WKInterfaceDevice` haptics and a round-trip spinner, and a dictated `AskView` (`TextField` dictation → `quickAsk`, sent/queued/failed receipt). All I/O is behind a `WatchGatewayProxy` seam (relay-first, the watch attaches its own reduced-scope token — D-K4); the default `MirroredSnapshotProxy` renders the watch App Group mirror and queues writes until the `ThinClawWatchBridge` relay proxy is wired. `StatusComplication` is a real WidgetKit complication (circular/corner/inline) reading the mirror, resilient to a missing snapshot ("open watch app"). Typechecks + swift-format-clean for watchOS 26; `ThinClawWatch` target link pending the bridge's `WatchRelayHost` watchOS cross-compile fix |
+| Watch client UI (`Watch/Sources`, `WatchWidgets/Sources`) | 🚧 authored (M4); glanceable `WatchRootView` (mirrored `AgentStatusSnapshot` phase + pending count + relay/direct/queued route badge), an approvals list offering Approve/Deny for **low-risk** entries only (high/unknown → "Approve on iPhone" hand-off, deny always allowed) with success/failure `WKInterfaceDevice` haptics and a round-trip spinner, and a dictated `AskView` (`TextField` dictation → `quickAsk`, sent/queued/failed receipt). All I/O is behind a `WatchGatewayProxy` seam (relay-first, the watch attaches its own reduced-scope token — D-K4); the **live** `RouterGatewayProxy` drives a `ThinClawWatchBridge` `WatchGatewayRouter` over real `WCSession.sendMessage` relay / pinned-URLSession direct / `transferUserInfo` queue transports, and `WatchSessionDelegate` activates the watch's `WCSession`, stores the provisioned companion credential in the watch keychain, mirrors snapshots into the watch App Group, and reloads the complication on a fresh mirror. The read-only `MirroredSnapshotProxy` remains only as the fallback for hosts without WatchConnectivity. `StatusComplication` is a real WidgetKit complication (circular/corner/inline) reading the mirror, resilient to a missing snapshot ("open watch app"). Pure seams swift-format-clean + `swift test`-green; whole-target watchOS compile is the Build stage's job and a full phone↔watch round-trip needs physically paired hardware |
 | `GET /api/chat/approvals` pull endpoint | ✅ landed (B1) |
 | First-party push + Live Activity emitter | ✅ landed (B2); content-free policy + notifier + `PUT/DELETE /api/devices/me/push`, `/live-activity/{id}`, `/live-activity-start-token`. Credential-gated (off without APNs config); mock-tested only, real Apple/TestFlight delivery pending |
 | Live Activity run routing (backend) | ✅ landed (M3); Live Activity registration now carries `thread_id`/`job_id`, and the notifier auto-tracks a run from that association: run-progress events (`tool_started`/`status`) emit throttled Live Activity **updates** to the per-activity token, `response` emits the **end**, and a run beginning on a device with a push-to-start token but no active activity emits a one-shot **push-to-start**. A Live Activity token 410 prunes only that activity (or only the start token), never the alert registration. Notifier-level + policy unit tests with a mock `PushSender`; real Apple delivery still pending |
@@ -257,7 +257,7 @@ new milestones — see [Remaining work](#remaining-work-honest).
 | mDNS advertisement | ✅ landed (B3); settings-gated `_thinclaw._tcp` advertiser behind the `mdns` cargo feature, default-off (`discovery.enabled` in settings or `MDNS_ENABLED`). Locator-only TXT (`version`, `api`, `name`, `fp` = base64url(sha256(instance-id))) — no tokens/secrets/paths; loopback binds skipped. Spawned from `GatewayChannel::start()`; responder in `src/channels/web/discovery.rs`. iOS-side consumption wired: `ThinClawAuth.BonjourBrowser` (`NWBrowser` + TXT parse) → `FeatureOnboarding.DiscoveryStore` → the onboarding "Discover on this network" affordance (locator-only — selecting a gateway only pre-fills the pairing URL; pairing still needs the QR secret and pinned-SPKI/instance-id verification). Unit-tested with a scripted browser; no live-LAN run yet |
 | iOS TestFlight archive pipeline | ✅ landed (M5); fastlane-free `archive` job in `.github/workflows/ios.yml` (tag-triggered on `ios-v*`) + `apps/ios/scripts/archive.sh` + `apps/ios/Config/ExportOptions.plist`. `xcodebuild archive` → `-exportArchive` (method `app-store`) → `xcrun altool --upload-app`, authenticated with an App Store Connect API key (`-authenticationKeyPath`/`-allowProvisioningUpdates`), no `match`, no committed profiles. Credential-gated: a no-op-with-message when the `APPLE_DEVELOPMENT_TEAM` / `APP_STORE_CONNECT_KEY_ID` / `APP_STORE_CONNECT_ISSUER_ID` / `APP_STORE_CONNECT_KEY_P8` secrets are absent, so tag pushes never fail CI for contributors. YAML validated (actionlint); the real archive is unrun here (no Apple team). See the TestFlight section above |
 | iOS accessibility + app-switcher redaction (client) | ✅ landed (M5); a pure `ThinClawCore.PrivacyRedactionPolicy` + `TimelineAccessibility` (VoiceOver labels for timeline items) are macOS-tested; `App/Sources/PrivacyOverlay` always covers the window on backgrounding/inactive `scenePhase`, and `FeatureChat`/`ThinClawDesign` honor VoiceOver + Reduce Motion. Pure logic `swift test`-covered; the SwiftUI overlay + `xcodebuild` are the Build stage's job |
-| iOS app feature milestones | ✅ all planned milestones landed in code (M1 onboarding/chat/sessions/persistence; M2 approvals + push; M3 widgets + Live Activity + snapshot pipeline; M4 watch companion; M5 jobs glance + device management + notification controls + accessibility + archive pipeline). **Remaining is bring-up, not milestones:** real-device / live-gateway E2E, live WatchConnectivity wiring (the bridge relay proxy replacing the default `MirroredSnapshotProxy`), whole-app/NSE/WidgetKit/ActivityKit + watchOS-target `xcodebuild`, live APNs/TestFlight delivery (needs an operator Apple team). See [Remaining work](#remaining-work-honest) |
+| iOS app feature milestones | ✅ all planned milestones landed in code (M1 onboarding/chat/sessions/persistence; M2 approvals + push; M3 widgets + Live Activity + snapshot pipeline; M4 watch companion; M5 jobs glance + device management + notification controls + accessibility + archive pipeline). **Remaining is bring-up, not milestones:** real-device / live-gateway E2E, a live WatchConnectivity phone↔watch round-trip (the `WCSession` wiring itself now lands the `RouterGatewayProxy`/`WatchSessionDelegate` live, but the transport can only be exercised on paired hardware), whole-app/NSE/WidgetKit/ActivityKit + watchOS-target `xcodebuild`, live APNs/TestFlight delivery (needs an operator Apple team). See [Remaining work](#remaining-work-honest) |
 
 **M1 caveat (verified 2026-07):** the client *layers* are implemented and
 unit-tested — `ThinClawTransport` (SSE parse/decode/reconnect,
@@ -294,12 +294,15 @@ over both stores, GRDB round-trip/migration) is unit-tested on macOS; the whole
 `ThinClaw` app target builds for the iOS 26 simulator. What is *not* yet done:
 `ChatStore`/`SessionsStore` async orchestration has no simulator UI tests
 (coverage is at the pure-reducer level), and there is no real-device or
-live-gateway end-to-end pairing/chat run. **Known API-spec gap:** the gateway's
-`assistant_thread` is modeled in the committed OpenAPI snapshot as
-`oneOf: [null, $ref]`, which swift-openapi-generator drops from the generated
-`ThreadListResponse`, so `GatewaySession.threads()` cannot surface the pinned
-assistant thread until that spec pattern is corrected and the client
-regenerated.
+live-gateway end-to-end pairing/chat run. The former `assistant_thread`
+API-spec gap is now **fixed end to end**: `ThreadListResponse.assistant_thread`
+is emitted as an optional plain `$ref` to `ThreadInfo` (via
+`schema(nullable = false)` + `skip_serializing_if`) instead of the
+generator-hostile `oneOf: [null, $ref]`, so swift-openapi-generator retains it as
+`ThreadInfo?`. The Swift client has been regenerated, and
+`GatewaySession.threadListing()` (with `threads()` layered over it) now surfaces
+the pinned assistant thread; `AppDependencies.defaultThread()` prefers it as the
+landing thread.
 
 ## Remaining work (honest)
 
@@ -309,17 +312,23 @@ against real hardware or Apple's live services**. What is genuinely still open:
 - **Real-device / live-gateway end-to-end.** No pairing, streaming chat,
   approval, jobs, or watch round-trip has been exercised against a running
   gateway on real hardware. Coverage today is `swift test` (pure logic + stores
-  on macOS) plus simulator `xcodebuild` **builds**; there are no simulator UI
-  tests for the feature stores' async orchestration and no E2E run.
+  on macOS), plus the iOS-only Feature packages' XCTest targets run on a
+  concrete iOS 26 simulator in CI (the `feature-tests` job / `scripts/
+  feature-tests.sh`; currently `FeatureOnboarding`), plus a whole-app simulator
+  `xcodebuild` **build** (the now-hard `build-app` gate). Still open: simulator
+  UI tests for the other feature stores' async orchestration, and any E2E run.
 - **Whole-target device builds.** The app + widget + NSE embeds build for the
   iOS 26 simulator; the ActivityKit/WidgetKit/`BGTaskScheduler` paths and the
-  **watchOS whole-target compile** (wiring the `ThinClawWatchBridge` relay proxy
-  into `WatchApp` in place of the default read-only `MirroredSnapshotProxy`) are
-  the Build stage's job and are not yet verified against a device destination.
-- **Live WatchConnectivity wiring (tracked).** The relay bridge, companion
-  provisioning, and route selection are authored and unit-tested at the seam
-  level, but the `WCSession` transport has not been run between a real phone and
-  watch.
+  **watchOS whole-target compile** are the Build stage's job and are not yet
+  verified against a device destination.
+- **Live WatchConnectivity round-trip (tracked).** The live `WCSession` wiring is
+  now in place on both sides — the watch's `RouterGatewayProxy` drives the bridge
+  router over real relay/direct/queue transports, `WatchSessionDelegate` handles
+  activation + provisioning + snapshot mirrors, and the phone pushes mirrors on
+  significant changes. What remains is a full round-trip between a **physically
+  paired iPhone + Apple Watch**: WatchConnectivity does not function end-to-end in
+  the simulator, so provisioning, relay approve/deny/quick-ask, and mirror
+  delivery can only be exercised on hardware.
 - **Live APNs + Live Activity delivery.** The content-free push builder,
   notifier, and NSE rewrite are tested only against mocks/the local gateway. No
   real Apple push, Live Activity update/push-to-start, or NSE rewrite has been
@@ -329,11 +338,46 @@ against real hardware or Apple's live services**. What is genuinely still open:
   `archive → export → upload` has never run. Cutting a TestFlight build requires
   an operator's own Apple Developer team and App Store Connect API key (see the
   [archive pipeline section](#testflight-archive-pipeline-milestone-m5)).
-- **Known API-spec gap.** The gateway's `assistant_thread` is modeled in the
-  committed OpenAPI snapshot as `oneOf: [null, $ref]`, which
-  swift-openapi-generator drops from `ThreadListResponse`, so
-  `GatewaySession.threads()` cannot surface the pinned assistant thread until the
-  spec pattern is corrected and the client regenerated.
+
+The `assistant_thread` API-spec gap is **resolved** (previously listed here as
+open): the gateway emits `ThreadListResponse.assistant_thread` as an optional
+plain `$ref` to `ThreadInfo` (`schema(nullable = false)` +
+`skip_serializing_if`) instead of the `oneOf: [null, $ref]` that
+swift-openapi-generator dropped, the Swift client is regenerated, and
+`GatewaySession.threadListing()` surfaces the pinned assistant thread (preferred
+by `AppDependencies.defaultThread()`).
+
+## On-device watch relay verification (hardware only)
+
+WatchConnectivity does not function end-to-end in the simulator, so the live
+relay wiring can only be verified on a **physically paired iPhone + Apple Watch**
+against a running gateway. Steps:
+
+1. **Pair the phone.** Complete onboarding on the iPhone (QR pairing to the
+   gateway) so a `DeviceCredential` lands in the shared Keychain.
+2. **Provisioning.** Foreground the app with the watch paired. The phone's
+   `WatchRelayHost` activates its `WCSession`, and on the watch reporting no
+   credential it mints a companion (`POST /api/devices/me/companions`) and
+   pushes it via `updateApplicationContext`. Confirm on the phone's Settings →
+   companions list that an "Apple Watch" companion appears, and that the watch
+   leaves the "Not paired yet" state.
+3. **Mirror delivery.** Trigger a status change (start an agent run, or create a
+   pending approval). Confirm the watch root view and the `StatusComplication`
+   update to the new phase / pending count (the phone pushes on significant
+   changes; the watch reloads the complication on a fresh mirror).
+4. **Relay approve/deny.** With a **low-risk** pending approval, tap Approve on
+   the wrist. Confirm the route badge reads "via iPhone" (relay), the spinner
+   shows, a success haptic fires, and the gateway records the decision
+   attributed to the **watch** companion device (not the phone). A high/unknown
+   entry must show "Approve on iPhone" with no wrist approve; deny must work at
+   any tier.
+5. **Quick-ask.** Dictate a prompt in Ask; confirm a "Sent" receipt and that the
+   gateway received a `chat/send` from the watch companion token.
+6. **Queue path.** Put the phone out of range / background it and repeat an
+   approve; confirm the badge reads "pending sync" and the action is queued
+   (`transferUserInfo`), then delivered when the phone returns.
+7. **Deprovision.** Unpair on the phone (Settings → sign out). Confirm the
+   companion is `DELETE`d and the watch surface drops back to unprovisioned.
 
 ## Doc obligations (same-PR rule)
 

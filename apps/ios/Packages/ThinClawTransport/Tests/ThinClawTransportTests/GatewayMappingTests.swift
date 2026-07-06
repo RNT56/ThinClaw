@@ -45,6 +45,73 @@ struct GatewayMappingTests {
         #expect(threads[1].lastMessagePreview == nil)
     }
 
+    @Test("thread listing surfaces the pinned assistant_thread from decoded JSON")
+    func decodesAndSurfacesAssistantThread() throws {
+        // Decode a wire payload with `assistant_thread` present, distinct from
+        // the entries in `threads`, to prove the regenerated schema exposes it
+        // and the mapping surfaces it separately.
+        let json = """
+            {
+              "active_thread": "regular-1",
+              "assistant_thread": {
+                "created_at": "2026-07-04T08:00:00Z",
+                "id": "assistant-pinned",
+                "state": "idle",
+                "thread_type": "assistant",
+                "title": "Assistant",
+                "turn_count": 12,
+                "updated_at": "2026-07-04T12:00:00Z"
+              },
+              "threads": [
+                {
+                  "created_at": "2026-07-04T10:00:00Z",
+                  "id": "regular-1",
+                  "state": "idle",
+                  "thread_type": "ios",
+                  "title": "Trip planning",
+                  "turn_count": 3,
+                  "updated_at": "2026-07-04T10:05:30Z"
+                }
+              ]
+            }
+            """
+        let response = try JSONDecoder().decode(
+            Components.Schemas.ThreadListResponse.self,
+            from: Data(json.utf8))
+
+        // The regenerated schema exposes the pinned thread as an optional ref.
+        #expect(response.assistantThread?.id == "assistant-pinned")
+
+        let listing = GatewayMapping.threadListing(from: response)
+        // The assistant thread is surfaced separately and is not mixed into
+        // the regular threads.
+        #expect(listing.assistantThread?.id == ThreadID("assistant-pinned"))
+        #expect(listing.assistantThread?.title == "Assistant")
+        #expect(listing.assistantThread?.channel == "assistant")
+        #expect(listing.threads.map(\.id) == [ThreadID("regular-1")])
+        #expect(!listing.threads.contains { $0.id == ThreadID("assistant-pinned") })
+    }
+
+    @Test("thread listing leaves assistantThread nil when absent from the wire")
+    func absentAssistantThreadMapsToNil() {
+        let response = Components.Schemas.ThreadListResponse(
+            activeThread: "t1",
+            threads: [
+                .init(
+                    createdAt: "2026-07-04T10:00:00Z",
+                    id: "t1",
+                    state: "idle",
+                    threadType: "ios",
+                    title: "Trip planning",
+                    turnCount: 3,
+                    updatedAt: "2026-07-04T10:05:30Z")
+            ])
+
+        let listing = GatewayMapping.threadListing(from: response)
+        #expect(listing.assistantThread == nil)
+        #expect(listing.threads.map(\.id) == [ThreadID("t1")])
+    }
+
     // MARK: - History turns
 
     @Test("a turn maps to user message, tool calls, then agent response in order")

@@ -342,6 +342,41 @@ mod tests {
     }
 
     #[test]
+    fn thread_list_assistant_thread_is_optional_plain_ref() {
+        // Regression guard: `ThreadListResponse.assistant_thread` must be a
+        // plain, non-nullable `$ref` to `ThreadInfo` that is simply absent from
+        // `required` (optional). The default utoipa emission for `Option<$ref>`
+        // is `oneOf: [{type: null}, {$ref}]`, which swift-openapi-generator
+        // drops entirely — making the pinned assistant thread invisible to the
+        // generated iOS client. `schema(nullable = false)` collapses it back to
+        // a plain ref; `skip_serializing_if` keeps the wire consistent.
+        let doc = gateway_openapi();
+        let doc_json = serde_json::to_value(&doc).expect("serializes");
+        let schema = &doc_json["components"]["schemas"]["ThreadListResponse"];
+
+        // Not required (optional).
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            !required.contains(&"assistant_thread"),
+            "assistant_thread must stay optional (absent from `required`)"
+        );
+
+        let field = &schema["properties"]["assistant_thread"];
+        // Plain `$ref`, not a null-union.
+        assert_eq!(
+            field["$ref"], "#/components/schemas/ThreadInfo",
+            "assistant_thread must be a plain $ref to ThreadInfo, got: {field}"
+        );
+        assert!(
+            field.get("oneOf").is_none() && field.get("anyOf").is_none(),
+            "assistant_thread must NOT be a oneOf/anyOf null-union (generator drops it): {field}"
+        );
+    }
+
+    #[test]
     fn skip_serializing_fields_stay_out_of_wire_format() {
         // `ConversationDeleted.principal_id`/`actor_id` are `skip_serializing`
         // + `schema(ignore)`; the wire format and the schema must agree.

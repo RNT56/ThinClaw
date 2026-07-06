@@ -2187,6 +2187,20 @@ public enum Components {
         public struct ThreadListResponse: Codable, Hashable, Sendable {
             /// - Remark: Generated from `#/components/schemas/ThreadListResponse/active_thread`.
             public var activeThread: Swift.String?
+            /// The pinned assistant thread (always present after first load).
+            ///
+            /// Schema note: emitted as a non-nullable, optional `$ref` to `ThreadInfo`
+            /// (`schema(nullable = false)` + `skip_serializing_if`), rather than the
+            /// default `oneOf: [null, $ref]` that utoipa produces for `Option<$ref>`.
+            /// swift-openapi-generator drops a `oneOf`-with-null property entirely, so
+            /// the null-union would make `assistant_thread` invisible to the generated
+            /// iOS client. The optional-ref shape keeps it as `ThreadInfo?`. On the wire
+            /// the field is now absent (not `null`) when `None`; the web UI already
+            /// coalesces via `data.assistant_thread || null`, so absent and `null` are
+            /// equivalent there.
+            ///
+            /// - Remark: Generated from `#/components/schemas/ThreadListResponse/assistant_thread`.
+            public var assistantThread: Components.Schemas.ThreadInfo?
             /// Regular conversation threads.
             ///
             /// - Remark: Generated from `#/components/schemas/ThreadListResponse/threads`.
@@ -2195,16 +2209,20 @@ public enum Components {
             ///
             /// - Parameters:
             ///   - activeThread:
+            ///   - assistantThread: The pinned assistant thread (always present after first load).
             ///   - threads: Regular conversation threads.
             public init(
                 activeThread: Swift.String? = nil,
+                assistantThread: Components.Schemas.ThreadInfo? = nil,
                 threads: [Components.Schemas.ThreadInfo]
             ) {
                 self.activeThread = activeThread
+                self.assistantThread = assistantThread
                 self.threads = threads
             }
             public enum CodingKeys: String, CodingKey {
                 case activeThread = "active_thread"
+                case assistantThread = "assistant_thread"
                 case threads
             }
         }
