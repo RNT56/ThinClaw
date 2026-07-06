@@ -42,6 +42,18 @@ pub struct ThreadInfo {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ThreadListResponse {
     /// The pinned assistant thread (always present after first load).
+    ///
+    /// Schema note: emitted as a non-nullable, optional `$ref` to `ThreadInfo`
+    /// (`schema(nullable = false)` + `skip_serializing_if`), rather than the
+    /// default `oneOf: [null, $ref]` that utoipa produces for `Option<$ref>`.
+    /// swift-openapi-generator drops a `oneOf`-with-null property entirely, so
+    /// the null-union would make `assistant_thread` invisible to the generated
+    /// iOS client. The optional-ref shape keeps it as `ThreadInfo?`. On the wire
+    /// the field is now absent (not `null`) when `None`; the web UI already
+    /// coalesces via `data.assistant_thread || null`, so absent and `null` are
+    /// equivalent there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub assistant_thread: Option<ThreadInfo>,
     /// Regular conversation threads.
     pub threads: Vec<ThreadInfo>,

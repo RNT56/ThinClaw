@@ -4278,15 +4278,8 @@
             "format": "uuid"
           },
           "assistant_thread": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ThreadInfo",
-                "description": "The pinned assistant thread (always present after first load)."
-              }
-            ]
+            "$ref": "#/components/schemas/ThreadInfo",
+            "description": "The pinned assistant thread (always present after first load).\n\nSchema note: emitted as a non-nullable, optional `$ref` to `ThreadInfo`\n(`schema(nullable = false)` + `skip_serializing_if`), rather than the\ndefault `oneOf: [null, $ref]` that utoipa produces for `Option<$ref>`.\nswift-openapi-generator drops a `oneOf`-with-null property entirely, so\nthe null-union would make `assistant_thread` invisible to the generated\niOS client. The optional-ref shape keeps it as `ThreadInfo?`. On the wire\nthe field is now absent (not `null`) when `None`; the web UI already\ncoalesces via `data.assistant_thread || null`, so absent and `null` are\nequivalent there."
           },
           "threads": {
             "type": "array",

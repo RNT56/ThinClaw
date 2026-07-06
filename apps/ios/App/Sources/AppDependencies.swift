@@ -13,7 +13,9 @@ import ThinClawAuth
 import ThinClawCore
 import ThinClawLiveActivity
 import ThinClawPersistence
+import ThinClawSnapshotKit
 import ThinClawTransport
+import ThinClawWidgetKitShared
 
 #if canImport(UIKit)
     import UIKit
@@ -62,6 +64,14 @@ final class AppDependencies {
     /// Background task mirroring the approvals store's pending set into the
     /// snapshot publisher; cancelled on unpair.
     private var snapshotMirrorTask: Task<Void, Never>?
+
+    /// Sink for pushing the freshest glanceable snapshots (status + approvals) to
+    /// a paired watch on a significant change. Set by the app once at launch to
+    /// `WatchProvisioning.mirror`; `nil` on hosts without WatchConnectivity, where
+    /// it is simply never invoked. The snapshots are read back from the iOS App
+    /// Group (already content-minimised by ``SnapshotPrivacyPolicy``) so the watch
+    /// mirror carries exactly what the widgets show.
+    var onSnapshotsPublished: (@MainActor (AgentStatusSnapshot, PendingApprovalsSnapshot) -> Void)?
 
     #if canImport(ActivityKit)
         /// The agent-run Live Activity manager, built lazily from the paired
@@ -142,7 +152,26 @@ final class AppDependencies {
     @discardableResult
     func refreshSnapshots() async -> Bool {
         guard isPaired, let client = makePushClient() else { return false }
-        return await snapshotService.refresh(client: client)
+        let wrote = await snapshotService.refresh(client: client)
+        if wrote { pushWatchMirror() }
+        return wrote
+    }
+
+    /// Push the freshest glanceable snapshots to a paired watch, if a sink is
+    /// wired. Reads the two snapshots the publisher just wrote back from the iOS
+    /// App Group (already content-minimised) so the watch mirror carries exactly
+    /// what the widgets show. No-op when no sink is set (no watch / unsupported
+    /// host) or when no snapshot has been written yet.
+    private func pushWatchMirror() {
+        guard let sink = onSnapshotsPublished,
+            let store = WidgetSnapshotAccess.store()
+        else { return }
+        let status = (try? store.load(AgentStatusSnapshot.self)) ?? nil
+        let approvals = (try? store.load(PendingApprovalsSnapshot.self)) ?? nil
+        guard status != nil || approvals != nil else { return }
+        sink(
+            status ?? AgentStatusSnapshot(generatedAt: .now, phase: .idle),
+            approvals ?? PendingApprovalsSnapshot(generatedAt: .now, approvals: []))
     }
 
     /// Begin mirroring the shared approvals store's pending set into the snapshot
@@ -161,6 +190,8 @@ final class AppDependencies {
             while !Task.isCancelled {
                 let pending = store.pending
                 await self?.snapshotService.mirror(approvals: pending)
+                // Mirror the same significant change to a paired watch.
+                self?.pushWatchMirror()
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                     withObservationTracking {
                         _ = store.pending
@@ -391,22 +422,30 @@ final class AppDependencies {
     }
 
     /// Resolve a default thread for the Chat tab when the user has not selected
-    /// one: the most-recently-updated cached thread, falling back to the
-    /// gateway's listing. Nil when there are no threads at all yet.
+    /// one: the gateway's pinned `assistant_thread` when available, otherwise
+    /// the most-recently-updated cached thread, falling back to the first
+    /// regular thread in the gateway's listing. Nil when there are no threads at
+    /// all yet.
     ///
-    /// NOTE (concern for the API stage): the gateway's `assistant_thread` is not
-    /// surfaced by `GatewaySession.threads()` because the committed OpenAPI
-    /// snapshot models it as `oneOf: [null, $ref]`, which swift-openapi-generator
-    /// drops from the generated `ThreadListResponse`. Until that spec pattern is
-    /// fixed and the client regenerated, the pinned assistant thread only
-    /// appears here once it has other activity in `threads`.
+    /// The pinned assistant thread is now surfaced by
+    /// `GatewaySession.threadListing()` (the OpenAPI spec models
+    /// `assistant_thread` as an optional `$ref`, which the generated
+    /// `ThreadListResponse` exposes as `ThreadInfo?`), so it is preferred as the
+    /// landing thread ahead of arbitrary cached or regular threads.
     func defaultThread() async -> ThreadID? {
+        // Best-effort listing: a failure (offline, unpaired) degrades to the
+        // cached fallback below rather than throwing.
+        var listing: ThreadListing?
+        if let session = ensureSession() {
+            listing = try? await session.threadListing()
+        }
+        if let assistant = listing?.assistantThread {
+            return assistant.id
+        }
         if let cached = try? await transcriptStore.threads(), let first = cached.first {
             return first.id
         }
-        guard let session = ensureSession() else { return nil }
-        let remote = (try? await session.threads()) ?? []
-        return remote.first?.id
+        return listing?.threads.first?.id
     }
 
     // MARK: - Onboarding / unpair

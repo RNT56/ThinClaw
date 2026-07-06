@@ -215,13 +215,20 @@ thinclaw://pair?d=<base64url(json)>
   round-trip spinner and success/failure `WKInterfaceDevice` haptics, and a
   dictated quick-ask with a sent/queued/failed receipt. Deny is always
   available at any tier. `apps/ios/WatchWidgets/Sources` renders a WidgetKit
-  status complication from the watch App Group mirror. The default read-only
-  `MirroredSnapshotProxy` renders the mirror and queues every write until the
-  bridge relay proxy is wired into `WatchApp`.
+  status complication from the watch App Group mirror. The watch surface is
+  driven **live**: `RouterGatewayProxy` routes every write through a
+  `WatchGatewayRouter` over the relay/direct/queue transports (forwarding the
+  watch's own token). The read-only `MirroredSnapshotProxy` remains only as the
+  fallback for build targets without WatchConnectivity.
 
-  **Relay + companion provisioning authored (M4).** `ThinClawWatchBridge` now
-  carries the bridge half and the `App/Sources/WatchProvisioning` hook activates
-  it while the phone is paired. The phone-side `WatchRelayHost`
+  **Relay + companion provisioning wired live (M4 + follow-up).**
+  `ThinClawWatchBridge` carries the bridge half; the
+  `App/Sources/WatchProvisioning` hook activates the phone-side host while paired
+  and the watch-side `WatchSessionDelegate` activates the watch's `WCSession`,
+  persists the provisioned credential, mirrors snapshots into the watch App
+  Group, and reloads the complication on a fresh mirror. The phone pushes
+  snapshot mirrors on every significant change (`AppDependencies` →
+  `WatchProvisioning.mirror`). The phone-side `WatchRelayHost`
   (`WCSessionDelegate`) mints the watch a companion
   (`POST /api/devices/me/companions`, pinned parent client) when the watch
   reports a missing/stale credential and delivers it as
@@ -235,10 +242,13 @@ thinclaw://pair?d=<base64url(json)>
   `reprovisionRequired`. The watch-side `WatchGatewayRouter` selects
   relay→direct→queue (direct = pinned URLSession with the watch's credential;
   else `transferUserInfo` queue + "pending sync") with per-route timeout
-  fall-through inside the <5s approval budget. On unpair the phone `DELETE`s the
-  companion (the parent cascade also covers it). Pure seams are `swift test`-
-  covered on macOS (39 tests); WCSession/watchOS whole-target compile is the
-  Build stage's job.
+  fall-through inside the <5s approval budget; the watch app supplies the live
+  `WCSession.sendMessage` relay, pinned-URLSession direct, and `transferUserInfo`
+  queue transports. On unpair the phone `DELETE`s the companion (the parent
+  cascade also covers it). Pure seams are `swift test`-covered on macOS (39
+  tests); the whole-target watchOS compile is the Build stage's job, and a full
+  phone↔watch round-trip still needs physically paired hardware (WatchConnectivity
+  does not function end-to-end in the simulator).
 
 ### Push privacy
 

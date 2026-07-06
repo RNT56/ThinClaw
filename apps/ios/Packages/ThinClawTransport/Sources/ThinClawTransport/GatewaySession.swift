@@ -231,10 +231,18 @@ public actor GatewaySession {
 
     /// List the conversation threads visible to this device.
     public func threads() async throws -> [ChatThread] {
+        try await threadListing().threads
+    }
+
+    /// List the conversation threads visible to this device, surfacing the
+    /// pinned assistant thread (`assistant_thread`) separately from the regular
+    /// `threads`. Prefer this over ``threads()`` when the caller needs the
+    /// pinned assistant thread (e.g. to pick a default landing thread).
+    public func threadListing() async throws -> ThreadListing {
         do {
             let output = try await client.chatThreadsHandler(.init())
             let response = try output.ok.body.json
-            return GatewayMapping.chatThreads(from: response)
+            return GatewayMapping.threadListing(from: response)
         } catch {
             throw APIError.from(error)
         }

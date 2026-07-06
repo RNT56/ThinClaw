@@ -127,8 +127,10 @@ printf 'DEVELOPMENT_TEAM = %s\n' "${DEVELOPMENT_TEAM}" > "${SIGNING_LOCAL}"
 # Generate the workspace and archive.
 # ---------------------------------------------------------------------------
 echo "==> tuist install && generate"
-tuist install
-tuist generate --no-open
+# Delegate to the shared generator so the archive path gets the same robust
+# workspace preparation as CI (notably: ensure declared-but-empty resource
+# directories exist, or graph construction fails on a fresh checkout).
+"${SCRIPT_DIR}/tuist-generate.sh"
 
 rm -rf "${ARCHIVE_PATH}" "${EXPORT_DIR}"
 mkdir -p "${BUILD_DIR}"

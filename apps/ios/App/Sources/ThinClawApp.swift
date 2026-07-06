@@ -60,6 +60,15 @@ struct ThinClawApp: App {
                         appDelegate.dependencies = dependencies
                         appDelegate.pushCoordinator = pushCoordinator
                     #endif
+                    #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
+                        // Push each freshly-published glanceable snapshot to a
+                        // paired watch (M4, D-K4). The relay host no-ops when no
+                        // watch is active, so this is safe to wire unconditionally.
+                        dependencies.onSnapshotsPublished = {
+                            [watchProvisioning] status, approvals in
+                            watchProvisioning.mirror(status: status, approvals: approvals)
+                        }
+                    #endif
                 }
         }
         .onChange(of: scenePhase) { _, phase in

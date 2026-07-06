@@ -5,13 +5,12 @@ import ThinClawWatchBridge
 /// A read-only ``WatchGatewayProxy`` that serves the mirrored snapshot bundle
 /// from the watch's own App Group and **queues** every write.
 ///
-/// This is the honest default until `ThinClawWatchBridge` lands its real
-/// relay/direct proxy (the other M4 half, `WatchRelayHost`/route selection):
-/// the watch can *render* whatever the phone last mirrored into the App Group,
-/// but it cannot yet send a decision or a prompt, so every action reports
-/// `.queued` and every route reads `.queued`. Swapping in the bridge proxy at
-/// `WatchApp` construction is the only change needed — the UI already codes
-/// against the protocol.
+/// This is now the **fallback** proxy for build targets without
+/// WatchConnectivity (e.g. a plain macOS host): the live surface uses
+/// ``RouterGatewayProxy`` over a real ``WatchGatewayRouter`` instead
+/// (``WatchApp``). It renders whatever the phone last mirrored into the App
+/// Group, but it cannot send a decision or a prompt, so every action reports
+/// `.queued` and every route reads `.queued`.
 ///
 /// The App Group `group.com.thinclaw.shared.watch` is the watch-local mirror
 /// container (distinct from the phone's `group.com.thinclaw.shared`); the

@@ -41,6 +41,19 @@ public enum GatewayMapping {
         response.threads.map(chatThread(from:))
     }
 
+    /// Map the `GET /api/chat/threads` response into a ``ThreadListing``,
+    /// surfacing the pinned `assistant_thread` separately from the regular
+    /// `threads`. The assistant thread is optional-ref on the wire (absent when
+    /// the gateway has none yet), so ``ThreadListing/assistantThread`` is `nil`
+    /// in that case.
+    public static func threadListing(
+        from response: Components.Schemas.ThreadListResponse
+    ) -> ThreadListing {
+        ThreadListing(
+            threads: response.threads.map(chatThread(from:)),
+            assistantThread: response.assistantThread.map(chatThread(from:)))
+    }
+
     // MARK: - History
 
     /// Map the `GET /api/chat/history` response into a ``HistoryPage``.

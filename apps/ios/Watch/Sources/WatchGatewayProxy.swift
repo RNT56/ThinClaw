@@ -4,12 +4,13 @@ import ThinClawWatchBridge
 
 /// UI-facing contract the watch app codes against for every gateway action.
 ///
-/// The **concrete** proxy is provided by `ThinClawWatchBridge` (the relay /
-/// direct-HTTP transport that attaches the watch's OWN reduced-scope token —
-/// docs/MOBILE_SECURITY.md D-K4). This protocol is the thin seam between that
+/// The **live** proxy is ``RouterGatewayProxy``, which drives a
+/// `ThinClawWatchBridge` ``WatchGatewayRouter`` over the relay / direct-HTTP /
+/// queue transports that attach the watch's OWN reduced-scope token
+/// (docs/MOBILE_SECURITY.md D-K4). This protocol is the thin seam between that
 /// transport and the SwiftUI surface here: the views and view models depend
-/// only on this shape, so the app compiles and previews without the transport
-/// wired, and the bridge's proxy conforms to it once it lands.
+/// only on this shape, so the read-only ``MirroredSnapshotProxy`` fallback
+/// conforms to it too for hosts without WatchConnectivity.
 ///
 /// Every call is relay-first: `currentRoute()` reports whether the request
 /// will go through the paired iPhone (`.relay`), straight to a reachable

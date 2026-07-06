@@ -46,7 +46,7 @@ Apple team**. See the caveats below the table and
 | `ThinClawAuth` (pairing parse, Secure-Enclave keypair, SPKI pinning, connection policy, Keychain) | ✅ implemented + tested (23 tests) |
 | `ThinClawAPI` (generated REST client + auth/error shell) | ✅ generated + tested (13 tests) |
 | `ThinClawPersistence` (GRDB WAL store + in-memory store, parameterized `TranscriptStoring` parity) | ✅ implemented + tested (11 tests) |
-| `FeatureOnboarding` (pairing state machine, QR scanner, app wiring) | ✅ implemented; store unit-tested on the iOS simulator (27 tests) |
+| `FeatureOnboarding` (pairing state machine, QR scanner, app wiring) | ✅ implemented; store unit-tested on the iOS simulator (32 tests), run in CI by the `feature-tests` job (`scripts/feature-tests.sh`) |
 | `FeatureChat` / `FeatureSessions` (`ChatStore`, `SessionsStore` over the live session + cache) | ✅ implemented; pure logic tested on macOS, async orchestration not yet UI-tested |
 | `App` composition (`AppDependencies` real graph, `AppRouter` deep links, `PushCoordinator`, `AppDelegate`, scenePhase lifecycle) | ✅ wired; whole app target builds for the iOS 26 simulator |
 | `FeatureApprovals` (risk-tiered cards over `ApprovalsStore`: cold-load + live fan-out + `POST /api/chat/approval`, Face-ID gate on high-risk approve) | ✅ implemented (M2); pure store logic tested on macOS |
@@ -61,7 +61,7 @@ Apple team**. See the caveats below the table and
 | `FeatureSettings` (device management + notification prefs over `ThinClawCore.SettingsStore`) | ✅ implemented (M5); shows this device (`GET /api/devices/me`), lists companions with per-companion Revoke (`DELETE /api/devices/me/companions/{id}`), Unpairs (`AppDependencies.unpair()`) — **no self-rename/rotate** (admin-only routes reject a device token). Per-category notification preview prefs persist to shared App Group defaults the NSE reads; connection row from live `GatewaySession` state + Keychain identity (never `/api/gateway/status`); URL/pin reveal Face-ID-gated (D-K3); "Enhanced protection" drives `GRDBTranscriptStore.applyFileProtection(enhanced:)` (file-protection class only; the app-switcher overlay is always on). Stores macOS-tested; SwiftUI screen at Build stage |
 | Accessibility + app-switcher redaction (`PrivacyRedactionPolicy`, `TimelineAccessibility`, `App/Sources/PrivacyOverlay`) | ✅ implemented (M5); pure redaction/VoiceOver logic macOS-tested, overlay always covers the window on background/inactive `scenePhase`, `FeatureChat`/`ThinClawDesign` honor VoiceOver + Reduce Motion; overlay verified at Build stage |
 | TestFlight archive pipeline (`scripts/archive.sh`, `Config/ExportOptions.plist`, CI `archive` job) | ✅ implemented (M5); fastlane-free `xcodebuild archive` → `-exportArchive` → `xcrun altool`, App Store Connect API key auth, tag-triggered (`ios-v*`), credential-gated no-op-with-message when secrets absent. actionlint-validated; real archive unrun (no Apple team in repo) |
-| Tuist manifests / CI `build-app` job | ✅ `tuist generate` succeeds locally and the app builds; CI `build-app` job unverified here |
+| Tuist manifests / CI `build-app` job | ✅ `scripts/tuist-generate.sh` + `xcodebuild build` verified locally from a fresh checkout (App/Resources deleted → generate exit 1→0 → **BUILD SUCCEEDED**); CI `build-app` is now a hard gate (was best-effort), fixing the graph-construction failure. Unverified only on the GitHub runner image itself |
 
 **M1 caveat:** the onboarding **and** chat/sessions flows are wired end to end
 in code. `OnboardingStore` is a real state machine (parse → confirm + D-X2
@@ -99,11 +99,14 @@ real-device or live-gateway pairing/chat run has happened (treat E2E as
 unverified), the `ChatStore`/`SessionsStore` async orchestration has no simulator
 UI tests (coverage is at the pure-reducer level), a whole-app/NSE `xcodebuild`
 verification and live APNs delivery are pending, per-category *preview* toggles
-(D-N3) and the jobs/settings surfaces are unbuilt. **Known API-spec gap:** the gateway's `assistant_thread` is
-modeled in the committed OpenAPI snapshot as `oneOf: [null, $ref]`, which
-swift-openapi-generator drops from `ThreadListResponse`, so `GatewaySession.threads()`
-cannot surface the pinned assistant thread until that spec pattern is corrected
-and the client regenerated. No real-device run and TestFlight are still pending.
+(D-N3) were the M2-stage gaps; the jobs and settings surfaces landed later in M5.
+The former `assistant_thread` API-spec gap is now **resolved**: the gateway emits
+`ThreadListResponse.assistant_thread` as an optional plain `$ref` to `ThreadInfo`
+(`schema(nullable = false)` + `skip_serializing_if`) instead of the
+generator-hostile `oneOf: [null, $ref]`, the Swift client is regenerated, and
+`GatewaySession.threadListing()` surfaces the pinned assistant thread (preferred
+as the landing thread by `AppDependencies.defaultThread()`). No real-device run
+and TestFlight are still pending.
 
 **M3 caveat:** the widgets, the agent-run Live Activity manager, and the App
 Group snapshot pipeline are **authored, not yet WidgetKit/ActivityKit
@@ -229,8 +232,54 @@ The SSE parser suite replays recorded gateway fixtures at adversarial
 chunkings (byte-by-byte, mid-UTF-8 splits, CRLF variants) — extend fixtures
 with `scripts/record-fixtures.sh` against a local gateway.
 
-UI targets compile through the Tuist project (`xcodebuild test` with an iOS
-26 simulator destination).
+The Feature packages (`Packages/Features/*`) are `.iOS(.v26)`-only, so
+`swift test` (which builds for the host Mac) cannot run them. Their XCTest
+targets run on a concrete iOS 26 simulator via `xcodebuild test`:
+
+```bash
+scripts/feature-tests.sh   # auto-discovers feature packages that have tests
+```
+
+The script picks (and boots) an available iOS 26 simulator, then runs
+`xcodebuild test -scheme <Package>` per package (no Tuist workspace needed —
+SPM emits a scheme per package). If the machine has no iOS 26 runtime it
+soft-skips with a warning and exits 0; set `FEATURE_TESTS_REQUIRE_SIM=1` to
+make a missing simulator a hard failure. To run one package by hand:
+
+```bash
+cd Packages/Features/FeatureOnboarding
+xcodebuild test -scheme FeatureOnboarding \
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest'
+```
+
+Whole-app UI compiles through the Tuist workspace (`xcodebuild test`/`build`
+with an iOS 26 simulator destination).
+
+## CI
+
+`.github/workflows/ios.yml` runs on `apps/ios/**`, `clients/openapi/**`, and
+its own path. Every job first selects the newest installed Xcode (the packages
+need Swift 6.2 / Xcode 26; the runner default is older). The hard gates are:
+
+- **swift test** matrix — the macOS-testable packages (Transport, Core,
+  SnapshotKit, Auth, API, Persistence).
+- **feature package tests** — the `.iOS(.v26)`-only Feature packages on a
+  concrete iOS 26 simulator via `scripts/feature-tests.sh` (soft-skips if the
+  runner has no iOS 26 runtime; see Testing).
+- **generated client drift** — `scripts/check-generated-drift.sh`.
+- **swift-format lint**.
+- **tuist build** — `scripts/tuist-generate.sh` + `xcodebuild build` for the
+  iOS simulator. This was previously best-effort (`continue-on-error`); the
+  failure was a reproducible, CI-only bug — `Project.swift` declares
+  `resources: ["App/Resources/**"]`, the repo commits no files there, and git
+  does not track empty directories, so on a fresh checkout the directory is
+  absent and `tuist generate` errors during graph construction. The generator
+  script now creates the declared-but-empty resource directory first, so this
+  is a hard gate (verified locally by deleting `App/Resources`: generate goes
+  from exit 1 to exit 0, then the app builds).
+
+The tag-triggered **TestFlight archive** job (see below) reuses the same
+`scripts/tuist-generate.sh` so it inherits the fix.
 
 ## API client generation
 
