@@ -10281,12 +10281,14 @@ dependencies = [
 name = "thinclaw-config"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "ratatui",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thinclaw-branding",
  "thinclaw-channels-core",
  "thinclaw-platform",
