@@ -128,6 +128,10 @@ All focused loop gates passed before edits:
 - Added channel manager ownership for hot-added and restarted stream forwarders.
   Hot-remove, restart, and shutdown now drain those per-channel forwarding
   tasks instead of relying on dropped streams to end eventually.
+- Split loop-adjacent helpers out of the two files that crossed the CI
+  file-size guard after hardening: heartbeat routine helpers and repo-project
+  config resolution moved out of `src/agent/agent_loop/mod.rs`, and runtime
+  maintenance/watch shutdown helpers moved out of `src/async_main.rs`.
 
 ## Verified After This Slice
 
@@ -195,6 +199,8 @@ All focused loop gates passed before edits:
 - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`:
   passed.
 - `bash scripts/audit-loop-inventory.sh`: passed.
+- `scripts/ci/check-file-sizes.sh`: passed.
+- `cargo fmt --all -- --check`: passed.
 - `git diff --check`: passed.
 
 ## Remaining Lanes
@@ -212,7 +218,6 @@ All focused loop gates passed before edits:
   default local gate: live GitHub/Docker/LLM, Postgres process-level restart
   stress, and provider API end-to-end runs should stay behind explicit
   integration or nightly jobs.
-- Large loop-adjacent module decomposition is now a mechanical architecture
-  follow-up rather than a behavioral blocker. The current slice pins behavior
-  and lifecycle guarantees first; split work can proceed behind the verified
-  regression gates without changing public loop semantics.
+- The CI-blocking file-size decomposition is complete for files touched by this
+  loop-hardening slice. Any broader module reshaping beyond the guard is now a
+  mechanical architecture follow-up rather than a behavioral blocker.

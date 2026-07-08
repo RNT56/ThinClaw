@@ -30,9 +30,7 @@ use crate::agent::submission::{
 };
 use crate::agent::{RootAgentRuntimePorts, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
-use crate::config::{
-    AgentConfig, HeartbeatConfig, RepoProjectsConfig, RoutineConfig, SkillsConfig,
-};
+use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::error::Error;
@@ -57,15 +55,15 @@ use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
 use thinclaw_agent::agent_loop::{
-    HeartbeatRoutineConfig, HeartbeatRoutineSpec, RESTART_NOTICE_TEXT, inbound_blocked_response,
-    inbound_rejected_response, routine_ownership_changed, should_suppress_outbound_response,
+    RESTART_NOTICE_TEXT, inbound_blocked_response, inbound_rejected_response,
+    should_suppress_outbound_response,
 };
 pub(crate) use thinclaw_agent::dispatcher_helpers::truncate_for_preview;
-use thinclaw_agent::startup_hooks::{
-    GatewayStartupThreadTarget, heartbeat_gateway_fallback_identity_from_diagnostics,
-    heartbeat_routine_owner_from_gateway_defaults, telegram_startup_thread_id,
-};
+use thinclaw_agent::startup_hooks::{GatewayStartupThreadTarget, telegram_startup_thread_id};
 use thinclaw_agent::turn_cancellation::TurnCancellationRegistry;
+
+use self::heartbeat::{heartbeat_routine_owner_for_gateway, upsert_heartbeat_routine};
+use self::repo_projects_config::resolve_repo_projects_config;
 
 /// Core dependencies for the agent.
 ///
@@ -606,41 +604,6 @@ impl BackgroundTasksHandle {
     ) -> tokio::sync::MutexGuard<'_, Option<tokio::sync::mpsc::Receiver<IncomingMessage>>> {
         self.system_event_mutex.lock().await
     }
-}
-
-async fn resolve_repo_projects_config(store: &Arc<dyn Database>) -> RepoProjectsConfig {
-    let mut default_config = RepoProjectsConfig::default();
-
-    for user_id in ["default", "local_user"] {
-        match store.get_all_settings(user_id).await {
-            Ok(map) => {
-                let settings = crate::settings::Settings::from_db_map(&map);
-                match RepoProjectsConfig::resolve(&settings) {
-                    Ok(config) if config.enabled => return config,
-                    Ok(config) if user_id == "default" => {
-                        default_config = config;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            user_id,
-                            error = %error,
-                            "failed to resolve repo projects config"
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    user_id,
-                    error = %error,
-                    "failed to load settings while resolving repo projects config"
-                );
-            }
-        }
-    }
-
-    default_config
 }
 
 impl Agent {
@@ -1996,149 +1959,9 @@ impl Agent {
     }
 }
 
-/// Register (or update) the heartbeat as a routine in the DB.
-///
-/// Creates a `__heartbeat__` routine with a cron trigger matching
-/// the configured interval. If the routine already exists, it checks
-/// whether the config has changed and updates if necessary.
-async fn upsert_heartbeat_routine(
-    store: &Arc<dyn Database>,
-    hb_config: &HeartbeatConfig,
-    user_id: &str,
-    actor_id: &str,
-) -> Result<(), Error> {
-    let spec = HeartbeatRoutineSpec::from_config(&HeartbeatRoutineConfig {
-        interval_secs: hb_config.interval_secs,
-        notify_channel: hb_config.notify_channel.clone(),
-        notify_user: hb_config.notify_user.clone(),
-        light_context: hb_config.light_context,
-        include_reasoning: hb_config.include_reasoning,
-        target: hb_config.target.clone(),
-        active_start_hour: hb_config.active_start_hour,
-        active_end_hour: hb_config.active_end_hour,
-        prompt: hb_config.prompt.clone(),
-        max_iterations: hb_config.max_iterations,
-    });
-
-    let existing = store
-        .get_routine_by_name_for_actor(user_id, actor_id, "__heartbeat__")
-        .await;
-    let legacy_default = if user_id != "default" || actor_id != "default" {
-        match store
-            .get_routine_by_name_for_actor("default", "default", "__heartbeat__")
-            .await
-        {
-            Ok(routine) => routine,
-            Err(e) => {
-                tracing::error!("Failed to load legacy default heartbeat routine: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let mut routine = match existing {
-        Ok(Some(routine)) => routine,
-        Ok(None) => match legacy_default.clone() {
-            Some(legacy) => legacy,
-            None => {
-                let routine = spec.new_routine(
-                    user_id,
-                    actor_id,
-                    hb_config.user_timezone.as_deref(),
-                    chrono::Utc::now(),
-                );
-
-                store.create_routine(&routine).await.map_err(|e| {
-                    Error::Database(crate::error::DatabaseError::Query(e.to_string()))
-                })?;
-
-                tracing::info!(
-                    id = %routine.id,
-                    user_id = %routine.user_id,
-                    actor_id = %routine.actor_id,
-                    schedule = %spec.schedule,
-                    next_fire = ?routine.next_fire_at,
-                    "Created heartbeat routine"
-                );
-                return Ok(());
-            }
-        },
-        Err(e) => {
-            tracing::error!("Failed to check existing heartbeat routine: {}", e);
-            return Ok(());
-        }
-    };
-
-    if let Some(legacy) = legacy_default
-        && legacy.id != routine.id
-    {
-        let deleted = store
-            .delete_routine(legacy.id)
-            .await
-            .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
-        tracing::info!(
-            legacy_id = %legacy.id,
-            current_id = %routine.id,
-            deleted,
-            "Removed duplicate legacy default heartbeat routine"
-        );
-    }
-
-    if routine_ownership_changed(&routine, user_id, actor_id) || spec.routine_needs_update(&routine)
-    {
-        spec.apply_to_routine(
-            &mut routine,
-            user_id,
-            actor_id,
-            hb_config.user_timezone.as_deref(),
-            chrono::Utc::now(),
-        );
-        store
-            .update_routine(&routine)
-            .await
-            .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
-        tracing::info!(
-            id = %routine.id,
-            user_id = %routine.user_id,
-            actor_id = %routine.actor_id,
-            schedule = %spec.schedule,
-            next_fire = ?routine.next_fire_at,
-            "Updated heartbeat routine ownership and configuration"
-        );
-    } else {
-        tracing::debug!("Heartbeat routine already up-to-date");
-    }
-
-    Ok(())
-}
-
-async fn heartbeat_routine_owner_for_gateway(
-    store: &Arc<dyn Database>,
-    diagnostics: Option<&serde_json::Value>,
-    fallback_user_id: &str,
-) -> (String, String) {
-    let (fallback_principal_id, fallback_actor_id) =
-        heartbeat_gateway_fallback_identity_from_diagnostics(diagnostics, fallback_user_id);
-    let inferred_user_id =
-        if fallback_principal_id.trim().is_empty() || fallback_principal_id == "default" {
-            match store.infer_primary_user_id_for_channel("gateway").await {
-                Ok(Some(inferred)) if !inferred.trim().is_empty() => Some(inferred),
-                Ok(_) | Err(_) => None,
-            }
-        } else {
-            None
-        };
-
-    heartbeat_routine_owner_from_gateway_defaults(
-        &fallback_principal_id,
-        &fallback_actor_id,
-        inferred_user_id.as_deref(),
-    )
-}
-
+mod heartbeat;
 mod message_handling;
+mod repo_projects_config;
 mod startup_hooks;
 
 #[cfg(test)]
