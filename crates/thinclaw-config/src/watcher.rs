@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, oneshot};
 use tokio::task::JoinHandle;
+
+const WATCHER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Configuration for the file watcher.
 #[derive(Debug, Clone)]
@@ -60,6 +62,7 @@ pub struct ConfigWatcher {
     config: WatcherConfig,
     tx: broadcast::Sender<ConfigChanged>,
     task_handle: RwLock<Option<JoinHandle<()>>>,
+    shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
     /// Last known modified time.
     last_mtime: Arc<RwLock<Option<SystemTime>>>,
 }
@@ -73,6 +76,7 @@ impl ConfigWatcher {
             config: WatcherConfig::default(),
             tx,
             task_handle: RwLock::new(None),
+            shutdown_tx: RwLock::new(None),
             last_mtime: Arc::new(RwLock::new(None)),
         }
     }
@@ -90,6 +94,8 @@ impl ConfigWatcher {
 
     /// Start watching for changes.
     pub async fn start(&self) {
+        self.stop().await;
+
         // Read current mtime to establish baseline
         let initial_mtime = file_mtime(&self.path);
         *self.last_mtime.write().await = initial_mtime;
@@ -98,6 +104,7 @@ impl ConfigWatcher {
         let config = self.config.clone();
         let tx = self.tx.clone();
         let last_mtime = Arc::clone(&self.last_mtime);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
             tracing::info!(
@@ -109,7 +116,13 @@ impl ConfigWatcher {
             let mut last_emit = SystemTime::UNIX_EPOCH;
 
             loop {
-                tokio::time::sleep(config.poll_interval).await;
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::info!(path = %path.display(), "Config watcher stopped");
+                        break;
+                    }
+                    _ = tokio::time::sleep(config.poll_interval) => {}
+                }
 
                 let current_mtime = file_mtime(&path);
                 let prev_mtime = *last_mtime.read().await;
@@ -153,14 +166,17 @@ impl ConfigWatcher {
             }
         });
 
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
         *self.task_handle.write().await = Some(handle);
     }
 
     /// Stop watching.
     pub async fn stop(&self) {
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
         if let Some(handle) = self.task_handle.write().await.take() {
-            handle.abort();
-            tracing::info!(path = %self.path.display(), "Config watcher stopped");
+            drain_watcher_task(handle, "config_watcher").await;
         }
     }
 
@@ -204,6 +220,21 @@ impl ConfigWatcher {
 /// Get file modified time, or None if the file doesn't exist.
 fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
+async fn drain_watcher_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(task = name, error = %error, "Watcher task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(WATCHER_STOP_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(task = name, "Watcher task did not drain before timeout; aborted");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +300,19 @@ mod tests {
     async fn test_stop_without_start() {
         let watcher = ConfigWatcher::new("/tmp/test.toml");
         watcher.stop().await; // Should not panic
+    }
+
+    #[tokio::test]
+    async fn test_stop_drains_running_watcher_promptly() {
+        let watcher = ConfigWatcher::new("/tmp/nonexistent_thinclaw_config_stop_test.toml")
+            .with_config(WatcherConfig {
+                poll_interval: Duration::from_secs(60),
+                debounce: Duration::from_millis(1),
+            });
+
+        watcher.start().await;
+        tokio::time::timeout(Duration::from_millis(250), watcher.stop())
+            .await
+            .expect("stop should not wait for the poll interval");
     }
 }

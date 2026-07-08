@@ -126,6 +126,7 @@ pub struct RoutineEventActivityInfo {
     pub processed_at: Option<String>,
     pub matched_routines: u32,
     pub fired_routines: u32,
+    pub attempt_count: u32,
     pub error_message: Option<String>,
     pub diagnostics: serde_json::Value,
 }

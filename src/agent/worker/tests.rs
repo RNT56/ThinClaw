@@ -139,6 +139,7 @@ async fn make_worker(tools: Vec<Arc<dyn Tool>>) -> Worker {
         cost_tracker: None,
         tool_profile: ToolProfile::Standard,
         notify_tx: None,
+        observer: Arc::new(crate::observability::NoopObserver),
     };
 
     Worker::new(job_id, deps)
@@ -437,6 +438,7 @@ async fn finalize_routine_run_resolves_routine_by_id_when_name_changes() {
         cost_tracker: None,
         tool_profile: ToolProfile::Restricted,
         notify_tx: None,
+        observer: Arc::new(crate::observability::NoopObserver),
     };
 
     let worker = Worker::new(job_id, deps);

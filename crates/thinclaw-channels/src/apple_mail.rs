@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use thinclaw_channels_core::{
@@ -31,6 +32,8 @@ const POLL_INTERVAL_SECS: u64 = 10;
 
 /// Maximum email body length.
 const MAX_BODY_LENGTH: usize = 100_000;
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -118,6 +121,8 @@ pub struct AppleMailChannel {
     db_path: PathBuf,
     /// Shutdown flag.
     shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+    poll_task: Mutex<Option<JoinHandle<()>>>,
     /// Last processed message ROWID.
     last_rowid: Arc<AtomicI64>,
 }
@@ -142,6 +147,8 @@ impl AppleMailChannel {
             config,
             db_path,
             shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(Notify::new()),
+            poll_task: Mutex::new(None),
             last_rowid: Arc::new(AtomicI64::new(0)),
         })
     }
@@ -485,6 +492,12 @@ impl Channel for AppleMailChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
+        if let Some(handle) = self.poll_task.lock().await.take() {
+            self.shutdown.store(true, Ordering::Relaxed);
+            self.shutdown_notify.notify_waiters();
+            drain_channel_task(handle, NAME).await;
+        }
+        self.shutdown.store(false, Ordering::Relaxed);
 
         // Initialize to current latest ROWID so we don't replay history
         let initial_rowid = Self::get_latest_rowid(&self.db_path).await?;
@@ -500,10 +513,11 @@ impl Channel for AppleMailChannel {
         let unread_only = self.config.unread_only;
         let mark_as_read = self.config.mark_as_read;
         let shutdown = self.shutdown.clone();
+        let shutdown_notify = Arc::clone(&self.shutdown_notify);
         let last_rowid = self.last_rowid.clone();
 
         // Spawn polling task
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
             loop {
@@ -577,9 +591,17 @@ impl Channel for AppleMailChannel {
                     }
                 }
 
-                tokio::time::sleep(poll_interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => {}
+                    _ = shutdown_notify.notified() => {
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                }
             }
         });
+        *self.poll_task.lock().await = Some(handle);
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -653,7 +675,26 @@ impl Channel for AppleMailChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown_notify.notify_waiters();
+        if let Some(handle) = self.poll_task.lock().await.take() {
+            drain_channel_task(handle, NAME).await;
+        }
         Ok(())
+    }
+}
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = name, error = %error, "channel polling task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = name, "channel polling task did not drain before timeout; aborted");
+        }
     }
 }
 
@@ -908,6 +949,8 @@ mod tests {
             config,
             db_path: std::path::PathBuf::from("/tmp/Envelope Index"),
             shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            shutdown_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            poll_task: tokio::sync::Mutex::new(None),
             last_rowid: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         };
         assert_eq!(

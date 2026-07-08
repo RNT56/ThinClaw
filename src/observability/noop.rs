@@ -51,6 +51,25 @@ mod tests {
         obs.record_metric(&ObserverMetric::RequestLatency(Duration::from_millis(50)));
         obs.record_metric(&ObserverMetric::ActiveJobs(2));
         obs.record_metric(&ObserverMetric::QueueDepth(0));
+        obs.record_metric(&ObserverMetric::LoopStarted(
+            thinclaw_agent::loop_control::LoopKind::Maintenance,
+        ));
+        obs.record_metric(&ObserverMetric::LoopRun(
+            thinclaw_agent::loop_control::LoopRunSummary::new(
+                thinclaw_agent::loop_control::LoopKind::Maintenance,
+                thinclaw_agent::loop_control::LoopStopReason::Completed,
+                1,
+                0,
+            ),
+        ));
+        obs.record_metric(&ObserverMetric::LoopPhaseRun(LoopPhaseRun::new(
+            thinclaw_agent::loop_control::LoopKind::RepoProjectSupervisor,
+            "recovery",
+            thinclaw_agent::loop_control::LoopStopReason::Completed,
+            Duration::from_millis(10),
+            0,
+            0,
+        )));
     }
 
     #[test]

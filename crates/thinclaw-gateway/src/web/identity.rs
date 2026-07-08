@@ -4,6 +4,7 @@ use axum::{
 };
 
 use thinclaw_identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+use thinclaw_settings::GatewayRole;
 
 use crate::web::devices::{DevicePlatform, DeviceScope};
 
@@ -103,9 +104,16 @@ pub struct GatewayRequestIdentity {
     pub actor_id: String,
     pub auth_source: GatewayAuthSource,
     pub compatibility_fallback: bool,
+    /// RBAC privilege tier for this request. See `crate::web::rbac`.
+    pub role: GatewayRole,
 }
 
 impl GatewayRequestIdentity {
+    /// Construct an identity. The role defaults to the least-privileged
+    /// [`GatewayRole::ReadOnly`] (fail-closed): callers that authenticate a
+    /// full-privilege context (primary bearer token, trusted proxy) opt into
+    /// admin explicitly via [`Self::with_role`], and any future construction
+    /// that forgets to set a role can only under-privilege, never escalate.
     pub fn new(
         principal_id: impl Into<String>,
         actor_id: impl Into<String>,
@@ -117,7 +125,14 @@ impl GatewayRequestIdentity {
             actor_id: actor_id.into(),
             auth_source,
             compatibility_fallback,
+            role: GatewayRole::ReadOnly,
         }
+    }
+
+    /// Set the RBAC role, returning the updated identity.
+    pub fn with_role(mut self, role: GatewayRole) -> Self {
+        self.role = role;
+        self
     }
 
     pub fn resolved_identity(&self, thread_id: Option<&str>) -> ResolvedIdentity {
@@ -147,6 +162,7 @@ impl GatewayRequestIdentity {
             actor_id,
             auth_source: self.auth_source.clone(),
             compatibility_fallback,
+            role: self.role,
         }
     }
 }

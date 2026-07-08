@@ -73,6 +73,7 @@ thinclaw-llm = { version = "0.1.0", path = "crates/thinclaw-llm" }
 thinclaw-llm-core = { version = "0.1.0", path = "crates/thinclaw-llm-core" }
 thinclaw-media = { version = "0.1.0", path = "crates/thinclaw-media" }
 thinclaw-platform = { version = "0.1.0", path = "crates/thinclaw-platform" }
+thinclaw-portability = { version = "0.1.0", path = "crates/thinclaw-portability" }
 thinclaw-repo-projects = { version = "0.1.0", path = "crates/thinclaw-repo-projects" }
 thinclaw-runtime-contracts = { version = "0.1.0", path = "crates/thinclaw-runtime-contracts" }
 thinclaw-safety = { version = "0.1.0", path = "crates/thinclaw-safety" }
@@ -239,6 +240,7 @@ aws-smithy-types = { version = "1", optional = true }
 
 # Audio capture for voice wake word detection (headless mode only)
 cpal = { version = "0.15", optional = true }
+prometheus-client = "0.25"
 
 # Optional rustls TLS listener for the gateway (mobile device pairing, D-X1)
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls"], optional = true }

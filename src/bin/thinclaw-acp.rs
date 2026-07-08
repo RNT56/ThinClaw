@@ -280,6 +280,7 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
             main_tool_profile: ToolProfile::Acp,
             worker_tool_profile: ToolProfile::Restricted,
             subagent_tool_profile: ToolProfile::ExplicitOnly,
+            subagent_max_per_principal: 0,
             model_thinking_overrides: std::collections::HashMap::new(),
             workspace_mode: "unrestricted".to_string(),
             workspace_root: None,
@@ -320,7 +321,13 @@ impl SmokeLlm {
     fn saw_tool_result(messages: &[ChatMessage]) -> bool {
         messages
             .iter()
-            .any(|message| matches!(message.role, Role::Tool))
+            .rev()
+            .find_map(|message| match message.role {
+                Role::Tool => Some(true),
+                Role::User => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     async fn maybe_wait_for_slow_prompt(messages: &[ChatMessage]) {

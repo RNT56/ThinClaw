@@ -25,7 +25,9 @@
 //! - `GMAIL_PROJECT_ID` — GCP project ID
 //! - `GMAIL_SUBSCRIPTION_ID` — Pub/Sub subscription name
 //! - `GMAIL_TOPIC_ID` — Pub/Sub topic name
-//! - `GMAIL_OAUTH_TOKEN` — OAuth2 access token (via `thinclaw auth gmail`)
+//! - `GMAIL_OAUTH_TOKEN` — OAuth2 access token (ThinClaw Desktop Gmail setup)
+//! - `GMAIL_REFRESH_TOKEN` / `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` — enable
+//!   unattended access-token refresh for long-running deployments
 //! - `GMAIL_ALLOWED_SENDERS` — comma-separated email allowlist (empty = all)
 
 use std::sync::Arc;
@@ -35,7 +37,8 @@ use std::{fs, path::PathBuf};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::gmail_wiring::{GmailConfig, is_sender_allowed};
@@ -64,6 +67,12 @@ struct GmailChannelState {
     messages_processed: std::sync::atomic::AtomicU64,
     /// Last processed Gmail history ID persisted across restarts.
     last_history_id: RwLock<Option<u64>>,
+    /// Notifies long-running Gmail loops to re-check their running state.
+    shutdown_notify: Notify,
+    /// Owned polling task, drained on restart and shutdown.
+    poll_task: Mutex<Option<JoinHandle<()>>>,
+    /// Owned token-refresh task, drained on restart and shutdown.
+    refresh_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// Response from Gmail API `messages.list`.
@@ -218,7 +227,27 @@ const PUBSUB_MAX_MESSAGES: u32 = 10;
 
 /// Poll interval between Pub/Sub pull requests.
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const GMAIL_UNREAD_FALLBACK_DAYS: u32 = 7;
+
+/// Refresh the access token this many seconds before it actually expires, so a
+/// request is never made with a token that lapses mid-flight.
+const TOKEN_REFRESH_MARGIN_SECS: u64 = 300;
+/// Fallback delay before retrying a failed proactive token refresh.
+const TOKEN_REFRESH_RETRY_SECS: u64 = 60;
+
+/// Response from Google's OAuth2 token endpoint on a refresh-token grant.
+#[derive(Debug, Deserialize)]
+struct GmailTokenRefreshResponse {
+    access_token: String,
+    #[serde(default = "default_token_lifetime")]
+    expires_in: u64,
+}
+
+fn default_token_lifetime() -> u64 {
+    3600
+}
 
 impl GmailChannel {
     /// Create a new Gmail channel from configuration.
@@ -254,6 +283,9 @@ impl GmailChannel {
                 last_error: RwLock::new(None),
                 messages_processed: std::sync::atomic::AtomicU64::new(0),
                 last_history_id: RwLock::new(persisted_history_id),
+                shutdown_notify: Notify::new(),
+                poll_task: Mutex::new(None),
+                refresh_task: Mutex::new(None),
             }),
             http,
         })
@@ -262,6 +294,114 @@ impl GmailChannel {
     /// Update the OAuth access token (e.g., after a token refresh).
     pub async fn set_access_token(&self, token: &str) {
         *self.state.access_token.write().await = token.to_string();
+    }
+
+    /// Exchange the configured refresh token for a fresh access token and
+    /// install it into shared state.
+    ///
+    /// Google access tokens expire after ~1 hour; without this a long-running
+    /// gateway/service deployment silently stops sending/receiving once the
+    /// initial token lapses. Returns the new token's lifetime in seconds so the
+    /// proactive loop can schedule the next refresh before expiry.
+    async fn refresh_access_token(
+        config: &GmailConfig,
+        state: &Arc<GmailChannelState>,
+        http: &Client,
+    ) -> Result<u64, ChannelError> {
+        let (Some(refresh_token), Some(client_id), Some(client_secret)) = (
+            config.refresh_token.as_deref(),
+            config.client_id.as_deref(),
+            config.client_secret.as_deref(),
+        ) else {
+            return Err(ChannelError::AuthFailed {
+                name: "gmail".into(),
+                reason: "Cannot refresh Gmail token: refresh_token/client_id/client_secret \
+                         not configured (set GMAIL_REFRESH_TOKEN, GMAIL_CLIENT_ID, \
+                         GMAIL_CLIENT_SECRET)"
+                    .into(),
+            });
+        };
+
+        let resp = http
+            .post("https://oauth2.googleapis.com/token")
+            .form(&[
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+                ("refresh_token", refresh_token),
+                ("grant_type", "refresh_token"),
+            ])
+            .send()
+            .await
+            .map_err(|e| ChannelError::AuthFailed {
+                name: "gmail".into(),
+                reason: format!("Gmail token refresh request failed: {e}"),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ChannelError::AuthFailed {
+                name: "gmail".into(),
+                reason: format!("Gmail token refresh returned {status}: {body}"),
+            });
+        }
+
+        let token: GmailTokenRefreshResponse =
+            resp.json().await.map_err(|e| ChannelError::AuthFailed {
+                name: "gmail".into(),
+                reason: format!("Invalid Gmail token refresh response: {e}"),
+            })?;
+
+        *state.access_token.write().await = token.access_token;
+        *state.last_error.write().await = None;
+        tracing::info!(
+            expires_in = token.expires_in,
+            "Refreshed Gmail OAuth access token"
+        );
+        Ok(token.expires_in)
+    }
+
+    /// Heuristic: does this error look like an expired/invalid access token?
+    fn is_auth_error(error: &ChannelError) -> bool {
+        if matches!(error, ChannelError::AuthFailed { .. }) {
+            return true;
+        }
+        let text = error.to_string();
+        text.contains("401")
+            || text.contains("UNAUTHENTICATED")
+            || text.contains("invalid_token")
+            || text.contains("Invalid Credentials")
+            || text.contains("invalid authentication credentials")
+    }
+
+    /// Background task: refresh the access token before it expires so the
+    /// channel keeps working indefinitely. No-op (task exits) when refresh
+    /// credentials are not configured.
+    async fn token_refresh_loop(config: GmailConfig, state: Arc<GmailChannelState>, http: Client) {
+        if !config.can_refresh_token() {
+            return;
+        }
+        loop {
+            if !*state.running.read().await {
+                break;
+            }
+            // Refresh immediately on entry, then reschedule based on the token
+            // lifetime with a safety margin; fall back to 45 min on failure.
+            let next_delay_secs = match Self::refresh_access_token(&config, &state, &http).await {
+                Ok(expires_in) => expires_in.saturating_sub(TOKEN_REFRESH_MARGIN_SECS).max(60),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Gmail proactive token refresh failed; retrying soon");
+                    *state.last_error.write().await = Some(e.to_string());
+                    TOKEN_REFRESH_RETRY_SECS
+                }
+            };
+            if !*state.running.read().await {
+                break;
+            }
+            if sleep_or_gmail_shutdown(&state, Duration::from_secs(next_delay_secs)).await {
+                break;
+            }
+        }
     }
 
     /// Returns the number of messages processed since startup.
@@ -277,7 +417,7 @@ impl GmailChannel {
         if token.is_empty() {
             return Err(ChannelError::AuthFailed {
                 name: "gmail".into(),
-                reason: "No OAuth token configured (run `thinclaw auth gmail`)".into(),
+                reason: "No OAuth token configured (authenticate via ThinClaw Desktop Gmail setup, or set GMAIL_OAUTH_TOKEN)".into(),
             });
         }
 
@@ -1014,10 +1154,22 @@ impl GmailChannel {
                 Err(e) => {
                     tracing::warn!(error = %e, "Pub/Sub pull error");
                     *state.last_error.write().await = Some(e.to_string());
+                    // Reactively refresh on an auth failure so we recover within
+                    // one poll cycle instead of waiting for the proactive timer.
+                    if config.can_refresh_token() && Self::is_auth_error(&e) {
+                        tracing::info!("Gmail pull failed auth; refreshing access token");
+                        if let Err(refresh_err) =
+                            Self::refresh_access_token(&config, &state, &channel.http).await
+                        {
+                            tracing::warn!(error = %refresh_err, "Reactive Gmail token refresh failed");
+                        }
+                    }
                 }
             }
 
-            tokio::time::sleep(POLL_INTERVAL).await;
+            if sleep_or_gmail_shutdown(&state, POLL_INTERVAL).await {
+                break;
+            }
         }
     }
 }
@@ -1030,16 +1182,33 @@ impl Channel for GmailChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let token = self.state.access_token.read().await.clone();
-        if token.is_empty() {
+        if token.is_empty() && !self.config.can_refresh_token() {
             return Err(ChannelError::AuthFailed {
                 name: "gmail".into(),
-                reason: "No OAuth token configured. Run `thinclaw auth gmail` first.".into(),
+                reason: "No OAuth access token or refresh credentials configured. Authenticate \
+                         via the ThinClaw Desktop Gmail setup, or set GMAIL_OAUTH_TOKEN (and \
+                         GMAIL_REFRESH_TOKEN/GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET for auto-refresh)."
+                    .into(),
             });
         }
+
+        self.stop_background_tasks().await;
 
         let (tx, rx) = mpsc::channel(256);
         *self.state.msg_tx.write().await = Some(tx);
         *self.state.running.write().await = true;
+
+        // Proactively keep the access token fresh so a long-running deployment
+        // does not silently stop after the initial token expires (~1 hour).
+        if self.config.can_refresh_token() {
+            let refresh_config = self.config.clone();
+            let refresh_state = Arc::clone(&self.state);
+            let refresh_http = self.http.clone();
+            let handle = tokio::spawn(async move {
+                Self::token_refresh_loop(refresh_config, refresh_state, refresh_http).await;
+            });
+            *self.state.refresh_task.lock().await = Some(handle);
+        }
 
         // Spawn the polling loop.
         // We need a second GmailChannel instance for the loop since `self` can't
@@ -1054,9 +1223,10 @@ impl Channel for GmailChannel {
         let state_clone = Arc::clone(&self.state);
         let http_clone = self.http.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             Self::poll_loop(config_clone, state_clone, http_clone, loop_channel).await;
         });
+        *self.state.poll_task.lock().await = Some(handle);
 
         tracing::info!(
             project = %self.config.project_id,
@@ -1176,10 +1346,49 @@ impl Channel for GmailChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
-        *self.state.running.write().await = false;
-        *self.state.msg_tx.write().await = None;
+        self.stop_background_tasks().await;
         tracing::info!("Gmail channel shut down");
         Ok(())
+    }
+}
+
+impl GmailChannel {
+    async fn stop_background_tasks(&self) {
+        *self.state.running.write().await = false;
+        self.state.shutdown_notify.notify_waiters();
+        *self.state.msg_tx.write().await = None;
+
+        let poll_handle = { self.state.poll_task.lock().await.take() };
+        if let Some(handle) = poll_handle {
+            drain_channel_task(handle, "gmail-poll").await;
+        }
+
+        let refresh_handle = { self.state.refresh_task.lock().await.take() };
+        if let Some(handle) = refresh_handle {
+            drain_channel_task(handle, "gmail-refresh").await;
+        }
+    }
+}
+
+async fn sleep_or_gmail_shutdown(state: &Arc<GmailChannelState>, duration: Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => !*state.running.read().await,
+        _ = state.shutdown_notify.notified() => !*state.running.read().await,
+    }
+}
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = "gmail", task = name, error = %error, "Gmail channel task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = "gmail", task = name, "Gmail channel task did not drain before timeout; aborted");
+        }
     }
 }
 
@@ -1239,6 +1448,66 @@ mod tests {
         let config = GmailConfig::default();
         let result = GmailChannel::new(config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn can_refresh_token_requires_all_three_credentials() {
+        let base = test_config();
+        assert!(!base.can_refresh_token(), "no refresh creds yet");
+
+        let full = GmailConfig {
+            refresh_token: Some("r".into()),
+            client_id: Some("c".into()),
+            client_secret: Some("s".into()),
+            ..test_config()
+        };
+        assert!(full.can_refresh_token());
+
+        // Any one missing/empty disables refresh.
+        for partial in [
+            GmailConfig {
+                refresh_token: None,
+                ..full.clone()
+            },
+            GmailConfig {
+                client_id: Some(String::new()),
+                ..full.clone()
+            },
+            GmailConfig {
+                client_secret: None,
+                ..full.clone()
+            },
+        ] {
+            assert!(!partial.can_refresh_token());
+        }
+    }
+
+    #[test]
+    fn is_auth_error_detects_expired_token_signals() {
+        assert!(GmailChannel::is_auth_error(&ChannelError::AuthFailed {
+            name: "gmail".into(),
+            reason: "nope".into(),
+        }));
+        assert!(GmailChannel::is_auth_error(&ChannelError::SendFailed {
+            name: "gmail".into(),
+            reason: "HTTP 401 Unauthorized: invalid_token".into(),
+        }));
+        assert!(!GmailChannel::is_auth_error(&ChannelError::SendFailed {
+            name: "gmail".into(),
+            reason: "HTTP 500 Internal Server Error".into(),
+        }));
+    }
+
+    #[test]
+    fn token_refresh_response_defaults_expiry() {
+        let parsed: GmailTokenRefreshResponse =
+            serde_json::from_str(r#"{"access_token":"abc"}"#).unwrap();
+        assert_eq!(parsed.access_token, "abc");
+        assert_eq!(parsed.expires_in, 3600);
+
+        let parsed: GmailTokenRefreshResponse =
+            serde_json::from_str(r#"{"access_token":"abc","expires_in":1799}"#).unwrap();
+        assert_eq!(parsed.expires_in, 1799);
     }
 
     #[test]

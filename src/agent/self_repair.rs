@@ -149,6 +149,17 @@ impl BrokenToolStorePort for RootBrokenToolStore {
             .await
             .map_err(|error| error.to_string())
     }
+
+    async fn record_tool_repair_result(
+        &self,
+        tool_name: &str,
+        result: &serde_json::Value,
+    ) -> Result<(), String> {
+        self.store
+            .record_tool_repair_result(tool_name, result)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 struct RootToolRepairBuilder {

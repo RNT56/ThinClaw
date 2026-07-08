@@ -1034,6 +1034,7 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            metrics_registry: None,
             response_cache: None,
             routine_engine: None,
             repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),

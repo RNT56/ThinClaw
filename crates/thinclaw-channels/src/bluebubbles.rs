@@ -24,11 +24,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::util::floor_char_boundary;
@@ -63,6 +65,8 @@ const TAPBACK_CODES: &[i64] = &[
     2000, 2001, 2002, 2003, 2004, 2005, // Removed
     3000, 3001, 3002, 3003, 3004, 3005,
 ];
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -154,6 +158,8 @@ pub struct BlueBubblesChannel {
     config: BlueBubblesConfig,
     client: Client,
     shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+    webhook_task: Mutex<Option<JoinHandle<()>>>,
     /// Whether the server has Private API enabled.
     private_api: Arc<AtomicBool>,
     /// Whether the helper bundle is connected.
@@ -190,6 +196,8 @@ impl BlueBubblesChannel {
             config,
             client,
             shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(Notify::new()),
+            webhook_task: Mutex::new(None),
             private_api: Arc::new(AtomicBool::new(false)),
             helper_connected: Arc::new(AtomicBool::new(false)),
             guid_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -969,7 +977,11 @@ impl Channel for BlueBubblesChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown_notify.notify_waiters();
         self.unregister_webhook().await;
+        if let Some(handle) = self.webhook_task.lock().await.take() {
+            drain_channel_task(handle, NAME).await;
+        }
         Ok(())
     }
 }
@@ -1277,8 +1289,9 @@ impl BlueBubblesChannel {
         let host = channel.config.webhook_host.clone();
         let port = channel.config.webhook_port;
         let shutdown = Arc::clone(&channel.shutdown);
+        let shutdown_notify = Arc::clone(&channel.shutdown_notify);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let addr = format!("{host}:{port}");
             let listener = match tokio::net::TcpListener::bind(&addr).await {
                 Ok(l) => l,
@@ -1299,18 +1312,37 @@ impl BlueBubblesChannel {
                         if shutdown.load(Ordering::Relaxed) {
                             break;
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        tokio::select! {
+                            _ = shutdown_notify.notified() => {}
+                            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        }
                     }
                 })
                 .await
                 .ok();
         });
+        *channel.webhook_task.lock().await = Some(handle);
 
         Ok(channel)
     }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = name, error = %error, "channel webhook task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = name, "channel webhook task did not drain before timeout; aborted");
+        }
+    }
+}
 
 /// Normalize a server URL (add http:// if missing, strip trailing slash).
 fn normalize_server_url(raw: &str) -> String {

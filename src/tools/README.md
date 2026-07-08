@@ -76,6 +76,26 @@ ThinClaw's MCP client now supports live approval flows for server-initiated `sam
 
 Use MCP when ecosystem leverage is more important than the stronger isolation ThinClaw provides for WASM tools.
 
+## Tool Access Policy & Approval
+
+Two independent layers gate tool use:
+
+- **Name-based policy** (`ToolPolicyManager` in `thinclaw-settings`): AllowAll /
+  AllowList / DenyList by tool *name*, with global / per-channel / per-group
+  scope. Decides whether a tool is visible/allowed at all.
+- **Argument-scoped policy** (`arg_policies`, `thinclaw_settings::arg_policy`):
+  inspects a call's *final arguments* and yields `allow` / `deny` /
+  `require_approval` — e.g. allow `shell` only when `command` matches `npm run *`,
+  or deny `http` to internal hosts. Rules fire in order (first match wins);
+  `allow` short-circuits. Configured under `tool_policies.arg_policies` and
+  round-trips through the same persisted / TOML / `THINCLAW_TOOL_POLICIES` env
+  layers as the name-based policy. Enforced on the final post-hook arguments at
+  both `src/tools/execution.rs::prepare_tool_call` (workers/scheduler/subagents)
+  and the interactive path (`src/agent/dispatcher/tool_execution.rs`).
+- **Plan mode** (`/plan on`): a per-thread mode that escalates *every*
+  state-changing (non-read) tool to require operator approval, regardless of the
+  tool's own approval class. See `docs/SURFACES_AND_COMMANDS.md`.
+
 ## Auth Guidance
 
 - `thinclaw tool auth <tool>` is the CLI surface for WASM tool authentication.

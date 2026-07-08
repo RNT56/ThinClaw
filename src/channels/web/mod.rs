@@ -172,6 +172,7 @@ impl GatewayChannel {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            metrics_registry: None,
             response_cache: None,
             routine_engine: None,
             repo_project_supervisor: Arc::new(tokio::sync::RwLock::new(None)),
@@ -224,6 +225,7 @@ impl GatewayChannel {
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             cost_tracker: self.state.cost_tracker.clone(),
+            metrics_registry: self.state.metrics_registry.clone(),
             response_cache: self.state.response_cache.clone(),
             routine_engine: self.state.routine_engine.clone(),
             repo_project_supervisor: self.state.repo_project_supervisor.clone(),
@@ -383,6 +385,15 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the Prometheus registry handle for the `/metrics` endpoint.
+    pub fn with_metrics_registry(
+        mut self,
+        registry: Arc<crate::observability::PrometheusObserver>,
+    ) -> Self {
+        self.rebuild_state(|s| s.metrics_registry = Some(registry));
+        self
+    }
+
     /// Inject the routine engine for webhook-triggered routine execution.
     pub fn with_routine_engine(
         mut self,
@@ -477,6 +488,7 @@ impl Channel for GatewayChannel {
             addr,
             self.state.clone(),
             self.auth_token.clone(),
+            self.config.principals.clone(),
             self.webhook_routes.clone(),
         )
         .await?;
@@ -744,6 +756,7 @@ mod tests {
             auth_token: Some("test-token".to_string()),
             user_id: "household-user".to_string(),
             actor_id: Some("desk-actor".to_string()),
+            principals: Vec::new(),
         });
 
         let diagnostics = gateway
@@ -769,6 +782,7 @@ mod tests {
             auth_token: Some("test-token".to_string()),
             user_id: "household-user".to_string(),
             actor_id: Some("desk-actor".to_string()),
+            principals: Vec::new(),
         });
         let mut events = Box::pin(
             gateway
@@ -806,6 +820,7 @@ mod tests {
                 auth_token: Some(empty.to_string()),
                 user_id: "u".to_string(),
                 actor_id: None,
+                principals: Vec::new(),
             });
             let token = gateway.auth_token();
             assert!(
@@ -824,6 +839,7 @@ mod tests {
             auth_token: Some("configured-secret".to_string()),
             user_id: "u".to_string(),
             actor_id: None,
+            principals: Vec::new(),
         });
         assert_eq!(gateway.auth_token(), "configured-secret");
     }

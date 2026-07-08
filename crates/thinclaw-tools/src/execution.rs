@@ -864,7 +864,12 @@ impl LocalExecutionBackend for LocalHostExecutionBackend {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<ExecutionResult, ToolError> {
-        let mut command = build_shell_command(&request.command, request.allow_network);
+        let confine_root = host_fs_confine_root(&request.workdir);
+        let mut command = build_shell_command(
+            &request.command,
+            request.allow_network,
+            confine_root.as_deref(),
+        );
         configure_spawn(
             &mut command,
             &request.workdir,
@@ -942,8 +947,13 @@ impl LocalExecutionBackend for LocalHostExecutionBackend {
         &self,
         request: ScriptExecutionRequest,
     ) -> Result<ExecutionResult, ToolError> {
-        let mut command =
-            build_script_command(&request.program, &request.args, request.allow_network);
+        let confine_root = host_fs_confine_root(&request.workdir);
+        let mut command = build_script_command(
+            &request.program,
+            &request.args,
+            request.allow_network,
+            confine_root.as_deref(),
+        );
         configure_spawn(
             &mut command,
             &request.workdir,
@@ -987,30 +997,45 @@ struct CollectedOutput {
     exit_code: i64,
 }
 
-fn build_shell_command(command: &str, allow_network: bool) -> Command {
+fn build_shell_command(command: &str, allow_network: bool, confine_root: Option<&Path>) -> Command {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = allow_network;
+    {
+        let _ = allow_network;
+        let _ = confine_root;
+    }
 
+    // macOS: when a confinement root is supplied (opt-in host FS sandbox),
+    // scope file writes to it via a tightened seatbelt profile; otherwise fall
+    // back to the network-only profile for the no-network case.
     #[cfg(target_os = "macos")]
-    if !allow_network && Path::new("/usr/bin/sandbox-exec").is_file() {
-        let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
-        sandboxed.arg("-p").arg(macos_network_deny_profile());
-        add_shell_args(&mut sandboxed, command);
-        return sandboxed;
+    if Path::new("/usr/bin/sandbox-exec").is_file() {
+        if let Some(root) = confine_root {
+            let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
+            sandboxed
+                .arg("-p")
+                .arg(macos_confined_profile(root, allow_network));
+            add_shell_args(&mut sandboxed, command);
+            return sandboxed;
+        }
+        if !allow_network {
+            let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
+            sandboxed.arg("-p").arg(macos_network_deny_profile());
+            add_shell_args(&mut sandboxed, command);
+            return sandboxed;
+        }
     }
 
     #[cfg(target_os = "linux")]
-    if !allow_network && let Some(wrapper) = linux_bubblewrap_program() {
+    if (!allow_network || confine_root.is_some())
+        && let Some(wrapper) = linux_bubblewrap_program()
+    {
         let mut sandboxed = Command::new(wrapper);
-        sandboxed
-            .arg("--die-with-parent")
-            .arg("--unshare-net")
-            .arg("--bind")
-            .arg("/")
-            .arg("/")
-            .arg("--proc")
-            .arg("/proc")
-            .arg("--");
+        sandboxed.arg("--die-with-parent");
+        if !allow_network {
+            sandboxed.arg("--unshare-net");
+        }
+        linux_bind_confinement(&mut sandboxed, confine_root);
+        sandboxed.arg("--proc").arg("/proc").arg("--");
         add_shell_args(&mut sandboxed, command);
         return sandboxed;
     }
@@ -1046,32 +1071,47 @@ fn add_shell_args(command: &mut Command, shell_command: &str) {
     }
 }
 
-fn build_script_command(program: &str, args: &[String], allow_network: bool) -> Command {
+fn build_script_command(
+    program: &str,
+    args: &[String],
+    allow_network: bool,
+    confine_root: Option<&Path>,
+) -> Command {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = allow_network;
+    {
+        let _ = allow_network;
+        let _ = confine_root;
+    }
 
     #[cfg(target_os = "macos")]
-    if !allow_network && Path::new("/usr/bin/sandbox-exec").is_file() {
-        let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
-        sandboxed.arg("-p").arg(macos_network_deny_profile());
-        sandboxed.arg(program);
-        sandboxed.args(args);
-        return sandboxed;
+    if Path::new("/usr/bin/sandbox-exec").is_file() {
+        if let Some(root) = confine_root {
+            let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
+            sandboxed
+                .arg("-p")
+                .arg(macos_confined_profile(root, allow_network));
+            sandboxed.arg(program).args(args);
+            return sandboxed;
+        }
+        if !allow_network {
+            let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
+            sandboxed.arg("-p").arg(macos_network_deny_profile());
+            sandboxed.arg(program).args(args);
+            return sandboxed;
+        }
     }
 
     #[cfg(target_os = "linux")]
-    if !allow_network && let Some(wrapper) = linux_bubblewrap_program() {
+    if (!allow_network || confine_root.is_some())
+        && let Some(wrapper) = linux_bubblewrap_program()
+    {
         let mut sandboxed = Command::new(wrapper);
-        sandboxed
-            .arg("--die-with-parent")
-            .arg("--unshare-net")
-            .arg("--bind")
-            .arg("/")
-            .arg("/")
-            .arg("--proc")
-            .arg("/proc")
-            .arg("--")
-            .arg(program);
+        sandboxed.arg("--die-with-parent");
+        if !allow_network {
+            sandboxed.arg("--unshare-net");
+        }
+        linux_bind_confinement(&mut sandboxed, confine_root);
+        sandboxed.arg("--proc").arg("/proc").arg("--").arg(program);
         sandboxed.args(args);
         return sandboxed;
     }
@@ -1081,9 +1121,78 @@ fn build_script_command(program: &str, args: &[String], allow_network: bool) -> 
     command
 }
 
+/// Whether host-direct execution should be filesystem-confined. Opt-in and
+/// default-off (`THINCLAW_HOST_FS_SANDBOX=1`), so enabling it never silently
+/// changes behavior for existing deployments. When on, host shell/script
+/// execution confines writes to the workspace root (plus temp dirs); reads and
+/// exec stay broad so interpreters can load their libraries.
+fn host_fs_sandbox_enabled() -> bool {
+    std::env::var("THINCLAW_HOST_FS_SANDBOX")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// The confinement root for a host-direct execution, or `None` when the opt-in
+/// sandbox is disabled. Canonicalizes so the OS sandbox sees a real path.
+fn host_fs_confine_root(workdir: &Path) -> Option<PathBuf> {
+    if !host_fs_sandbox_enabled() {
+        return None;
+    }
+    Some(std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf()))
+}
+
+/// Bubblewrap bind flags: a read-only view of the whole filesystem plus a
+/// writable workspace root and tmpfs `/tmp` when confining; otherwise a plain
+/// read-write bind of `/`.
+#[cfg(target_os = "linux")]
+fn linux_bind_confinement(command: &mut Command, confine_root: Option<&Path>) {
+    match confine_root {
+        Some(root) => {
+            command.arg("--ro-bind").arg("/").arg("/");
+            command.arg("--dev").arg("/dev");
+            command.arg("--tmpfs").arg("/tmp");
+            command.arg("--bind").arg(root).arg(root);
+        }
+        None => {
+            command.arg("--bind").arg("/").arg("/");
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn macos_network_deny_profile() -> &'static str {
     "(version 1) (allow default) (deny network*)"
+}
+
+/// A seatbelt profile that keeps reads/exec broad (so interpreters load their
+/// libraries) but confines file *writes* to `confine_root` plus the standard
+/// temp/device paths, and denies network unless `allow_network`.
+#[cfg(target_os = "macos")]
+fn macos_confined_profile(confine_root: &Path, allow_network: bool) -> String {
+    let root = confine_root.to_string_lossy();
+    let mut profile =
+        String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n");
+    profile.push_str(&format!("  (subpath \"{root}\")\n"));
+    profile.push_str("  (subpath \"/private/tmp\")\n  (subpath \"/tmp\")\n");
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        let tmpdir = tmpdir.trim_end_matches('/');
+        if !tmpdir.is_empty() {
+            profile.push_str(&format!("  (subpath \"{tmpdir}\")\n"));
+        }
+    }
+    profile.push_str(
+        "  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  \
+         (regex #\"^/dev/fd/\")\n  (regex #\"^/dev/tty\"))\n",
+    );
+    if !allow_network {
+        profile.push_str("(deny network*)\n");
+    }
+    profile
 }
 
 fn configure_spawn(
@@ -1274,4 +1383,89 @@ fn floor_char_boundary(value: &str, index: usize) -> usize {
         index = index.saturating_sub(1);
     }
     index
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_sandbox_tests {
+    use super::*;
+
+    /// The seatbelt profile keeps reads/exec broad but denies writes by default,
+    /// re-allowing only the confine root plus temp/device paths, and denies
+    /// network only when asked.
+    #[test]
+    fn confined_profile_structure_is_wellformed() {
+        let root = Path::new("/Users/example/work");
+
+        let deny_net = macos_confined_profile(root, false);
+        assert!(deny_net.contains("(allow default)"));
+        assert!(deny_net.contains("(deny file-write*)"));
+        assert!(deny_net.contains("(subpath \"/Users/example/work\")"));
+        assert!(deny_net.contains("(subpath \"/private/tmp\")"));
+        assert!(deny_net.contains("(literal \"/dev/null\")"));
+        assert!(deny_net.contains("(deny network*)"));
+
+        let allow_net = macos_confined_profile(root, true);
+        assert!(allow_net.contains("(subpath \"/Users/example/work\")"));
+        assert!(
+            !allow_net.contains("(deny network*)"),
+            "network should stay open when allow_network is true"
+        );
+    }
+
+    /// End-to-end proof the confinement actually holds: under the real
+    /// `sandbox-exec`, a write inside the confine root succeeds while a write to
+    /// a sibling outside it is blocked by the kernel.
+    #[test]
+    fn confined_profile_blocks_writes_outside_root() {
+        if !Path::new("/usr/bin/sandbox-exec").is_file() {
+            return; // No seatbelt on this host; nothing to verify.
+        }
+        let Ok(home) = std::env::var("HOME") else {
+            return; // No writable anchor outside the temp allowlist.
+        };
+        let pid = std::process::id();
+
+        // Confine root lives in $HOME so the subpath grant — not the temp
+        // allowlist — is what makes the inside write succeed.
+        let root = Path::new(&home).join(format!(".thinclaw_sbx_{pid}"));
+        if std::fs::create_dir_all(&root).is_err() {
+            return;
+        }
+        let Ok(root) = std::fs::canonicalize(&root) else {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        };
+        let profile = macos_confined_profile(&root, false);
+
+        let inside = root.join("ok.txt");
+        let inside_ok = run_sandboxed_write(&profile, &inside);
+
+        // A sibling directly in $HOME is outside every allowed subpath.
+        let outside = Path::new(&home).join(format!(".thinclaw_sbx_escape_{pid}.txt"));
+        let _ = std::fs::remove_file(&outside);
+        let outside_ok = run_sandboxed_write(&profile, &outside);
+        let outside_existed = outside.exists();
+
+        // Clean up before asserting so a failure never leaves artifacts behind.
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+
+        assert!(inside_ok, "write inside the confine root should be allowed");
+        assert!(
+            !outside_ok && !outside_existed,
+            "write outside the confine root should be denied by the seatbelt profile"
+        );
+    }
+
+    fn run_sandboxed_write(profile: &str, target: &Path) -> bool {
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .arg("-p")
+            .arg(profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf hi > '{}'", target.display()))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
 }

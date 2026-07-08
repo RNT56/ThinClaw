@@ -1183,7 +1183,7 @@ impl SetupWizard {
             self.settings.channels.gmail_enabled = true;
             print_success("Gmail channel configured");
             print_info(
-                "Run `thinclaw auth gmail` to complete OAuth2 authentication before starting.",
+                "Complete Gmail OAuth2 authentication via the ThinClaw Desktop Gmail setup (or provide GMAIL_OAUTH_TOKEN) before starting.",
             );
         } else {
             self.settings.channels.gmail_enabled = false;

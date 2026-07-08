@@ -407,6 +407,12 @@ pub struct Thread {
     /// Pending auth token request (thread is in auth mode).
     #[serde(default)]
     pub pending_auth: Option<PendingAuth>,
+    /// Plan mode: when true, mutating (non-read) tools are hidden from the LLM's
+    /// tool list and, if attempted, require operator approval before running —
+    /// so the agent proposes actions and the operator confirms. Toggled by
+    /// `/plan`; survives restart via the runtime snapshot.
+    #[serde(default)]
+    pub plan_mode: bool,
 }
 
 impl Thread {
@@ -423,6 +429,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            plan_mode: false,
         }
     }
 
@@ -439,6 +446,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            plan_mode: false,
         }
     }
 
@@ -471,12 +479,14 @@ impl Thread {
             provider_context_refs: Vec::new(),
             active_message_row_count: None,
             undo_checkpoints: Vec::new(),
+            plan_mode: self.plan_mode,
         }
     }
 
     pub fn restore_runtime_snapshot(&mut self, runtime: ThreadRuntimeSnapshot) {
         self.pending_approval = runtime.pending_approval.map(Into::into);
         self.pending_auth = runtime.pending_auth.map(Into::into);
+        self.plan_mode = runtime.plan_mode;
         self.state = match ThreadState::from(runtime.state) {
             ThreadState::Processing => {
                 if let Some(turn) = self.turns.last_mut() {
@@ -597,15 +607,52 @@ impl Thread {
     }
 
     /// Get all messages for context building.
+    ///
+    /// Reconstructs the full conversation, including prior turns' tool calls and
+    /// their results, so a later turn can "see" exactly what an earlier turn's
+    /// tools returned (e.g. a grep or test-run output) rather than only the
+    /// final prose. Each reconstructed turn emits a provider-valid shape:
+    ///
+    /// ```text
+    /// user(input)
+    /// assistant(tool_calls: [t{n}_c0, t{n}_c1, ...])   // if the turn used tools
+    /// tool_result(t{n}_c0) ... tool_result(t{n}_cK)    // one per call, in order
+    /// assistant(response)                              // final text, if present
+    /// ```
+    ///
+    /// Every reconstructed `tool_call` id is paired with exactly one following
+    /// `tool_result` (a placeholder when no result/error was recorded), so the
+    /// sequence never leaves an orphaned tool call for a provider to reject.
+    /// Individual tool-result bodies are truncated to bound context growth from
+    /// a single very large historical output; the live agent loop applies its
+    /// own additional token cap and recent-turns pruning downstream.
     pub fn messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         for turn in &self.turns {
             messages.push(ChatMessage::user(&turn.user_input));
+            turn.append_tool_exchange(&mut messages);
             if let Some(ref response) = turn.response {
                 messages.push(ChatMessage::assistant(response));
             }
         }
         messages
+    }
+
+    /// Number of durable conversation rows this thread represents: one `user`
+    /// row per turn plus one `assistant` row per completed turn.
+    ///
+    /// This is the unit the active-message watermark is stored in (it drives
+    /// DB-row truncation on hydration after `/undo`, `/redo`, `/clear`,
+    /// `/rewind`). It must **exclude** the synthetic tool-call/tool-result
+    /// messages that [`Thread::messages`] reconstructs — those are never
+    /// persisted as rows, so counting them would inflate the watermark and let
+    /// undone turns reappear after a restart. Equivalent to what
+    /// `messages().len()` returned before cross-turn tool reconstruction.
+    pub fn persisted_message_count(&self) -> usize {
+        self.turns
+            .iter()
+            .map(|turn| 1 + usize::from(turn.response.is_some()))
+            .sum()
     }
 
     /// Truncate turns to a specific count (keeping most recent).
@@ -622,35 +669,76 @@ impl Thread {
 
     /// Restore thread state from a checkpoint's messages.
     ///
-    /// Clears existing turns and rebuilds from message pairs.
-    /// Messages should alternate: user, assistant, user, assistant...
+    /// Clears existing turns and rebuilds from the message stream produced by
+    /// [`Thread::messages`]. A turn is `user` followed by an optional tool
+    /// exchange — `assistant(tool_calls)` + `tool_result(...)` — and an optional
+    /// final `assistant(text)`. Tool calls/results are reconstructed onto the
+    /// turn so a subsequent [`Thread::messages`] call reproduces an equivalent,
+    /// provider-valid stream. Bare `user`/`assistant` alternation (no tools)
+    /// still round-trips exactly as before.
     pub fn restore_from_messages(&mut self, messages: Vec<ChatMessage>) {
         self.turns.clear();
         self.state = ThreadState::Idle;
         self.pending_approval = None;
         self.pending_auth = None;
 
-        // Messages alternate: user, assistant, user, assistant...
         let mut iter = messages.into_iter().peekable();
         let mut turn_number = 0;
 
         while let Some(msg) = iter.next() {
-            if msg.role == Role::User {
-                let mut turn = Turn::new(turn_number, &msg.content, false);
+            if msg.role != Role::User {
+                // Stray leading tool/assistant messages with no owning user turn
+                // are skipped (matches prior behavior for malformed input).
+                continue;
+            }
 
-                // Check if next is assistant response
-                if let Some(next) = iter.peek()
-                    && next.role == Role::Assistant
-                {
-                    // iter.next() is guaranteed Some after a successful peek()
-                    if let Some(response) = iter.next() {
-                        turn.complete(&response.content);
+            let mut turn = Turn::new(turn_number, &msg.content, false);
+
+            // Consume the rest of this turn: tool-call exchanges and/or a final
+            // assistant text, stopping at the next user message.
+            while let Some(next) = iter.peek() {
+                match next.role {
+                    Role::User => break,
+                    Role::Assistant => {
+                        // Guaranteed Some after a successful peek().
+                        let Some(assistant) = iter.next() else { break };
+                        if let Some(calls) = assistant.tool_calls {
+                            // Tool-call block: record each call, then absorb the
+                            // matching tool_result messages that follow.
+                            for call in calls {
+                                turn.record_tool_call(call.name, call.arguments);
+                                if let Some(result) = iter.peek()
+                                    && result.role == Role::Tool
+                                    && let Some(result) = iter.next()
+                                {
+                                    if let Some(err) = result.content.strip_prefix("[error] ") {
+                                        turn.record_tool_error(err.to_string());
+                                    } else {
+                                        turn.record_tool_result(serde_json::Value::String(
+                                            result.content,
+                                        ));
+                                    }
+                                }
+                            }
+                        } else {
+                            // Final assistant text for this turn.
+                            turn.complete(&assistant.content);
+                            break;
+                        }
+                    }
+                    Role::Tool => {
+                        // A tool result with no preceding recorded call: skip it
+                        // rather than leave it dangling.
+                        let _ = iter.next();
+                    }
+                    Role::System => {
+                        let _ = iter.next();
                     }
                 }
-
-                self.turns.push(turn);
-                turn_number += 1;
             }
+
+            self.turns.push(turn);
+            turn_number += 1;
         }
 
         self.updated_at = Utc::now();
@@ -802,6 +890,78 @@ impl Turn {
             call.error = Some(error.into());
         }
     }
+
+    /// Append this turn's tool calls and their results to `messages` as a
+    /// provider-valid assistant(tool_calls) + tool_result(...) sequence.
+    ///
+    /// No-op when the turn recorded no tool calls. See [`Thread::messages`] for
+    /// the reconstruction contract; ids are synthesized as `t{turn}_c{index}`
+    /// and are stable for a given turn/call position so repeated calls produce
+    /// identical output.
+    pub(crate) fn append_tool_exchange(&self, messages: &mut Vec<ChatMessage>) {
+        if self.tool_calls.is_empty() {
+            return;
+        }
+
+        let mut calls = Vec::with_capacity(self.tool_calls.len());
+        for (idx, call) in self.tool_calls.iter().enumerate() {
+            calls.push(ToolCall {
+                id: synthetic_tool_call_id(self.turn_number, idx),
+                name: call.name.clone(),
+                arguments: call.parameters.clone(),
+            });
+        }
+        messages.push(ChatMessage::assistant_with_tool_calls(None, calls));
+
+        for (idx, call) in self.tool_calls.iter().enumerate() {
+            let body = match (&call.result, &call.error) {
+                (_, Some(error)) => {
+                    format!("[error] {}", truncate_tool_body(error))
+                }
+                (Some(result), None) => {
+                    let rendered = match result {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    truncate_tool_body(&rendered)
+                }
+                (None, None) => "[no result recorded]".to_string(),
+            };
+            messages.push(ChatMessage::tool_result(
+                synthetic_tool_call_id(self.turn_number, idx),
+                &call.name,
+                body,
+            ));
+        }
+    }
+}
+
+/// Maximum characters retained for a single historical tool-result body when
+/// reconstructing prior turns. Bounds context growth from one very large output
+/// (e.g. a full file read or verbose test log) while keeping the head, which is
+/// almost always the salient part for a follow-up turn.
+const MAX_HISTORICAL_TOOL_RESULT_CHARS: usize = 4000;
+
+/// Synthesize a stable tool-call id for a reconstructed prior turn.
+fn synthetic_tool_call_id(turn_number: usize, call_index: usize) -> String {
+    format!("t{turn_number}_c{call_index}")
+}
+
+/// Truncate a reconstructed tool-result body on a char boundary, appending a
+/// marker noting how many characters were elided.
+fn truncate_tool_body(body: &str) -> String {
+    if body.chars().count() <= MAX_HISTORICAL_TOOL_RESULT_CHARS {
+        return body.to_string();
+    }
+    let mut out: String = body
+        .chars()
+        .take(MAX_HISTORICAL_TOOL_RESULT_CHARS)
+        .collect();
+    let elided = body.chars().count() - MAX_HISTORICAL_TOOL_RESULT_CHARS;
+    out.push_str(&format!(
+        "\n… [truncated {elided} chars — full output in session history]"
+    ));
+    out
 }
 
 /// Record of a tool call made during a turn.
@@ -1151,6 +1311,7 @@ mod tests {
             provider_context_refs: Vec::new(),
             active_message_row_count: None,
             undo_checkpoints: Vec::new(),
+            plan_mode: false,
         });
 
         assert_eq!(thread.state, ThreadState::Interrupted);
@@ -1183,6 +1344,7 @@ mod tests {
             provider_context_refs: vec!["provider:1".to_string(), "provider:2".to_string()],
             active_message_row_count: Some(4),
             undo_checkpoints: Vec::new(),
+            plan_mode: false,
         };
 
         let encoded = serde_json::to_string(&runtime).expect("serialize runtime");
@@ -1434,6 +1596,190 @@ mod tests {
         assert_eq!(messages[0].content, "first");
         assert_eq!(messages[1].content, "first reply");
         assert_eq!(messages[2].content, "second (in progress)");
+    }
+
+    #[test]
+    fn test_messages_reconstruct_tool_calls_across_turns() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Turn 0: uses a tool, gets a result, then answers.
+        thread.start_turn("what files are here?");
+        {
+            let turn = thread.last_turn_mut().unwrap();
+            turn.record_tool_call("list_files", serde_json::json!({ "path": "." }));
+            turn.record_tool_result(serde_json::json!("a.rs\nb.rs"));
+        }
+        thread.complete_turn("There are two files.");
+
+        // Turn 1: a follow-up that should be able to see the prior tool output.
+        thread.start_turn("open the first one");
+
+        let messages = thread.messages();
+        // user, assistant(tool_calls), tool_result, assistant(text), user
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].role, Role::User);
+
+        assert_eq!(messages[1].role, Role::Assistant);
+        let calls = messages[1].tool_calls.as_ref().expect("tool calls present");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_files");
+        let call_id = calls[0].id.clone();
+
+        assert_eq!(messages[2].role, Role::Tool);
+        // The tool result must reference the exact id of the preceding call so
+        // no provider rejects an orphaned tool call.
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some(call_id.as_str()));
+        assert!(messages[2].content.contains("a.rs"));
+
+        assert_eq!(messages[3].role, Role::Assistant);
+        assert_eq!(messages[3].content, "There are two files.");
+        assert!(messages[3].tool_calls.is_none());
+
+        assert_eq!(messages[4].role, Role::User);
+        assert_eq!(messages[4].content, "open the first one");
+    }
+
+    #[test]
+    fn test_messages_tool_call_ids_are_paired_and_unique() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        thread.start_turn("do two things");
+        {
+            let turn = thread.last_turn_mut().unwrap();
+            turn.record_tool_call("first", serde_json::json!({}));
+            turn.record_tool_result(serde_json::json!("ok-1"));
+            turn.record_tool_call("second", serde_json::json!({}));
+            turn.record_tool_error("boom");
+        }
+        thread.complete_turn("done");
+
+        let messages = thread.messages();
+        let calls = messages[1].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 2);
+
+        // Every advertised tool-call id has exactly one matching tool result.
+        let result_ids: Vec<_> = messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        assert_eq!(result_ids.len(), 2);
+        for call in calls {
+            assert!(result_ids.contains(&call.id), "unpaired call {}", call.id);
+        }
+        // Errors are surfaced to the model, not silently dropped.
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == Role::Tool && m.content.contains("[error] boom"))
+        );
+    }
+
+    #[test]
+    fn test_plan_mode_survives_runtime_snapshot_round_trip() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        assert!(!thread.plan_mode);
+        thread.plan_mode = true;
+
+        let snapshot = thread.runtime_snapshot(None, None, Vec::new(), Vec::new(), None);
+        assert!(snapshot.plan_mode);
+
+        // Serde round-trip (the snapshot is persisted as JSON).
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored: ThreadRuntimeSnapshot = serde_json::from_str(&json).unwrap();
+
+        let mut fresh = Thread::new(Uuid::new_v4());
+        fresh.restore_runtime_snapshot(restored);
+        assert!(fresh.plan_mode, "plan mode lost across snapshot round-trip");
+    }
+
+    #[test]
+    fn test_persisted_message_count_excludes_tool_messages() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // A tool-using turn reconstructs to 4 messages but is still 2 DB rows.
+        thread.start_turn("run tests");
+        {
+            let turn = thread.last_turn_mut().unwrap();
+            turn.record_tool_call("shell", serde_json::json!({}));
+            turn.record_tool_result(serde_json::json!("ok"));
+        }
+        thread.complete_turn("done");
+        // A plain turn: 2 messages, 2 rows.
+        thread.start_turn("thanks");
+        thread.complete_turn("welcome");
+        // An in-progress turn: 1 user row, no assistant yet.
+        thread.start_turn("more?");
+
+        // messages() is inflated by the reconstructed tool exchange...
+        assert!(thread.messages().len() > thread.persisted_message_count());
+        // ...but the watermark counts DB rows: 2 + 2 + 1 = 5.
+        assert_eq!(thread.persisted_message_count(), 5);
+    }
+
+    #[test]
+    fn test_messages_without_tools_unchanged() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("hi");
+        thread.complete_turn("hello");
+
+        let messages = thread.messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert!(messages[1].tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_truncate_tool_body_bounds_large_output() {
+        let big = "x".repeat(MAX_HISTORICAL_TOOL_RESULT_CHARS + 500);
+        let truncated = truncate_tool_body(&big);
+        assert!(truncated.contains("[truncated"));
+        // Kept head + marker, not the entire original.
+        assert!(truncated.chars().count() < big.chars().count());
+
+        let small = "small output";
+        assert_eq!(truncate_tool_body(small), small);
+    }
+
+    #[test]
+    fn test_messages_restore_round_trip_preserves_tool_exchange() {
+        // Undo/redo captures thread.messages() and later restores it. With
+        // tool-call reconstruction the checkpoint stream now carries tool
+        // messages; restore must not drop the response text or the calls.
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("run the tests");
+        {
+            let turn = thread.last_turn_mut().unwrap();
+            turn.record_tool_call("shell", serde_json::json!({ "cmd": "cargo test" }));
+            turn.record_tool_result(serde_json::json!("42 passed"));
+        }
+        thread.complete_turn("All tests pass.");
+        thread.start_turn("great, ship it");
+        thread.complete_turn("Shipped.");
+
+        let snapshot = thread.messages();
+
+        let mut restored = Thread::new(Uuid::new_v4());
+        restored.restore_from_messages(snapshot.clone());
+
+        // The rebuilt turns reproduce an equivalent message stream.
+        let round_tripped = restored.messages();
+        assert_eq!(round_tripped.len(), snapshot.len());
+        for (a, b) in snapshot.iter().zip(round_tripped.iter()) {
+            assert_eq!(a.role, b.role, "role drift on round trip");
+            assert_eq!(a.content, b.content, "content drift on round trip");
+        }
+
+        // Concretely: the response text and the tool call survived.
+        assert_eq!(restored.turns.len(), 2);
+        assert_eq!(
+            restored.turns[0].response.as_deref(),
+            Some("All tests pass.")
+        );
+        assert_eq!(restored.turns[0].tool_calls.len(), 1);
+        assert_eq!(restored.turns[0].tool_calls[0].name, "shell");
+        assert_eq!(restored.turns[1].response.as_deref(), Some("Shipped."));
     }
 
     #[test]

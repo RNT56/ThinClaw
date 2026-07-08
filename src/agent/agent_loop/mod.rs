@@ -11,14 +11,17 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
+use thinclaw_agent::loop_control::{LoopKind, LoopRunSummary, LoopStopReason};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::AgentRunDriver;
 use crate::agent::agent_router::AgentRouter;
 use crate::agent::context_monitor::ContextMonitor;
-use crate::agent::outcomes::{OutcomeService, spawn_outcome_service};
-use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
+use crate::agent::outcomes::{OutcomeService, spawn_outcome_service_with_shutdown};
+use crate::agent::routine_engine::{
+    RoutineEngine, spawn_cron_ticker_with_shutdown, spawn_zombie_reaper_with_shutdown,
+};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::subagent_executor::SubagentExecutor;
@@ -27,15 +30,14 @@ use crate::agent::submission::{
 };
 use crate::agent::{RootAgentRuntimePorts, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
-use crate::config::{
-    AgentConfig, HeartbeatConfig, RepoProjectsConfig, RoutineConfig, SkillsConfig,
-};
+use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::{LlmProvider, ProviderTokenCapture, TokenCaptureSupport};
+use crate::observability::ObserverMetric;
 use crate::repo_projects::executor::{RepoProjectExecutor, RepoProjectExecutorConfig};
 use crate::repo_projects::github_provider::{
     RepoGitHubClientProvider, SecretsRepoGitHubClientProvider,
@@ -53,15 +55,15 @@ use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
 use thinclaw_agent::agent_loop::{
-    HeartbeatRoutineConfig, HeartbeatRoutineSpec, RESTART_NOTICE_TEXT, inbound_blocked_response,
-    inbound_rejected_response, routine_ownership_changed, should_suppress_outbound_response,
+    RESTART_NOTICE_TEXT, inbound_blocked_response, inbound_rejected_response,
+    should_suppress_outbound_response,
 };
 pub(crate) use thinclaw_agent::dispatcher_helpers::truncate_for_preview;
-use thinclaw_agent::startup_hooks::{
-    GatewayStartupThreadTarget, heartbeat_gateway_fallback_identity_from_diagnostics,
-    heartbeat_routine_owner_from_gateway_defaults, telegram_startup_thread_id,
-};
+use thinclaw_agent::startup_hooks::{GatewayStartupThreadTarget, telegram_startup_thread_id};
 use thinclaw_agent::turn_cancellation::TurnCancellationRegistry;
+
+use self::heartbeat::{heartbeat_routine_owner_for_gateway, upsert_heartbeat_routine};
+use self::repo_projects_config::resolve_repo_projects_config;
 
 /// Core dependencies for the agent.
 ///
@@ -212,6 +214,7 @@ impl Agent {
         if let Some(ref tracker) = deps.cost_tracker {
             scheduler = scheduler.with_cost_tracker(Arc::clone(tracker));
         }
+        scheduler = scheduler.with_observer(Arc::clone(&deps.observer));
         let scheduler = Arc::new(scheduler);
 
         // Use provided agent router or create a default one.
@@ -550,19 +553,25 @@ impl Agent {
 /// handle is stored in managed state and taken on app quit.
 pub struct BackgroundTasksHandle {
     repair_handle: tokio::task::JoinHandle<()>,
+    repair_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// Session pruner — prunes idle chat sessions (SessionManager).
     session_pruning_handle: tokio::task::JoinHandle<()>,
+    session_pruning_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// Job context pruner — safety-net cleanup for ContextManager job slots.
     /// Catches leaked contexts that the oneshot cleanup missed (e.g. panicked
     /// cleanup tasks, orphaned Completed/Stuck jobs).
     job_context_pruning_handle: tokio::task::JoinHandle<()>,
+    job_context_pruning_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
     routine_handle: Option<(tokio::task::JoinHandle<()>, Arc<RoutineEngine>)>,
+    routine_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     // IC-003: Previously leaked — notification forwarder is now tracked
     notification_forwarder_handle: Option<tokio::task::JoinHandle<()>>,
     // Bug 5 fix: zombie reaper was previously untracked and leaked on shutdown
     zombie_reaper_handle: Option<tokio::task::JoinHandle<()>>,
+    zombie_reaper_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     outcome_handle: Option<tokio::task::JoinHandle<()>>,
+    outcome_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     repo_project_supervisor: Option<ProjectSupervisor>,
     repo_project_supervisor_handle: Option<tokio::task::JoinHandle<()>>,
     repo_project_supervisor_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -597,42 +606,22 @@ impl BackgroundTasksHandle {
     }
 }
 
-async fn resolve_repo_projects_config(store: &Arc<dyn Database>) -> RepoProjectsConfig {
-    let mut default_config = RepoProjectsConfig::default();
-
-    for user_id in ["default", "local_user"] {
-        match store.get_all_settings(user_id).await {
-            Ok(map) => {
-                let settings = crate::settings::Settings::from_db_map(&map);
-                match RepoProjectsConfig::resolve(&settings) {
-                    Ok(config) if config.enabled => return config,
-                    Ok(config) if user_id == "default" => {
-                        default_config = config;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            user_id,
-                            error = %error,
-                            "failed to resolve repo projects config"
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    user_id,
-                    error = %error,
-                    "failed to load settings while resolving repo projects config"
-                );
-            }
-        }
+impl Agent {
+    fn record_loop_start(&self, kind: LoopKind) {
+        self.observer()
+            .record_metric(&ObserverMetric::LoopStarted(kind));
     }
 
-    default_config
-}
+    fn record_loop_stop(&self, kind: LoopKind, stop_reason: LoopStopReason) {
+        self.observer()
+            .record_metric(&ObserverMetric::LoopRun(LoopRunSummary::new(
+                kind,
+                stop_reason,
+                0,
+                0,
+            )));
+    }
 
-impl Agent {
     /// Spawn background tasks (self-repair, session pruning, heartbeat, routines).
     ///
     /// This is separate from `run()` so that Tauri/API callers can start
@@ -685,9 +674,17 @@ impl Agent {
         let repair = Arc::new(repair);
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
+        let (repair_shutdown_tx, mut repair_shutdown_rx) = tokio::sync::oneshot::channel();
+        self.record_loop_start(LoopKind::SelfRepair);
         let repair_handle = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(repair_interval).await;
+                tokio::select! {
+                    _ = &mut repair_shutdown_rx => {
+                        tracing::info!("self-repair loop shutting down");
+                        break;
+                    }
+                    _ = tokio::time::sleep(repair_interval) => {}
+                }
 
                 // Check stuck jobs
                 let stuck_jobs = repair.detect_stuck_jobs().await;
@@ -832,12 +829,22 @@ impl Agent {
         // ── Session pruning ─────────────────────────────────────────────
         let session_mgr = self.session_manager.clone();
         let session_idle_timeout = self.config.session_idle_timeout;
+        let (session_pruning_shutdown_tx, mut session_pruning_shutdown_rx) =
+            tokio::sync::oneshot::channel();
+        self.record_loop_start(LoopKind::SessionPruning);
         let session_pruning_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(600)); // Every 10 min
             interval.tick().await; // Skip immediate first tick
             loop {
-                interval.tick().await;
-                session_mgr.prune_stale_sessions(session_idle_timeout).await;
+                tokio::select! {
+                    _ = &mut session_pruning_shutdown_rx => {
+                        tracing::info!("session pruning loop shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        session_mgr.prune_stale_sessions(session_idle_timeout).await;
+                    }
+                }
             }
         });
 
@@ -846,10 +853,14 @@ impl Agent {
         // (immediate removal from ContextManager on completion). This pruner
         // is a safety net that catches leaked contexts: panicked cleanup tasks,
         // orphaned Completed/Stuck jobs, etc. Runs every 5 min.
-        let job_context_pruning_handle = self.context_manager.spawn_pruner(
+        let (job_context_pruning_shutdown_tx, job_context_pruning_shutdown_rx) =
+            tokio::sync::oneshot::channel();
+        self.record_loop_start(LoopKind::JobContextPruning);
+        let job_context_pruning_handle = self.context_manager.spawn_pruner_with_shutdown(
             std::time::Duration::from_secs(300), // check every 5 min
             chrono::Duration::try_minutes(10).expect("10 minutes is a valid chrono::Duration"), // prune terminal/completed jobs > 10 min old
             chrono::Duration::try_minutes(30).expect("30 minutes is a valid chrono::Duration"), // prune stuck jobs > 30 min old
+            job_context_pruning_shutdown_rx,
         );
 
         // ── Memory hygiene background task ─────────────────────────────
@@ -919,7 +930,8 @@ impl Agent {
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),
-                    );
+                    )
+                    .with_observer(Arc::clone(self.observer()));
 
                     // Wire SSE broadcasting if available
                     if let Some(ref sender) = self.deps.sse_sender {
@@ -992,6 +1004,7 @@ impl Agent {
 
                     // Spawn notification forwarder (IC-003: track handle for cleanup)
                     let channels = self.channels.clone();
+                    self.record_loop_start(LoopKind::RoutineNotificationForwarder);
                     let notification_forwarder_handle = tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
                             let user = response
@@ -1037,7 +1050,13 @@ impl Agent {
                     // Spawn cron ticker
                     let cron_interval =
                         std::time::Duration::from_secs(rt_config.cron_check_interval_secs);
-                    let cron_handle = spawn_cron_ticker(Arc::clone(&engine), cron_interval);
+                    let (cron_shutdown_tx, cron_shutdown_rx) = tokio::sync::oneshot::channel();
+                    self.record_loop_start(LoopKind::RoutineCron);
+                    let cron_handle = spawn_cron_ticker_with_shutdown(
+                        Arc::clone(&engine),
+                        cron_interval,
+                        cron_shutdown_rx,
+                    );
 
                     tracing::info!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
@@ -1045,7 +1064,12 @@ impl Agent {
                         rt_config.max_concurrent_routines
                     );
 
-                    Some((cron_handle, engine, notification_forwarder_handle))
+                    Some((
+                        cron_handle,
+                        engine,
+                        notification_forwarder_handle,
+                        cron_shutdown_tx,
+                    ))
                 } else {
                     tracing::warn!("Routines enabled but store/workspace not available");
                     None
@@ -1066,18 +1090,30 @@ impl Agent {
             Some(monitor)
         };
 
-        let (routine_handle, notification_forwarder_handle) = match routine_handle {
-            Some((cron, engine, notify_handle)) => (Some((cron, engine)), Some(notify_handle)),
-            None => (None, None),
-        };
+        let (routine_handle, notification_forwarder_handle, routine_shutdown_tx) =
+            match routine_handle {
+                Some((cron, engine, notify_handle, shutdown_tx)) => {
+                    (Some((cron, engine)), Some(notify_handle), Some(shutdown_tx))
+                }
+                None => (None, None, None),
+            };
 
-        // Bug 5 fix: spawn and track the zombie reaper handle so it is aborted
-        // during shutdown_background() instead of leaking indefinitely.
-        let zombie_reaper_handle = routine_handle.as_ref().map(|(_, engine)| {
-            crate::agent::routine_engine::spawn_zombie_reaper(Arc::clone(engine))
-        });
+        let (zombie_reaper_handle, zombie_reaper_shutdown_tx) =
+            if let Some((_, engine)) = routine_handle.as_ref() {
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+                self.record_loop_start(LoopKind::RoutineZombieReaper);
+                (
+                    Some(spawn_zombie_reaper_with_shutdown(
+                        Arc::clone(engine),
+                        shutdown_rx,
+                    )),
+                    Some(shutdown_tx),
+                )
+            } else {
+                (None, None)
+            };
 
-        let outcome_handle = self.store().map(|store| {
+        let (outcome_handle, outcome_shutdown_tx) = if let Some(store) = self.store() {
             let service = Arc::new(
                 OutcomeService::new(Arc::clone(store), self.deps.cheap_llm.clone())
                     .with_learning_context(
@@ -1088,8 +1124,15 @@ impl Agent {
                             .map(|(_, engine)| Arc::clone(engine)),
                     ),
             );
-            spawn_outcome_service(service)
-        });
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            self.record_loop_start(LoopKind::OutcomeService);
+            (
+                Some(spawn_outcome_service_with_shutdown(service, shutdown_rx)),
+                Some(shutdown_tx),
+            )
+        } else {
+            (None, None)
+        };
 
         let (
             repo_project_supervisor,
@@ -1208,6 +1251,7 @@ impl Agent {
                 if let Some(slot) = self.deps.repo_project_supervisor_slot.as_ref() {
                     *slot.write().await = Some(supervisor.clone());
                 }
+                self.record_loop_start(LoopKind::RepoProjectSupervisor);
 
                 (
                     Some(supervisor),
@@ -1216,6 +1260,7 @@ impl Agent {
                         wake_rx,
                         std::time::Duration::from_secs(repo_projects_config.watchdog_interval_secs),
                         shutdown_rx,
+                        Some(Arc::clone(self.observer())),
                     ))),
                     Some(shutdown_tx),
                 )
@@ -1228,13 +1273,19 @@ impl Agent {
 
         BackgroundTasksHandle {
             repair_handle,
+            repair_shutdown_tx: Some(repair_shutdown_tx),
             session_pruning_handle,
+            session_pruning_shutdown_tx: Some(session_pruning_shutdown_tx),
             job_context_pruning_handle,
+            job_context_pruning_shutdown_tx: Some(job_context_pruning_shutdown_tx),
             heartbeat_handle,
             routine_handle,
+            routine_shutdown_tx,
             notification_forwarder_handle,
             zombie_reaper_handle,
+            zombie_reaper_shutdown_tx,
             outcome_handle,
+            outcome_shutdown_tx,
             repo_project_supervisor,
             repo_project_supervisor_handle,
             repo_project_supervisor_shutdown_tx,
@@ -1250,37 +1301,114 @@ impl Agent {
     /// `Mutex<Option<BackgroundTasksHandle>>.take()`).
     pub async fn shutdown_background(&self, handle: BackgroundTasksHandle) {
         tracing::info!("Agent shutting down...");
-        handle.repair_handle.abort();
-        handle.session_pruning_handle.abort();
-        handle.job_context_pruning_handle.abort();
+        if let Some(tx) = handle.repair_shutdown_tx {
+            let _ = tx.send(());
+        }
+        let stop_reason = Self::drain_or_abort_background_task(
+            "self_repair",
+            handle.repair_handle,
+            Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+            LoopStopReason::ExternalShutdown,
+        )
+        .await;
+        self.record_loop_stop(LoopKind::SelfRepair, stop_reason);
+        if let Some(tx) = handle.session_pruning_shutdown_tx {
+            let _ = tx.send(());
+        }
+        let stop_reason = Self::drain_or_abort_background_task(
+            "session_pruning",
+            handle.session_pruning_handle,
+            Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+            LoopStopReason::ExternalShutdown,
+        )
+        .await;
+        self.record_loop_stop(LoopKind::SessionPruning, stop_reason);
+        if let Some(tx) = handle.job_context_pruning_shutdown_tx {
+            let _ = tx.send(());
+        }
+        let stop_reason = Self::drain_or_abort_background_task(
+            "job_context_pruning",
+            handle.job_context_pruning_handle,
+            Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+            LoopStopReason::ExternalShutdown,
+        )
+        .await;
+        self.record_loop_stop(LoopKind::JobContextPruning, stop_reason);
         if let Some(h) = handle.heartbeat_handle {
             h.abort();
         }
+        if let Some(tx) = handle.routine_shutdown_tx {
+            let _ = tx.send(());
+        }
         if let Some((cron_handle, engine)) = handle.routine_handle {
-            cron_handle.abort();
+            let stop_reason = Self::drain_or_abort_background_task(
+                "routine_cron_ticker",
+                cron_handle,
+                Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+                LoopStopReason::ExternalShutdown,
+            )
+            .await;
+            self.record_loop_stop(LoopKind::RoutineCron, stop_reason);
             // IC-018: Abort all running routine tasks
             engine.abort_all().await;
         }
-        // IC-003: Abort notification forwarder
+        // IC-003: drain notification forwarder after routine senders close.
         if let Some(h) = handle.notification_forwarder_handle {
-            h.abort();
+            let stop_reason = Self::drain_or_abort_background_task(
+                "routine_notification_forwarder",
+                h,
+                Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+                LoopStopReason::ChannelClosed,
+            )
+            .await;
+            self.record_loop_stop(LoopKind::RoutineNotificationForwarder, stop_reason);
         }
-        // Bug 5 fix: abort zombie reaper (was previously untracked and leaked)
+        if let Some(tx) = handle.zombie_reaper_shutdown_tx {
+            let _ = tx.send(());
+        }
+        // Bug 5 fix: stop zombie reaper (was previously untracked and leaked)
         if let Some(h) = handle.zombie_reaper_handle {
-            h.abort();
+            let stop_reason = Self::drain_or_abort_background_task(
+                "routine_zombie_reaper",
+                h,
+                Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+                LoopStopReason::ExternalShutdown,
+            )
+            .await;
+            self.record_loop_stop(LoopKind::RoutineZombieReaper, stop_reason);
+        }
+        if let Some(tx) = handle.outcome_shutdown_tx {
+            let _ = tx.send(());
         }
         if let Some(h) = handle.outcome_handle {
-            h.abort();
+            let stop_reason = Self::drain_or_abort_background_task(
+                "outcome_service",
+                h,
+                Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+                LoopStopReason::ExternalShutdown,
+            )
+            .await;
+            self.record_loop_stop(LoopKind::OutcomeService, stop_reason);
         }
         if let Some(tx) = handle.repo_project_supervisor_shutdown_tx {
             let _ = tx.send(());
         }
         drop(handle.repo_project_supervisor);
         if let Some(h) = handle.repo_project_supervisor_handle {
-            h.abort();
+            let stop_reason = Self::drain_or_abort_background_task(
+                "repo_project_supervisor",
+                h,
+                Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+                LoopStopReason::ExternalShutdown,
+            )
+            .await;
+            self.record_loop_stop(LoopKind::RepoProjectSupervisor, stop_reason);
         }
         if let Some(ref monitor) = handle.health_monitor {
             monitor.stop().await;
+        }
+        if let Some(manager) = self.extension_manager() {
+            manager.stop_mcp_background_tasks().await;
         }
         self.scheduler.stop_all().await;
     }
@@ -1514,6 +1642,52 @@ impl Agent {
     /// Bound on how long shutdown waits for in-flight conversation turns to
     /// finish before proceeding with channel teardown.
     const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+    /// Bound for background loops that have an explicit shutdown signal.
+    const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    async fn drain_or_abort_background_task(
+        name: &'static str,
+        mut handle: tokio::task::JoinHandle<()>,
+        timeout: std::time::Duration,
+        drained_reason: LoopStopReason,
+    ) -> LoopStopReason {
+        let sleep = tokio::time::sleep(timeout);
+        tokio::pin!(sleep);
+
+        tokio::select! {
+            joined = &mut handle => {
+                match joined {
+                    Ok(()) => {
+                        tracing::debug!(task = name, "background task drained on shutdown");
+                        drained_reason
+                    }
+                    Err(error) if error.is_cancelled() => {
+                        tracing::debug!(task = name, "background task was already cancelled");
+                        LoopStopReason::Cancelled
+                    }
+                    Err(error) => {
+                        tracing::warn!(task = name, error = %error, "background task failed while draining");
+                        LoopStopReason::FatalError
+                    }
+                }
+            }
+            _ = &mut sleep => {
+                tracing::warn!(
+                    task = name,
+                    timeout_secs = timeout.as_secs(),
+                    "background task did not drain before timeout; aborting"
+                );
+                handle.abort();
+                if let Err(error) = handle.await
+                    && error.is_panic()
+                {
+                    tracing::error!(task = name, error = %error, "background task panicked during abort");
+                    return LoopStopReason::FatalError;
+                }
+                LoopStopReason::Cancelled
+            }
+        }
+    }
 
     /// Route one incoming message to its conversation's ordered worker.
     ///
@@ -1785,149 +1959,9 @@ impl Agent {
     }
 }
 
-/// Register (or update) the heartbeat as a routine in the DB.
-///
-/// Creates a `__heartbeat__` routine with a cron trigger matching
-/// the configured interval. If the routine already exists, it checks
-/// whether the config has changed and updates if necessary.
-async fn upsert_heartbeat_routine(
-    store: &Arc<dyn Database>,
-    hb_config: &HeartbeatConfig,
-    user_id: &str,
-    actor_id: &str,
-) -> Result<(), Error> {
-    let spec = HeartbeatRoutineSpec::from_config(&HeartbeatRoutineConfig {
-        interval_secs: hb_config.interval_secs,
-        notify_channel: hb_config.notify_channel.clone(),
-        notify_user: hb_config.notify_user.clone(),
-        light_context: hb_config.light_context,
-        include_reasoning: hb_config.include_reasoning,
-        target: hb_config.target.clone(),
-        active_start_hour: hb_config.active_start_hour,
-        active_end_hour: hb_config.active_end_hour,
-        prompt: hb_config.prompt.clone(),
-        max_iterations: hb_config.max_iterations,
-    });
-
-    let existing = store
-        .get_routine_by_name_for_actor(user_id, actor_id, "__heartbeat__")
-        .await;
-    let legacy_default = if user_id != "default" || actor_id != "default" {
-        match store
-            .get_routine_by_name_for_actor("default", "default", "__heartbeat__")
-            .await
-        {
-            Ok(routine) => routine,
-            Err(e) => {
-                tracing::error!("Failed to load legacy default heartbeat routine: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let mut routine = match existing {
-        Ok(Some(routine)) => routine,
-        Ok(None) => match legacy_default.clone() {
-            Some(legacy) => legacy,
-            None => {
-                let routine = spec.new_routine(
-                    user_id,
-                    actor_id,
-                    hb_config.user_timezone.as_deref(),
-                    chrono::Utc::now(),
-                );
-
-                store.create_routine(&routine).await.map_err(|e| {
-                    Error::Database(crate::error::DatabaseError::Query(e.to_string()))
-                })?;
-
-                tracing::info!(
-                    id = %routine.id,
-                    user_id = %routine.user_id,
-                    actor_id = %routine.actor_id,
-                    schedule = %spec.schedule,
-                    next_fire = ?routine.next_fire_at,
-                    "Created heartbeat routine"
-                );
-                return Ok(());
-            }
-        },
-        Err(e) => {
-            tracing::error!("Failed to check existing heartbeat routine: {}", e);
-            return Ok(());
-        }
-    };
-
-    if let Some(legacy) = legacy_default
-        && legacy.id != routine.id
-    {
-        let deleted = store
-            .delete_routine(legacy.id)
-            .await
-            .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
-        tracing::info!(
-            legacy_id = %legacy.id,
-            current_id = %routine.id,
-            deleted,
-            "Removed duplicate legacy default heartbeat routine"
-        );
-    }
-
-    if routine_ownership_changed(&routine, user_id, actor_id) || spec.routine_needs_update(&routine)
-    {
-        spec.apply_to_routine(
-            &mut routine,
-            user_id,
-            actor_id,
-            hb_config.user_timezone.as_deref(),
-            chrono::Utc::now(),
-        );
-        store
-            .update_routine(&routine)
-            .await
-            .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
-        tracing::info!(
-            id = %routine.id,
-            user_id = %routine.user_id,
-            actor_id = %routine.actor_id,
-            schedule = %spec.schedule,
-            next_fire = ?routine.next_fire_at,
-            "Updated heartbeat routine ownership and configuration"
-        );
-    } else {
-        tracing::debug!("Heartbeat routine already up-to-date");
-    }
-
-    Ok(())
-}
-
-async fn heartbeat_routine_owner_for_gateway(
-    store: &Arc<dyn Database>,
-    diagnostics: Option<&serde_json::Value>,
-    fallback_user_id: &str,
-) -> (String, String) {
-    let (fallback_principal_id, fallback_actor_id) =
-        heartbeat_gateway_fallback_identity_from_diagnostics(diagnostics, fallback_user_id);
-    let inferred_user_id =
-        if fallback_principal_id.trim().is_empty() || fallback_principal_id == "default" {
-            match store.infer_primary_user_id_for_channel("gateway").await {
-                Ok(Some(inferred)) if !inferred.trim().is_empty() => Some(inferred),
-                Ok(_) | Err(_) => None,
-            }
-        } else {
-            None
-        };
-
-    heartbeat_routine_owner_from_gateway_defaults(
-        &fallback_principal_id,
-        &fallback_actor_id,
-        inferred_user_id.as_deref(),
-    )
-}
-
+mod heartbeat;
 mod message_handling;
+mod repo_projects_config;
 mod startup_hooks;
 
 #[cfg(test)]

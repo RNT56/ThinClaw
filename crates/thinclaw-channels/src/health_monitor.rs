@@ -7,10 +7,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::manager::ChannelManager;
+
+const HEALTH_MONITOR_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Configuration for the channel health monitor.
 #[derive(Debug, Clone)]
@@ -53,6 +55,7 @@ pub struct ChannelHealthMonitor {
     channel_manager: Arc<ChannelManager>,
     states: Arc<RwLock<HashMap<String, ChannelState>>>,
     task_handle: RwLock<Option<JoinHandle<()>>>,
+    shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
 }
 
 impl ChannelHealthMonitor {
@@ -63,6 +66,7 @@ impl ChannelHealthMonitor {
             channel_manager,
             states: Arc::new(RwLock::new(HashMap::new())),
             task_handle: RwLock::new(None),
+            shutdown_tx: RwLock::new(None),
         }
     }
 
@@ -73,9 +77,12 @@ impl ChannelHealthMonitor {
 
     /// Start the health monitoring background task.
     pub async fn start(&self) {
+        self.stop().await;
+
         let config = self.config.clone();
         let manager = Arc::clone(&self.channel_manager);
         let states = Arc::clone(&self.states);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
             tracing::info!(
@@ -85,7 +92,13 @@ impl ChannelHealthMonitor {
             );
 
             loop {
-                tokio::time::sleep(config.check_interval).await;
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::info!("Channel health monitor stopped");
+                        break;
+                    }
+                    _ = tokio::time::sleep(config.check_interval) => {}
+                }
 
                 let results = manager.health_check_all().await;
                 let channel_names = manager.channel_names().await;
@@ -214,14 +227,17 @@ impl ChannelHealthMonitor {
             }
         });
 
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
         *self.task_handle.write().await = Some(handle);
     }
 
     /// Stop the health monitor.
     pub async fn stop(&self) {
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
         if let Some(handle) = self.task_handle.write().await.take() {
-            handle.abort();
-            tracing::info!("Channel health monitor stopped");
+            drain_monitor_task(handle).await;
         }
     }
 
@@ -253,6 +269,21 @@ pub struct ChannelHealthStatus {
     pub error: Option<String>,
     pub consecutive_failures: u32,
     pub restart_attempts: u32,
+}
+
+async fn drain_monitor_task(mut handle: JoinHandle<()>) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(error = %error, "Channel health monitor exited with error");
+            }
+        }
+        _ = tokio::time::sleep(HEALTH_MONITOR_STOP_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!("Channel health monitor did not drain before timeout; aborted");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -289,5 +320,22 @@ mod tests {
         let manager = Arc::new(ChannelManager::new());
         let monitor = ChannelHealthMonitor::with_defaults(manager);
         monitor.stop().await; // Should not panic
+    }
+
+    #[tokio::test]
+    async fn test_monitor_stop_drains_promptly() {
+        let manager = Arc::new(ChannelManager::new());
+        let monitor = ChannelHealthMonitor::new(
+            manager,
+            HealthMonitorConfig {
+                check_interval: Duration::from_secs(60),
+                ..HealthMonitorConfig::default()
+            },
+        );
+
+        monitor.start().await;
+        tokio::time::timeout(Duration::from_millis(250), monitor.stop())
+            .await
+            .expect("stop should not wait for the check interval");
     }
 }

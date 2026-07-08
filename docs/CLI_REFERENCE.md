@@ -103,6 +103,7 @@ for configuration, local/cloud mode, and workflow security details.
 - `thinclaw cron`: Manage scheduled background routines.
 - `thinclaw experiments`: Manage research automation (campaigns, providers, targets).
 - `thinclaw repo-projects`: Manage the GitHub repository project supervisor (default off until enabled in settings). See [Repo Project Supervisor](#repo-project-supervisor).
+- `thinclaw backup`: Export or restore an encrypted whole-agent backup. See [Backup & Restore](#backup--restore).
 - `thinclaw message`: Send a message to the agent directly from the CLI without starting the interactive prompt.
 - `thinclaw pairing`: DM pairing logic to approve inbound requests from unknown senders on supported channels.
 - `thinclaw logs`: Query, tail, and filter system logs.
@@ -196,6 +197,36 @@ handlers use.
 - `thinclaw repo-projects cancel <PROJECT_ID>`: Cancel a project.
 - `thinclaw repo-projects events <PROJECT_ID>`: List recent project events.
   - `--limit <N>`: Maximum number of events to show (default 20).
+
+## Backup & Restore
+
+`thinclaw backup` produces and restores a single **encrypted bundle** of the
+whole agent: the ThinClaw home directory (config, `SOUL.md`, skills, channels,
+personality) as a file tree, plus a database payload. The bundle is portable —
+it decrypts with the passphrase alone on any machine — and sealed with
+scrypt + XChaCha20-Poly1305.
+
+The passphrase comes from `THINCLAW_BACKUP_PASSPHRASE` (preferred) or
+`--passphrase <value>` (which can leak via shell history). Volatile and secret
+paths — `logs/`, `.env`, pid files, capture dirs (`screenshots/`, `camera/`,
+`audio/`), and the live database file — are excluded from the file tree.
+**Secrets are not exported**; they live in the OS keychain / secrets store and
+must be re-provisioned after a restore.
+
+- `thinclaw backup export`: Write an encrypted bundle.
+  - `--output <PATH>` or `-o <PATH>`: Bundle path (default `./thinclaw-backup-<timestamp>.tclaw`, written `0600`).
+  - `--no-database`: Config + workspace files only (skip the database section).
+  - The database section is a WAL-checkpointed libSQL snapshot, or a
+    `pg_dump --format=custom` archive for Postgres. If neither is available
+    (e.g. `pg_dump` not installed) the bundle is still written without it.
+- `thinclaw backup inspect <BUNDLE>`: Print a bundle's manifest (producer, timestamp, sections) without changing anything.
+- `thinclaw backup import <BUNDLE>`: Restore config + workspace files into the ThinClaw home.
+  - Without `--yes` it is a dry run that only prints the manifest.
+  - `--yes`: Confirm overwriting config + workspace files.
+  - `--restore-database`: Also restore the database. For libSQL this overwrites
+    the local database file (**ThinClaw must be stopped**); for Postgres the
+    exact `pg_restore` command is printed rather than run, and the dump is
+    written next to the bundle as `<bundle>.database-dump`.
 
 ## Trajectory Archive
 

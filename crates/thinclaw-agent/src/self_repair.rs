@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde_json::json;
 use thinclaw_types::error::RepairError;
 pub use thinclaw_types::{BrokenTool, StuckJob};
 use uuid::Uuid;
@@ -37,6 +38,12 @@ pub trait BrokenToolStorePort: Send + Sync {
     async fn mark_tool_repaired(&self, tool_name: &str) -> Result<(), String>;
 
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), String>;
+
+    async fn record_tool_repair_result(
+        &self,
+        tool_name: &str,
+        result: &serde_json::Value,
+    ) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone)]
@@ -239,18 +246,33 @@ impl SelfRepair for DefaultSelfRepair {
         };
 
         if tool.repair_attempts >= self.max_repair_attempts {
-            return Ok(RepairResult::ManualRequired {
-                message: format!(
-                    "Tool '{}' exceeded max repair attempts ({})",
-                    tool.name, self.max_repair_attempts
-                ),
-            });
+            let message = format!(
+                "Tool '{}' exceeded max repair attempts ({})",
+                tool.name, self.max_repair_attempts
+            );
+            self.record_tool_repair_result(
+                store,
+                &tool.name,
+                tool_repair_result_record(ToolRepairResultRecordInput {
+                    tool,
+                    attempt: tool.repair_attempts,
+                    max_attempts: self.max_repair_attempts,
+                    status: "manual_required",
+                    terminal: true,
+                    requires_operator_review: true,
+                    result: None,
+                    error: Some(&message),
+                }),
+            )
+            .await;
+            return Ok(RepairResult::ManualRequired { message });
         }
+        let attempt = tool.repair_attempts + 1;
 
         tracing::info!(
             "Attempting to repair tool '{}' (attempt {})",
             tool.name,
-            tool.repair_attempts + 1
+            attempt
         );
 
         if let Err(e) = store.increment_repair_attempts(&tool.name).await {
@@ -264,6 +286,21 @@ impl SelfRepair for DefaultSelfRepair {
                     tool.name,
                     result.iterations
                 );
+                self.record_tool_repair_result(
+                    store,
+                    &tool.name,
+                    tool_repair_result_record(ToolRepairResultRecordInput {
+                        tool,
+                        attempt,
+                        max_attempts: self.max_repair_attempts,
+                        status: "success",
+                        terminal: true,
+                        requires_operator_review: false,
+                        result: Some(&result),
+                        error: None,
+                    }),
+                )
+                .await;
 
                 if let Err(e) = store.mark_tool_repaired(&tool.name).await {
                     tracing::warn!("Failed to mark tool as repaired: {}", e);
@@ -294,20 +331,72 @@ impl SelfRepair for DefaultSelfRepair {
                     tool.name,
                     result.error
                 );
-                Ok(RepairResult::Retry {
-                    message: format!(
-                        "Repair attempt {} for '{}' failed: {}",
-                        tool.repair_attempts + 1,
-                        tool.name,
-                        result.error.unwrap_or_else(|| "Unknown error".to_string())
-                    ),
-                })
+                let error = result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                let terminal = attempt >= self.max_repair_attempts;
+                self.record_tool_repair_result(
+                    store,
+                    &tool.name,
+                    tool_repair_result_record(ToolRepairResultRecordInput {
+                        tool,
+                        attempt,
+                        max_attempts: self.max_repair_attempts,
+                        status: if terminal { "manual_required" } else { "retry" },
+                        terminal,
+                        requires_operator_review: terminal,
+                        result: Some(&result),
+                        error: Some(&error),
+                    }),
+                )
+                .await;
+                if terminal {
+                    Ok(RepairResult::ManualRequired {
+                        message: format!(
+                            "Repair attempt {} for '{}' failed and reached max attempts ({}): {}",
+                            attempt, tool.name, self.max_repair_attempts, error
+                        ),
+                    })
+                } else {
+                    Ok(RepairResult::Retry {
+                        message: format!(
+                            "Repair attempt {} for '{}' failed: {}",
+                            attempt, tool.name, error
+                        ),
+                    })
+                }
             }
             Err(e) => {
                 tracing::error!("Repair build for '{}' errored: {}", tool.name, e);
-                Ok(RepairResult::Retry {
-                    message: format!("Repair build error: {}", e),
-                })
+                let terminal = attempt >= self.max_repair_attempts;
+                self.record_tool_repair_result(
+                    store,
+                    &tool.name,
+                    tool_repair_result_record(ToolRepairResultRecordInput {
+                        tool,
+                        attempt,
+                        max_attempts: self.max_repair_attempts,
+                        status: if terminal { "manual_required" } else { "retry" },
+                        terminal,
+                        requires_operator_review: terminal,
+                        result: None,
+                        error: Some(&e),
+                    }),
+                )
+                .await;
+                if terminal {
+                    Ok(RepairResult::ManualRequired {
+                        message: format!(
+                            "Repair build error reached max attempts for '{}': {}",
+                            tool.name, e
+                        ),
+                    })
+                } else {
+                    Ok(RepairResult::Retry {
+                        message: format!("Repair build error: {}", e),
+                    })
+                }
             }
         }
     }
@@ -319,6 +408,57 @@ impl SelfRepair for DefaultSelfRepair {
             tracing::warn!("Failed to dismiss broken tool '{}': {}", tool_name, e);
         }
     }
+}
+
+impl DefaultSelfRepair {
+    async fn record_tool_repair_result(
+        &self,
+        store: &Arc<dyn BrokenToolStorePort>,
+        tool_name: &str,
+        result: serde_json::Value,
+    ) {
+        if let Err(e) = store.record_tool_repair_result(tool_name, &result).await {
+            tracing::warn!(
+                "Failed to record tool repair result for '{}': {}",
+                tool_name,
+                e
+            );
+        }
+    }
+}
+
+struct ToolRepairResultRecordInput<'a> {
+    tool: &'a BrokenTool,
+    attempt: u32,
+    max_attempts: u32,
+    status: &'a str,
+    terminal: bool,
+    requires_operator_review: bool,
+    result: Option<&'a ToolRepairBuildResult>,
+    error: Option<&'a str>,
+}
+
+fn tool_repair_result_record(input: ToolRepairResultRecordInput<'_>) -> serde_json::Value {
+    let tool = input.tool;
+    json!({
+        "status": input.status,
+        "tool_name": tool.name.clone(),
+        "attempt": input.attempt,
+        "max_attempts": input.max_attempts,
+        "failure_count": tool.failure_count,
+        "last_error": tool.last_error.clone(),
+        "recorded_at": Utc::now().to_rfc3339(),
+        "terminal": input.terminal,
+        "requires_operator_review": input.requires_operator_review,
+        "quarantined": input.terminal && input.requires_operator_review,
+        "build": input.result.map(|result| json!({
+            "success": result.success,
+            "registered": result.registered,
+            "iterations": result.iterations,
+            "error": result.error.clone(),
+        })),
+        "error": input.error,
+    })
 }
 
 #[cfg(test)]
@@ -361,6 +501,7 @@ mod tests {
     #[derive(Default)]
     struct CountingStore {
         increments: Mutex<u32>,
+        results: Mutex<Vec<serde_json::Value>>,
     }
 
     #[async_trait]
@@ -373,6 +514,14 @@ mod tests {
         }
         async fn increment_repair_attempts(&self, _tool_name: &str) -> Result<(), String> {
             *self.increments.lock().unwrap() += 1;
+            Ok(())
+        }
+        async fn record_tool_repair_result(
+            &self,
+            _tool_name: &str,
+            result: &serde_json::Value,
+        ) -> Result<(), String> {
+            self.results.lock().unwrap().push(result.clone());
             Ok(())
         }
     }
@@ -388,6 +537,20 @@ mod tests {
                 registered: true,
                 iterations: 2,
                 error: None,
+            })
+        }
+    }
+
+    struct FailingBuilder;
+
+    #[async_trait]
+    impl ToolRepairBuilderPort for FailingBuilder {
+        async fn repair_tool(&self, _tool: &BrokenTool) -> Result<ToolRepairBuildResult, String> {
+            Ok(ToolRepairBuildResult {
+                success: false,
+                registered: false,
+                iterations: 1,
+                error: Some("compile failed".to_string()),
             })
         }
     }
@@ -451,6 +614,66 @@ mod tests {
             *store.increments.lock().unwrap(),
             0,
             "no rebuild should be attempted once the attempt cap is reached"
+        );
+        let results = store.results.lock().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].get("status").and_then(|value| value.as_str()),
+            Some("manual_required")
+        );
+        assert_eq!(
+            results[0]
+                .get("quarantined")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_broken_tool_records_retry_evidence() {
+        let store = Arc::new(CountingStore::default());
+        let repair = DefaultSelfRepair::new(Arc::new(NoopContext), Duration::from_secs(60), 3)
+            .with_store(store.clone())
+            .with_builder(Arc::new(FailingBuilder), Arc::new(AlwaysPresentProbe));
+
+        let result = repair.repair_broken_tool(&broken_tool(0)).await.unwrap();
+        assert!(matches!(result, RepairResult::Retry { .. }));
+        let results = store.results.lock().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].get("status").and_then(|value| value.as_str()),
+            Some("retry")
+        );
+        assert_eq!(
+            results[0].get("error").and_then(|value| value.as_str()),
+            Some("compile failed")
+        );
+        assert_eq!(
+            results[0].get("terminal").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_broken_tool_records_terminal_final_failure() {
+        let store = Arc::new(CountingStore::default());
+        let repair = DefaultSelfRepair::new(Arc::new(NoopContext), Duration::from_secs(60), 3)
+            .with_store(store.clone())
+            .with_builder(Arc::new(FailingBuilder), Arc::new(AlwaysPresentProbe));
+
+        let result = repair.repair_broken_tool(&broken_tool(2)).await.unwrap();
+        assert!(matches!(result, RepairResult::ManualRequired { .. }));
+        let results = store.results.lock().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].get("status").and_then(|value| value.as_str()),
+            Some("manual_required")
+        );
+        assert_eq!(
+            results[0]
+                .get("requires_operator_review")
+                .and_then(|value| value.as_bool()),
+            Some(true)
         );
     }
 }

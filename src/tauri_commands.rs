@@ -506,7 +506,12 @@ pub fn gmail_status(config: &GmailConfig) -> Result<GmailStatusResponse, String>
     use crate::channels::gmail_wiring::GmailStatus;
 
     let missing_fields = config.validate();
-    let needs_oauth = config.enabled && missing_fields.is_empty() && config.oauth_token.is_none();
+    // A refresh-token-only configuration (GMAIL_REFRESH_TOKEN/CLIENT_ID/SECRET)
+    // is fully functional via unattended refresh, so it does not "need oauth".
+    let needs_oauth = config.enabled
+        && missing_fields.is_empty()
+        && config.oauth_token.is_none()
+        && !config.can_refresh_token();
     let status = config.status();
     let status_str = if needs_oauth {
         "needs oauth".to_string()

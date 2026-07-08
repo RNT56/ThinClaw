@@ -104,6 +104,13 @@ impl RepoProjectStore for PgBackend {
         self.store.record_repo_webhook_delivery(delivery).await
     }
 
+    async fn get_repo_webhook_delivery(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<RepoWebhookDelivery>, DatabaseError> {
+        self.store.get_repo_webhook_delivery(delivery_id).await
+    }
+
     async fn list_repo_webhook_deliveries(
         &self,
         limit: i64,

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::config::{
@@ -37,6 +38,7 @@ struct ResolvedOAuthSource {
 }
 
 pub struct OAuthCredentialSyncHandle {
+    shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: JoinHandle<()>,
 }
 
@@ -50,6 +52,9 @@ pub struct OAuthCredentialSyncStatus {
 
 impl Drop for OAuthCredentialSyncHandle {
     fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
         self.join_handle.abort();
     }
 }
@@ -68,10 +73,17 @@ impl OAuthCredentialSyncHandle {
                 .max(MIN_POLL_INTERVAL_SECS),
         );
         let mut fingerprints = current_fingerprints(&sources);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let join_handle = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(poll_interval).await;
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::debug!("External OAuth credential sync stopped");
+                        break;
+                    }
+                    _ = tokio::time::sleep(poll_interval) => {}
+                }
 
                 let (snapshot, next_fingerprints) = snapshot_source_state(&sources);
                 if next_fingerprints == fingerprints {
@@ -91,7 +103,27 @@ impl OAuthCredentialSyncHandle {
             }
         });
 
-        Some(Self { join_handle })
+        Some(Self {
+            shutdown_tx: Some(shutdown_tx),
+            join_handle,
+        })
+    }
+
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        tokio::select! {
+            result = &mut self.join_handle => {
+                if let Err(error) = result {
+                    tracing::warn!(error = %error, "External OAuth credential sync exited with error");
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                self.join_handle.abort();
+                tracing::warn!("External OAuth credential sync did not drain before timeout; aborted");
+            }
+        }
     }
 }
 

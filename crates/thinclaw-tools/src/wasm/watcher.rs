@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::wasm::ports::{RegistryUnregister, WasmToolRegistrar};
 use crate::wasm::{WasmToolLoader, discover_dev_tools, discover_tools};
+
+const WATCHER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Configuration for the tool watcher.
 #[derive(Debug, Clone)]
@@ -56,6 +58,7 @@ where
     install_dir: PathBuf,
     config: ToolWatcherConfig,
     task_handle: RwLock<Option<JoinHandle<()>>>,
+    shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
     known: Arc<RwLock<HashMap<String, WatchedTool>>>,
     loader: Arc<WasmToolLoader<R>>,
     registry: Arc<R>,
@@ -71,6 +74,7 @@ where
             install_dir,
             config: ToolWatcherConfig::default(),
             task_handle: RwLock::new(None),
+            shutdown_tx: RwLock::new(None),
             known: Arc::new(RwLock::new(HashMap::new())),
             loader,
             registry,
@@ -125,11 +129,14 @@ where
 
     /// Start polling for changes.
     pub async fn start(&self) {
+        self.stop().await;
+
         let install_dir = self.install_dir.clone();
         let config = self.config.clone();
         let known = Arc::clone(&self.known);
         let loader = Arc::clone(&self.loader);
         let registry = Arc::clone(&self.registry);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
             tracing::info!(
@@ -140,7 +147,13 @@ where
             );
 
             loop {
-                tokio::time::sleep(config.poll_interval).await;
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::info!(dir = %install_dir.display(), "WASM tool hot-reload watcher stopped");
+                        break;
+                    }
+                    _ = tokio::time::sleep(config.poll_interval) => {}
+                }
 
                 if let Err(error) =
                     Self::poll_once(&install_dir, &config, &known, &loader, &registry).await
@@ -150,14 +163,17 @@ where
             }
         });
 
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
         *self.task_handle.write().await = Some(handle);
     }
 
     /// Stop watching.
     pub async fn stop(&self) {
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
         if let Some(handle) = self.task_handle.write().await.take() {
-            handle.abort();
-            tracing::info!(dir = %self.install_dir.display(), "WASM tool hot-reload watcher stopped");
+            drain_watcher_task(handle, "wasm_tool_watcher").await;
         }
     }
 
@@ -295,6 +311,21 @@ async fn scan_current_sources(
 async fn metadata_mtime(path: &Path) -> Result<SystemTime, std::io::Error> {
     let metadata = tokio::fs::metadata(path).await?;
     metadata.modified()
+}
+
+async fn drain_watcher_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(task = name, error = %error, "Watcher task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(WATCHER_STOP_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(task = name, "Watcher task did not drain before timeout; aborted");
+        }
+    }
 }
 
 #[cfg(test)]

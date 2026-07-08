@@ -1,21 +1,33 @@
 use super::*;
 
 pub async fn start_experiment_controller_loop(store: Arc<dyn Database>) {
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    start_experiment_controller_loop_with_shutdown(store, shutdown_rx).await;
+}
+
+pub async fn start_experiment_controller_loop_with_shutdown(
+    store: Arc<dyn Database>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
     let mut interval = interval(TokioDuration::from_secs(
         DEFAULT_EXPERIMENT_CONTROLLER_TICK_SECS,
     ));
     interval.tick().await;
     loop {
-        match reconcile_experiments_once(&store).await {
-            Ok(()) => {}
-            Err(error) => match error {
-                ApiError::FeatureDisabled(_) => {
-                    tracing::debug!("Experiment controller loop skipped: experiments are disabled");
-                }
-                _ => tracing::warn!("Experiment controller reconcile failed: {error}"),
-            },
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                tracing::debug!("Experiment controller loop stopped");
+                break;
+            }
+            _ = reconcile_experiment_controller_pass(&store) => {}
         }
-        interval.tick().await;
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                tracing::debug!("Experiment controller loop stopped");
+                break;
+            }
+            _ = interval.tick() => {}
+        }
     }
 }
 
@@ -27,22 +39,57 @@ pub async fn start_experiment_controller_loop(store: Arc<dyn Database>) {
 /// A `retention_days` of `0` disables reaping (the loop still runs but each pass
 /// is a no-op), so an operator can opt out without tearing down the task.
 pub async fn start_experiment_artifact_reaper_loop(store: Arc<dyn Database>, retention_days: u32) {
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    start_experiment_artifact_reaper_loop_with_shutdown(store, retention_days, shutdown_rx).await;
+}
+
+pub async fn start_experiment_artifact_reaper_loop_with_shutdown(
+    store: Arc<dyn Database>,
+    retention_days: u32,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
     let mut interval = interval(TokioDuration::from_secs(DEFAULT_ARTIFACT_REAPER_TICK_SECS));
     interval.tick().await;
     loop {
-        match reap_expired_artifacts_once(&store, retention_days).await {
-            Ok(pruned) => {
-                if pruned > 0 {
-                    tracing::info!(
-                        "Experiment artifact reaper pruned {pruned} expired artifact(s)"
-                    );
-                }
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                tracing::debug!("Experiment artifact reaper loop stopped");
+                break;
             }
-            Err(error) => {
-                tracing::warn!("Experiment artifact reaper failed: {error}");
+            _ = experiment_artifact_reaper_pass(&store, retention_days) => {}
+        }
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                tracing::debug!("Experiment artifact reaper loop stopped");
+                break;
+            }
+            _ = interval.tick() => {}
+        }
+    }
+}
+
+async fn reconcile_experiment_controller_pass(store: &Arc<dyn Database>) {
+    match reconcile_experiments_once(store).await {
+        Ok(()) => {}
+        Err(error) => match error {
+            ApiError::FeatureDisabled(_) => {
+                tracing::debug!("Experiment controller loop skipped: experiments are disabled");
+            }
+            _ => tracing::warn!("Experiment controller reconcile failed: {error}"),
+        },
+    }
+}
+
+async fn experiment_artifact_reaper_pass(store: &Arc<dyn Database>, retention_days: u32) {
+    match reap_expired_artifacts_once(store, retention_days).await {
+        Ok(pruned) => {
+            if pruned > 0 {
+                tracing::info!("Experiment artifact reaper pruned {pruned} expired artifact(s)");
             }
         }
-        interval.tick().await;
+        Err(error) => {
+            tracing::warn!("Experiment artifact reaper failed: {error}");
+        }
     }
 }
 

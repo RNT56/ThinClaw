@@ -85,6 +85,15 @@ pub struct AgentSettings {
     #[serde(default = "default_subagent_tool_profile")]
     pub subagent_tool_profile: String,
 
+    /// Maximum concurrent sub-agents attributable to a single principal.
+    ///
+    /// `0` (default) disables the per-principal check: only the global
+    /// concurrency cap applies, which is right for single-operator setups.
+    /// On a shared/multi-user gateway, set this below the global cap so one
+    /// principal's spawn burst cannot starve every other principal.
+    #[serde(default)]
+    pub subagent_max_per_principal: usize,
+
     /// Workspace mode: "unrestricted", "sandboxed", or "project".
     /// Controls the system prompt and filesystem restrictions.
     /// - "unrestricted": full access to host filesystem and OS APIs
@@ -233,6 +242,7 @@ impl Default for AgentSettings {
             main_tool_profile: default_main_tool_profile(),
             worker_tool_profile: default_worker_tool_profile(),
             subagent_tool_profile: default_subagent_tool_profile(),
+            subagent_max_per_principal: 0,
             workspace_mode: None,
             model_guidance_enabled: true,
             cli_skin: default_cli_skin(),

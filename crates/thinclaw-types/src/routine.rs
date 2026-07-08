@@ -770,6 +770,7 @@ pub enum RoutineEventStatus {
     Processing,
     Processed,
     Failed,
+    DeadLettered,
 }
 
 impl std::fmt::Display for RoutineEventStatus {
@@ -779,6 +780,7 @@ impl std::fmt::Display for RoutineEventStatus {
             RoutineEventStatus::Processing => write!(f, "processing"),
             RoutineEventStatus::Processed => write!(f, "processed"),
             RoutineEventStatus::Failed => write!(f, "failed"),
+            RoutineEventStatus::DeadLettered => write!(f, "dead_lettered"),
         }
     }
 }
@@ -792,6 +794,7 @@ impl std::str::FromStr for RoutineEventStatus {
             "processing" => Ok(Self::Processing),
             "processed" => Ok(Self::Processed),
             "failed" => Ok(Self::Failed),
+            "dead_lettered" => Ok(Self::DeadLettered),
             other => Err(RoutineError::ExecutionFailed {
                 reason: format!("unknown routine event status: {other}"),
             }),
