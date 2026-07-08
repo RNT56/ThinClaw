@@ -137,6 +137,9 @@ All focused loop gates passed before edits:
   profiles while real WASM watchers still drain when the runtime feature is on.
 - Updated `crossbeam-epoch` to the non-vulnerable `0.9.20` lockfile version
   after the CI dependency audit surfaced RUSTSEC-2026-0204.
+- Updated the desktop backend's separate lockfile so Desktop Companion CI uses
+  the same non-vulnerable `crossbeam-epoch` resolution and current backend
+  dependency graph under `--locked`.
 - Hardened ACP prompt-approval timeout cleanup so timed-out permission prompts
   remove stale waiters/pending permissions and return `cancelled` promptly while
   interrupting the underlying turn best-effort.
@@ -217,6 +220,8 @@ All focused loop gates passed before edits:
 - `cargo clippy --locked --workspace --all-targets --no-default-features --features libsql -- -D warnings`:
   passed.
 - `cargo check --locked --workspace --no-default-features --features postgres`:
+  passed.
+- `cargo check --manifest-path apps/desktop/backend/Cargo.toml --locked`:
   passed.
 - `cargo clippy --locked --workspace --all-targets --no-default-features --features postgres -- -D warnings`:
   passed.
