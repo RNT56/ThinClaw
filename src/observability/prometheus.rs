@@ -53,6 +53,26 @@ struct ChannelLabels {
     direction: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct LoopKindLabels {
+    loop_kind: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct LoopRunLabels {
+    loop_kind: String,
+    stop_reason: String,
+    failed: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct LoopPhaseRunLabels {
+    loop_kind: String,
+    phase: String,
+    stop_reason: String,
+    failed: String,
+}
+
 /// Prometheus-backed observer. Cloneable metric families share atomic state, so
 /// the single registered registry always reflects live values at scrape time.
 pub struct PrometheusObserver {
@@ -69,6 +89,14 @@ pub struct PrometheusObserver {
     agent_errors: Family<ComponentLabels, Counter>,
     channel_messages: Family<ChannelLabels, Counter>,
     heartbeat_ticks: Counter,
+    loop_starts: Family<LoopKindLabels, Counter>,
+    loop_stops: Family<LoopRunLabels, Counter>,
+    loop_iterations: Family<LoopRunLabels, Counter>,
+    loop_retries: Family<LoopRunLabels, Counter>,
+    loop_phase_runs: Family<LoopPhaseRunLabels, Counter>,
+    loop_phase_seconds: Family<LoopPhaseRunLabels, Histogram>,
+    loop_phase_iterations: Family<LoopPhaseRunLabels, Counter>,
+    loop_phase_retries: Family<LoopPhaseRunLabels, Counter>,
     tokens_used: Counter,
     request_latency_seconds: Histogram,
 
@@ -150,6 +178,65 @@ impl PrometheusObserver {
             heartbeat_ticks.clone(),
         );
 
+        let loop_starts = Family::<LoopKindLabels, Counter>::default();
+        registry.register(
+            "loop_starts",
+            "Total loop start events by loop kind",
+            loop_starts.clone(),
+        );
+
+        let loop_stops = Family::<LoopRunLabels, Counter>::default();
+        registry.register(
+            "loop_stops",
+            "Total loop stop events by kind and stop reason",
+            loop_stops.clone(),
+        );
+
+        let loop_iterations = Family::<LoopRunLabels, Counter>::default();
+        registry.register(
+            "loop_iterations",
+            "Total loop iterations reported at stop by kind and stop reason",
+            loop_iterations.clone(),
+        );
+
+        let loop_retries = Family::<LoopRunLabels, Counter>::default();
+        registry.register(
+            "loop_retries",
+            "Total loop retries reported at stop by kind and stop reason",
+            loop_retries.clone(),
+        );
+
+        let loop_phase_runs = Family::<LoopPhaseRunLabels, Counter>::default();
+        registry.register(
+            "loop_phase_runs",
+            "Total loop phase completions by kind, phase, and stop reason",
+            loop_phase_runs.clone(),
+        );
+
+        let loop_phase_seconds =
+            Family::<LoopPhaseRunLabels, Histogram>::new_with_constructor(|| {
+                Histogram::new(LATENCY_BUCKETS)
+            });
+        registry.register(
+            "loop_phase_seconds",
+            "Loop phase duration in seconds by kind, phase, and stop reason",
+            loop_phase_seconds.clone(),
+        );
+
+        let loop_phase_iterations = Family::<LoopPhaseRunLabels, Counter>::default();
+        registry.register(
+            "loop_phase_iterations",
+            "Total loop phase iterations reported by kind, phase, and stop reason",
+            loop_phase_iterations.clone(),
+        );
+
+        let loop_phase_retries = Family::<LoopPhaseRunLabels, Counter>::default();
+        registry.register(
+            "loop_phase_retries",
+            "Total loop phase retries/errors reported by kind, phase, and stop reason",
+            loop_phase_retries.clone(),
+        );
+
         let tokens_used = Counter::default();
         registry.register(
             "tokens_used",
@@ -192,6 +279,14 @@ impl PrometheusObserver {
             agent_errors,
             channel_messages,
             heartbeat_ticks,
+            loop_starts,
+            loop_stops,
+            loop_iterations,
+            loop_retries,
+            loop_phase_runs,
+            loop_phase_seconds,
+            loop_phase_iterations,
+            loop_phase_retries,
             tokens_used,
             request_latency_seconds,
             active_jobs,
@@ -322,6 +417,45 @@ impl Observer for PrometheusObserver {
             ObserverMetric::QueueDepth(n) => {
                 self.queue_depth.set(*n as i64);
             }
+            ObserverMetric::LoopStarted(kind) => {
+                self.loop_starts
+                    .get_or_create(&LoopKindLabels {
+                        loop_kind: kind.as_str().to_string(),
+                    })
+                    .inc();
+            }
+            ObserverMetric::LoopRun(summary) => {
+                let labels = LoopRunLabels {
+                    loop_kind: summary.kind.as_str().to_string(),
+                    stop_reason: summary.stop_reason.as_str().to_string(),
+                    failed: summary.stop_reason.is_failure().to_string(),
+                };
+                self.loop_stops.get_or_create(&labels).inc();
+                self.loop_iterations
+                    .get_or_create(&labels)
+                    .inc_by(summary.iterations as u64);
+                self.loop_retries
+                    .get_or_create(&labels)
+                    .inc_by(u64::from(summary.retries));
+            }
+            ObserverMetric::LoopPhaseRun(phase) => {
+                let labels = LoopPhaseRunLabels {
+                    loop_kind: phase.kind.as_str().to_string(),
+                    phase: phase.phase.clone(),
+                    stop_reason: phase.stop_reason.as_str().to_string(),
+                    failed: phase.stop_reason.is_failure().to_string(),
+                };
+                self.loop_phase_runs.get_or_create(&labels).inc();
+                self.loop_phase_seconds
+                    .get_or_create(&labels)
+                    .observe(phase.duration.as_secs_f64());
+                self.loop_phase_iterations
+                    .get_or_create(&labels)
+                    .inc_by(phase.iterations as u64);
+                self.loop_phase_retries
+                    .get_or_create(&labels)
+                    .inc_by(u64::from(phase.retries));
+            }
         }
     }
 
@@ -334,6 +468,8 @@ impl Observer for PrometheusObserver {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    use crate::observability::LoopPhaseRun;
 
     #[test]
     fn name_is_prometheus() {
@@ -383,6 +519,25 @@ mod tests {
         });
         obs.record_metric(&ObserverMetric::ActiveJobs(4));
         obs.record_metric(&ObserverMetric::QueueDepth(9));
+        obs.record_metric(&ObserverMetric::LoopStarted(
+            thinclaw_agent::loop_control::LoopKind::RoutineCron,
+        ));
+        obs.record_metric(&ObserverMetric::LoopRun(
+            thinclaw_agent::loop_control::LoopRunSummary::new(
+                thinclaw_agent::loop_control::LoopKind::RoutineCron,
+                thinclaw_agent::loop_control::LoopStopReason::ExternalShutdown,
+                7,
+                2,
+            ),
+        ));
+        obs.record_metric(&ObserverMetric::LoopPhaseRun(LoopPhaseRun::new(
+            thinclaw_agent::loop_control::LoopKind::RepoProjectSupervisor,
+            "reconcile",
+            thinclaw_agent::loop_control::LoopStopReason::Completed,
+            Duration::from_millis(25),
+            4,
+            1,
+        )));
         obs.set_cost_cents(1234);
 
         let text = obs.encode();
@@ -392,12 +547,25 @@ mod tests {
         assert!(text.contains("thinclaw_tool_calls_total"));
         assert!(text.contains("thinclaw_agent_turns_total"));
         assert!(text.contains("thinclaw_tokens_used_total"));
+        assert!(text.contains("thinclaw_loop_starts_total"));
+        assert!(text.contains("thinclaw_loop_stops_total"));
+        assert!(text.contains("thinclaw_loop_iterations_total"));
+        assert!(text.contains("thinclaw_loop_retries_total"));
+        assert!(text.contains("thinclaw_loop_phase_runs_total"));
+        assert!(text.contains("thinclaw_loop_phase_seconds"));
+        assert!(text.contains("thinclaw_loop_phase_iterations_total"));
+        assert!(text.contains("thinclaw_loop_phase_retries_total"));
         assert!(text.contains("thinclaw_active_jobs 4"));
         assert!(text.contains("thinclaw_queue_depth 9"));
         assert!(text.contains("thinclaw_cost_cents 1234"));
         // Label rendering.
         assert!(text.contains("provider=\"openai\""));
         assert!(text.contains("tool=\"shell\""));
+        assert!(text.contains("loop_kind=\"routine_cron\""));
+        assert!(text.contains("loop_kind=\"repo_project_supervisor\""));
+        assert!(text.contains("phase=\"reconcile\""));
+        assert!(text.contains("stop_reason=\"external_shutdown\""));
+        assert!(text.contains("stop_reason=\"completed\""));
         // Exposition ends with the EOF marker.
         assert!(text.contains("# EOF"));
     }

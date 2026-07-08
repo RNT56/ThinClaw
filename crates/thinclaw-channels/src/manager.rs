@@ -5,12 +5,13 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
+use tokio::task::JoinHandle;
 
 use crate::status_view::{ChannelStatusEntry, ChannelViewState};
 use thinclaw_channels_core::{
@@ -21,6 +22,7 @@ use thinclaw_types::error::ChannelError;
 
 const LEGACY_WEB_CHANNEL_ALIAS: &str = "web";
 const GATEWAY_CHANNEL_NAME: &str = "gateway";
+const CHANNEL_FORWARDER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Descriptor for a native channel surface that the runtime can expose in
 /// status/configuration before the concrete transport is registered.
@@ -248,6 +250,8 @@ pub struct ChannelManager {
     started_at: Instant,
     /// Optional gateway adapter for channel status change events.
     status_sink: RwLock<Option<ChannelStatusSink>>,
+    /// Hot-added/restarted stream forwarders keyed by channel name.
+    stream_forwarders: RwLock<HashMap<String, JoinHandle<()>>>,
 }
 
 impl ChannelManager {
@@ -262,6 +266,7 @@ impl ChannelManager {
             counters: Arc::new(RwLock::new(HashMap::new())),
             started_at: Instant::now(),
             status_sink: RwLock::new(None),
+            stream_forwarders: RwLock::new(HashMap::new()),
         }
     }
 
@@ -357,6 +362,51 @@ impl ChannelManager {
         self.inject_tx.clone()
     }
 
+    async fn spawn_stream_forwarder(
+        &self,
+        name: String,
+        stream: MessageStream,
+        lifecycle: &'static str,
+    ) {
+        let tx = self.inject_tx.clone();
+        let spawn_name = name.clone();
+        let handle = tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(msg) = stream.next().await {
+                if tx.send(msg).await.is_err() {
+                    tracing::warn!(
+                        channel = %spawn_name,
+                        lifecycle,
+                        "Inject channel closed, stopping channel stream forwarder"
+                    );
+                    break;
+                }
+            }
+            tracing::info!(channel = %spawn_name, lifecycle, "Channel stream forwarder ended");
+        });
+        if let Some(old_handle) = self.stream_forwarders.write().await.insert(name, handle) {
+            drain_stream_forwarder_task(old_handle, "replaced").await;
+        }
+    }
+
+    async fn drain_stream_forwarder(&self, name: &str) {
+        let handle = { self.stream_forwarders.write().await.remove(name) };
+        if let Some(handle) = handle {
+            drain_stream_forwarder_task(handle, name).await;
+        }
+    }
+
+    async fn drain_all_stream_forwarders(&self) {
+        let handles = {
+            let mut guard = self.stream_forwarders.write().await;
+            guard.drain().collect::<Vec<_>>()
+        };
+        for (name, handle) in handles {
+            drain_stream_forwarder_task(handle, &name).await;
+        }
+    }
+
     /// Add a channel to the manager.
     pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
@@ -390,20 +440,9 @@ impl ChannelManager {
         self.channels.write().await.insert(name.clone(), channel);
         let _ = self.counter_for(&name).await;
 
-        // Forward stream messages through inject_tx
-        let tx = self.inject_tx.clone();
-        let spawn_name = name.clone();
-        tokio::spawn(async move {
-            use futures::StreamExt;
-            let mut stream = stream;
-            while let Some(msg) = stream.next().await {
-                if tx.send(msg).await.is_err() {
-                    tracing::warn!(channel = %spawn_name, "Inject channel closed, stopping hot-added channel");
-                    break;
-                }
-            }
-            tracing::info!(channel = %spawn_name, "Hot-added channel stream ended");
-        });
+        self.drain_stream_forwarder(&name).await;
+        self.spawn_stream_forwarder(name.clone(), stream, "hot-added")
+            .await;
 
         self.emit_channel_status_change(
             name.clone(),
@@ -426,6 +465,7 @@ impl ChannelManager {
             if let Err(e) = channel.shutdown().await {
                 tracing::warn!(channel = %name, error = %e, "Error shutting down hot-removed channel");
             }
+            self.drain_stream_forwarder(name).await;
 
             // Clean up counters
             self.counters.write().await.remove(name);
@@ -634,6 +674,8 @@ impl ChannelManager {
                 tracing::error!("Error shutting down channel {}: {}", name, e);
             }
         }
+        drop(channels);
+        self.drain_all_stream_forwarders().await;
         Ok(())
     }
 
@@ -901,23 +943,9 @@ impl ChannelManager {
         // Drop the read guard before spawning (we don't need it anymore).
         drop(channels);
 
-        // Forward the new stream through inject_tx.
-        let tx = self.inject_tx.clone();
-        let spawn_name = name.to_string();
-        tokio::spawn(async move {
-            use futures::StreamExt;
-            let mut stream = stream;
-            while let Some(msg) = stream.next().await {
-                if tx.send(msg).await.is_err() {
-                    tracing::warn!(
-                        channel = %spawn_name,
-                        "Inject channel closed, stopping restarted channel"
-                    );
-                    break;
-                }
-            }
-            tracing::info!(channel = %spawn_name, "Restarted channel stream ended");
-        });
+        self.drain_stream_forwarder(name).await;
+        self.spawn_stream_forwarder(name.to_string(), stream, "restarted")
+            .await;
 
         self.emit_channel_status_change(
             name.to_string(),
@@ -944,6 +972,21 @@ impl ChannelManager {
             channel.toggle_debug_mode().await
         } else {
             false
+        }
+    }
+}
+
+async fn drain_stream_forwarder_task(mut handle: JoinHandle<()>, name: &str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = name, error = %error, "channel stream forwarder exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_FORWARDER_DRAIN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = name, "channel stream forwarder did not drain before timeout; aborted");
         }
     }
 }
@@ -1059,7 +1102,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures::stream;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
     use tokio::sync::Mutex;
 
     #[derive(Default)]
@@ -1073,8 +1119,28 @@ mod tests {
         state: Arc<MockChannelState>,
     }
 
+    #[derive(Default)]
+    struct ForwardingChannelState {
+        sender: Mutex<Option<mpsc::Sender<IncomingMessage>>>,
+        shutdowns: AtomicUsize,
+    }
+
+    struct ForwardingChannel {
+        name: String,
+        state: Arc<ForwardingChannelState>,
+    }
+
     impl MockChannel {
         fn new(name: &str, state: Arc<MockChannelState>) -> Self {
+            Self {
+                name: name.to_string(),
+                state,
+            }
+        }
+    }
+
+    impl ForwardingChannel {
+        fn new(name: &str, state: Arc<ForwardingChannelState>) -> Self {
             Self {
                 name: name.to_string(),
                 state,
@@ -1117,6 +1183,37 @@ mod tests {
             let mut calls = self.state.diagnostics_calls.lock().await;
             *calls += 1;
             Some(serde_json::json!({"channel": self.name}))
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Channel for ForwardingChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            let (tx, rx) = mpsc::channel(1);
+            *self.state.sender.lock().await = Some(tx);
+            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<(), ChannelError> {
+            self.state.shutdowns.fetch_add(1, AtomicOrdering::Relaxed);
+            *self.state.sender.lock().await = None;
+            Ok(())
         }
 
         async fn health_check(&self) -> Result<(), ChannelError> {
@@ -1215,5 +1312,31 @@ mod tests {
             .find(|entry| entry.name == "gateway")
             .expect("active gateway entry should remain");
         assert_eq!(gateway.channel_type, "gateway");
+    }
+
+    #[tokio::test]
+    async fn hot_remove_drains_stream_forwarder() {
+        let manager = ChannelManager::new();
+        let state = Arc::new(ForwardingChannelState::default());
+        manager
+            .hot_add(Box::new(ForwardingChannel::new(
+                "forwarded",
+                Arc::clone(&state),
+            )))
+            .await
+            .unwrap();
+
+        assert!(
+            manager
+                .stream_forwarders
+                .read()
+                .await
+                .contains_key("forwarded")
+        );
+
+        manager.hot_remove("forwarded").await.unwrap();
+
+        assert!(manager.stream_forwarders.read().await.is_empty());
+        assert_eq!(state.shutdowns.load(AtomicOrdering::Relaxed), 1);
     }
 }

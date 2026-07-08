@@ -95,6 +95,31 @@ impl Observer for LogObserver {
             ObserverMetric::QueueDepth(n) => {
                 tracing::debug!(queue_depth = n, "observer: metric.queue_depth");
             }
+            ObserverMetric::LoopStarted(kind) => {
+                tracing::debug!(loop_kind = kind.as_str(), "observer: metric.loop_started");
+            }
+            ObserverMetric::LoopRun(summary) => {
+                tracing::debug!(
+                    loop_kind = summary.kind.as_str(),
+                    stop_reason = summary.stop_reason.as_str(),
+                    iterations = summary.iterations,
+                    retries = summary.retries,
+                    failed = summary.stop_reason.is_failure(),
+                    "observer: metric.loop_run"
+                );
+            }
+            ObserverMetric::LoopPhaseRun(phase) => {
+                tracing::debug!(
+                    loop_kind = phase.kind.as_str(),
+                    phase = phase.phase.as_str(),
+                    stop_reason = phase.stop_reason.as_str(),
+                    duration_ms = phase.duration.as_millis() as u64,
+                    iterations = phase.iterations,
+                    retries = phase.retries,
+                    failed = phase.stop_reason.is_failure(),
+                    "observer: metric.loop_phase_run"
+                );
+            }
         }
     }
 
@@ -172,6 +197,25 @@ mod tests {
         obs.record_metric(&ObserverMetric::TokensUsed(1000));
         obs.record_metric(&ObserverMetric::ActiveJobs(5));
         obs.record_metric(&ObserverMetric::QueueDepth(12));
+        obs.record_metric(&ObserverMetric::LoopStarted(
+            thinclaw_agent::loop_control::LoopKind::SelfRepair,
+        ));
+        obs.record_metric(&ObserverMetric::LoopRun(
+            thinclaw_agent::loop_control::LoopRunSummary::new(
+                thinclaw_agent::loop_control::LoopKind::SelfRepair,
+                thinclaw_agent::loop_control::LoopStopReason::ExternalShutdown,
+                1,
+                0,
+            ),
+        ));
+        obs.record_metric(&ObserverMetric::LoopPhaseRun(LoopPhaseRun::new(
+            thinclaw_agent::loop_control::LoopKind::RepoProjectSupervisor,
+            "reconcile",
+            thinclaw_agent::loop_control::LoopStopReason::Completed,
+            Duration::from_millis(20),
+            1,
+            0,
+        )));
     }
 
     #[test]

@@ -37,7 +37,8 @@ use std::{fs, path::PathBuf};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::gmail_wiring::{GmailConfig, is_sender_allowed};
@@ -66,6 +67,12 @@ struct GmailChannelState {
     messages_processed: std::sync::atomic::AtomicU64,
     /// Last processed Gmail history ID persisted across restarts.
     last_history_id: RwLock<Option<u64>>,
+    /// Notifies long-running Gmail loops to re-check their running state.
+    shutdown_notify: Notify,
+    /// Owned polling task, drained on restart and shutdown.
+    poll_task: Mutex<Option<JoinHandle<()>>>,
+    /// Owned token-refresh task, drained on restart and shutdown.
+    refresh_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// Response from Gmail API `messages.list`.
@@ -220,6 +227,8 @@ const PUBSUB_MAX_MESSAGES: u32 = 10;
 
 /// Poll interval between Pub/Sub pull requests.
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const GMAIL_UNREAD_FALLBACK_DAYS: u32 = 7;
 
 /// Refresh the access token this many seconds before it actually expires, so a
@@ -274,6 +283,9 @@ impl GmailChannel {
                 last_error: RwLock::new(None),
                 messages_processed: std::sync::atomic::AtomicU64::new(0),
                 last_history_id: RwLock::new(persisted_history_id),
+                shutdown_notify: Notify::new(),
+                poll_task: Mutex::new(None),
+                refresh_task: Mutex::new(None),
             }),
             http,
         })
@@ -370,6 +382,9 @@ impl GmailChannel {
             return;
         }
         loop {
+            if !*state.running.read().await {
+                break;
+            }
             // Refresh immediately on entry, then reschedule based on the token
             // lifetime with a safety margin; fall back to 45 min on failure.
             let next_delay_secs = match Self::refresh_access_token(&config, &state, &http).await {
@@ -383,8 +398,7 @@ impl GmailChannel {
             if !*state.running.read().await {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(next_delay_secs)).await;
-            if !*state.running.read().await {
+            if sleep_or_gmail_shutdown(&state, Duration::from_secs(next_delay_secs)).await {
                 break;
             }
         }
@@ -1153,7 +1167,9 @@ impl GmailChannel {
                 }
             }
 
-            tokio::time::sleep(POLL_INTERVAL).await;
+            if sleep_or_gmail_shutdown(&state, POLL_INTERVAL).await {
+                break;
+            }
         }
     }
 }
@@ -1176,6 +1192,8 @@ impl Channel for GmailChannel {
             });
         }
 
+        self.stop_background_tasks().await;
+
         let (tx, rx) = mpsc::channel(256);
         *self.state.msg_tx.write().await = Some(tx);
         *self.state.running.write().await = true;
@@ -1186,9 +1204,10 @@ impl Channel for GmailChannel {
             let refresh_config = self.config.clone();
             let refresh_state = Arc::clone(&self.state);
             let refresh_http = self.http.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 Self::token_refresh_loop(refresh_config, refresh_state, refresh_http).await;
             });
+            *self.state.refresh_task.lock().await = Some(handle);
         }
 
         // Spawn the polling loop.
@@ -1204,9 +1223,10 @@ impl Channel for GmailChannel {
         let state_clone = Arc::clone(&self.state);
         let http_clone = self.http.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             Self::poll_loop(config_clone, state_clone, http_clone, loop_channel).await;
         });
+        *self.state.poll_task.lock().await = Some(handle);
 
         tracing::info!(
             project = %self.config.project_id,
@@ -1326,10 +1346,49 @@ impl Channel for GmailChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
-        *self.state.running.write().await = false;
-        *self.state.msg_tx.write().await = None;
+        self.stop_background_tasks().await;
         tracing::info!("Gmail channel shut down");
         Ok(())
+    }
+}
+
+impl GmailChannel {
+    async fn stop_background_tasks(&self) {
+        *self.state.running.write().await = false;
+        self.state.shutdown_notify.notify_waiters();
+        *self.state.msg_tx.write().await = None;
+
+        let poll_handle = { self.state.poll_task.lock().await.take() };
+        if let Some(handle) = poll_handle {
+            drain_channel_task(handle, "gmail-poll").await;
+        }
+
+        let refresh_handle = { self.state.refresh_task.lock().await.take() };
+        if let Some(handle) = refresh_handle {
+            drain_channel_task(handle, "gmail-refresh").await;
+        }
+    }
+}
+
+async fn sleep_or_gmail_shutdown(state: &Arc<GmailChannelState>, duration: Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => !*state.running.read().await,
+        _ = state.shutdown_notify.notified() => !*state.running.read().await,
+    }
+}
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = "gmail", task = name, error = %error, "Gmail channel task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = "gmail", task = name, "Gmail channel task did not drain before timeout; aborted");
+        }
     }
 }
 

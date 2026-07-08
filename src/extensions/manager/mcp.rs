@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::oneshot;
 use tokio::time::MissedTickBehavior;
 
 use crate::extensions::{ActivateResult, AuthResult, ExtensionError, ExtensionKind};
@@ -17,6 +18,8 @@ use crate::tools::mcp::{McpClient, McpPendingInteraction};
 
 use super::ExtensionManager;
 use super::core::PendingAuth;
+
+const MCP_LOOP_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl ExtensionManager {
     // ── MCP config helpers (DB with disk fallback) ─────────────────────
@@ -86,12 +89,19 @@ impl ExtensionManager {
         let server_name = name.to_string();
         let config_store = self.mcp_config_store();
         let weak_client = Arc::downgrade(client);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             interval.tick().await;
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::debug!(server = %server_name, "MCP roots-grant watcher stopped");
+                        break;
+                    }
+                    _ = interval.tick() => {}
+                }
                 let Some(client) = weak_client.upgrade() else {
                     break;
                 };
@@ -109,12 +119,26 @@ impl ExtensionManager {
                 }
             }
         });
-        watchers.insert(name.to_string(), handle);
+        watchers.insert(name.to_string(), (handle, shutdown_tx));
     }
 
     pub(super) async fn stop_mcp_watcher(&self, name: &str) {
-        if let Some(handle) = self.mcp_watchers.write().await.remove(name) {
-            handle.abort();
+        if let Some((handle, shutdown_tx)) = self.mcp_watchers.write().await.remove(name) {
+            let _ = shutdown_tx.send(());
+            drain_mcp_task(handle, "mcp_roots_grant_watcher").await;
+        }
+    }
+
+    pub async fn stop_mcp_background_tasks(&self) {
+        self.stop_mcp_health_monitor().await;
+
+        let watchers = {
+            let mut guard = self.mcp_watchers.write().await;
+            guard.drain().collect::<Vec<_>>()
+        };
+        for (_name, (handle, shutdown_tx)) in watchers {
+            let _ = shutdown_tx.send(());
+            drain_mcp_task(handle, "mcp_roots_grant_watcher").await;
         }
     }
 
@@ -222,6 +246,7 @@ impl ExtensionManager {
             return;
         }
         let manager = Arc::downgrade(self);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
             /// Backoff ceiling: never wait longer than this between attempts.
             const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
@@ -235,7 +260,13 @@ impl ExtensionManager {
                 std::collections::HashMap::new();
 
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::debug!("MCP health monitor stopped");
+                        break;
+                    }
+                    _ = ticker.tick() => {}
+                }
                 let Some(manager) = manager.upgrade() else {
                     break;
                 };
@@ -266,7 +297,18 @@ impl ExtensionManager {
                 }
             }
         });
+        *self.mcp_health_monitor_shutdown.write().await = Some(shutdown_tx);
         *guard = Some(handle);
+    }
+
+    pub async fn stop_mcp_health_monitor(&self) {
+        let handle = self.mcp_health_monitor.write().await.take();
+        if let Some(tx) = self.mcp_health_monitor_shutdown.write().await.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = handle {
+            drain_mcp_task(handle, "mcp_health_monitor").await;
+        }
     }
 
     async fn build_mcp_client(
@@ -584,5 +626,20 @@ impl ExtensionManager {
             tools_loaded: tool_names,
             message: format!("Connected to '{}' and loaded tools", name),
         })
+    }
+}
+
+async fn drain_mcp_task(mut handle: tokio::task::JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(task = name, error = %error, "MCP background task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(MCP_LOOP_STOP_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(task = name, "MCP background task did not drain before timeout; aborted");
+        }
     }
 }

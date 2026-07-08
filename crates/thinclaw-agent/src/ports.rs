@@ -897,6 +897,20 @@ pub trait RoutineStorePort: Send + Sync {
         processed_at: DateTime<Utc>,
         error_message: &str,
     ) -> Result<(), DatabaseError>;
+    async fn dead_letter_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
+    async fn replay_routine_event(
+        &self,
+        id: Uuid,
+        user_id: &str,
+        actor_id: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<Option<RoutineEvent>, DatabaseError>;
     async fn list_routine_events_for_actor(
         &self,
         user_id: &str,

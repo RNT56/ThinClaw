@@ -9,6 +9,8 @@ use thinclaw_types::{
 };
 use uuid::Uuid;
 
+use crate::loop_control::{LoopBudget, LoopKind, LoopRunSummary, LoopStopReason};
+
 pub const SUBAGENT_MAX_ITERATIONS: usize = 30;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 pub const DEFAULT_MAX_CONCURRENT: usize = 5;
@@ -468,8 +470,23 @@ pub fn should_force_subagent_text(iteration: usize, max_iterations: usize) -> bo
     iteration >= max_iterations.saturating_sub(2)
 }
 
+pub fn subagent_iteration_stop_reason(
+    iteration: usize,
+    max_iterations: usize,
+) -> Option<LoopStopReason> {
+    LoopBudget::iterations(max_iterations).iteration_stop_reason(iteration)
+}
+
 pub fn subagent_iteration_limit_reason(max_iterations: usize) -> String {
     format!("Exceeded maximum iterations ({})", max_iterations)
+}
+
+pub fn subagent_loop_summary(
+    stop_reason: LoopStopReason,
+    iterations: usize,
+    retries: u32,
+) -> LoopRunSummary {
+    LoopRunSummary::new(LoopKind::Subagent, stop_reason, iterations, retries)
 }
 
 pub fn subagent_job_metadata(input: SubagentJobMetadataInput<'_>) -> serde_json::Value {
@@ -1199,6 +1216,14 @@ mod tests {
         assert!(!should_force_subagent_text(27, 30));
         assert!(should_force_subagent_text(28, 30));
         assert!(should_force_subagent_text(0, 0));
+        assert_eq!(
+            subagent_iteration_stop_reason(31, 30),
+            Some(LoopStopReason::IterationBudgetExceeded)
+        );
+        assert_eq!(
+            subagent_loop_summary(LoopStopReason::Cancelled, 3, 0).labels(),
+            [("loop", "subagent"), ("stop_reason", "cancelled")]
+        );
         assert_eq!(
             subagent_iteration_limit_reason(30),
             "Exceeded maximum iterations (30)"

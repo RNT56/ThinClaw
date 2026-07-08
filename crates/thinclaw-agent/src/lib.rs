@@ -23,6 +23,7 @@ pub mod learning_policy;
 pub mod learning_provider_policy;
 pub mod learning_provider_types;
 pub mod learning_types;
+pub mod loop_control;
 pub mod outbound_media;
 pub mod outcomes;
 pub mod personality;

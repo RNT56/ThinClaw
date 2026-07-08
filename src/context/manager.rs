@@ -467,6 +467,45 @@ impl ContextManager {
             }
         })
     }
+
+    /// Spawn a background pruning loop that exits when `shutdown_rx` resolves.
+    pub fn spawn_pruner_with_shutdown(
+        self: &std::sync::Arc<Self>,
+        interval: std::time::Duration,
+        max_age: chrono::Duration,
+        stuck_timeout: chrono::Duration,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
+        let manager = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            tracing::info!(
+                interval_secs = interval.as_secs(),
+                max_age_mins = max_age.num_minutes(),
+                stuck_timeout_mins = stuck_timeout.num_minutes(),
+                "Session pruner started"
+            );
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::info!("Session pruner shutting down");
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        let result = manager.prune_stale_sessions(max_age, stuck_timeout).await;
+                        if result.total_pruned > 0 {
+                            tracing::debug!(
+                                terminal = result.terminal_pruned,
+                                stuck = result.stuck_pruned,
+                                "Session prune cycle complete"
+                            );
+                        }
+                    }
+                }
+            }
+        })
+    }
 }
 
 impl Default for ContextManager {
@@ -612,5 +651,25 @@ mod tests {
         assert_eq!(manager.all_jobs().await.len(), 1);
         assert!(manager.get_context(active_job).await.is_ok());
         assert!(manager.get_context(old_job).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_pruner_with_shutdown_exits_cleanly() {
+        let manager = std::sync::Arc::new(ContextManager::new(10));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = manager.spawn_pruner_with_shutdown(
+            std::time::Duration::from_secs(60),
+            chrono::Duration::try_hours(1).unwrap(),
+            chrono::Duration::try_hours(4).unwrap(),
+            shutdown_rx,
+        );
+
+        shutdown_tx
+            .send(())
+            .expect("pruner should still be running");
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("pruner should stop promptly")
+            .expect("pruner task should join cleanly");
     }
 }

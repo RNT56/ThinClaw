@@ -312,6 +312,20 @@ impl Store {
         Ok(count > 0)
     }
 
+    pub async fn get_repo_webhook_delivery(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<RepoWebhookDelivery>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT data FROM repo_webhook_deliveries WHERE delivery_id = $1 LIMIT 1",
+                &[&delivery_id],
+            )
+            .await?;
+        row.map(|row| json_from_row(&row, "data")).transpose()
+    }
+
     pub async fn list_repo_webhook_deliveries(
         &self,
         limit: i64,

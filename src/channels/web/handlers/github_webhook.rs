@@ -5,12 +5,14 @@ use std::time::Duration;
 use axum::{
     Json,
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
+use base64::Engine as _;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::SseEvent;
 use crate::repo_projects::github::{
@@ -42,6 +44,24 @@ pub(crate) struct GitHubRepoProjectsWebhookResponse {
     pub matched_project_id: Option<String>,
     pub duplicate: bool,
     pub supervisor_woken: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct GitHubRepoProjectsWebhookReplayResponse {
+    pub ok: bool,
+    pub replayed: bool,
+    pub event: String,
+    pub delivery_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_full_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_project_id: Option<String>,
+    pub supervisor_woken: bool,
+    pub raw_payload_replayed: bool,
 }
 
 pub(crate) async fn github_repo_projects_webhook_handler(
@@ -98,7 +118,7 @@ pub(crate) async fn github_repo_projects_webhook_handler(
 
     // Durable, restart-surviving idempotency + audit. The in-memory deduper above
     // is a fast pre-check; this catches redeliveries that span a restart.
-    if !record_webhook_delivery(&state, &envelope).await {
+    if !record_webhook_delivery(&state, &envelope, &body, signature_header).await {
         tracing::debug!(
             delivery_id = %envelope.delivery_id,
             event = %envelope.event,
@@ -150,6 +170,16 @@ pub(crate) async fn github_repo_projects_webhook_handler(
         duplicate: false,
         supervisor_woken,
     }))
+}
+
+pub(crate) async fn github_repo_projects_webhook_replay_handler(
+    State(state): State<Arc<GatewayState>>,
+    _request_identity: GatewayRequestIdentity,
+    Path(delivery_id): Path<String>,
+) -> Result<Json<GitHubRepoProjectsWebhookReplayResponse>, (StatusCode, String)> {
+    replay_stored_github_webhook_delivery(&state, &delivery_id)
+        .await
+        .map(Json)
 }
 
 async fn resolve_github_webhook_secret(
@@ -211,6 +241,71 @@ async fn resolve_github_webhook_secret(
         ));
     }
     Ok(secret.expose().to_string())
+}
+
+async fn replay_stored_github_webhook_delivery(
+    state: &GatewayState,
+    delivery_id: &str,
+) -> Result<GitHubRepoProjectsWebhookReplayResponse, (StatusCode, String)> {
+    let delivery_id = delivery_id.trim();
+    if delivery_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "GitHub webhook delivery id is required".to_string(),
+        ));
+    }
+    let Some(store) = state.store.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Repository project database is not available".to_string(),
+        ));
+    };
+    let Some(delivery) = store
+        .get_repo_webhook_delivery(delivery_id)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("GitHub webhook delivery '{delivery_id}' was not found"),
+        ));
+    };
+
+    let (envelope, raw_payload_replayed) = replay_envelope_from_delivery(&delivery)?;
+
+    let matched_project_id = find_project_id_for_repo(
+        state,
+        envelope.repository_full_name.as_deref(),
+        envelope.installation_id,
+    )
+    .await?;
+    let supervisor_woken = wake_repo_project_supervisor(state, &envelope).await?;
+
+    if let Some(project_id) = matched_project_id {
+        broadcast_github_webhook_replay(state, &envelope, project_id);
+    }
+
+    tracing::info!(
+        event = envelope.event,
+        delivery_id = envelope.delivery_id,
+        repository = ?envelope.repository_full_name,
+        matched_project_id = ?matched_project_id,
+        supervisor_woken,
+        "GitHub repo project webhook delivery replayed",
+    );
+
+    Ok(GitHubRepoProjectsWebhookReplayResponse {
+        ok: true,
+        replayed: true,
+        event: envelope.event,
+        delivery_id: envelope.delivery_id,
+        action: envelope.action,
+        installation_id: envelope.installation_id,
+        repository_full_name: envelope.repository_full_name,
+        matched_project_id: matched_project_id.map(|id| id.to_string()),
+        supervisor_woken,
+        raw_payload_replayed,
+    })
 }
 
 async fn find_project_id_for_repo(
@@ -283,7 +378,12 @@ async fn match_and_backfill_repo(
 /// store is available), `false` when it was already recorded (a duplicate). A
 /// transient DB error fails open (treats the delivery as new) so a real event is
 /// never dropped on infrastructure trouble.
-async fn record_webhook_delivery(state: &GatewayState, envelope: &GitHubWebhookEnvelope) -> bool {
+async fn record_webhook_delivery(
+    state: &GatewayState,
+    envelope: &GitHubWebhookEnvelope,
+    raw_body: &[u8],
+    signature_header: Option<&str>,
+) -> bool {
     let Some(store) = state.store.as_ref() else {
         return true;
     };
@@ -293,6 +393,8 @@ async fn record_webhook_delivery(state: &GatewayState, envelope: &GitHubWebhookE
         action: envelope.action.clone(),
         repository_full_name: envelope.repository_full_name.clone(),
         installation_id: envelope.installation_id,
+        raw_payload_base64: Some(base64::engine::general_purpose::STANDARD.encode(raw_body)),
+        signature_header: signature_header.map(str::to_string),
         received_at: chrono::Utc::now(),
     };
     match store.record_repo_webhook_delivery(&delivery).await {
@@ -301,6 +403,43 @@ async fn record_webhook_delivery(state: &GatewayState, envelope: &GitHubWebhookE
             tracing::warn!(error = %error, "failed to durably record GitHub webhook delivery");
             true
         }
+    }
+}
+
+fn replay_envelope_from_delivery(
+    delivery: &RepoWebhookDelivery,
+) -> Result<(GitHubWebhookEnvelope, bool), (StatusCode, String)> {
+    let Some(raw_payload_base64) = delivery.raw_payload_base64.as_deref() else {
+        return Ok((legacy_replay_envelope_from_delivery(delivery), false));
+    };
+    let raw_payload = base64::engine::general_purpose::STANDARD
+        .decode(raw_payload_base64.as_bytes())
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "GitHub webhook delivery '{}' has invalid stored raw payload: {error}",
+                    delivery.delivery_id
+                ),
+            )
+        })?;
+    parse_github_webhook_envelope(&delivery.event, Some(&delivery.delivery_id), &raw_payload)
+        .map(|envelope| (envelope, true))
+        .map_err(github_webhook_error_response)
+}
+
+fn legacy_replay_envelope_from_delivery(delivery: &RepoWebhookDelivery) -> GitHubWebhookEnvelope {
+    GitHubWebhookEnvelope {
+        event: delivery.event.clone(),
+        delivery_id: delivery.delivery_id.clone(),
+        installation_id: delivery.installation_id,
+        repository_full_name: delivery.repository_full_name.clone(),
+        action: delivery.action.clone(),
+        payload: serde_json::json!({
+            "replayed_from_delivery_record": true,
+            "delivery_id": delivery.delivery_id,
+            "received_at": delivery.received_at.to_rfc3339(),
+        }),
     }
 }
 
@@ -340,6 +479,35 @@ fn broadcast_github_webhook(
         (Some(repository), None) => format!("GitHub {repository} {event_type} webhook"),
         (None, Some(action)) => format!("GitHub {event_type} webhook: {action}"),
         (None, None) => format!("GitHub {event_type} webhook"),
+    };
+    state.sse.broadcast(SseEvent::RepoProjectEvent {
+        project_id: project_id.to_string(),
+        event_type,
+        message,
+    });
+}
+
+fn broadcast_github_webhook_replay(
+    state: &GatewayState,
+    envelope: &GitHubWebhookEnvelope,
+    project_id: Uuid,
+) {
+    let event_type = format!("github.{}.replay", envelope.event);
+    let message = match (
+        envelope.repository_full_name.as_deref(),
+        envelope.action.as_deref(),
+    ) {
+        (Some(repository), Some(action)) => {
+            format!(
+                "Replayed GitHub {repository} {} webhook: {action}",
+                envelope.event
+            )
+        }
+        (Some(repository), None) => {
+            format!("Replayed GitHub {repository} {} webhook", envelope.event)
+        }
+        (None, Some(action)) => format!("Replayed GitHub {} webhook: {action}", envelope.event),
+        (None, None) => format!("Replayed GitHub {} webhook", envelope.event),
     };
     state.sse.broadcast(SseEvent::RepoProjectEvent {
         project_id: project_id.to_string(),
@@ -398,11 +566,76 @@ mod tests {
 #[cfg(all(test, feature = "libsql"))]
 mod backfill_tests {
     use super::*;
+    use crate::channels::web::sse::SseManager;
+    use crate::db::Database;
+    use crate::repo_projects::supervisor::{
+        ProjectSupervisor, RepoSupervisorDecision, RepoSupervisorStore, RepoSupervisorWakeReason,
+    };
     use crate::testing::test_db;
     use chrono::Utc;
+    use std::time::Duration;
     use thinclaw_repo_projects::{
         GitHubAuthMode, ProjectPolicy, RepoProject, RepoProjectRepo, RepoProjectState,
+        RepoWebhookDelivery,
     };
+
+    #[derive(Default)]
+    struct NoopSupervisorStore;
+
+    #[async_trait::async_trait]
+    impl RepoSupervisorStore for NoopSupervisorStore {
+        async fn reconcile_project(
+            &self,
+            _project_id: Option<Uuid>,
+            _reason: RepoSupervisorWakeReason,
+        ) -> Result<Vec<RepoSupervisorDecision>, String> {
+            Ok(vec![RepoSupervisorDecision::Idle])
+        }
+    }
+
+    fn gateway_state(
+        store: Arc<dyn Database>,
+        supervisor: Option<ProjectSupervisor>,
+    ) -> GatewayState {
+        GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: SseManager::new(),
+            workspace: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: Some(store),
+            job_manager: None,
+            prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
+            user_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            llm_runtime: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
+            chat_rate_limiter: crate::channels::web::rate_limiter::RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            cost_tracker: None,
+            metrics_registry: None,
+            response_cache: None,
+            routine_engine: None,
+            repo_project_supervisor: Arc::new(tokio::sync::RwLock::new(supervisor)),
+            startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
+            secrets_store: None,
+            channel_manager: None,
+            hooks: None,
+        }
+    }
 
     fn project() -> RepoProject {
         let now = Utc::now();
@@ -484,6 +717,41 @@ mod backfill_tests {
     }
 
     #[tokio::test]
+    async fn record_webhook_delivery_persists_raw_payload_for_exact_replay() {
+        let (db, _guard) = test_db().await;
+        let state = gateway_state(Arc::clone(&db), None);
+        let raw_payload = br#"{"action":"opened","repository":{"full_name":"acme/widgets"},"installation":{"id":4242}}"#;
+        let envelope = parse_github_webhook_envelope(
+            "pull_request",
+            Some("delivery-raw-store-1"),
+            raw_payload,
+        )
+        .unwrap();
+
+        assert!(
+            record_webhook_delivery(
+                &state,
+                &envelope,
+                raw_payload,
+                Some("sha256=stored-signature"),
+            )
+            .await
+        );
+
+        let stored = db
+            .get_repo_webhook_delivery("delivery-raw-store-1")
+            .await
+            .unwrap()
+            .expect("delivery should be stored");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw_payload);
+        assert_eq!(stored.raw_payload_base64.as_deref(), Some(encoded.as_str()));
+        assert_eq!(
+            stored.signature_header.as_deref(),
+            Some("sha256=stored-signature")
+        );
+    }
+
+    #[tokio::test]
     async fn unmatched_repo_returns_none() {
         let (db, _guard) = test_db().await;
         let project = project();
@@ -496,5 +764,115 @@ mod backfill_tests {
             .await
             .unwrap();
         assert_eq!(matched, None);
+    }
+
+    #[tokio::test]
+    async fn replay_stored_delivery_matches_repo_and_wakes_supervisor() {
+        let (db, _guard) = test_db().await;
+        let project = project();
+        db.create_repo_project(&project).await.unwrap();
+        db.upsert_repo_project_repo(&repo(project.id, Some(4242)))
+            .await
+            .unwrap();
+        let delivery = RepoWebhookDelivery {
+            delivery_id: "delivery-replay-1".to_string(),
+            event: "pull_request".to_string(),
+            action: Some("synchronize".to_string()),
+            repository_full_name: Some("acme/widgets".to_string()),
+            installation_id: Some(4242),
+            raw_payload_base64: None,
+            signature_header: None,
+            received_at: Utc::now(),
+        };
+        db.record_repo_webhook_delivery(&delivery).await.unwrap();
+
+        let (supervisor, mut wake_rx) = ProjectSupervisor::new(Arc::new(NoopSupervisorStore), 4);
+        let state = gateway_state(Arc::clone(&db), Some(supervisor));
+
+        let response = replay_stored_github_webhook_delivery(&state, "delivery-replay-1")
+            .await
+            .unwrap();
+
+        assert!(response.ok);
+        assert!(response.replayed);
+        assert_eq!(response.delivery_id, "delivery-replay-1");
+        assert_eq!(response.event, "pull_request");
+        assert_eq!(response.action.as_deref(), Some("synchronize"));
+        assert_eq!(response.matched_project_id, Some(project.id.to_string()));
+        assert!(response.supervisor_woken);
+        assert!(!response.raw_payload_replayed);
+
+        let wake = tokio::time::timeout(Duration::from_secs(2), wake_rx.recv())
+            .await
+            .expect("supervisor wake should arrive")
+            .expect("supervisor wake channel should stay open");
+        assert_eq!(wake.project_id, None);
+        assert_eq!(
+            wake.reason,
+            RepoSupervisorWakeReason::GitHubWebhook {
+                delivery_id: "delivery-replay-1".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_stored_delivery_prefers_raw_payload_over_derived_metadata() {
+        let (db, _guard) = test_db().await;
+        let project = project();
+        db.create_repo_project(&project).await.unwrap();
+        db.upsert_repo_project_repo(&repo(project.id, Some(4242)))
+            .await
+            .unwrap();
+        let raw_payload = serde_json::json!({
+            "action": "closed",
+            "repository": {
+                "full_name": "acme/widgets"
+            },
+            "installation": {
+                "id": 4242
+            }
+        })
+        .to_string();
+        let delivery = RepoWebhookDelivery {
+            delivery_id: "delivery-replay-raw-1".to_string(),
+            event: "pull_request".to_string(),
+            action: Some("stale-derived-action".to_string()),
+            repository_full_name: Some("wrong/repo".to_string()),
+            installation_id: Some(1111),
+            raw_payload_base64: Some(base64::engine::general_purpose::STANDARD.encode(raw_payload)),
+            signature_header: Some("sha256=stored-signature".to_string()),
+            received_at: Utc::now(),
+        };
+        db.record_repo_webhook_delivery(&delivery).await.unwrap();
+
+        let (supervisor, _wake_rx) = ProjectSupervisor::new(Arc::new(NoopSupervisorStore), 4);
+        let state = gateway_state(Arc::clone(&db), Some(supervisor));
+
+        let response = replay_stored_github_webhook_delivery(&state, "delivery-replay-raw-1")
+            .await
+            .unwrap();
+
+        assert!(response.ok);
+        assert!(response.raw_payload_replayed);
+        assert_eq!(response.action.as_deref(), Some("closed"));
+        assert_eq!(
+            response.repository_full_name.as_deref(),
+            Some("acme/widgets")
+        );
+        assert_eq!(response.installation_id, Some(4242));
+        assert_eq!(response.matched_project_id, Some(project.id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn replay_missing_delivery_returns_not_found() {
+        let (db, _guard) = test_db().await;
+        let state = gateway_state(db, None);
+
+        let error = replay_stored_github_webhook_delivery(&state, "missing-delivery")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        assert!(error.1.contains("missing-delivery"));
     }
 }

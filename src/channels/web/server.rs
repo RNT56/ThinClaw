@@ -961,6 +961,10 @@ pub async fn start_server(
         )
         .route("/api/repo-projects/setup", post(repo_project_setup_handler))
         .route(
+            "/api/repo-projects/webhooks/github/{delivery_id}/replay",
+            post(github_repo_projects_webhook_replay_handler),
+        )
+        .route(
             "/api/repo-projects/credentials",
             post(repo_project_credential_handler),
         )
@@ -1107,6 +1111,10 @@ pub async fn start_server(
         )
         .route("/api/routines/summary", get(routines_summary_handler))
         .route("/api/routines/events", get(routines_events_handler))
+        .route(
+            "/api/routines/events/{id}/replay",
+            post(routines_event_replay_handler),
+        )
         .route(
             "/api/routines/runs",
             axum::routing::delete(routines_clear_runs_handler),

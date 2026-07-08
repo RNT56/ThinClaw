@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use lru::LruCache;
 use reqwest::Client;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::attachments::{
@@ -32,7 +33,12 @@ pub struct SignalChannel {
     reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
     /// Debug mode for verbose tool output (toggled via /debug command).
     debug_mode: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+    sse_task: Mutex<Option<JoinHandle<()>>>,
 }
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl SignalChannel {
     /// Create a new Signal channel with normalized config and fresh client/cache.
@@ -48,8 +54,17 @@ impl SignalChannel {
         let cap = REPLY_TARGETS_CAP;
         let reply_targets = Arc::new(RwLock::new(LruCache::new(cap)));
         let debug_mode = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_notify = Arc::new(Notify::new());
 
-        Ok(Self::from_parts(config, client, reply_targets, debug_mode))
+        Ok(Self::from_parts(
+            config,
+            client,
+            reply_targets,
+            debug_mode,
+            shutdown,
+            shutdown_notify,
+        ))
     }
 
     /// Construct a SignalChannel from pre-validated parts.
@@ -61,12 +76,17 @@ impl SignalChannel {
         client: Client,
         reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
         debug_mode: Arc<AtomicBool>,
+        shutdown: Arc<AtomicBool>,
+        shutdown_notify: Arc<Notify>,
     ) -> Self {
         Self {
             config,
             client,
             reply_targets,
             debug_mode,
+            shutdown,
+            shutdown_notify,
+            sse_task: Mutex::new(None),
         }
     }
 
@@ -831,17 +851,36 @@ impl Channel for SignalChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
+        if let Some(handle) = self.sse_task.lock().await.take() {
+            self.shutdown.store(true, Ordering::Relaxed);
+            self.shutdown_notify.notify_waiters();
+            drain_channel_task(handle, "signal-sse").await;
+        }
+        self.shutdown.store(false, Ordering::Relaxed);
 
         let config = self.config.clone();
         let client = self.client.clone();
         let reply_targets = Arc::clone(&self.reply_targets);
         let debug_mode = Arc::clone(&self.debug_mode);
+        let shutdown = Arc::clone(&self.shutdown);
+        let shutdown_notify = Arc::clone(&self.shutdown_notify);
 
-        tokio::spawn(async move {
-            if let Err(e) = sse_listener(config, client, tx, reply_targets, debug_mode).await {
+        let handle = tokio::spawn(async move {
+            if let Err(e) = sse_listener(
+                config,
+                client,
+                tx,
+                reply_targets,
+                debug_mode,
+                shutdown,
+                shutdown_notify,
+            )
+            .await
+            {
                 tracing::error!("Signal SSE listener exited with error: {e}");
             }
         });
+        *self.sse_task.lock().await = Some(handle);
 
         // Log the URL with credentials redacted (if any).
         let safe_url = Self::redact_url(&self.config.http_url);
@@ -1082,6 +1121,15 @@ impl Channel for SignalChannel {
         Ok(())
     }
 
+    async fn shutdown(&self) -> Result<(), ChannelError> {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown_notify.notify_waiters();
+        if let Some(handle) = self.sse_task.lock().await.take() {
+            drain_channel_task(handle, "signal-sse").await;
+        }
+        Ok(())
+    }
+
     async fn health_check(&self) -> Result<(), ChannelError> {
         let url = format!("{}{}", self.config.http_url, SIGNAL_HEALTH_ENDPOINT);
         let resp = self
@@ -1121,12 +1169,16 @@ async fn sse_listener(
     tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
     debug_mode: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
 ) -> Result<(), ChannelError> {
     let channel = SignalChannel::from_parts(
         config,
         client,
         Arc::clone(&reply_targets),
         Arc::clone(&debug_mode),
+        Arc::clone(&shutdown),
+        Arc::clone(&shutdown_notify),
     );
 
     let mut url = reqwest::Url::parse(&format!("{}/api/v1/events", channel.config.http_url))
@@ -1141,12 +1193,23 @@ async fn sse_listener(
     let max_delay = Duration::from_secs(60);
 
     loop {
-        let resp = channel
-            .client
-            .get(url.clone())
-            .header("Accept", "text/event-stream")
-            .send()
-            .await;
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let resp = tokio::select! {
+            resp = channel
+                .client
+                .get(url.clone())
+                .header("Accept", "text/event-stream")
+                .send() => resp,
+            _ = shutdown_notify.notified() => {
+                if shutdown.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
 
         let resp = match resp {
             Ok(r) if r.status().is_success() => r,
@@ -1155,7 +1218,19 @@ async fn sse_listener(
                 let mut stream = r.bytes_stream();
                 let mut bytes = Vec::new();
                 let mut collected = 0usize;
-                while let Some(chunk) = stream.next().await {
+                loop {
+                    let next_chunk = tokio::select! {
+                        chunk = stream.next() => chunk,
+                        _ = shutdown_notify.notified() => {
+                            if shutdown.load(Ordering::Relaxed) {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                    };
+                    let Some(chunk) = next_chunk else {
+                        break;
+                    };
                     let chunk = chunk.unwrap_or_default();
                     let remaining = MAX_ERROR_LOG_BODY.saturating_sub(collected);
                     if remaining == 0 {
@@ -1169,14 +1244,18 @@ async fn sse_listener(
                 }
                 let body = String::from_utf8_lossy(&bytes);
                 tracing::warn!("Signal SSE returned {status}: {body}");
-                tokio::time::sleep(retry_delay).await;
+                if sleep_or_signal_shutdown(&shutdown, &shutdown_notify, retry_delay).await {
+                    return Ok(());
+                }
                 retry_delay = (retry_delay * 2).min(max_delay);
                 continue;
             }
             Err(e) => {
                 let safe_url = SignalChannel::redact_url(url.as_str());
                 tracing::warn!("Signal SSE connect error to {safe_url}: {e}, retrying...");
-                tokio::time::sleep(retry_delay).await;
+                if sleep_or_signal_shutdown(&shutdown, &shutdown_notify, retry_delay).await {
+                    return Ok(());
+                }
                 retry_delay = (retry_delay * 2).min(max_delay);
                 continue;
             }
@@ -1194,7 +1273,19 @@ async fn sse_listener(
         // leading sequence for a 4-byte character).
         let mut utf8_carry: Vec<u8> = Vec::with_capacity(4);
 
-        while let Some(chunk) = bytes_stream.next().await {
+        loop {
+            let next_chunk = tokio::select! {
+                chunk = bytes_stream.next() => chunk,
+                _ = shutdown_notify.notified() => {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
+            let Some(chunk) = next_chunk else {
+                break;
+            };
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
@@ -1358,8 +1449,36 @@ async fn sse_listener(
         }
 
         tracing::debug!("Signal SSE stream ended, reconnecting with backoff...");
-        tokio::time::sleep(retry_delay).await;
+        if sleep_or_signal_shutdown(&shutdown, &shutdown_notify, retry_delay).await {
+            return Ok(());
+        }
         retry_delay = std::cmp::min(retry_delay * 2, max_delay);
+    }
+}
+
+async fn sleep_or_signal_shutdown(
+    shutdown: &Arc<AtomicBool>,
+    shutdown_notify: &Arc<Notify>,
+    duration: Duration,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => shutdown.load(Ordering::Relaxed),
+        _ = shutdown_notify.notified() => shutdown.load(Ordering::Relaxed),
+    }
+}
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = "signal", task = name, error = %error, "Signal channel task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = "signal", task = name, "Signal channel task did not drain before timeout; aborted");
+        }
     }
 }
 

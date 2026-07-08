@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use thinclaw_agent::loop_control::{LoopKind, LoopRunSummary, LoopStopReason};
 use thinclaw_agent::prompt_assembly::{
     SUBAGENT_AVAILABLE_SKILL_INSTRUCTION, render_skill_sections,
 };
@@ -70,6 +71,7 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
+use crate::observability::{NoopObserver, Observer, ObserverMetric};
 use crate::safety::SafetyLayer;
 use crate::skills::{LoadedSkill, SkillRegistry, prefilter_skills};
 use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
@@ -211,6 +213,8 @@ pub struct SubagentExecutor {
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
     /// Optional skills config for deterministic skill prefiltering.
     skills_config: Option<SkillsConfig>,
+    /// Shared observability sink for subagent loop lifecycle metrics.
+    observer: Arc<dyn Observer>,
 }
 
 impl SubagentExecutor {
@@ -241,6 +245,7 @@ impl SubagentExecutor {
             workspace: None,
             skill_registry: None,
             skills_config: None,
+            observer: Arc::new(NoopObserver),
         };
         (executor, result_rx)
     }
@@ -287,6 +292,12 @@ impl SubagentExecutor {
     ) -> Self {
         self.skill_registry = Some(skill_registry);
         self.skills_config = Some(skills_config);
+        self
+    }
+
+    /// Set the shared observer so sub-agent loops emit lifecycle metrics.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = observer;
         self
     }
 
@@ -502,6 +513,7 @@ impl SubagentExecutor {
         let sse_tx_for_task = self.sse_tx.clone();
         let cost_tracker_for_task = self.cost_tracker.clone();
         let cost_guard_for_task = self.cost_guard.clone();
+        let observer_for_task = Arc::clone(&self.observer);
 
         // Emit SubagentSpawned event
         let _ = channels
@@ -526,6 +538,7 @@ impl SubagentExecutor {
         let active_for_task = self.active.clone();
         let join_handle = tokio::spawn(async move {
             let start = Instant::now();
+            observer_for_task.record_metric(&ObserverMetric::LoopStarted(LoopKind::Subagent));
             let (activity_tx, activity_rx) = watch::channel(Instant::now());
             let store_for_subagent_loop = store_for_task.clone();
             let cancel_watch_outer = cancel_rx.clone();
@@ -582,15 +595,18 @@ impl SubagentExecutor {
 
             let duration_ms = start.elapsed().as_millis() as u64;
 
-            let subagent_result = match result {
-                Ok(Ok((response, iterations))) => subagent_result_from_completion(
-                    id,
-                    agent_name.clone(),
-                    duration_ms,
-                    SubagentCompletionOutcome::Success {
-                        response,
-                        iterations,
-                    },
+            let (subagent_result, loop_stop_reason) = match result {
+                Ok(Ok((response, iterations))) => (
+                    subagent_result_from_completion(
+                        id,
+                        agent_name.clone(),
+                        duration_ms,
+                        SubagentCompletionOutcome::Success {
+                            response,
+                            iterations,
+                        },
+                    ),
+                    LoopStopReason::Completed,
                 ),
                 Ok(Err(e)) => {
                     // A cancel signal makes the loop exit with an error; report
@@ -600,15 +616,37 @@ impl SubagentExecutor {
                     } else {
                         SubagentCompletionOutcome::Error(e.to_string())
                     };
-                    subagent_result_from_completion(id, agent_name.clone(), duration_ms, outcome)
+                    let stop_reason = if *cancel_watch_outer.borrow() {
+                        LoopStopReason::Cancelled
+                    } else {
+                        LoopStopReason::FatalError
+                    };
+                    (
+                        subagent_result_from_completion(
+                            id,
+                            agent_name.clone(),
+                            duration_ms,
+                            outcome,
+                        ),
+                        stop_reason,
+                    )
                 }
-                Err(_timeout) => subagent_result_from_completion(
-                    id,
-                    agent_name.clone(),
-                    duration_ms,
-                    SubagentCompletionOutcome::TimedOut,
+                Err(_timeout) => (
+                    subagent_result_from_completion(
+                        id,
+                        agent_name.clone(),
+                        duration_ms,
+                        SubagentCompletionOutcome::TimedOut,
+                    ),
+                    LoopStopReason::WallTimeBudgetExceeded,
                 ),
             };
+            observer_for_task.record_metric(&ObserverMetric::LoopRun(LoopRunSummary::new(
+                LoopKind::Subagent,
+                loop_stop_reason,
+                subagent_result.iterations,
+                0,
+            )));
 
             let _ = channels
                 .send_status(

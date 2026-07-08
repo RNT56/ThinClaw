@@ -1,4 +1,8 @@
 use super::*;
+use thinclaw_agent::loop_control::{LoopKind, LoopStopReason};
+
+use crate::observability::LoopMetricGuard;
+
 impl Agent {
     /// Run the agentic loop: call LLM, execute tools, repeat until text response.
     ///
@@ -143,6 +147,8 @@ impl Agent {
         let max_tool_iterations = self.config.max_tool_iterations;
         let iteration_policy = IterationLimitPolicy::new(max_tool_iterations);
         let mut iteration = 0;
+        let mut loop_metrics =
+            LoopMetricGuard::start(Arc::clone(self.observer()), LoopKind::AgentDispatcher);
 
         // Store the original LLM so we can restore it when the override is reset.
         let original_llm = reasoning.current_llm();
@@ -164,10 +170,12 @@ impl Agent {
 
         loop {
             iteration += 1;
+            loop_metrics.set_iterations(iteration);
             // Hard ceiling one past the forced-text iteration (should never be reached
             // since the iteration policy forces a text response, but kept as a safety net).
             let iteration_decision = iteration_policy.decision_for(iteration);
             if let Some(reason) = iteration_decision.abort_reason {
+                loop_metrics.stop_with(LoopStopReason::IterationBudgetExceeded);
                 return Err(crate::error::LlmError::InvalidResponse {
                     provider: "agent".to_string(),
                     reason,
@@ -259,6 +267,7 @@ impl Agent {
                         .collect::<Vec<_>>();
 
                     if partial_output.is_empty() {
+                        loop_metrics.stop_with(LoopStopReason::Interrupted);
                         return Err(crate::error::JobError::ContextError {
                             id: thread_id,
                             reason: "Interrupted".to_string(),
@@ -274,6 +283,7 @@ impl Agent {
                         iteration - 1,
                         parts.join("\n\n")
                     );
+                    loop_metrics.stop_with(LoopStopReason::Interrupted);
                     return Ok(AgenticLoopResult::Response(
                         thinclaw_agent::submission::AgentResponsePayload::text(partial),
                     )
@@ -355,6 +365,7 @@ impl Agent {
                     let flush_result = tokio::select! {
                         biased;
                         _ = self.wait_for_turn_cancellation(thread_id) => {
+                            loop_metrics.stop_with(LoopStopReason::Interrupted);
                             return Err(Self::turn_interrupted_error(thread_id));
                         }
                         result = reasoning.respond_with_tools(&flush_ctx) => result
@@ -733,6 +744,7 @@ impl Agent {
                                     tracing::warn!(
                                         "Tool-phase synthesis was enabled without a cheap_llm handle; returning primary response"
                                     );
+                                    loop_metrics.stop_with(LoopStopReason::Completed);
                                     return Ok(AgenticLoopResult::Response(
                                         thinclaw_agent::submission::AgentResponsePayload::text(
                                             text,
@@ -779,6 +791,7 @@ impl Agent {
                                         if synthesis_finish_reason
                                             == crate::llm::FinishReason::Stop =>
                                     {
+                                        loop_metrics.stop_with(LoopStopReason::Completed);
                                         return Ok(self
                                             .agentic_result_from_text(
                                                 synthesis_streamed_text,
@@ -794,6 +807,7 @@ impl Agent {
                                             text_len = text.len(),
                                             "Tool-phase synthesis produced non-final text"
                                         );
+                                        loop_metrics.stop_with(LoopStopReason::Completed);
                                         return Ok(AgenticLoopResult::Response(
                                             thinclaw_agent::submission::AgentResponsePayload::text(
                                                 finalization_failure_response(
@@ -807,6 +821,7 @@ impl Agent {
                                         tracing::warn!(
                                             "Tool-phase synthesis unexpectedly returned tool calls"
                                         );
+                                        loop_metrics.stop_with(LoopStopReason::Completed);
                                         return Ok(AgenticLoopResult::Response(
                                             thinclaw_agent::submission::AgentResponsePayload::text(
                                                 finalization_failure_response(
@@ -819,11 +834,13 @@ impl Agent {
                                 }
                             }
                             ToolPhaseTextOutcome::PrimaryFinalText => {
+                                loop_metrics.stop_with(LoopStopReason::Completed);
                                 return Ok(self
                                     .agentic_result_from_text(phase_one_streamed_text, text)
                                     .with_generated_attachments(&turn.generated_attachments));
                             }
                             ToolPhaseTextOutcome::PrimaryNeedsFinalization => {
+                                loop_metrics.stop_with(LoopStopReason::Completed);
                                 return Ok(self
                                     .finalize_primary_text_only(
                                         &mut reasoning,
@@ -865,6 +882,7 @@ impl Agent {
                         continue;
                     }
 
+                    loop_metrics.stop_with(LoopStopReason::Completed);
                     return Ok(self
                         .agentic_result_from_text(phase_one_streamed_text, text)
                         .with_generated_attachments(&turn.generated_attachments));
@@ -924,6 +942,7 @@ impl Agent {
                             turn.context_messages
                                 .push(ChatMessage::system(STUCK_LOOP_FINALIZATION_PROMPT));
 
+                            loop_metrics.stop_with(LoopStopReason::Completed);
                             return Ok(self
                                 .finalize_primary_text_only(
                                     &mut reasoning,
@@ -973,6 +992,7 @@ impl Agent {
                         )
                         .await?
                     {
+                        loop_metrics.stop_with(LoopStopReason::Completed);
                         return Ok(result.with_generated_attachments(&turn.generated_attachments));
                     }
                 }

@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 use crate::llm::costs;
 
@@ -234,10 +235,29 @@ pub async fn sync_once(db: Option<&dyn crate::db::Database>) -> bool {
 pub fn spawn_pricing_sync(
     db: Option<std::sync::Arc<dyn crate::db::Database>>,
 ) -> tokio::task::JoinHandle<()> {
+    let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+    spawn_pricing_sync_with_shutdown(db, shutdown_rx)
+}
+
+/// Spawn the background pricing sync task with cooperative shutdown.
+///
+/// The task exits before the next long sleep when `shutdown_rx` resolves. If a
+/// fetch is in flight, shutdown races that fetch so app teardown does not have
+/// to wait on OpenRouter network I/O.
+pub fn spawn_pricing_sync_with_shutdown(
+    db: Option<std::sync::Arc<dyn crate::db::Database>>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Step 1: Try loading from DB cache for instant startup pricing
         if let Some(ref db) = db
-            && let Some(cache) = load_cache_from_db(db.as_ref()).await
+            && let Some(cache) = tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("Pricing sync stopped before loading DB cache");
+                    return;
+                }
+                cache = load_cache_from_db(db.as_ref()) => cache,
+            }
         {
             let fetched_at = chrono::DateTime::parse_from_rfc3339(&cache.fetched_at)
                 .ok()
@@ -248,15 +268,33 @@ pub fn spawn_pricing_sync(
 
         // Step 2: Fetch fresh pricing from OpenRouter
         let db_ref = db.as_deref();
-        sync_once(db_ref).await;
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                tracing::info!("Pricing sync stopped before initial fetch");
+                return;
+            }
+            _ = sync_once(db_ref) => {}
+        }
 
         // Step 3: Refresh every 24 hours
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
         interval.tick().await; // skip the immediate first tick (already did sync above)
 
         loop {
-            interval.tick().await;
-            sync_once(db_ref).await;
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("Pricing sync stopped");
+                    break;
+                }
+                _ = interval.tick() => {}
+            }
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("Pricing sync stopped before scheduled fetch");
+                    break;
+                }
+                _ = sync_once(db_ref) => {}
+            }
         }
     })
 }
@@ -306,5 +344,19 @@ mod tests {
         let restored = from_cache(&cache);
         assert_eq!(restored.len(), 1);
         assert!(restored.contains_key("good-model"));
+    }
+
+    #[tokio::test]
+    async fn test_pricing_sync_with_shutdown_exits_before_fetch() {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        shutdown_tx
+            .send(())
+            .expect("pricing sync receiver should still exist");
+
+        let handle = spawn_pricing_sync_with_shutdown(None, shutdown_rx);
+        tokio::time::timeout(std::time::Duration::from_millis(250), handle)
+            .await
+            .expect("pricing sync should stop promptly")
+            .expect("pricing sync task should not panic");
     }
 }

@@ -213,6 +213,30 @@ impl RoutineStorePort for RootRoutineStorePort {
             .await
     }
 
+    async fn dead_letter_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.inner
+            .dead_letter_routine_event(id, processed_at, error_message, diagnostics)
+            .await
+    }
+
+    async fn replay_routine_event(
+        &self,
+        id: Uuid,
+        user_id: &str,
+        actor_id: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<Option<RoutineEvent>, DatabaseError> {
+        self.inner
+            .replay_routine_event(id, user_id, actor_id, diagnostics)
+            .await
+    }
+
     async fn list_routine_events_for_actor(
         &self,
         user_id: &str,

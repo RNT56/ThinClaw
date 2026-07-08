@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use thinclaw_channels_core::{
@@ -218,7 +220,11 @@ impl From<StatusUpdate> for TuiUpdate {
 }
 
 pub trait TuiRuntime: Send + Sync + 'static {
-    fn start(&self, outgoing_tx: mpsc::Sender<TuiEvent>, incoming_rx: mpsc::Receiver<TuiUpdate>);
+    fn start(
+        &self,
+        outgoing_tx: mpsc::Sender<TuiEvent>,
+        incoming_rx: mpsc::Receiver<TuiUpdate>,
+    ) -> JoinHandle<()>;
 }
 
 pub struct TuiChannel {
@@ -227,7 +233,12 @@ pub struct TuiChannel {
     event_rx: Mutex<Option<mpsc::Receiver<TuiEvent>>>,
     update_tx: mpsc::Sender<TuiUpdate>,
     update_rx: Mutex<Option<mpsc::Receiver<TuiUpdate>>>,
+    shutdown_notify: Arc<Notify>,
+    forwarder_task: Mutex<Option<JoinHandle<()>>>,
+    runtime_task: Mutex<Option<JoinHandle<()>>>,
 }
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl TuiChannel {
     pub fn new(runtime: Arc<dyn TuiRuntime>) -> Self {
@@ -239,6 +250,9 @@ impl TuiChannel {
             event_rx: Mutex::new(Some(event_rx)),
             update_tx,
             update_rx: Mutex::new(Some(update_rx)),
+            shutdown_notify: Arc::new(Notify::new()),
+            forwarder_task: Mutex::new(None),
+            runtime_task: Mutex::new(None),
         }
     }
 
@@ -283,12 +297,24 @@ impl Channel for TuiChannel {
                     reason: "TUI update stream has already been started".to_string(),
                 })?;
 
-        self.runtime.start(self.event_tx.clone(), update_rx);
+        if let Some(handle) = self.runtime_task.lock().await.take() {
+            drain_channel_task(handle, "tui-runtime").await;
+        }
+        let runtime_handle = self.runtime.start(self.event_tx.clone(), update_rx);
+        *self.runtime_task.lock().await = Some(runtime_handle);
 
         let (msg_tx, msg_rx) = mpsc::channel(64);
-        tokio::spawn(async move {
+        let shutdown_notify = Arc::clone(&self.shutdown_notify);
+        let handle = tokio::spawn(async move {
             let mut sent_shutdown = false;
-            while let Some(event) = event_rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    event = event_rx.recv() => event,
+                    _ = shutdown_notify.notified() => None,
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 let content = match event {
                     TuiEvent::UserMessage(text) => text,
                     TuiEvent::Abort => "/interrupt".to_string(),
@@ -313,6 +339,7 @@ impl Channel for TuiChannel {
                     .await;
             }
         });
+        *self.forwarder_task.lock().await = Some(handle);
 
         Ok(Box::pin(ReceiverStream::new(msg_rx)))
     }
@@ -354,7 +381,29 @@ impl Channel for TuiChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
+        self.shutdown_notify.notify_waiters();
+        if let Some(handle) = self.forwarder_task.lock().await.take() {
+            drain_channel_task(handle, "tui").await;
+        }
+        if let Some(handle) = self.runtime_task.lock().await.take() {
+            drain_channel_task(handle, "tui-runtime").await;
+        }
         Ok(())
+    }
+}
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = name, error = %error, "channel forwarder task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = name, "channel forwarder task did not drain before timeout; aborted");
+        }
     }
 }
 

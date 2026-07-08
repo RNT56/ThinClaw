@@ -148,7 +148,7 @@ impl Store {
                             OR (claimed_at IS NOT NULL AND claimed_at < $1)
                         )
                    )
-                ORDER BY created_at ASC
+                ORDER BY attempt_count ASC, created_at ASC
                 LIMIT $2
                 "#,
                 &[&stale_before, &limit],
@@ -214,6 +214,69 @@ impl Store {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn dead_letter_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE routine_event_inbox
+            SET status = 'dead_lettered',
+                processed_at = $2,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                error_message = $3,
+                diagnostics = $4
+            WHERE id = $1
+            "#,
+            &[&id, &processed_at, &error_message, diagnostics],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn replay_routine_event(
+        &self,
+        id: Uuid,
+        user_id: &str,
+        actor_id: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<Option<RoutineEvent>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                WITH replayed AS (
+                    UPDATE routine_event_inbox
+                    SET status = 'pending',
+                        diagnostics = $4,
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL,
+                        processed_at = NULL,
+                        error_message = NULL,
+                        matched_routines = 0,
+                        fired_routines = 0,
+                        attempt_count = 0
+                    WHERE id = $1
+                      AND principal_id = $2
+                      AND actor_id = $3
+                      AND status IN ('failed', 'dead_lettered')
+                    RETURNING *
+                )
+                SELECT * FROM replayed
+                "#,
+                &[&id, &user_id, &actor_id, diagnostics],
+            )
+            .await?;
+        row.map(|row| row_to_routine_event(&row)).transpose()
     }
 
     pub async fn list_routine_events_for_actor(

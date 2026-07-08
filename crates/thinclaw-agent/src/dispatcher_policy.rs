@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use thinclaw_llm_core::{ChatMessage, FinishReason, Role, ToolCall, turn_analysis::TurnAwareness};
 
+use crate::loop_control::{LoopBudget, LoopKind, LoopRunSummary, LoopStopReason};
+
 pub const TOOL_RESULT_KEEP_TURNS: usize = 3;
 pub const STUCK_WARN_THRESHOLD: u32 = 3;
 pub const STUCK_FORCE_THRESHOLD: u32 = 5;
@@ -165,6 +167,14 @@ impl IterationLimitPolicy {
             inject_nudge: iteration == self.nudge_at,
             force_text: iteration >= self.force_text_at,
         }
+    }
+
+    pub fn stop_reason_for(self, iteration: usize) -> Option<LoopStopReason> {
+        LoopBudget::iterations(self.max_tool_iterations + 1).iteration_stop_reason(iteration)
+    }
+
+    pub fn run_summary(self, stop_reason: LoopStopReason, iterations: usize) -> LoopRunSummary {
+        LoopRunSummary::new(LoopKind::AgentDispatcher, stop_reason, iterations, 0)
     }
 }
 
@@ -610,6 +620,19 @@ mod tests {
         assert_eq!(
             policy.decision_for(6).abort_reason.as_deref(),
             Some("Exceeded maximum tool iterations (4)")
+        );
+        assert_eq!(
+            policy.stop_reason_for(6),
+            Some(LoopStopReason::IterationBudgetExceeded)
+        );
+        assert_eq!(
+            policy
+                .run_summary(LoopStopReason::IterationBudgetExceeded, 6)
+                .labels(),
+            [
+                ("loop", "agent_dispatcher"),
+                ("stop_reason", "iteration_budget_exceeded")
+            ]
         );
     }
 

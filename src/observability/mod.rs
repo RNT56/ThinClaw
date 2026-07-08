@@ -20,7 +20,7 @@ pub mod traits;
 pub use self::log::LogObserver;
 pub use self::noop::NoopObserver;
 pub use self::prometheus::PrometheusObserver;
-pub use self::traits::{Observer, ObserverEvent, ObserverMetric};
+pub use self::traits::{LoopMetricGuard, LoopPhaseRun, Observer, ObserverEvent, ObserverMetric};
 
 /// Configuration for the observability backend.
 #[derive(Debug, Clone)]
