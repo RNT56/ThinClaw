@@ -45,6 +45,13 @@ use thinclaw::setup::SetupWizard;
 
 use super::*;
 
+mod runtime_maintenance;
+
+use runtime_maintenance::{
+    RuntimeHotReloadWatchers, RuntimeMaintenanceTask, shutdown_runtime_maintenance,
+    start_cost_persistence, start_experiment_loops, start_pricing_sync,
+};
+
 pub(crate) async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let command_intent = runtime_command_intent(cli.command.as_ref());
@@ -68,6 +75,10 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         Some(Command::RepoProjects(rp_cmd)) => {
             init_cli_tracing(cli.debug);
             return thinclaw::cli::run_repo_projects_command(rp_cmd.clone()).await;
+        }
+        Some(Command::Backup(backup_cmd)) => {
+            init_cli_tracing(cli.debug);
+            return thinclaw::cli::run_backup_command(backup_cmd.clone()).await;
         }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -362,10 +373,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
     let flags = AppBuilderFlags { no_db: cli.no_db };
-    // `mut` only under `voice` so the host can take the constructed voice-wake
-    // runtime out of `components` (F-18); split to avoid an unused-mut warning on
-    // non-voice builds.
-    #[cfg(feature = "voice")]
     let mut components = AppBuilder::new(
         config,
         flags,
@@ -374,15 +381,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     )
     .build_all()
     .await?;
-    #[cfg(not(feature = "voice"))]
-    let components = AppBuilder::new(
-        config,
-        flags,
-        toml_path.map(std::path::PathBuf::from),
-        Arc::clone(&log_broadcaster),
-    )
-    .build_all()
-    .await?;
+    let oauth_credential_sync = components.oauth_credential_sync.take();
 
     if let Some(db) = components.db.clone() {
         thinclaw::tauri_commands::configure_routing_persistence(
@@ -902,6 +901,9 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             subscription_id: gmail_config.subscription_id.clone(),
             topic_id: gmail_config.topic_id.clone(),
             oauth_token: gmail_config.oauth_token.clone(),
+            refresh_token: gmail_config.refresh_token.clone(),
+            client_id: gmail_config.client_id.clone(),
+            client_secret: gmail_config.client_secret.clone(),
             allowed_senders: gmail_config.allowed_senders.clone(),
             label_filters: gmail_config.label_filters.clone(),
             max_message_size_bytes: gmail_config.max_message_size_bytes,
@@ -922,9 +924,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                         "Gmail channel has empty allowed_senders list — ALL incoming emails will be processed."
                     );
                 }
-                if gmail_config.oauth_token.is_none() {
+                if gmail_config.oauth_token.is_none() && gmail_config.refresh_token.is_none() {
                     tracing::warn!(
-                        "Gmail channel has no OAuth token. Run `thinclaw auth gmail` to authenticate."
+                        "Gmail channel has no OAuth token. Authenticate via the ThinClaw Desktop \
+                         Gmail setup, or set GMAIL_OAUTH_TOKEN (and GMAIL_REFRESH_TOKEN / \
+                         GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET for unattended auto-refresh)."
                     );
                 }
             }
@@ -1075,6 +1079,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let shared_db = components.db.clone();
     let shared_secrets_store = components.secrets_store.clone();
     let inject_sender = channels.inject_sender();
+    let mut maintenance_tasks = Vec::new();
 
     // F-18: start the headless voice-wake runtime (constructed in build_all) and
     // route detected utterances into the agent. On a wake word we capture +
@@ -1085,8 +1090,19 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     if let Some(mut wake_runtime) = components.voice_wake.take() {
         if let Some(mut wake_events) = wake_runtime.take_events() {
             let voice_inject = inject_sender.clone();
-            tokio::spawn(async move {
-                while let Some(event) = wake_events.recv().await {
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+            let handle = tokio::spawn(async move {
+                loop {
+                    let event = tokio::select! {
+                        _ = &mut shutdown_rx => {
+                            tracing::debug!("Voice wake event consumer stopped");
+                            break;
+                        }
+                        event = wake_events.recv() => event,
+                    };
+                    let Some(event) = event else {
+                        break;
+                    };
                     match event {
                         thinclaw::voice_wake::VoiceWakeEvent::WakeWordDetected {
                             confidence,
@@ -1125,6 +1141,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                     }
                 }
                 tracing::debug!("Voice wake event consumer exited");
+            });
+            maintenance_tasks.push(RuntimeMaintenanceTask {
+                name: "voice_wake_forwarder",
+                shutdown_tx,
+                handle,
             });
         }
         match wake_runtime.start().await {
@@ -1217,6 +1238,9 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         gw = gw.with_cost_tracker(Arc::clone(&components.cost_tracker));
+        if let Some(ref registry) = components.metrics_registry {
+            gw = gw.with_metrics_registry(Arc::clone(registry));
+        }
         gw = gw.with_response_cache(Arc::clone(&components.response_cache));
         gw = gw.with_hooks(Arc::clone(&components.hooks));
         if let Some(ref ss) = components.secrets_store {
@@ -1241,10 +1265,32 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             if let Some(ref tx) = job_event_tx {
                 let mut rx = tx.subscribe();
                 let gw_state = Arc::clone(gw.state());
-                tokio::spawn(async move {
-                    while let Ok((_job_id, event)) = rx.recv().await {
-                        gw_state.sse.broadcast(event);
+                let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+                let handle = tokio::spawn(async move {
+                    loop {
+                        let event = tokio::select! {
+                            _ = &mut shutdown_rx => {
+                                tracing::debug!("Docker job-event SSE forwarder stopped");
+                                break;
+                            }
+                            received = rx.recv() => received,
+                        };
+                        match event {
+                            Ok((_job_id, event)) => gw_state.sse.broadcast(event),
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!(
+                                    skipped,
+                                    "Docker job-event SSE forwarder lagged behind"
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
                     }
+                });
+                maintenance_tasks.push(RuntimeMaintenanceTask {
+                    name: "docker_job_event_sse_forwarder",
+                    shutdown_tx,
+                    handle,
                 });
             }
         }
@@ -1401,6 +1447,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // Clone the SSE sender for the routine engine before the extension manager consumes it.
     let routine_sse_sender = sse_sender.clone();
+    let mut hot_reload_watchers = RuntimeHotReloadWatchers::default();
 
     if let Some(ref runtime) = components.wasm_tool_runtime {
         let mut loader = thinclaw::tools::wasm::WasmToolLoader::new(
@@ -1428,6 +1475,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         tracing::info!(
             "WASM tool hot-reload watcher started (new/modified/deleted tools auto-detected)"
         );
+        hot_reload_watchers.tool = Some(tool_watcher);
     }
 
     if let Some(ref skill_registry) = components.skill_registry {
@@ -1437,16 +1485,24 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         tracing::info!(
             "Skill hot-reload watcher started (new/modified/deleted SKILL.md files auto-detected)"
         );
+        hot_reload_watchers.skill = Some(skill_watcher);
     }
 
     // ── SIGHUP hot-reload handler (Unix only) ──────────────────────────
     #[cfg(unix)]
-    spawn_sighup_reload_handler(
-        webhook_server.clone(),
-        components.db.as_ref().map(Arc::clone),
-        components.secrets_store.clone(),
-        "default".to_string(),
-    );
+    {
+        let (shutdown_tx, handle) = spawn_sighup_reload_handler(
+            webhook_server.clone(),
+            components.db.as_ref().map(Arc::clone),
+            components.secrets_store.clone(),
+            "default".to_string(),
+        );
+        maintenance_tasks.push(RuntimeMaintenanceTask {
+            name: "sighup_reload_handler",
+            shutdown_tx,
+            handle,
+        });
+    }
 
     // ── WASM channel hot-reload watcher ─────────────────────────────────
     if let Some((loader, channels_dir, wasm_router)) = wasm_watcher_state {
@@ -1465,7 +1521,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         tracing::info!(
             "WASM channel hot-reload watcher started (new/modified/deleted .wasm files auto-detected)"
         );
-        // Watcher runs until the process exits (task is aborted on shutdown).
+        hot_reload_watchers.channel = Some(watcher);
     }
 
     // Wire SSE sender into channel manager for ChannelStatusChange events.
@@ -1489,6 +1545,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             channels.clone(),
             thinclaw::agent::SubagentConfig {
                 default_tool_profile: config.agent.subagent_tool_profile,
+                max_per_principal: config.agent.subagent_max_per_principal,
                 ..thinclaw::agent::SubagentConfig::default()
             },
         );
@@ -1512,6 +1569,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                 executor.with_skill_registry(Arc::clone(skill_registry), config.skills.clone());
         }
         executor = executor.with_cost_tracker(Arc::clone(&components.cost_tracker));
+        executor = executor.with_observer(Arc::clone(&components.observer));
+        // Same guard instance as the main dispatcher loop: sub-agent work now
+        // draws down (and is blocked by) the operator's daily-budget and
+        // hourly-rate limits instead of bypassing them.
+        executor = executor.with_cost_guard(Arc::clone(&components.cost_guard));
 
         let executor = std::sync::Arc::new(executor);
         thinclaw::api::experiments::register_experiment_subagent_executor(std::sync::Arc::clone(
@@ -1525,8 +1587,19 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         let inject_tx = channels.inject_sender();
         let db_for_subagent_results = components.db.as_ref().map(Arc::clone);
 
-        tokio::spawn(async move {
-            while let Some(msg) = result_rx.recv().await {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            loop {
+                let msg = tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::debug!("Sub-agent result injection forwarder stopped");
+                        break;
+                    }
+                    msg = result_rx.recv() => msg,
+                };
+                let Some(msg) = msg else {
+                    break;
+                };
                 let summary = if msg.result.success {
                     msg.result.response.clone()
                 } else {
@@ -1586,6 +1659,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                         .await;
                 }
             }
+        });
+        maintenance_tasks.push(RuntimeMaintenanceTask {
+            name: "subagent_result_forwarder",
+            shutdown_tx,
+            handle,
         });
 
         // Register sub-agent tools with the executor
@@ -1666,10 +1744,13 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // ── Background maintenance loops ─────────────────────────────────
     // Periodic cost persistence, per-token pricing sync, and (when enabled)
-    // the experiment controller/reaper — each self-contained and fire-and-forget.
-    start_cost_persistence(&components.db, &components.cost_tracker);
-    start_pricing_sync(&components.db);
-    start_experiment_loops(&components.db, &config);
+    // the experiment controller/reaper. Each returns an owned shutdown handle
+    // so runtime teardown can drain the loop before final persistence flushes.
+    if let Some(task) = start_cost_persistence(&components.db, &components.cost_tracker) {
+        maintenance_tasks.push(task);
+    }
+    maintenance_tasks.push(start_pricing_sync(&components.db));
+    maintenance_tasks.extend(start_experiment_loops(&components.db, &config));
 
     // Clone handles for the shutdown flush (before components are moved into deps).
     let shutdown_db = components.db.as_ref().map(Arc::clone);
@@ -1754,9 +1835,15 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         *gw_state.scheduler.write().await = Some(Arc::clone(agent.scheduler()));
     }
 
-    agent.run().await?;
+    let agent_result = agent.run().await;
+    hot_reload_watchers.stop().await;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+    shutdown_runtime_maintenance(maintenance_tasks).await;
+    if let Some(handle) = oauth_credential_sync {
+        handle.shutdown().await;
+    }
+    agent_result?;
 
     // Final cost flush — captures any entries since the last periodic flush.
     if let Some(ref db) = shutdown_db {
@@ -1813,82 +1900,4 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Spawn the periodic cost-tracker persistence loop (flushes to the DB every
-/// 60s so cost data survives restarts). Fire-and-forget; no-op without a DB.
-fn start_cost_persistence(
-    db: &Option<Arc<dyn thinclaw::db::Database>>,
-    cost_tracker: &Arc<tokio::sync::Mutex<thinclaw::llm::cost_tracker::CostTracker>>,
-) {
-    if let Some(db) = db {
-        let persistence_plan = PeriodicPersistencePlan::cost_entries();
-        let persist_db = Arc::clone(db);
-        let persist_tracker = Arc::clone(cost_tracker);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(persistence_plan.interval);
-            interval.tick().await; // skip the initial immediate tick
-            let mut last_count: usize = 0;
-            loop {
-                interval.tick().await;
-                let (snapshot, count) = {
-                    let guard = persist_tracker.lock().await;
-                    (guard.to_json(), guard.entry_count())
-                };
-                // Only write when new entries have been recorded.
-                if count != last_count {
-                    match persist_db
-                        .set_setting("default", persistence_plan.setting_key, &snapshot)
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::debug!("[cost] Persisted {} cost entries to DB", count);
-                            last_count = count;
-                        }
-                        Err(e) => {
-                            tracing::warn!("[cost] Failed to persist cost entries: {}", e);
-                        }
-                    }
-                }
-            }
-        });
-        tracing::info!("Cost persistence background task started (60s interval)");
-    }
-}
-
-/// Spawn the background pricing sync (loads the DB cache for instant
-/// availability, then refreshes from OpenRouter every 24h).
-fn start_pricing_sync(db: &Option<Arc<dyn thinclaw::db::Database>>) {
-    let pricing_db = db.as_ref().map(Arc::clone);
-    thinclaw::llm::pricing_sync::spawn_pricing_sync(pricing_db);
-    tracing::info!("Pricing sync background task started (24h interval)");
-}
-
-/// Spawn the experiment controller reconciler + artifact reaper when experiments
-/// are enabled; otherwise log that they are off.
-fn start_experiment_loops(db: &Option<Arc<dyn thinclaw::db::Database>>, config: &Config) {
-    if config.experiments.enabled {
-        if let Some(db) = db.as_ref().cloned() {
-            let experiments_db = Arc::clone(&db);
-            tokio::spawn(async move {
-                thinclaw::api::experiments::start_experiment_controller_loop(experiments_db).await;
-            });
-            tracing::info!("Experiment controller reconciler started (periodic cadence)");
-
-            let reaper_db = Arc::clone(&db);
-            let retention_days = config.experiments.default_artifact_retention_days;
-            tokio::spawn(async move {
-                thinclaw::api::experiments::start_experiment_artifact_reaper_loop(
-                    reaper_db,
-                    retention_days,
-                )
-                .await;
-            });
-            tracing::info!(
-                "Experiment artifact reaper started (daily cadence, retention {retention_days}d)"
-            );
-        }
-    } else {
-        tracing::info!("Experiment controller not started because experiments are disabled.");
-    }
 }

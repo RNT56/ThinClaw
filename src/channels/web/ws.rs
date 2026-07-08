@@ -722,6 +722,7 @@ mod tests {
             channel_manager: None,
             hooks: None,
             cost_tracker: None,
+            metrics_registry: None,
             response_cache: None,
         }
     }

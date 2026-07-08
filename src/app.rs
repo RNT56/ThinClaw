@@ -108,6 +108,9 @@ pub struct AppComponents {
     /// Observability backend selected by the operator (wizard/config). Defaults
     /// to a no-op observer; `OBSERVABILITY_BACKEND=log` emits structured events.
     pub observer: Arc<dyn crate::observability::Observer>,
+    /// Concrete Prometheus registry handle, present only when the observability
+    /// backend is `prometheus`. Shared with the gateway to serve `/metrics`.
+    pub metrics_registry: Option<Arc<crate::observability::PrometheusObserver>>,
     /// Headless voice-wake runtime, constructed (not yet started) when the
     /// `voice` feature is built and `THINCLAW_VOICE_WAKE` is set (F-18). The host
     /// (`main.rs`) starts it and consumes wake events once the channel inject
@@ -947,6 +950,12 @@ impl AppBuilder {
             // code — the signature-checked dlopen only happens on explicit activation).
             let _ = manager.register_native_plugins_from_allowlist().await;
 
+            // Background MCP health monitor: probes active servers, persists
+            // McpRuntimeHealth, and auto-reconnects crashed stdio servers.
+            manager
+                .start_mcp_health_monitor(std::time::Duration::from_secs(30))
+                .await;
+
             Some(manager)
         };
 
@@ -1685,7 +1694,30 @@ impl AppBuilder {
         // Construct the operator-selected observability backend and record a
         // startup event so the choice (wizard Step 18 / OBSERVABILITY_BACKEND)
         // has an observable effect. NoopObserver discards it at zero cost.
-        let observer = crate::observability::create_observer(&self.config.observability);
+        // For the Prometheus backend build the concrete observer so the same
+        // registry can be both written to (as `Arc<dyn Observer>`) and scraped
+        // by the gateway `/metrics` route.
+        let (observer, metrics_registry): (
+            Arc<dyn crate::observability::Observer>,
+            Option<Arc<crate::observability::PrometheusObserver>>,
+        ) = if self.config.observability.is_prometheus() {
+            let prom = crate::observability::create_prometheus_observer();
+            prom.set_start_time(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            );
+            (
+                Arc::clone(&prom) as Arc<dyn crate::observability::Observer>,
+                Some(prom),
+            )
+        } else {
+            (
+                crate::observability::create_observer(&self.config.observability),
+                None,
+            )
+        };
         observer.record_event(&crate::observability::ObserverEvent::AgentStart {
             provider: self.config.llm.backend.to_string(),
             model: llm.model_name().to_string(),
@@ -1729,6 +1761,7 @@ impl AppBuilder {
             ))),
             routing_policy: Arc::clone(&llm_runtime.routing_policy),
             observer,
+            metrics_registry,
             #[cfg(feature = "voice")]
             voice_wake,
         })

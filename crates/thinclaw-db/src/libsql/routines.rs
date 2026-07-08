@@ -767,7 +767,7 @@ impl RoutineStore for LibSqlBackend {
                                 OR (claimed_at IS NOT NULL AND claimed_at < ?2)
                             )
                         )
-                     ORDER BY created_at ASC
+                     ORDER BY attempt_count ASC, created_at ASC
                      LIMIT ?3",
                     ROUTINE_EVENT_COLUMNS
                 ),
@@ -846,6 +846,94 @@ impl RoutineStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn dead_letter_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            r#"
+                UPDATE routine_event_inbox
+                SET status = 'dead_lettered',
+                    processed_at = ?2,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    lease_expires_at = NULL,
+                    error_message = ?3,
+                    diagnostics = ?4
+                WHERE id = ?1
+            "#,
+            params![
+                id.to_string(),
+                fmt_ts(&processed_at),
+                error_message,
+                diagnostics.to_string()
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn replay_routine_event(
+        &self,
+        id: Uuid,
+        user_id: &str,
+        actor_id: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<Option<RoutineEvent>, DatabaseError> {
+        let conn = self.connect().await?;
+        let count = conn
+            .execute(
+                r#"
+                    UPDATE routine_event_inbox
+                    SET status = 'pending',
+                        diagnostics = ?4,
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL,
+                        processed_at = NULL,
+                        error_message = NULL,
+                        matched_routines = 0,
+                        fired_routines = 0,
+                        attempt_count = 0
+                    WHERE id = ?1
+                      AND principal_id = ?2
+                      AND actor_id = ?3
+                      AND status IN ('failed', 'dead_lettered')
+                "#,
+                params![id.to_string(), user_id, actor_id, diagnostics.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if count == 0 {
+            return Ok(None);
+        }
+
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {} FROM routine_event_inbox WHERE id = ?1 LIMIT 1",
+                    ROUTINE_EVENT_COLUMNS
+                ),
+                params![id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        row_to_routine_event_libsql(&row).map(Some)
     }
 
     async fn list_routine_events_for_actor(

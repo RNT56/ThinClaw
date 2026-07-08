@@ -474,6 +474,80 @@ async fn outcome_contract_flow_contract() {
 }
 
 #[tokio::test]
+async fn outcome_contract_claims_are_idempotent_under_parallel_workers() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+    let user = fixtures::user("outcome_parallel_claim_user");
+    let now = chrono::Utc::now();
+    let mut inserted_ids = std::collections::BTreeSet::new();
+
+    for index in 0..6 {
+        let mut contract = fixtures::outcome_contract(&user);
+        contract.source_id = Uuid::new_v4().to_string();
+        contract.dedupe_key = format!("outcome-parallel-claim-{index}-{}", Uuid::new_v4());
+        contract.due_at = now - chrono::Duration::seconds(1);
+        contract.expires_at = now + chrono::Duration::hours(72);
+        let contract_id = ctx
+            .db
+            .insert_outcome_contract(&contract)
+            .await
+            .expect("insert_outcome_contract should succeed");
+        inserted_ids.insert(contract_id);
+    }
+
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        let db = Arc::clone(&ctx.db);
+        let user = user.clone();
+        workers.push(tokio::spawn(async move {
+            db.claim_due_outcome_contracts_for_user(&user, 3, chrono::Utc::now())
+                .await
+                .expect("parallel claim_due_outcome_contracts_for_user should succeed")
+        }));
+    }
+
+    let mut claimed_ids = Vec::new();
+    for worker in workers {
+        for contract in worker.await.expect("parallel claim task should join") {
+            assert_eq!(
+                contract.user_id, user,
+                "parallel scoped claims must not leak other users"
+            );
+            claimed_ids.push(contract.id);
+        }
+    }
+    let raced_unique: std::collections::BTreeSet<_> = claimed_ids.iter().copied().collect();
+    assert_eq!(
+        raced_unique.len(),
+        claimed_ids.len(),
+        "parallel outcome workers must not claim the same contract twice"
+    );
+
+    let follow_up = ctx
+        .db
+        .claim_due_outcome_contracts_for_user(&user, 10, chrono::Utc::now())
+        .await
+        .expect("follow-up claim_due_outcome_contracts_for_user should succeed");
+    claimed_ids.extend(follow_up.into_iter().map(|contract| contract.id));
+    let all_unique: std::collections::BTreeSet<_> = claimed_ids.iter().copied().collect();
+    assert_eq!(
+        all_unique, inserted_ids,
+        "parallel plus follow-up claims should drain every due contract exactly once"
+    );
+
+    let final_claim = ctx
+        .db
+        .claim_due_outcome_contracts_for_user(&user, 10, chrono::Utc::now())
+        .await
+        .expect("final claim_due_outcome_contracts_for_user should succeed");
+    assert!(
+        final_claim.is_empty(),
+        "no due contracts should remain after the batch has been claimed"
+    );
+}
+
+#[tokio::test]
 async fn manual_outcome_review_reuses_learning_event_in_ledger() {
     let Some(ctx) = contract_db_or_skip().await else {
         return;

@@ -17,13 +17,15 @@ pub fn health_response() -> HealthResponse {
 ///
 /// Pure so the readiness contract is unit-testable without constructing the full
 /// gateway runtime state. Returns `200 healthy` only when the database is
-/// reachable *and* at least one LLM provider is configured; otherwise `503
+/// reachable, at least one LLM provider is configured, *and* the gateway's
+/// inbound message channel is wired to the agent runtime; otherwise `503
 /// unhealthy`, so load balancers stop routing to an instance that cannot serve.
 pub fn readiness_response(
     db_ready: bool,
     provider_configured: bool,
+    channel_ready: bool,
 ) -> (StatusCode, HealthResponse) {
-    if db_ready && provider_configured {
+    if db_ready && provider_configured && channel_ready {
         (
             StatusCode::OK,
             HealthResponse {
@@ -165,6 +167,9 @@ pub struct GmailSetupStatusInput {
     pub subscription_id: Option<String>,
     pub topic_id: Option<String>,
     pub oauth_token: Option<String>,
+    /// True when refresh credentials (refresh_token + client_id + client_secret)
+    /// are configured, so the channel can self-refresh without an OAuth token.
+    pub refresh_ready: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,7 +244,10 @@ pub fn build_gmail_setup_status(input: GmailSetupStatusInput) -> PartialChannelS
         }
     }
 
-    let needs_oauth = input.enabled && missing_fields.is_empty() && input.oauth_token.is_none();
+    let needs_oauth = input.enabled
+        && missing_fields.is_empty()
+        && input.oauth_token.is_none()
+        && !input.refresh_ready;
 
     PartialChannelSetupStatus {
         enabled: input.enabled,
@@ -709,21 +717,28 @@ mod tests {
 
     #[test]
     fn readiness_503_when_db_down() {
-        let (code, body) = readiness_response(false, true);
+        let (code, body) = readiness_response(false, true, true);
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "unhealthy");
     }
 
     #[test]
     fn readiness_503_when_no_provider() {
-        let (code, body) = readiness_response(true, false);
+        let (code, body) = readiness_response(true, false, true);
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "unhealthy");
+    }
+
+    #[test]
+    fn readiness_503_when_channel_not_wired() {
+        let (code, body) = readiness_response(true, true, false);
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "unhealthy");
     }
 
     #[test]
     fn readiness_200_when_all_ready() {
-        let (code, body) = readiness_response(true, true);
+        let (code, body) = readiness_response(true, true, true);
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body.status, "healthy");
     }
@@ -871,11 +886,30 @@ mod tests {
             subscription_id: Some("subscription".to_string()),
             topic_id: Some("topic".to_string()),
             oauth_token: None,
+            refresh_ready: false,
         });
 
         assert!(status.enabled);
         assert!(!status.configured);
         assert!(status.needs_oauth);
+        assert!(status.missing_fields.is_empty());
+    }
+
+    #[test]
+    fn gmail_status_refresh_only_is_configured_without_oauth_token() {
+        let status = build_gmail_setup_status(GmailSetupStatusInput {
+            enabled: true,
+            project_id: Some("project".to_string()),
+            subscription_id: Some("subscription".to_string()),
+            topic_id: Some("topic".to_string()),
+            oauth_token: None,
+            refresh_ready: true,
+        });
+
+        // Refresh credentials mean the channel self-refreshes: no OAuth needed,
+        // and it should report as configured.
+        assert!(!status.needs_oauth);
+        assert!(status.configured);
         assert!(status.missing_fields.is_empty());
     }
 
@@ -887,6 +921,7 @@ mod tests {
             subscription_id: Some("subscription".to_string()),
             topic_id: None,
             oauth_token: Some(String::new()),
+            refresh_ready: false,
         });
 
         assert!(status.enabled);

@@ -9,6 +9,8 @@ use thinclaw_types::{
 };
 use uuid::Uuid;
 
+use crate::loop_control::{LoopBudget, LoopKind, LoopRunSummary, LoopStopReason};
+
 pub const SUBAGENT_MAX_ITERATIONS: usize = 30;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 pub const DEFAULT_MAX_CONCURRENT: usize = 5;
@@ -17,8 +19,15 @@ pub const SUBAGENT_PROGRESS_PREVIEW_MAX: usize = 80;
 /// Configuration for the sub-agent system.
 #[derive(Debug, Clone)]
 pub struct SubagentConfig {
-    /// Maximum number of concurrent sub-agents.
+    /// Maximum number of concurrent sub-agents across the whole process.
     pub max_concurrent: usize,
+    /// Maximum concurrent sub-agents attributable to a single principal.
+    ///
+    /// `0` means "no per-principal limit" (global cap only) — the historical
+    /// behavior, and the right default for a single-operator deployment. On a
+    /// shared/multi-user gateway, set this below `max_concurrent` so one
+    /// principal's burst of spawns cannot starve every other principal.
+    pub max_per_principal: usize,
     /// Default timeout for sub-agents in seconds.
     pub default_timeout_secs: u64,
     /// Whether sub-agents can spawn other sub-agents.
@@ -33,6 +42,7 @@ impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
             max_concurrent: DEFAULT_MAX_CONCURRENT,
+            max_per_principal: 0,
             default_timeout_secs: DEFAULT_TIMEOUT_SECS,
             allow_nested: false,
             max_tool_iterations: SUBAGENT_MAX_ITERATIONS,
@@ -162,8 +172,14 @@ pub struct SubagentSystemPromptSections<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentConcurrency {
+    /// Total sub-agents running across the whole process.
     pub running: usize,
+    /// Global concurrency ceiling.
     pub max_concurrent: usize,
+    /// Sub-agents currently attributed to the spawning principal.
+    pub principal_running: usize,
+    /// Per-principal ceiling. `0` disables the per-principal check.
+    pub max_per_principal: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,10 +189,29 @@ pub enum SubagentSpawnAdmission {
 }
 
 impl SubagentConcurrency {
+    /// Global-only admission (no per-principal scoping).
     pub fn new(running: usize, max_concurrent: usize) -> Self {
         Self {
             running,
             max_concurrent,
+            principal_running: 0,
+            max_per_principal: 0,
+        }
+    }
+
+    /// Admission with an additional per-principal ceiling. `max_per_principal`
+    /// of `0` behaves exactly like [`SubagentConcurrency::new`].
+    pub fn with_principal_scope(
+        running: usize,
+        max_concurrent: usize,
+        principal_running: usize,
+        max_per_principal: usize,
+    ) -> Self {
+        Self {
+            running,
+            max_concurrent,
+            principal_running,
+            max_per_principal,
         }
     }
 
@@ -191,14 +226,27 @@ impl SubagentConcurrency {
         )
     }
 
+    /// Reason returned when the spawning principal has hit its own ceiling
+    /// while the global pool still has room.
+    pub fn principal_rejection_reason(self) -> String {
+        format!(
+            "Per-principal sub-agent limit reached ({}/{}); other principals still have capacity",
+            self.principal_running, self.max_per_principal
+        )
+    }
+
     pub fn admission(self) -> SubagentSpawnAdmission {
-        if self.running < self.max_concurrent {
-            SubagentSpawnAdmission::Admitted
-        } else {
-            SubagentSpawnAdmission::Rejected {
+        if self.running >= self.max_concurrent {
+            return SubagentSpawnAdmission::Rejected {
                 reason: self.rejection_reason(),
-            }
+            };
         }
+        if self.max_per_principal > 0 && self.principal_running >= self.max_per_principal {
+            return SubagentSpawnAdmission::Rejected {
+                reason: self.principal_rejection_reason(),
+            };
+        }
+        SubagentSpawnAdmission::Admitted
     }
 }
 
@@ -422,8 +470,23 @@ pub fn should_force_subagent_text(iteration: usize, max_iterations: usize) -> bo
     iteration >= max_iterations.saturating_sub(2)
 }
 
+pub fn subagent_iteration_stop_reason(
+    iteration: usize,
+    max_iterations: usize,
+) -> Option<LoopStopReason> {
+    LoopBudget::iterations(max_iterations).iteration_stop_reason(iteration)
+}
+
 pub fn subagent_iteration_limit_reason(max_iterations: usize) -> String {
     format!("Exceeded maximum iterations ({})", max_iterations)
+}
+
+pub fn subagent_loop_summary(
+    stop_reason: LoopStopReason,
+    iterations: usize,
+    retries: u32,
+) -> LoopRunSummary {
+    LoopRunSummary::new(LoopKind::Subagent, stop_reason, iterations, retries)
 }
 
 pub fn subagent_job_metadata(input: SubagentJobMetadataInput<'_>) -> serde_json::Value {
@@ -1154,6 +1217,14 @@ mod tests {
         assert!(should_force_subagent_text(28, 30));
         assert!(should_force_subagent_text(0, 0));
         assert_eq!(
+            subagent_iteration_stop_reason(31, 30),
+            Some(LoopStopReason::IterationBudgetExceeded)
+        );
+        assert_eq!(
+            subagent_loop_summary(LoopStopReason::Cancelled, 3, 0).labels(),
+            [("loop", "subagent"), ("stop_reason", "cancelled")]
+        );
+        assert_eq!(
             subagent_iteration_limit_reason(30),
             "Exceeded maximum iterations (30)"
         );
@@ -1226,6 +1297,36 @@ mod tests {
             SubagentStatus::TimedOut
         );
         assert_eq!(subagent_routine_completion(&timeout).summary, "Timed out");
+    }
+
+    #[test]
+    fn subagent_per_principal_admission_reserves_capacity_for_others() {
+        // Global pool has room (3/8) but this principal has already hit its own
+        // ceiling (2/2): reject so other principals aren't starved.
+        let scoped = SubagentConcurrency::with_principal_scope(3, 8, 2, 2);
+        assert_eq!(
+            scoped.admission(),
+            SubagentSpawnAdmission::Rejected {
+                reason:
+                    "Per-principal sub-agent limit reached (2/2); other principals still have capacity"
+                        .to_string()
+            }
+        );
+
+        // Same global state, but the principal is under its ceiling: admit.
+        assert!(SubagentConcurrency::with_principal_scope(3, 8, 1, 2).allows_spawn());
+
+        // The global cap still dominates even when the principal has headroom.
+        assert_eq!(
+            SubagentConcurrency::with_principal_scope(8, 8, 0, 2).admission(),
+            SubagentSpawnAdmission::Rejected {
+                reason: "Maximum concurrent sub-agents reached (8/8)".to_string()
+            }
+        );
+
+        // max_per_principal == 0 disables the per-principal check entirely
+        // (single-operator default behavior is unchanged).
+        assert!(SubagentConcurrency::with_principal_scope(3, 8, 99, 0).allows_spawn());
     }
 
     #[test]

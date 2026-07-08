@@ -164,6 +164,12 @@ impl AcpConnectionState {
         self.core.has_pending_permission(session_id).await
     }
 
+    async fn clear_pending_permissions_for_session(&self, session_id: &str) {
+        self.core
+            .clear_pending_permissions_for_session(session_id)
+            .await;
+    }
+
     async fn insert_pending_client_request(
         &self,
         request_id: String,
@@ -1371,7 +1377,17 @@ async fn handle_prompt(
             }
             Err(_) => {
                 state.mark_cancelled(&request.session_id).await;
-                interrupt_acp_session(agent, state, &request.session_id).await;
+                let _ = state.take_prompt_waiter(&request.session_id).await;
+                state
+                    .clear_pending_permissions_for_session(&request.session_id)
+                    .await;
+                let interrupt_agent = Arc::clone(&agent);
+                let interrupt_state = Arc::clone(state);
+                let interrupt_session_id = request.session_id.clone();
+                tokio::spawn(async move {
+                    interrupt_acp_session(interrupt_agent, &interrupt_state, &interrupt_session_id)
+                        .await;
+                });
                 state.clear_cancelled(&request.session_id).await;
                 return Ok(prompt_response(wire::StopReason::Cancelled));
             }

@@ -267,6 +267,13 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub gateway_auth_token: Option<String>,
 
+    /// Extra Web Gateway RBAC principals (each a token + role) layered on top of
+    /// the primary `gateway_auth_token`, which always has admin rights. Empty by
+    /// default, so RBAC is inactive unless the operator adds principals. Can also
+    /// be supplied at runtime via the `GATEWAY_PRINCIPALS` env var (JSON array).
+    #[serde(default)]
+    pub gateway_principals: Vec<GatewayPrincipalConfig>,
+
     /// Whether the interactive CLI/REPL channel is enabled.
     #[serde(default)]
     pub cli_enabled: Option<bool>,
@@ -348,6 +355,7 @@ impl Default for ChannelSettings {
             gateway_host: None,
             gateway_port: None,
             gateway_auth_token: None,
+            gateway_principals: Vec::new(),
             cli_enabled: None,
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,

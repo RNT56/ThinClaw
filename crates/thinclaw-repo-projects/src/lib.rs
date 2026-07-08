@@ -438,6 +438,14 @@ pub struct RepoWebhookDelivery {
     pub repository_full_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installation_id: Option<i64>,
+    /// Original GitHub webhook request body encoded as base64. Older delivery
+    /// records may not have this field; replay falls back to the derived
+    /// metadata above for those records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_payload_base64: Option<String>,
+    /// Original `X-Hub-Signature-256` header, retained for operator audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_header: Option<String>,
     pub received_at: DateTime<Utc>,
 }
 

@@ -7,6 +7,7 @@ use thinclaw_types::JobState;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::loop_control::{LoopBudget, LoopKind, LoopRunSummary, LoopStopReason};
 use crate::routine::RunStatus;
 
 pub fn touch_worker_activity(activity_tx: &watch::Sender<Instant>) {
@@ -98,7 +99,11 @@ pub const WORKER_TOOL_KEEPALIVE_SECS: u64 = 15;
 pub const WORKER_TASK_FAILED_DURING_EXECUTION_REASON: &str = "Task failed during execution";
 
 pub fn capped_worker_iterations(requested: Option<u64>, default_value: usize) -> usize {
-    (requested.unwrap_or(default_value as u64) as usize).min(MAX_WORKER_ITERATIONS)
+    LoopBudget::capped_iterations(requested, default_value, MAX_WORKER_ITERATIONS)
+}
+
+pub fn worker_loop_budget(max_iterations: usize) -> LoopBudget {
+    LoopBudget::iterations(max_iterations)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +158,22 @@ pub fn metadata_string_list(metadata: &serde_json::Value, key: &str) -> Option<V
 }
 
 pub fn worker_iteration_exceeded(iteration: usize, max_iterations: usize) -> bool {
-    iteration > max_iterations
+    worker_iteration_stop_reason(iteration, max_iterations).is_some()
+}
+
+pub fn worker_iteration_stop_reason(
+    iteration: usize,
+    max_iterations: usize,
+) -> Option<LoopStopReason> {
+    worker_loop_budget(max_iterations).iteration_stop_reason(iteration)
+}
+
+pub fn worker_loop_summary(
+    stop_reason: LoopStopReason,
+    iterations: usize,
+    retries: u32,
+) -> LoopRunSummary {
+    LoopRunSummary::new(LoopKind::Worker, stop_reason, iterations, retries)
 }
 
 pub fn should_nudge_worker(iteration: usize) -> bool {
@@ -539,6 +559,14 @@ mod tests {
     fn worker_loop_iteration_policy_matches_legacy_boundaries() {
         assert!(!worker_iteration_exceeded(50, 50));
         assert!(worker_iteration_exceeded(51, 50));
+        assert_eq!(
+            worker_iteration_stop_reason(51, 50),
+            Some(LoopStopReason::IterationBudgetExceeded)
+        );
+        assert_eq!(
+            worker_loop_summary(LoopStopReason::Completed, 7, 0).labels(),
+            [("loop", "worker"), ("stop_reason", "completed")]
+        );
         assert!(!should_nudge_worker(8));
         assert!(should_nudge_worker(10));
         assert!(!should_nudge_worker(11));

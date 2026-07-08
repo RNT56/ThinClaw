@@ -66,6 +66,7 @@ async fn start_test_server() -> (
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,
+        metrics_registry: None,
         response_cache: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
@@ -77,7 +78,7 @@ async fn start_test_server() -> (
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string(), vec![])
+    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string(), vec![], vec![])
         .await
         .expect("Failed to start test server");
 

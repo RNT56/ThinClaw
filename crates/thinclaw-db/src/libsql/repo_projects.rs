@@ -379,6 +379,28 @@ impl RepoProjectStore for LibSqlBackend {
         Ok(count > 0)
     }
 
+    async fn get_repo_webhook_delivery(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<RepoWebhookDelivery>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT data FROM repo_webhook_deliveries WHERE delivery_id = ?1 LIMIT 1",
+                params![delivery_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        row_json_to(&row, 0).map(Some)
+    }
+
     async fn list_repo_webhook_deliveries(
         &self,
         limit: i64,
@@ -722,6 +744,8 @@ mod tests {
             action: Some("opened".to_string()),
             repository_full_name: Some("owner/repo".to_string()),
             installation_id: Some(42),
+            raw_payload_base64: None,
+            signature_header: None,
             received_at: ts(0),
         };
         assert!(
@@ -745,6 +769,19 @@ mod tests {
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].event, "pull_request");
         assert_eq!(deliveries[0].installation_id, Some(42));
+        let loaded = backend
+            .get_repo_webhook_delivery("delivery-1")
+            .await
+            .expect("get delivery")
+            .expect("delivery should exist");
+        assert_eq!(loaded, delivery);
+        assert!(
+            backend
+                .get_repo_webhook_delivery("missing-delivery")
+                .await
+                .expect("get missing delivery")
+                .is_none()
+        );
 
         // Project run upsert + status update round trip.
         let project_id = Uuid::new_v4();

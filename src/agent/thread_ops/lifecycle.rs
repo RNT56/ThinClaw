@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::Agent;
+use crate::agent::checkpoint;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::session::Session;
 use crate::agent::submission::SubmissionResult;
@@ -44,9 +45,13 @@ impl Agent {
         action: UndoRedoAction,
     ) -> Result<SubmissionResult, Error> {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        let mut mgr = undo_mgr.lock().await;
-
+        // Lock ordering: session BEFORE undo manager, matching the hot turn
+        // path in thread_ops/input.rs. The reverse order here would create an
+        // AB-BA deadlock with a concurrent chat turn on the same thread (the
+        // Tauri desktop surface dispatches commands and messages without
+        // per-thread serialization).
         let mut sess = session.lock().await;
+        let mut mgr = undo_mgr.lock().await;
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -68,7 +73,7 @@ impl Agent {
                 // Row-count watermark for the thread as it stands *after*
                 // the mutation above, so hydration truncates DB history to
                 // match what was just restored in memory.
-                let active_message_row_count = thread.messages().len() as i64;
+                let active_message_row_count = thread.persisted_message_count() as i64;
                 drop(sess);
                 self.clear_thread_runtime_transients(thread_id).await;
                 self.persist_active_watermark_and_undo_stack(
@@ -87,6 +92,182 @@ impl Agent {
         match thinclaw_agent::thread_ops::undo_redo_message(action, &outcome) {
             ThreadOperationMessage::Ok(message) => Ok(SubmissionResult::ok_with_message(message)),
             ThreadOperationMessage::Error(message) => Ok(SubmissionResult::error(message)),
+        }
+    }
+
+    /// `/rewind` — unified conversation + filesystem rewind to an earlier turn.
+    ///
+    /// With no args or `list`, this is a **dry run**: it prints the available
+    /// rewind targets (conversation checkpoints and turn-tagged filesystem
+    /// checkpoints) and mutates nothing. With a turn number, it restores the
+    /// conversation to the start of that turn (via the undo manager) and, when
+    /// filesystem checkpoints are enabled, restores files to the matching
+    /// turn-tagged checkpoint.
+    pub(in crate::agent) async fn process_rewind(
+        &self,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        args: &[String],
+    ) -> Result<SubmissionResult, Error> {
+        let sub = args.first().map(|s| s.trim()).unwrap_or("");
+
+        // List / dry-run: no mutation.
+        if sub.is_empty() || sub.eq_ignore_ascii_case("list") {
+            return Ok(SubmissionResult::response(
+                self.rewind_list_text(thread_id).await,
+            ));
+        }
+
+        let Some(target_turn) = sub.parse::<usize>().ok() else {
+            return Ok(SubmissionResult::error(
+                "Usage: /rewind <turn-number>  |  /rewind list",
+            ));
+        };
+
+        // ── Conversation restore (precise, via the undo manager) ──
+        // Lock ordering: session before undo manager (see process_undo_or_redo).
+        let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
+        let mut sess = session.lock().await;
+        let mut mgr = undo_mgr.lock().await;
+        let restored = {
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            match thinclaw_agent::thread_ops::restore_thread_to_turn(thread, &mut mgr, target_turn)
+            {
+                Some(info) => {
+                    let usage_percent = self
+                        .effective_context_monitor()
+                        .usage_percent(&thread.messages());
+                    let active_message_row_count = thread.persisted_message_count() as i64;
+                    Some((info, usage_percent, active_message_row_count))
+                }
+                None => None,
+            }
+        };
+        // Release the session lock before the async persistence tail.
+        drop(sess);
+        let restored = match restored {
+            Some((info, usage_percent, active_message_row_count)) => {
+                self.clear_thread_runtime_transients(thread_id).await;
+                self.persist_active_watermark_and_undo_stack(
+                    thread_id,
+                    active_message_row_count,
+                    &mgr,
+                )
+                .await;
+                self.record_context_pressure_state(thread_id, usage_percent)
+                    .await;
+                Some(info)
+            }
+            None => None,
+        };
+        drop(mgr);
+
+        let Some((turn, _description)) = restored else {
+            return Ok(SubmissionResult::error(format!(
+                "No conversation checkpoint for turn {target_turn}. Run `/rewind list` to see \
+                 available rewind points."
+            )));
+        };
+
+        // ── Filesystem restore (best-effort, turn-tagged) ──
+        let file_note = self.rewind_files_to_turn(thread_id, turn).await;
+
+        Ok(SubmissionResult::ok_with_message(format!(
+            "Rewound the conversation to the start of turn {turn}.{file_note}"
+        )))
+    }
+
+    /// Render the `/rewind list` dry-run report.
+    async fn rewind_list_text(&self, thread_id: Uuid) -> String {
+        let mut out = String::from("Rewind targets\n\n");
+
+        let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
+        let turns = undo_mgr.lock().await.checkpoint_turns();
+        if turns.is_empty() {
+            out.push_str("Conversation: no rewind points yet.\n");
+        } else {
+            out.push_str("Conversation (turn — snapshot):\n");
+            for (turn, description) in &turns {
+                out.push_str(&format!("  {turn} — {description}\n"));
+            }
+        }
+
+        out.push('\n');
+        if !self.config.checkpoints_enabled {
+            out.push_str("Filesystem checkpoints: disabled in settings.\n");
+        } else {
+            let fallback_root = self
+                .config
+                .workspace_root
+                .clone()
+                .or_else(|| std::env::current_dir().ok());
+            match checkpoint::resolve_thread_root(&thread_id.to_string(), fallback_root.as_deref())
+            {
+                Some(project_root) => match checkpoint::list_checkpoints(&project_root).await {
+                    Ok(entries) if !entries.is_empty() => {
+                        out.push_str("Filesystem (turn — commit — summary):\n");
+                        for entry in entries.iter().take(15) {
+                            let turn = entry
+                                .turn
+                                .map(|t| t.to_string())
+                                .unwrap_or_else(|| "—".to_string());
+                            let short = &entry.commit_hash[..entry.commit_hash.len().min(8)];
+                            out.push_str(&format!("  {turn} — {short} — {}\n", entry.summary));
+                        }
+                    }
+                    _ => out.push_str("Filesystem checkpoints: none yet.\n"),
+                },
+                None => out.push_str("Filesystem checkpoints: project root unresolved.\n"),
+            }
+        }
+
+        out.push_str("\nRun `/rewind <turn>` to restore both conversation and files to that turn.");
+        out
+    }
+
+    /// Restore files to the newest turn-tagged checkpoint at or before `turn`.
+    /// Returns a human-readable note to append to the command reply.
+    async fn rewind_files_to_turn(&self, thread_id: Uuid, turn: usize) -> String {
+        if !self.config.checkpoints_enabled {
+            return String::new();
+        }
+        let fallback_root = self
+            .config
+            .workspace_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        let Some(project_root) =
+            checkpoint::resolve_thread_root(&thread_id.to_string(), fallback_root.as_deref())
+        else {
+            return String::new();
+        };
+        let entries = match checkpoint::list_checkpoints(&project_root).await {
+            Ok(entries) => entries,
+            Err(_) => return String::new(),
+        };
+        // Entries are newest-first; the first with a turn tag <= target is the
+        // closest file state at or before that turn.
+        let Some(entry) = entries.iter().find(|e| e.turn.is_some_and(|t| t <= turn)) else {
+            return " No matching filesystem checkpoint for that turn (files unchanged)."
+                .to_string();
+        };
+        let short = &entry.commit_hash[..entry.commit_hash.len().min(8)];
+        match checkpoint::restore_with_scope(
+            &thread_id.to_string(),
+            &project_root,
+            &entry.commit_hash,
+            None,
+        )
+        .await
+        {
+            Ok(()) => format!(
+                " Restored files to checkpoint {short} (turn {}).",
+                entry.turn.map(|t| t.to_string()).unwrap_or_default()
+            ),
+            Err(e) => format!(" (file restore failed: {e})"),
         }
     }
 
@@ -246,7 +427,7 @@ impl Agent {
             .usage_percent(&thread.messages());
         // /clear empties the in-memory thread, so the watermark drops to 0:
         // hydration must not resurrect the cleared DB rows after a restart.
-        let active_message_row_count = thread.messages().len() as i64;
+        let active_message_row_count = thread.persisted_message_count() as i64;
         let mut session_extract_artifact = crate::agent::AgentRunArtifact::new(
             "thread_clear",
             crate::agent::AgentRunStatus::Completed,
@@ -342,10 +523,11 @@ impl Agent {
         checkpoint_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
+        // Lock ordering: session before undo manager (see process_undo_or_redo).
+        let mut sess = session.lock().await;
         let mut mgr = undo_mgr.lock().await;
 
         let outcome = {
-            let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
@@ -358,8 +540,10 @@ impl Agent {
             // Row-count watermark for the thread as it stands *after* the
             // checkpoint restore above, so hydration truncates DB history to
             // match what /resume just restored in memory.
-            description.map(|description| (description, thread.messages().len() as i64))
+            description.map(|description| (description, thread.persisted_message_count() as i64))
         };
+        // Release the session lock before the async persistence tail.
+        drop(sess);
 
         if let Some((description, active_message_row_count)) = outcome {
             self.clear_thread_runtime_transients(thread_id).await;

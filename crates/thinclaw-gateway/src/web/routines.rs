@@ -246,6 +246,7 @@ pub struct RoutineEventActivityInput {
     pub processed_at: Option<DateTime<Utc>>,
     pub matched_routines: u32,
     pub fired_routines: u32,
+    pub attempt_count: u32,
     pub error_message: Option<String>,
     pub diagnostics: serde_json::Value,
 }
@@ -262,6 +263,7 @@ pub fn routine_event_activity_info(input: RoutineEventActivityInput) -> RoutineE
         processed_at: input.processed_at.map(|ts| ts.to_rfc3339()),
         matched_routines: input.matched_routines,
         fired_routines: input.fired_routines,
+        attempt_count: input.attempt_count,
         error_message: input.error_message,
         diagnostics: input.diagnostics,
     }
@@ -974,6 +976,7 @@ mod tests {
             processed_at: Some(completed_at),
             matched_routines: 2,
             fired_routines: 1,
+            attempt_count: 3,
             error_message: None,
             diagnostics: serde_json::json!({"source": "test"}),
         });
@@ -983,6 +986,7 @@ mod tests {
             event.processed_at.as_deref(),
             Some("2026-06-02T10:05:00+00:00")
         );
+        assert_eq!(event.attempt_count, 3);
     }
 
     #[test]

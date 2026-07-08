@@ -168,6 +168,7 @@ async fn start_ui_gateway(
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,
+        metrics_registry: None,
         response_cache: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
@@ -179,7 +180,7 @@ async fn start_ui_gateway(
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("valid bind addr");
-    start_server(addr, state, AUTH_TOKEN.to_string(), vec![]).await
+    start_server(addr, state, AUTH_TOKEN.to_string(), vec![], vec![]).await
 }
 
 async fn eval_value(page: &Page, expression: &str) -> Value {

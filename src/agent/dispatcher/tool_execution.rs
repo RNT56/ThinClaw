@@ -109,6 +109,23 @@ impl Agent {
             None => std::collections::HashSet::new(),
         };
 
+        // Plan mode: when on, every state-changing (non-read) tool the model
+        // proposes is escalated to require operator approval, even tools that
+        // would normally run without one — so the agent proposes and the
+        // operator confirms. Read the flag once for this batch.
+        let plan_mode = {
+            let sess = session.lock().await;
+            sess.threads
+                .get(&thread_id)
+                .map(|thread| thread.plan_mode)
+                .unwrap_or(false)
+        };
+
+        // Argument-scoped tool policies (e.g. allow `shell` only for `npm run *`,
+        // deny `http` to internal hosts). Loaded once and applied to each call's
+        // final (post-hook) arguments below.
+        let arg_tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
+
         for (idx, original_tc) in tool_calls.iter().enumerate() {
             let mut tc = original_tc.clone();
 
@@ -164,15 +181,33 @@ impl Agent {
                 _ => {}
             }
 
+            // Argument-scoped policy on the final (post-hook) arguments:
+            // `Deny` blocks the call outright; `RequireApproval` escalates it.
+            let arg_decision = arg_tool_policies.evaluate_arg_policy(&tc.name, &tc.arguments);
+            if let crate::tools::policy::ArgPolicyDecision::Deny(reason) = &arg_decision {
+                preflight.push((tc, PreflightOutcome::Rejected(reason.clone())));
+                continue;
+            }
+            let arg_force_approval = matches!(
+                arg_decision,
+                crate::tools::policy::ArgPolicyDecision::RequireApproval
+            );
+
             // Check if tool requires approval on the final (post-hook)
             // parameters. When auto_approve_tools is set, auto-approve
             // everything EXCEPT ApprovalRequirement::Always (destructive
             // commands from NEVER_AUTO_APPROVE_PATTERNS like rm -rf,
             // DROP DATABASE, etc.) which always require human approval.
             if let Some(tool) = self.tools().get(&tc.name).await {
-                use crate::tools::ApprovalRequirement;
+                use crate::tools::{ApprovalRequirement, ToolSideEffectLevel};
                 let approval = tool.requires_approval(&tc.arguments);
-                let needs_approval = if self.config.auto_approve_tools {
+                // In plan mode, any non-read tool is proposed for approval
+                // regardless of its own approval class or auto-approve setting.
+                let mutating_in_plan_mode =
+                    plan_mode && tool.metadata().side_effect_level != ToolSideEffectLevel::Read;
+                let needs_approval = if mutating_in_plan_mode || arg_force_approval {
+                    true
+                } else if self.config.auto_approve_tools {
                     // Auto-approve mode: only block Always-approval
                     // tools (destructive shell commands, hardware access).
                     matches!(approval, ApprovalRequirement::Always)

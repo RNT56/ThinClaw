@@ -1,9 +1,10 @@
 //! Bounded reconcile loop scaffolding for the repo project supervisor.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use thinclaw_agent::loop_control::{LoopKind, LoopRunSummary, LoopStopReason};
 use thinclaw_repo_projects::{
     RepoProject, RepoProjectEvent, RepoProjectEventKind, RepoProjectRepo, RepoProjectRunState,
     RepoProjectState, RepoProjectTask, RepoProjectTaskState, validate_project_state_transition,
@@ -14,6 +15,7 @@ use uuid::Uuid;
 
 use crate::channels::web::types::SseEvent;
 use crate::db::Database;
+use crate::observability::{LoopPhaseRun, Observer, ObserverMetric};
 use crate::repo_projects::executor::RepoProjectExecutor;
 use crate::repo_projects::pipeline::{GitHubPipeline, PipelineOutcome};
 use crate::repo_projects::planner::RepoTaskPlanner;
@@ -44,6 +46,45 @@ pub enum RepoSupervisorDecision {
     AwaitingHuman { project_id: Uuid, reason: String },
     Blocked { project_id: Uuid, reason: String },
     Completed { project_id: Uuid },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoSupervisorPhase {
+    Recovery,
+    Reconcile,
+}
+
+impl RepoSupervisorPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Recovery => "recovery",
+            Self::Reconcile => "reconcile",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RepoSupervisorDecisionCounts {
+    total: usize,
+    idle: usize,
+    needs_planning: usize,
+    dispatch: usize,
+    wait_for_ci: usize,
+    awaiting_review: usize,
+    merged: usize,
+    awaiting_human: usize,
+    blocked: usize,
+    completed: usize,
+}
+
+impl RepoSupervisorDecisionCounts {
+    fn stop_reason(self) -> LoopStopReason {
+        if self.total == 0 || self.total == self.idle {
+            LoopStopReason::NoWork
+        } else {
+            LoopStopReason::Completed
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -925,33 +966,62 @@ pub async fn run_project_supervisor_loop(
     mut wake_rx: mpsc::Receiver<RepoSupervisorWake>,
     watchdog_interval: Duration,
     mut shutdown_rx: oneshot::Receiver<()>,
+    observer: Option<Arc<dyn Observer>>,
 ) {
     let mut watchdog = tokio::time::interval(watchdog_interval);
     watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Restart recovery: reconcile jobs that finished while we were down and
     // surface orphaned in-flight tasks before steady-state reconciliation.
+    trace_supervisor_phase_start(RepoSupervisorPhase::Recovery, None, None);
+    let recovery_started = Instant::now();
     if let Err(error) = store.recover().await {
+        trace_supervisor_phase_stop(
+            RepoSupervisorPhase::Recovery,
+            LoopStopReason::FatalError,
+            recovery_started.elapsed(),
+            RepoSupervisorDecisionCounts::default(),
+            1,
+            observer.as_ref(),
+        );
         tracing::warn!(error = %error, "repo project supervisor recovery failed");
+    } else {
+        trace_supervisor_phase_stop(
+            RepoSupervisorPhase::Recovery,
+            LoopStopReason::Completed,
+            recovery_started.elapsed(),
+            RepoSupervisorDecisionCounts::default(),
+            0,
+            observer.as_ref(),
+        );
     }
+
+    let mut reconciles = 0usize;
+    let mut errors = 0u32;
 
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
+                trace_supervisor_loop_stop(LoopStopReason::ExternalShutdown, reconciles, errors);
                 tracing::info!("repo project supervisor shutting down");
                 return;
             }
             _ = watchdog.tick() => {
-                if let Err(error) = reconcile_once(&store, None, RepoSupervisorWakeReason::Watchdog).await {
+                reconciles += 1;
+                if let Err(error) = reconcile_once(&store, None, RepoSupervisorWakeReason::Watchdog, observer.as_ref()).await {
+                    errors += 1;
                     tracing::warn!(error = %error, "repo project watchdog reconcile failed");
                 }
             }
             maybe_wake = wake_rx.recv() => {
                 let Some(wake) = maybe_wake else {
+                    trace_supervisor_loop_stop(LoopStopReason::ChannelClosed, reconciles, errors);
                     tracing::info!("repo project supervisor wake channel closed");
                     return;
                 };
-                if let Err(error) = reconcile_once(&store, wake.project_id, wake.reason).await {
+                reconciles += 1;
+                if let Err(error) = reconcile_once(&store, wake.project_id, wake.reason, observer.as_ref()).await {
+                    errors += 1;
                     tracing::warn!(error = %error, "repo project reconcile failed");
                 }
             }
@@ -959,16 +1029,132 @@ pub async fn run_project_supervisor_loop(
     }
 }
 
+fn trace_supervisor_loop_stop(stop_reason: LoopStopReason, reconciles: usize, errors: u32) {
+    let summary = LoopRunSummary::new(
+        LoopKind::RepoProjectSupervisor,
+        stop_reason,
+        reconciles,
+        errors,
+    );
+    tracing::info!(
+        loop_kind = summary.kind.as_str(),
+        stop_reason = summary.stop_reason.as_str(),
+        reconciles = summary.iterations,
+        errors = summary.retries,
+        "repo project supervisor loop stopped"
+    );
+}
+
 async fn reconcile_once(
     store: &Arc<dyn RepoSupervisorStore>,
     project_id: Option<Uuid>,
     reason: RepoSupervisorWakeReason,
+    observer: Option<&Arc<dyn Observer>>,
 ) -> Result<(), String> {
-    let decisions = store.reconcile_project(project_id, reason).await?;
+    trace_supervisor_phase_start(RepoSupervisorPhase::Reconcile, project_id, Some(&reason));
+    let started = Instant::now();
+    let decisions = match store.reconcile_project(project_id, reason).await {
+        Ok(decisions) => decisions,
+        Err(error) => {
+            trace_supervisor_phase_stop(
+                RepoSupervisorPhase::Reconcile,
+                LoopStopReason::FatalError,
+                started.elapsed(),
+                RepoSupervisorDecisionCounts::default(),
+                1,
+                observer,
+            );
+            return Err(error);
+        }
+    };
+    let counts = repo_supervisor_decision_counts(&decisions);
+    trace_supervisor_phase_stop(
+        RepoSupervisorPhase::Reconcile,
+        counts.stop_reason(),
+        started.elapsed(),
+        counts,
+        0,
+        observer,
+    );
     for decision in decisions {
         tracing::info!(?decision, "repo project supervisor decision");
     }
     Ok(())
+}
+
+fn trace_supervisor_phase_start(
+    phase: RepoSupervisorPhase,
+    project_id: Option<Uuid>,
+    reason: Option<&RepoSupervisorWakeReason>,
+) {
+    tracing::debug!(
+        loop_kind = LoopKind::RepoProjectSupervisor.as_str(),
+        phase = phase.as_str(),
+        project_id = ?project_id,
+        reason = ?reason,
+        "repo project supervisor phase started"
+    );
+}
+
+fn trace_supervisor_phase_stop(
+    phase: RepoSupervisorPhase,
+    stop_reason: LoopStopReason,
+    elapsed: Duration,
+    counts: RepoSupervisorDecisionCounts,
+    errors: u32,
+    observer: Option<&Arc<dyn Observer>>,
+) {
+    if let Some(observer) = observer {
+        observer.record_metric(&ObserverMetric::LoopPhaseRun(LoopPhaseRun::new(
+            LoopKind::RepoProjectSupervisor,
+            phase.as_str(),
+            stop_reason,
+            elapsed,
+            counts.total,
+            errors,
+        )));
+    }
+    tracing::info!(
+        loop_kind = LoopKind::RepoProjectSupervisor.as_str(),
+        phase = phase.as_str(),
+        stop_reason = stop_reason.as_str(),
+        elapsed_ms = elapsed.as_millis() as u64,
+        decisions = counts.total,
+        idle = counts.idle,
+        needs_planning = counts.needs_planning,
+        dispatch = counts.dispatch,
+        wait_for_ci = counts.wait_for_ci,
+        awaiting_review = counts.awaiting_review,
+        merged = counts.merged,
+        awaiting_human = counts.awaiting_human,
+        blocked = counts.blocked,
+        completed = counts.completed,
+        errors,
+        "repo project supervisor phase stopped"
+    );
+}
+
+fn repo_supervisor_decision_counts(
+    decisions: &[RepoSupervisorDecision],
+) -> RepoSupervisorDecisionCounts {
+    let mut counts = RepoSupervisorDecisionCounts {
+        total: decisions.len(),
+        ..RepoSupervisorDecisionCounts::default()
+    };
+    for decision in decisions {
+        match decision {
+            RepoSupervisorDecision::Idle => counts.idle += 1,
+            RepoSupervisorDecision::NeedsPlanning { .. } => counts.needs_planning += 1,
+            RepoSupervisorDecision::DispatchTask { .. } => counts.dispatch += 1,
+            RepoSupervisorDecision::WaitForCi { .. } => counts.wait_for_ci += 1,
+            RepoSupervisorDecision::AwaitingReview { .. } => counts.awaiting_review += 1,
+            RepoSupervisorDecision::Merged { .. } => counts.merged += 1,
+            RepoSupervisorDecision::AwaitingHuman { .. } => counts.awaiting_human += 1,
+            RepoSupervisorDecision::Blocked { .. } => counts.blocked += 1,
+            RepoSupervisorDecision::Completed { .. } => counts.completed += 1,
+        }
+    }
+    counts
 }
 
 fn state_label(state: RepoProjectState) -> &'static str {
@@ -1033,6 +1219,24 @@ mod tests {
     #[derive(Default)]
     struct TestStore {
         calls: Mutex<Vec<RepoSupervisorWakeReason>>,
+        recoveries: Mutex<usize>,
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        metrics: Mutex<Vec<ObserverMetric>>,
+    }
+
+    impl Observer for RecordingObserver {
+        fn record_event(&self, _event: &crate::observability::ObserverEvent) {}
+
+        fn record_metric(&self, metric: &ObserverMetric) {
+            self.metrics.lock().unwrap().push(metric.clone());
+        }
+
+        fn name(&self) -> &str {
+            "recording"
+        }
     }
 
     #[async_trait::async_trait]
@@ -1044,6 +1248,11 @@ mod tests {
         ) -> Result<Vec<RepoSupervisorDecision>, String> {
             self.calls.lock().unwrap().push(reason);
             Ok(vec![RepoSupervisorDecision::Idle])
+        }
+
+        async fn recover(&self) -> Result<(), String> {
+            *self.recoveries.lock().unwrap() += 1;
+            Ok(())
         }
     }
 
@@ -1057,5 +1266,125 @@ mod tests {
             .unwrap();
         let wake = rx.recv().await.unwrap();
         assert_eq!(wake.reason, RepoSupervisorWakeReason::Manual);
+    }
+
+    #[tokio::test]
+    async fn supervisor_loop_exits_when_wake_channel_closes() {
+        let store = Arc::new(TestStore::default());
+        let store_trait: Arc<dyn RepoSupervisorStore> = store.clone();
+        let (wake_tx, wake_rx) = mpsc::channel(1);
+        drop(wake_tx);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            run_project_supervisor_loop(
+                store_trait,
+                wake_rx,
+                Duration::from_secs(60),
+                shutdown_rx,
+                None,
+            ),
+        )
+        .await
+        .expect("supervisor loop should exit after wake channel closes");
+
+        assert_eq!(*store.recoveries.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn supervisor_loop_exits_on_shutdown_signal() {
+        let store = Arc::new(TestStore::default());
+        let store_trait: Arc<dyn RepoSupervisorStore> = store.clone();
+        let (_wake_tx, wake_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        shutdown_tx
+            .send(())
+            .expect("supervisor shutdown receiver should exist");
+
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            run_project_supervisor_loop(
+                store_trait,
+                wake_rx,
+                Duration::from_secs(60),
+                shutdown_rx,
+                None,
+            ),
+        )
+        .await
+        .expect("supervisor loop should exit after shutdown signal");
+
+        assert_eq!(*store.recoveries.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn decision_counts_classify_reconcile_phase_outcome() {
+        let project_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        let counts = repo_supervisor_decision_counts(&[
+            RepoSupervisorDecision::Idle,
+            RepoSupervisorDecision::DispatchTask {
+                project_id,
+                task_id,
+            },
+            RepoSupervisorDecision::Blocked {
+                project_id,
+                reason: "missing repo".to_string(),
+            },
+            RepoSupervisorDecision::Completed { project_id },
+        ]);
+
+        assert_eq!(counts.total, 4);
+        assert_eq!(counts.idle, 1);
+        assert_eq!(counts.dispatch, 1);
+        assert_eq!(counts.blocked, 1);
+        assert_eq!(counts.completed, 1);
+        assert_eq!(counts.stop_reason(), LoopStopReason::Completed);
+    }
+
+    #[test]
+    fn decision_counts_treat_empty_or_idle_only_as_no_work() {
+        let empty = repo_supervisor_decision_counts(&[]);
+        assert_eq!(empty.stop_reason(), LoopStopReason::NoWork);
+
+        let idle_only = repo_supervisor_decision_counts(&[
+            RepoSupervisorDecision::Idle,
+            RepoSupervisorDecision::Idle,
+        ]);
+        assert_eq!(idle_only.total, 2);
+        assert_eq!(idle_only.idle, 2);
+        assert_eq!(idle_only.stop_reason(), LoopStopReason::NoWork);
+    }
+
+    #[test]
+    fn phase_stop_records_observer_metric() {
+        let observer = Arc::new(RecordingObserver::default());
+        let observer_trait: Arc<dyn Observer> = observer.clone();
+        let counts = RepoSupervisorDecisionCounts {
+            total: 3,
+            dispatch: 2,
+            completed: 1,
+            ..RepoSupervisorDecisionCounts::default()
+        };
+
+        trace_supervisor_phase_stop(
+            RepoSupervisorPhase::Reconcile,
+            LoopStopReason::Completed,
+            Duration::from_millis(12),
+            counts,
+            1,
+            Some(&observer_trait),
+        );
+
+        let metrics = observer.metrics.lock().unwrap();
+        let Some(ObserverMetric::LoopPhaseRun(metric)) = metrics.first() else {
+            panic!("expected loop phase metric");
+        };
+        assert_eq!(metric.kind, LoopKind::RepoProjectSupervisor);
+        assert_eq!(metric.phase, "reconcile");
+        assert_eq!(metric.stop_reason, LoopStopReason::Completed);
+        assert_eq!(metric.iterations, 3);
+        assert_eq!(metric.retries, 1);
     }
 }

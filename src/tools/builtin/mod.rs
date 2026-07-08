@@ -18,7 +18,6 @@ mod clarify;
 mod comfyui;
 mod desktop_autonomy;
 mod device_info;
-mod discord_actions;
 mod echo;
 mod execute_code;
 pub mod extension_tools;
@@ -45,10 +44,8 @@ mod send_message;
 pub(crate) mod shell;
 pub mod shell_security;
 pub mod skill_tools;
-mod slack_actions;
 mod smart_approve;
 pub mod subagent;
-mod telegram_actions;
 mod time;
 pub(crate) mod todo;
 mod tts;
@@ -73,7 +70,6 @@ pub use comfyui::{
 };
 pub use desktop_autonomy::{DesktopAutonomyPort, DesktopAutonomyTool};
 pub use device_info::DeviceInfoTool;
-pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
 pub use execute_code::ExecuteCodeTool;
 pub use extension_tools::{
@@ -137,10 +133,8 @@ pub use skill_tools::{
     SkillUpdateTool, root_skill_install_tool_host, root_skill_publish_tool_host,
     root_skill_search_tool_host, root_skill_tap_tool_host, root_skill_tool_host,
 };
-pub use slack_actions::SlackActionsTool;
 pub use smart_approve::{ApprovalDecision, SmartApprovalMode, SmartApprover};
 pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};
-pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;
 pub use todo::{SharedTodoStore, TodoTool, new_shared_todo_store};
 pub use tts::TtsTool;

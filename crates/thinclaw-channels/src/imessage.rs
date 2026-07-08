@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use thinclaw_channels_core::{
@@ -32,6 +33,8 @@ const NAME: &str = "imessage";
 
 /// Default polling interval in seconds.
 const POLL_INTERVAL_SECS: u64 = 3;
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum message length for a single iMessage bubble.
 const MAX_MESSAGE_LENGTH: usize = 20_000;
@@ -123,6 +126,8 @@ pub struct IMessageChannel {
     config: IMessageConfig,
     /// Shutdown flag.
     shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+    poll_task: Mutex<Option<JoinHandle<()>>>,
     /// Last processed message ROWID.
     last_rowid: Arc<AtomicI64>,
 }
@@ -141,6 +146,8 @@ impl IMessageChannel {
         Ok(Self {
             config,
             shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(Notify::new()),
+            poll_task: Mutex::new(None),
             last_rowid: Arc::new(AtomicI64::new(0)),
         })
     }
@@ -571,6 +578,12 @@ impl Channel for IMessageChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
+        if let Some(handle) = self.poll_task.lock().await.take() {
+            self.shutdown.store(true, Ordering::Relaxed);
+            self.shutdown_notify.notify_waiters();
+            drain_channel_task(handle, NAME).await;
+        }
+        self.shutdown.store(false, Ordering::Relaxed);
 
         // Initialize to current latest ROWID so we don't replay history.
         // Then apply max_message_age_secs: find the minimum ROWID that falls
@@ -598,10 +611,11 @@ impl Channel for IMessageChannel {
         let allow_from = self.config.allow_from.clone();
         let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
         let shutdown = self.shutdown.clone();
+        let shutdown_notify = Arc::clone(&self.shutdown_notify);
         let last_rowid = self.last_rowid.clone();
 
         // Spawn polling task
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // Bounded dedup ring: tracks ROWIDs seen in this session to
             // handle sqlite3 returning the same message if ROWID
             // boundaries shift (e.g., deleted messages).
@@ -704,9 +718,17 @@ impl Channel for IMessageChannel {
                     }
                 }
 
-                tokio::time::sleep(poll_interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(poll_interval) => {}
+                    _ = shutdown_notify.notified() => {
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                }
             }
         });
+        *self.poll_task.lock().await = Some(handle);
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -788,7 +810,26 @@ impl Channel for IMessageChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown_notify.notify_waiters();
+        if let Some(handle) = self.poll_task.lock().await.take() {
+            drain_channel_task(handle, NAME).await;
+        }
         Ok(())
+    }
+}
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = name, error = %error, "channel polling task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = name, "channel polling task did not drain before timeout; aborted");
+        }
     }
 }
 

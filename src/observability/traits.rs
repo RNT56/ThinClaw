@@ -1,6 +1,9 @@
 //! Core observer trait and event/metric types.
 
+use std::sync::Arc;
 use std::time::Duration;
+
+use thinclaw_agent::loop_control::{LoopKind, LoopRunSummary, LoopStopReason};
 
 /// Provider-agnostic observer for agent lifecycle events and metrics.
 ///
@@ -85,6 +88,93 @@ pub enum ObserverMetric {
     ActiveJobs(u64),
     /// Current message queue depth (gauge).
     QueueDepth(u64),
+    /// A long-running loop started.
+    LoopStarted(LoopKind),
+    /// A long-running loop stopped with a structured reason.
+    LoopRun(LoopRunSummary),
+    /// A named phase within a long-running loop completed.
+    LoopPhaseRun(LoopPhaseRun),
+}
+
+#[derive(Debug, Clone)]
+pub struct LoopPhaseRun {
+    pub kind: LoopKind,
+    pub phase: String,
+    pub stop_reason: LoopStopReason,
+    pub duration: Duration,
+    pub iterations: usize,
+    pub retries: u32,
+}
+
+impl LoopPhaseRun {
+    pub fn new(
+        kind: LoopKind,
+        phase: impl Into<String>,
+        stop_reason: LoopStopReason,
+        duration: Duration,
+        iterations: usize,
+        retries: u32,
+    ) -> Self {
+        Self {
+            kind,
+            phase: phase.into(),
+            stop_reason,
+            duration,
+            iterations,
+            retries,
+        }
+    }
+}
+
+/// Synchronous guard for loops with many early-return paths.
+///
+/// The observer API is sync, so this can emit a final `LoopRun` metric from
+/// `Drop` without changing async control flow. Loops should update iterations
+/// and terminal reason as they make progress; unexpected `?` exits default to
+/// `FatalError`, making missing classification visible in metrics.
+pub struct LoopMetricGuard {
+    observer: Arc<dyn Observer>,
+    kind: LoopKind,
+    iterations: usize,
+    retries: u32,
+    stop_reason: LoopStopReason,
+}
+
+impl LoopMetricGuard {
+    pub fn start(observer: Arc<dyn Observer>, kind: LoopKind) -> Self {
+        observer.record_metric(&ObserverMetric::LoopStarted(kind));
+        Self {
+            observer,
+            kind,
+            iterations: 0,
+            retries: 0,
+            stop_reason: LoopStopReason::FatalError,
+        }
+    }
+
+    pub fn set_iterations(&mut self, iterations: usize) {
+        self.iterations = iterations;
+    }
+
+    pub fn set_retries(&mut self, retries: u32) {
+        self.retries = retries;
+    }
+
+    pub fn stop_with(&mut self, stop_reason: LoopStopReason) {
+        self.stop_reason = stop_reason;
+    }
+}
+
+impl Drop for LoopMetricGuard {
+    fn drop(&mut self) {
+        self.observer
+            .record_metric(&ObserverMetric::LoopRun(LoopRunSummary::new(
+                self.kind,
+                self.stop_reason,
+                self.iterations,
+                self.retries,
+            )));
+    }
 }
 
 #[cfg(test)]
@@ -135,10 +225,73 @@ mod tests {
 
     #[test]
     fn metric_variants_are_constructible() {
+        use thinclaw_agent::loop_control::LoopStopReason;
+
         let _ = ObserverMetric::RequestLatency(Duration::from_millis(200));
         let _ = ObserverMetric::TokensUsed(500);
         let _ = ObserverMetric::ActiveJobs(3);
         let _ = ObserverMetric::QueueDepth(10);
+        let _ = ObserverMetric::LoopStarted(LoopKind::RoutineCron);
+        let _ = ObserverMetric::LoopRun(LoopRunSummary::new(
+            LoopKind::RoutineCron,
+            LoopStopReason::ExternalShutdown,
+            2,
+            0,
+        ));
+        let _ = ObserverMetric::LoopPhaseRun(LoopPhaseRun::new(
+            LoopKind::RepoProjectSupervisor,
+            "reconcile",
+            LoopStopReason::Completed,
+            Duration::from_millis(50),
+            3,
+            0,
+        ));
+    }
+
+    #[test]
+    fn loop_metric_guard_records_start_and_drop_summary() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct RecordingObserver {
+            metrics: Mutex<Vec<ObserverMetric>>,
+        }
+
+        impl Observer for RecordingObserver {
+            fn record_event(&self, _event: &ObserverEvent) {}
+
+            fn record_metric(&self, metric: &ObserverMetric) {
+                self.metrics
+                    .lock()
+                    .expect("metrics lock")
+                    .push(metric.clone());
+            }
+
+            fn name(&self) -> &str {
+                "recording"
+            }
+        }
+
+        let observer = Arc::new(RecordingObserver::default());
+        {
+            let mut guard = LoopMetricGuard::start(observer.clone(), LoopKind::AgentDispatcher);
+            guard.set_iterations(7);
+            guard.set_retries(2);
+            guard.stop_with(LoopStopReason::IterationBudgetExceeded);
+        }
+
+        let metrics = observer.metrics.lock().expect("metrics lock");
+        assert!(matches!(
+            metrics.first(),
+            Some(ObserverMetric::LoopStarted(LoopKind::AgentDispatcher))
+        ));
+        let Some(ObserverMetric::LoopRun(summary)) = metrics.get(1) else {
+            panic!("expected loop run summary metric");
+        };
+        assert_eq!(summary.kind, LoopKind::AgentDispatcher);
+        assert_eq!(summary.stop_reason, LoopStopReason::IterationBudgetExceeded);
+        assert_eq!(summary.iterations, 7);
+        assert_eq!(summary.retries, 2);
     }
 
     /// Guardrail (backlog B2): every `ObserverEvent` variant must have a real

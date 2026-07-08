@@ -15,7 +15,7 @@ use crate::builtin::{
     RemoveAgentTool, SearchFilesTool, SendMessageFn, SendMessageTool, SharedModelOverride,
     SharedProcessRegistry, SharedTodoStore, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
     ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
-    VisionAnalyzeTool, WriteFileTool,
+    VisionAnalyzeTool, WebSearchTool, WriteFileTool,
 };
 use crate::execution::LocalExecutionBackend;
 use crate::wasm::SharedCredentialRegistry;
@@ -238,6 +238,10 @@ impl ToolRegistry {
             http = http.with_credentials(credential_registry, secrets_store);
         }
         self.register_sync(Arc::new(http));
+
+        // Zero-config web search (no API key). Always on so a fresh install can
+        // answer current-events / lookup questions out of the box.
+        self.register_sync(Arc::new(WebSearchTool::new()));
 
         #[cfg(feature = "document-extraction")]
         self.register_sync(Arc::new(ExtractDocumentTool));

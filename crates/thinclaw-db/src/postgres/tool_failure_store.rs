@@ -25,6 +25,16 @@ impl ToolFailureStore for PgBackend {
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), DatabaseError> {
         self.store.increment_repair_attempts(tool_name).await
     }
+
+    async fn record_tool_repair_result(
+        &self,
+        tool_name: &str,
+        result: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .record_tool_repair_result(tool_name, result)
+            .await
+    }
 }
 
 // ==================== SettingsStore ====================

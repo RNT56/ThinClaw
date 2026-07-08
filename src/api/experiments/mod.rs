@@ -202,7 +202,10 @@ pub use campaign::{
     cancel_campaign, pause_campaign, promote_campaign, reissue_lease, resume_campaign,
     start_campaign,
 };
-pub use controller::{start_experiment_artifact_reaper_loop, start_experiment_controller_loop};
+pub use controller::{
+    start_experiment_artifact_reaper_loop, start_experiment_artifact_reaper_loop_with_shutdown,
+    start_experiment_controller_loop, start_experiment_controller_loop_with_shutdown,
+};
 pub use crud::{
     create_project, create_runner, create_target, delete_project, delete_runner, delete_target,
     get_campaign, get_project, get_runner, get_trial, link_target, list_artifacts, list_campaigns,

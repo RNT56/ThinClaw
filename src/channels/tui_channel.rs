@@ -11,13 +11,17 @@ use crate::tui::{TuiApp, TuiEvent, TuiUpdate};
 struct RootTuiRuntime;
 
 impl thinclaw_channels::tui::TuiRuntime for RootTuiRuntime {
-    fn start(&self, outgoing_tx: mpsc::Sender<TuiEvent>, incoming_rx: mpsc::Receiver<TuiUpdate>) {
+    fn start(
+        &self,
+        outgoing_tx: mpsc::Sender<TuiEvent>,
+        incoming_rx: mpsc::Receiver<TuiUpdate>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut app = TuiApp::new(outgoing_tx, incoming_rx);
             if let Err(error) = app.run().await {
                 tracing::error!(error = %error, "TUI runtime exited with an error");
             }
-        });
+        })
     }
 }
 

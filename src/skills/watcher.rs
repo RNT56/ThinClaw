@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::skills::registry::SkillRegistry;
+
+const WATCHER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Configuration for the skill watcher.
 #[derive(Debug, Clone)]
@@ -35,6 +37,7 @@ impl Default for SkillWatcherConfig {
 pub struct SkillWatcher {
     config: SkillWatcherConfig,
     task_handle: RwLock<Option<JoinHandle<()>>>,
+    shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
     known: Arc<RwLock<HashMap<PathBuf, SystemTime>>>,
     registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
 }
@@ -45,6 +48,7 @@ impl SkillWatcher {
         Self {
             config: SkillWatcherConfig::default(),
             task_handle: RwLock::new(None),
+            shutdown_tx: RwLock::new(None),
             known: Arc::new(RwLock::new(HashMap::new())),
             registry,
         }
@@ -75,9 +79,12 @@ impl SkillWatcher {
 
     /// Start polling for changes.
     pub async fn start(&self) {
+        self.stop().await;
+
         let config = self.config.clone();
         let known = Arc::clone(&self.known);
         let registry = Arc::clone(&self.registry);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
             tracing::info!(
@@ -88,7 +95,13 @@ impl SkillWatcher {
             let mut last_reload = SystemTime::UNIX_EPOCH;
 
             loop {
-                tokio::time::sleep(config.poll_interval).await;
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        tracing::info!("Skill hot-reload watcher stopped");
+                        break;
+                    }
+                    _ = tokio::time::sleep(config.poll_interval) => {}
+                }
 
                 let snapshot = match Self::scan_registry(&registry).await {
                     Ok(snapshot) => snapshot,
@@ -131,14 +144,17 @@ impl SkillWatcher {
             }
         });
 
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
         *self.task_handle.write().await = Some(handle);
     }
 
     /// Stop watching.
     pub async fn stop(&self) {
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
         if let Some(handle) = self.task_handle.write().await.take() {
-            handle.abort();
-            tracing::info!("Skill hot-reload watcher stopped");
+            drain_watcher_task(handle, "skill_watcher").await;
         }
     }
 
@@ -192,6 +208,21 @@ async fn metadata_mtime(path: &Path) -> Result<SystemTime, std::io::Error> {
     metadata.modified()
 }
 
+async fn drain_watcher_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(task = name, error = %error, "Watcher task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(WATCHER_STOP_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(task = name, "Watcher task did not drain before timeout; aborted");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +232,21 @@ mod tests {
         let config = SkillWatcherConfig::default();
         assert_eq!(config.poll_interval, Duration::from_secs(3));
         assert_eq!(config.debounce, Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn test_stop_drains_running_watcher_promptly() {
+        let registry = Arc::new(tokio::sync::RwLock::new(SkillRegistry::new(PathBuf::from(
+            "/tmp/nonexistent_thinclaw_skill_watcher_stop_test",
+        ))));
+        let watcher = SkillWatcher::new(registry).with_config(SkillWatcherConfig {
+            poll_interval: Duration::from_secs(60),
+            debounce: Duration::from_millis(1),
+        });
+
+        watcher.start().await;
+        tokio::time::timeout(Duration::from_millis(250), watcher.stop())
+            .await
+            .expect("stop should not wait for the poll interval");
     }
 }

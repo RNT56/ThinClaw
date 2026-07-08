@@ -205,6 +205,10 @@ pub struct ThreadRuntimeSnapshot {
     /// losing all undo history.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undo_checkpoints: Vec<crate::undo::Checkpoint>,
+    /// Whether the thread is in plan mode (mutating tools deferred for approval),
+    /// so `/plan` survives a process restart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_mode: bool,
 }
 
 /// Target used for status, proactive messages, and broadcasts.
@@ -893,6 +897,20 @@ pub trait RoutineStorePort: Send + Sync {
         processed_at: DateTime<Utc>,
         error_message: &str,
     ) -> Result<(), DatabaseError>;
+    async fn dead_letter_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
+    async fn replay_routine_event(
+        &self,
+        id: Uuid,
+        user_id: &str,
+        actor_id: &str,
+        diagnostics: &serde_json::Value,
+    ) -> Result<Option<RoutineEvent>, DatabaseError>;
     async fn list_routine_events_for_actor(
         &self,
         user_id: &str,

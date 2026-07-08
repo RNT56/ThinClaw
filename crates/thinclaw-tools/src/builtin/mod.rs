@@ -14,7 +14,6 @@ pub mod clarify;
 pub mod comfyui;
 pub mod desktop_autonomy;
 pub mod device_info;
-pub mod discord_actions;
 pub mod echo;
 pub mod execute_code;
 pub mod extension_tools;
@@ -41,13 +40,12 @@ pub mod send_message;
 pub mod shell;
 pub mod shell_security;
 pub mod skill;
-pub mod slack_actions;
 pub mod subagent;
-pub mod telegram_actions;
 pub mod time;
 pub mod todo;
 pub mod tts;
 pub mod vision;
+pub mod web_search;
 
 pub use advisor::{
     ADVISOR_TOOL_NAME, AdvisorCallBudget, AdvisorConsultationEnvelope, AdvisorConsultationMode,
@@ -72,7 +70,6 @@ pub use comfyui::{
 };
 pub use desktop_autonomy::{DesktopAutonomyPort, DesktopAutonomyTool};
 pub use device_info::DeviceInfoTool;
-pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
 pub use execute_code::{ExecuteCodeTool, ToolRpcHost};
 pub use extension_tools::{
@@ -136,13 +133,12 @@ pub use skill::{
     is_skipped_package_name, normalize_tap_path, relative_path_is_safe, restricted_skill_names,
     validate_github_repo, validate_repo_path_component, validate_repo_relative_path,
 };
-pub use slack_actions::SlackActionsTool;
 pub use subagent::{
     CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool, SubagentSpawnRequest,
     SubagentToolPort,
 };
-pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;
 pub use todo::{SharedTodoStore, TodoItem, TodoStatus, TodoStore, TodoTool, new_shared_todo_store};
 pub use tts::TtsTool;
 pub use vision::VisionAnalyzeTool;
+pub use web_search::WebSearchTool;

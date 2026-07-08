@@ -26,7 +26,8 @@ use futures::{SinkExt, StreamExt};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
@@ -47,6 +48,8 @@ const MAX_MESSAGE_LENGTH: usize = 2000;
 
 /// Discord API base URL.
 const API_BASE: &str = "https://discord.com/api/v10";
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Gateway intents: GUILDS (1) + GUILD_MESSAGES (512) + MESSAGE_CONTENT (32768) + DIRECT_MESSAGES (4096)
 const GATEWAY_INTENTS: u64 = 1 | 512 | 4096 | 32768;
@@ -138,6 +141,8 @@ pub struct DiscordChannel {
     config: DiscordConfig,
     client: Client,
     shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+    gateway_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl DiscordChannel {
@@ -155,6 +160,8 @@ impl DiscordChannel {
             config,
             client,
             shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(Notify::new()),
+            gateway_task: Mutex::new(None),
         })
     }
 
@@ -420,12 +427,19 @@ impl Channel for DiscordChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
+        if let Some(handle) = self.gateway_task.lock().await.take() {
+            self.shutdown.store(true, Ordering::Relaxed);
+            self.shutdown_notify.notify_waiters();
+            drain_channel_task(handle, NAME).await;
+        }
+        self.shutdown.store(false, Ordering::Relaxed);
 
         let bot_token = self.config.bot_token.expose_secret().to_string();
         let guild_id = self.config.guild_id.clone();
         let allow_from = self.config.allow_from.clone();
         let client = self.client.clone();
         let shutdown = self.shutdown.clone();
+        let shutdown_notify = Arc::clone(&self.shutdown_notify);
 
         // Validate token and get bot user ID
         let me_resp = client
@@ -455,10 +469,10 @@ impl Channel for DiscordChannel {
         tracing::info!("Discord bot connected as {} ({})", bot_name, bot_user_id);
 
         // Spawn Gateway connection
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let sequence = Arc::new(AtomicU64::new(0));
 
-            loop {
+            'gateway: loop {
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
@@ -468,7 +482,15 @@ impl Channel for DiscordChannel {
                     Ok(url) => url,
                     Err(e) => {
                         tracing::error!("Discord: failed to get gateway URL: {e}");
-                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        if sleep_or_channel_shutdown(
+                            &shutdown,
+                            &shutdown_notify,
+                            Duration::from_secs(10),
+                        )
+                        .await
+                        {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -478,7 +500,15 @@ impl Channel for DiscordChannel {
                     Ok((stream, _)) => stream,
                     Err(e) => {
                         tracing::error!("Discord: WebSocket connect failed: {e}");
-                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        if sleep_or_channel_shutdown(
+                            &shutdown,
+                            &shutdown_notify,
+                            Duration::from_secs(10),
+                        )
+                        .await
+                        {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -487,7 +517,16 @@ impl Channel for DiscordChannel {
                 let (mut ws_write, mut ws_read) = ws_stream.split();
 
                 // Wait for Hello (op 10)
-                let heartbeat_interval = match ws_read.next().await {
+                let hello_msg = tokio::select! {
+                    msg = ws_read.next() => msg,
+                    _ = shutdown_notify.notified() => {
+                        if shutdown.load(Ordering::Relaxed) {
+                            break 'gateway;
+                        }
+                        continue;
+                    }
+                };
+                let heartbeat_interval = match hello_msg {
                     Some(Ok(WsMessage::Text(text))) => {
                         let payload: GatewayPayload = match serde_json::from_str(&text) {
                             Ok(p) => p,
@@ -510,7 +549,15 @@ impl Channel for DiscordChannel {
                     }
                     _ => {
                         tracing::error!("Discord: no Hello received");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        if sleep_or_channel_shutdown(
+                            &shutdown,
+                            &shutdown_notify,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                        {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -526,29 +573,8 @@ impl Channel for DiscordChannel {
                     continue;
                 }
 
-                // Spawn heartbeat task
-                let seq_heartbeat = sequence.clone();
-                let shutdown_hb = shutdown.clone();
-                let (hb_tx, mut hb_rx) = mpsc::channel::<String>(1);
-                tokio::spawn(async move {
-                    let mut interval =
-                        tokio::time::interval(Duration::from_millis(heartbeat_interval));
-                    loop {
-                        interval.tick().await;
-                        if shutdown_hb.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let seq = seq_heartbeat.load(Ordering::Relaxed);
-                        let hb = if seq == 0 {
-                            r#"{"op":1,"d":null}"#.to_string()
-                        } else {
-                            format!(r#"{{"op":1,"d":{seq}}}"#)
-                        };
-                        if hb_tx.send(hb).await.is_err() {
-                            break;
-                        }
-                    }
-                });
+                let mut heartbeat_tick =
+                    tokio::time::interval(Duration::from_millis(heartbeat_interval));
 
                 // Process events
                 loop {
@@ -558,9 +584,22 @@ impl Channel for DiscordChannel {
 
                     let msg = tokio::select! {
                         msg = ws_read.next() => msg,
-                        hb = hb_rx.recv() => {
-                            if let Some(hb) = hb {
-                                let _ = ws_write.send(WsMessage::Text(hb.into())).await;
+                        _ = heartbeat_tick.tick() => {
+                            let seq = sequence.load(Ordering::Relaxed);
+                            let hb = if seq == 0 {
+                                r#"{"op":1,"d":null}"#.to_string()
+                            } else {
+                                format!(r#"{{"op":1,"d":{seq}}}"#)
+                            };
+                            if ws_write.send(WsMessage::Text(hb.into())).await.is_err() {
+                                tracing::warn!("Discord: failed to send heartbeat");
+                                break;
+                            }
+                            continue;
+                        }
+                        _ = shutdown_notify.notified() => {
+                            if shutdown.load(Ordering::Relaxed) {
+                                break;
                             }
                             continue;
                         }
@@ -692,7 +731,15 @@ impl Channel for DiscordChannel {
                         // Invalid session
                         9 => {
                             tracing::warn!("Discord: invalid session, re-identifying");
-                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            let shutting_down = sleep_or_channel_shutdown(
+                                &shutdown,
+                                &shutdown_notify,
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                            if shutting_down {
+                                break;
+                            }
                             break;
                         }
                         _ => {}
@@ -701,10 +748,19 @@ impl Channel for DiscordChannel {
 
                 if !shutdown.load(Ordering::Relaxed) {
                     tracing::info!("Discord: reconnecting in 5s...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if sleep_or_channel_shutdown(
+                        &shutdown,
+                        &shutdown_notify,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    {
+                        break;
+                    }
                 }
             }
         });
+        *self.gateway_task.lock().await = Some(handle);
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -828,11 +884,41 @@ impl Channel for DiscordChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown_notify.notify_waiters();
+        if let Some(handle) = self.gateway_task.lock().await.take() {
+            drain_channel_task(handle, NAME).await;
+        }
         Ok(())
     }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+async fn sleep_or_channel_shutdown(
+    shutdown: &Arc<AtomicBool>,
+    shutdown_notify: &Arc<Notify>,
+    duration: Duration,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => shutdown.load(Ordering::Relaxed),
+        _ = shutdown_notify.notified() => shutdown.load(Ordering::Relaxed),
+    }
+}
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = name, error = %error, "channel gateway task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = name, "channel gateway task did not drain before timeout; aborted");
+        }
+    }
+}
 
 /// Download Discord CDN attachments, returning `MediaContent` for each.
 async fn download_discord_attachments(

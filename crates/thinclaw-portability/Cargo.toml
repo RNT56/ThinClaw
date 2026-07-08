@@ -1,0 +1,24 @@
+[package]
+name = "thinclaw-portability"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Portable, encrypted whole-agent backup bundles. All crypto/compression crates
+# are already in the workspace lockfile, so this adds no new third-party crate.
+
+[dependencies]
+aead = "0.5"
+chacha20poly1305 = "0.10"
+flate2 = "1"
+rand = "0.10"
+scrypt = "0.11"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11"
+tar = "0.4"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

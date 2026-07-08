@@ -89,4 +89,20 @@ impl Store {
 
         Ok(())
     }
+
+    pub async fn record_tool_repair_result(
+        &self,
+        tool_name: &str,
+        result: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+
+        conn.execute(
+            "UPDATE tool_failures SET last_build_result = $2::jsonb WHERE tool_name = $1",
+            &[&tool_name, result],
+        )
+        .await?;
+
+        Ok(())
+    }
 }
