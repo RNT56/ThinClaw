@@ -132,6 +132,9 @@ All focused loop gates passed before edits:
   file-size guard after hardening: heartbeat routine helpers and repo-project
   config resolution moved out of `src/agent/agent_loop/mod.rs`, and runtime
   maintenance/watch shutdown helpers moved out of `src/async_main.rs`.
+- Added no-op `stop()` methods to the root crate's no-WASM-runtime watcher
+  stubs so the shared runtime shutdown path compiles in minimal feature
+  profiles while real WASM watchers still drain when the runtime feature is on.
 
 ## Verified After This Slice
 
@@ -201,6 +204,14 @@ All focused loop gates passed before edits:
 - `bash scripts/audit-loop-inventory.sh`: passed.
 - `scripts/ci/check-file-sizes.sh`: passed.
 - `cargo fmt --all -- --check`: passed.
+- `cargo check --locked --workspace --no-default-features --features libsql`:
+  passed.
+- `cargo clippy --locked --workspace --all-targets --no-default-features --features libsql -- -D warnings`:
+  passed.
+- `cargo check --locked --workspace --no-default-features --features postgres`:
+  passed.
+- `cargo clippy --locked --workspace --all-targets --no-default-features --features postgres -- -D warnings`:
+  passed.
 - `git diff --check`: passed.
 
 ## Remaining Lanes

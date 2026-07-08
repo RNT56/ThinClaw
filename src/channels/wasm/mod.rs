@@ -481,5 +481,7 @@ mod stubs {
         pub async fn seed_from_dir(&self) {}
 
         pub async fn start(&self) {}
+
+        pub async fn stop(&self) {}
     }
 }
