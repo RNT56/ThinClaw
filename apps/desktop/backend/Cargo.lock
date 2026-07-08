@@ -4875,7 +4875,7 @@ dependencies = [
  "tower-http 0.4.4",
  "tracing",
  "uuid",
- "zerocopy 0.7.35",
+ "zerocopy 0.8.33",
 ]
 
 [[package]]

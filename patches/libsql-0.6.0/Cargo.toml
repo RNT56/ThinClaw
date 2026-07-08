@@ -227,7 +227,7 @@ version = "0.2.0"
 optional = true
 
 [dependencies.zerocopy]
-version = "0.7.28"
+version = "0.8.33"
 optional = true
 
 [dev-dependencies.criterion]
