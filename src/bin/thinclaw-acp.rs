@@ -321,7 +321,13 @@ impl SmokeLlm {
     fn saw_tool_result(messages: &[ChatMessage]) -> bool {
         messages
             .iter()
-            .any(|message| matches!(message.role, Role::Tool))
+            .rev()
+            .find_map(|message| match message.role {
+                Role::Tool => Some(true),
+                Role::User => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     async fn maybe_wait_for_slow_prompt(messages: &[ChatMessage]) {

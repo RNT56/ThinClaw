@@ -135,6 +135,14 @@ All focused loop gates passed before edits:
 - Added no-op `stop()` methods to the root crate's no-WASM-runtime watcher
   stubs so the shared runtime shutdown path compiles in minimal feature
   profiles while real WASM watchers still drain when the runtime feature is on.
+- Updated `crossbeam-epoch` to the non-vulnerable `0.9.20` lockfile version
+  after the CI dependency audit surfaced RUSTSEC-2026-0204.
+- Hardened ACP prompt-approval timeout cleanup so timed-out permission prompts
+  remove stale waiters/pending permissions and return `cancelled` promptly while
+  interrupting the underlying turn best-effort.
+- Fixed the ACP smoke LLM fixture to treat only tool results after the latest
+  user prompt as current-turn tool output, preserving repeated approval
+  scenarios now that transcript history faithfully includes prior tool results.
 
 ## Verified After This Slice
 
@@ -212,6 +220,11 @@ All focused loop gates passed before edits:
   passed.
 - `cargo clippy --locked --workspace --all-targets --no-default-features --features postgres -- -D warnings`:
   passed.
+- `cargo deny check`: passed.
+- `cargo test --locked --features acp channels::acp --lib -- --test-threads=1`:
+  31 passed.
+- `cargo test --locked --features acp --test acp_stdio_smoke -- --nocapture`:
+  5 passed.
 - `git diff --check`: passed.
 
 ## Remaining Lanes

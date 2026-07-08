@@ -259,6 +259,14 @@ impl AcpConnectionCore {
             .any(|pending| pending.session_id == session_id)
     }
 
+    pub async fn clear_pending_permissions_for_session(&self, session_id: &str) {
+        self.inner
+            .write()
+            .await
+            .pending_permissions
+            .retain(|_, pending| pending.session_id != session_id);
+    }
+
     pub async fn client_capabilities(&self) -> wire::AcpClientCapabilities {
         self.inner.read().await.client_capabilities.clone()
     }
