@@ -509,16 +509,19 @@ pub(crate) fn check_onboard_needed(toml_path: Option<&Path>, no_db: bool) -> Opt
 ///
 /// On `SIGHUP` it refreshes the secrets overlay, reloads config (DB or env
 /// fallback), and performs a two-phase listener swap if the HTTP bind address
-/// changed. Fire-and-forget: the task lives for the process lifetime. Extracted
-/// verbatim from `async_main` to keep the entry point focused (backlog A6).
+/// changed. The returned handle must be drained during runtime shutdown.
 #[cfg(unix)]
 pub(crate) fn spawn_sighup_reload_handler(
     webhook_server: Option<Arc<tokio::sync::Mutex<thinclaw::channels::WebhookServer>>>,
     store: Option<Arc<dyn thinclaw::db::Database>>,
     secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
     owner_id: String,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
 ) {
-    tokio::spawn(async move {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sighup = match signal(SignalKind::hangup()) {
             Ok(s) => s,
@@ -529,7 +532,18 @@ pub(crate) fn spawn_sighup_reload_handler(
         };
 
         loop {
-            sighup.recv().await;
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::debug!("SIGHUP hot-reload handler stopped");
+                    break;
+                }
+                received = sighup.recv() => {
+                    if received.is_none() {
+                        tracing::debug!("SIGHUP stream closed; hot-reload handler exiting");
+                        break;
+                    }
+                }
+            }
             tracing::info!("SIGHUP received — reloading HTTP webhook config");
 
             // 1. Refresh secrets overlay (thread-safe, no unsafe set_var)
@@ -616,4 +630,5 @@ pub(crate) fn spawn_sighup_reload_handler(
     tracing::info!(
         "SIGHUP hot-reload handler registered (send `kill -HUP` to reload HTTP webhook config)"
     );
+    (shutdown_tx, handle)
 }

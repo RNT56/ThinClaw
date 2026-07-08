@@ -84,6 +84,10 @@ pub struct ThreadRuntimeState {
     /// `thinclaw_agent::ports::ThreadRuntimeSnapshot::undo_checkpoints`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undo_checkpoints: Vec<thinclaw_agent::undo::Checkpoint>,
+    /// Whether the thread is in plan mode, so `/plan` survives a restart.
+    /// Mirrors `thinclaw_agent::ports::ThreadRuntimeSnapshot::plan_mode`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_mode: bool,
 }
 
 /// Compatibility methods that used to be inherent on the root `Thread`.
@@ -144,6 +148,7 @@ impl ThreadRuntimeStateExt for Thread {
             provider_context_refs: snapshot.provider_context_refs,
             active_message_row_count: snapshot.active_message_row_count,
             undo_checkpoints: snapshot.undo_checkpoints,
+            plan_mode: snapshot.plan_mode,
         }
     }
 
@@ -172,6 +177,7 @@ impl ThreadRuntimeStateExt for Thread {
             provider_context_refs: runtime.provider_context_refs,
             active_message_row_count: runtime.active_message_row_count,
             undo_checkpoints: runtime.undo_checkpoints,
+            plan_mode: runtime.plan_mode,
         });
     }
 
@@ -246,6 +252,7 @@ pub(crate) fn thread_runtime_state_from_portable(
         provider_context_refs: snapshot.provider_context_refs,
         active_message_row_count: snapshot.active_message_row_count,
         undo_checkpoints: snapshot.undo_checkpoints,
+        plan_mode: snapshot.plan_mode,
     }
 }
 

@@ -23,6 +23,7 @@ use crate::db::Database;
 use crate::error::{Error, JobError};
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
+use crate::observability::{NoopObserver, Observer};
 use crate::safety::SafetyLayer;
 use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 
@@ -45,6 +46,8 @@ pub struct Scheduler {
     subtasks: Arc<RwLock<HashMap<Uuid, ScheduledSubtask>>>,
     /// Optional shared cost tracker for worker LLM calls.
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    /// Shared observability sink for worker loop lifecycle metrics.
+    observer: Arc<dyn Observer>,
 }
 
 impl Scheduler {
@@ -71,6 +74,7 @@ impl Scheduler {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
             cost_tracker: None,
+            observer: Arc::new(NoopObserver),
         }
     }
 
@@ -92,6 +96,12 @@ impl Scheduler {
         tracker: Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>,
     ) -> Self {
         self.cost_tracker = Some(tracker);
+        self
+    }
+
+    /// Attach the shared observer so worker loops emit lifecycle metrics.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = observer;
         self
     }
 
@@ -321,6 +331,7 @@ impl Scheduler {
                 cost_tracker: self.cost_tracker.clone(),
                 tool_profile: self.config.worker_tool_profile,
                 notify_tx,
+                observer: Arc::clone(&self.observer),
             };
             let worker = Worker::new(job_id, deps);
 
@@ -424,6 +435,7 @@ impl Scheduler {
                 cost_tracker: self.cost_tracker.clone(),
                 tool_profile: self.config.worker_tool_profile,
                 notify_tx,
+                observer: Arc::clone(&self.observer),
             };
             let worker = Worker::new(job_id, deps);
 
@@ -525,6 +537,7 @@ impl Scheduler {
                 cost_tracker: self.cost_tracker.clone(),
                 tool_profile: self.config.worker_tool_profile,
                 notify_tx: None,
+                observer: Arc::clone(&self.observer),
             };
             let worker = Worker::new(job_id, deps);
 

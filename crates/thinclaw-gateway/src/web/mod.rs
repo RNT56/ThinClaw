@@ -20,6 +20,7 @@ pub mod ports;
 pub mod projects;
 pub mod providers;
 pub mod rate_limiter;
+pub mod rbac;
 pub mod routines;
 pub mod settings;
 pub mod skills;

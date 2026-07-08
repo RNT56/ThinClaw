@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::llm::cost_tracker::CostTracker;
 use chrono::Utc;
 
+use thinclaw_agent::loop_control::{LoopKind, LoopStopReason};
 use thinclaw_agent::worker_runtime::{
     DEFAULT_WORKER_ITERATIONS, RoutineFinalizationOutcome, WORKER_COMPLETE_JOB_TOOL_NAME,
     WORKER_DIRECT_LOOP_DELAY_MS, WORKER_TASK_FAILED_DURING_EXECUTION_REASON,
@@ -38,6 +39,7 @@ use crate::hooks::HookRegistry;
 use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
+use crate::observability::{LoopMetricGuard, Observer};
 use crate::safety::SafetyLayer;
 use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 use crate::workspace::Workspace;
@@ -80,6 +82,8 @@ pub struct WorkerDeps {
     /// the agent-loop notification forwarder, in addition to the SSE summary.
     /// `None` for non-routine workers, preserving prior behavior.
     pub notify_tx: Option<tokio::sync::mpsc::Sender<OutgoingResponse>>,
+    /// Shared observability sink for loop lifecycle metrics.
+    pub observer: Arc<dyn Observer>,
 }
 
 /// Worker that executes a single job.
@@ -110,6 +114,21 @@ struct OutputRouting {
 /// Result of a tool execution with metadata for context building.
 struct ToolExecResult {
     result: Result<String, Error>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerLoopOutcome {
+    stop_reason: LoopStopReason,
+    iterations: usize,
+}
+
+impl WorkerLoopOutcome {
+    fn new(stop_reason: LoopStopReason, iterations: usize) -> Self {
+        Self {
+            stop_reason,
+            iterations,
+        }
+    }
 }
 
 impl Worker {
@@ -354,6 +373,8 @@ impl Worker {
         // keeps legitimately active work alive, including long-running tools
         // that emit periodic keepalives from inside the worker.
         let (activity_tx, mut activity_rx) = watch::channel(std::time::Instant::now());
+        let mut loop_metrics =
+            LoopMetricGuard::start(Arc::clone(&self.deps.observer), LoopKind::Worker);
         let execution = self.execution_loop(&mut rx, &reasoning, &mut reason_ctx, &activity_tx);
         tokio::pin!(execution);
         let inactivity_sleep = tokio::time::sleep(self.timeout());
@@ -375,7 +396,9 @@ impl Worker {
         };
 
         match result {
-            Ok(Ok(())) => {
+            Ok(Ok(outcome)) => {
+                loop_metrics.set_iterations(outcome.iterations);
+                loop_metrics.stop_with(outcome.stop_reason);
                 tracing::info!("Worker for job {} completed successfully", self.job_id);
                 // Ensure the job reaches a terminal state even when the execution
                 // loop returned Ok(()) without explicitly calling mark_completed()
@@ -392,10 +415,12 @@ impl Worker {
                 }
             }
             Ok(Err(e)) => {
+                loop_metrics.stop_with(LoopStopReason::FatalError);
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
                 self.mark_failed(&e.to_string()).await?;
             }
             Err(()) => {
+                loop_metrics.stop_with(LoopStopReason::IdleTimeout);
                 tracing::warn!("Worker for job {} timed out", self.job_id);
                 self.mark_stuck("Execution timeout").await?;
             }
@@ -416,7 +441,7 @@ impl Worker {
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
         activity_tx: &watch::Sender<std::time::Instant>,
-    ) -> Result<(), Error> {
+    ) -> Result<WorkerLoopOutcome, Error> {
         touch_worker_activity(activity_tx);
         // Shared across the plan phase and the direct-selection loop so the
         // plan->direct fallthrough doesn't reset the lease-renewal throttle.
@@ -540,7 +565,7 @@ impl Worker {
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
                 && is_worker_terminal_state(ctx.state)
             {
-                return Ok(());
+                return Ok(WorkerLoopOutcome::new(LoopStopReason::Completed, iteration));
             }
 
             // Heartbeat jobs: if the plan already called emit_user_message,
@@ -551,7 +576,7 @@ impl Worker {
                 self.last_output.lock().ok().is_some_and(|g| g.is_some()),
             ) {
                 self.mark_completed().await?;
-                return Ok(());
+                return Ok(WorkerLoopOutcome::new(LoopStopReason::Completed, iteration));
             }
 
             tracing::info!(
@@ -576,7 +601,10 @@ impl Worker {
                 match msg {
                     WorkerMessage::Stop => {
                         tracing::debug!("Worker for job {} received stop signal", self.job_id);
-                        return Ok(());
+                        return Ok(WorkerLoopOutcome::new(
+                            LoopStopReason::ExternalShutdown,
+                            iteration,
+                        ));
                     }
                     WorkerMessage::Ping => {
                         touch_worker_activity(activity_tx);
@@ -591,7 +619,7 @@ impl Worker {
                 && ctx.state == JobState::Cancelled
             {
                 tracing::info!("Worker for job {} detected cancellation", self.job_id);
-                return Ok(());
+                return Ok(WorkerLoopOutcome::new(LoopStopReason::Cancelled, iteration));
             }
 
             iteration += 1;
@@ -625,7 +653,10 @@ impl Worker {
                 } else {
                     self.mark_stuck("Maximum iterations exceeded").await?;
                 }
-                return Ok(());
+                return Ok(WorkerLoopOutcome::new(
+                    LoopStopReason::IterationBudgetExceeded,
+                    iteration,
+                ));
             }
 
             // Refresh tool definitions so newly built tools become visible
@@ -672,7 +703,10 @@ impl Worker {
                         if crate::util::llm_signals_completion(&response) {
                             self.set_last_output(&response);
                             self.mark_completed().await?;
-                            return Ok(());
+                            return Ok(WorkerLoopOutcome::new(
+                                LoopStopReason::Completed,
+                                iteration,
+                            ));
                         }
 
                         // Heartbeat jobs: any text response (HEARTBEAT_OK or findings)
@@ -682,7 +716,10 @@ impl Worker {
                         if is_heartbeat {
                             self.set_last_output(&response);
                             self.mark_completed().await?;
-                            return Ok(());
+                            return Ok(WorkerLoopOutcome::new(
+                                LoopStopReason::Completed,
+                                iteration,
+                            ));
                         }
 
                         // Add assistant response to context
@@ -756,7 +793,10 @@ impl Worker {
                             }
                         }
                         if job_finished {
-                            return Ok(());
+                            return Ok(WorkerLoopOutcome::new(
+                                LoopStopReason::Completed,
+                                iteration,
+                            ));
                         }
                     }
                 }
@@ -778,7 +818,7 @@ impl Worker {
                     .process_tool_result(reason_ctx, selection, result)
                     .await?
                 {
-                    return Ok(());
+                    return Ok(WorkerLoopOutcome::new(LoopStopReason::Completed, iteration));
                 }
             } else {
                 // Multiple tools: execute in parallel
@@ -801,7 +841,7 @@ impl Worker {
                     }
                 }
                 if job_finished {
-                    return Ok(());
+                    return Ok(WorkerLoopOutcome::new(LoopStopReason::Completed, iteration));
                 }
             }
 
@@ -814,7 +854,7 @@ impl Worker {
                 self.last_output.lock().ok().is_some_and(|g| g.is_some()),
             ) {
                 self.mark_completed().await?;
-                return Ok(());
+                return Ok(WorkerLoopOutcome::new(LoopStopReason::Completed, iteration));
             }
 
             // Small delay between iterations

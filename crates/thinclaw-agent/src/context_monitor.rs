@@ -13,8 +13,14 @@ const DEFAULT_CONTEXT_LIMIT: usize = 100_000;
 /// Compaction threshold as a percentage of the limit.
 const COMPACTION_THRESHOLD: f64 = 0.8;
 
-/// Approximate tokens per word (rough estimate for English).
+/// Approximate tokens per whitespace-delimited word (rough estimate for
+/// space-separated prose in Latin scripts).
 const TOKENS_PER_WORD: f64 = 1.3;
+
+/// Approximate characters per token for the character-based estimate. This is
+/// the widely used "~4 chars per token" rule of thumb for BPE tokenizers on
+/// mixed English / code / JSON content.
+const CHARS_PER_TOKEN: usize = 4;
 
 /// Context pressure levels derived from approximate context usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -190,15 +196,83 @@ impl Default for ContextMonitor {
     }
 }
 
-/// Estimate tokens for a single message.
+/// Returns true for codepoints that a BPE tokenizer typically encodes at
+/// roughly one token per character (CJK ideographs, kana, Hangul, and common
+/// full-width forms). Whitespace-word counting badly undercounts these scripts
+/// because they are not space-delimited, so we count them per-character.
+fn is_dense_script(ch: char) -> bool {
+    matches!(ch as u32,
+        0x3040..=0x30FF |   // Hiragana + Katakana
+        0x3400..=0x4DBF |   // CJK Unified Ideographs Extension A
+        0x4E00..=0x9FFF |   // CJK Unified Ideographs
+        0xAC00..=0xD7AF |   // Hangul syllables
+        0xF900..=0xFAFF |   // CJK Compatibility Ideographs
+        0xFF00..=0xFFEF |   // Half/Full-width forms
+        0x20000..=0x2FA1F   // CJK Extension B+ / Supplement
+    )
+}
+
+/// Estimate tokens for raw text using a content-aware heuristic.
+///
+/// Combines two independent estimates and takes the larger (more conservative)
+/// so we never *under*-count relative to a real tokenizer, which is the failure
+/// mode that lets a request overflow the provider's context window:
+///
+/// - **Character-based** (`~4 chars/token`), with dense scripts (CJK/kana/Hangul)
+///   counted at ~1 token each. This dominates for code, JSON tool payloads, and
+///   non-Latin text, where whitespace-word counting is wildly inaccurate.
+/// - **Word-based** (`words * 1.3`), a good fit for ordinary Latin-script prose.
+///
+/// This is not an exact BPE tokenizer (which would require a per-provider
+/// vocabulary and cannot cover Anthropic locally), but it is dramatically closer
+/// than pure word counting for the content types agents actually generate.
+pub fn estimate_text_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+
+    let mut dense_chars = 0usize;
+    let mut other_chars = 0usize;
+    for ch in text.chars() {
+        if is_dense_script(ch) {
+            dense_chars += 1;
+        } else {
+            other_chars += 1;
+        }
+    }
+    // Ceiling division for the Latin/code portion, plus ~1 token per dense char.
+    let char_based = dense_chars + other_chars.div_ceil(CHARS_PER_TOKEN);
+
+    let word_count = text.split_whitespace().count();
+    let word_based = (word_count as f64 * TOKENS_PER_WORD) as usize;
+
+    char_based.max(word_based)
+}
+
+/// Estimate tokens for a single message, including tool-call JSON and media.
 fn estimate_message_tokens(message: &ChatMessage) -> usize {
-    // Use word-based estimation as it's more accurate for varied content
-    let word_count = message.content.split_whitespace().count();
+    // Add overhead for role framing and message structure (~4 tokens).
+    let overhead = 4;
 
-    // Add overhead for role and structure
-    let overhead = 4; // ~4 tokens for role and message structure
+    let mut text_tokens = estimate_text_tokens(&message.content) + overhead;
 
-    let text_tokens = (word_count as f64 * TOKENS_PER_WORD) as usize + overhead;
+    // Tool-call payloads (name + serialized arguments) are real context that
+    // the previous word-based estimator ignored entirely — an assistant turn
+    // that calls tools with large JSON arguments could be undercounted by
+    // thousands of tokens. Account for both the request and result framing.
+    if let Some(ref tool_calls) = message.tool_calls {
+        for call in tool_calls {
+            text_tokens += estimate_text_tokens(&call.name);
+            text_tokens += estimate_text_tokens(&call.arguments.to_string());
+            text_tokens += 8; // per-tool-call id + JSON framing overhead
+        }
+    }
+    if let Some(ref name) = message.name {
+        text_tokens += estimate_text_tokens(name) + 2;
+    }
+    if message.tool_call_id.is_some() {
+        text_tokens += 4; // tool_call_id linkage overhead
+    }
 
     // Estimate tokens for multimodal attachments.
     // Image tokens vary by resolution, but roughly:
@@ -218,12 +292,6 @@ fn estimate_message_tokens(message: &ChatMessage) -> usize {
         .sum();
 
     text_tokens + attachment_tokens
-}
-
-/// Estimate tokens for raw text.
-pub fn estimate_text_tokens(text: &str) -> usize {
-    let word_count = text.split_whitespace().count();
-    (word_count as f64 * TOKENS_PER_WORD) as usize
 }
 
 /// Context size breakdown for reporting.
@@ -279,9 +347,56 @@ mod tests {
     fn test_token_estimation() {
         let msg = ChatMessage::user("Hello, how are you today?");
         let tokens = estimate_message_tokens(&msg);
-        // 5 words * 1.3 + 4 overhead = ~10-11 tokens
         assert!(tokens > 0);
         assert!(tokens < 20);
+    }
+
+    #[test]
+    fn test_dense_json_not_undercounted() {
+        // Dense JSON has few whitespace "words" but many tokens. The char-based
+        // estimate must dominate so we don't wildly undercount tool payloads.
+        let json = r#"{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9}"#;
+        let word_based = (json.split_whitespace().count() as f64 * TOKENS_PER_WORD) as usize;
+        let estimate = estimate_text_tokens(json);
+        assert!(
+            estimate > word_based * 3,
+            "dense JSON estimate {estimate} should far exceed word-based {word_based}"
+        );
+    }
+
+    #[test]
+    fn test_cjk_counted_per_character() {
+        // No whitespace words at all, but ~12 tokens of real content.
+        let cjk = "今日はいい天気ですね本当に";
+        let word_based = (cjk.split_whitespace().count() as f64 * TOKENS_PER_WORD) as usize;
+        let estimate = estimate_text_tokens(cjk);
+        assert!(word_based <= 2, "sanity: CJK has ~no whitespace words");
+        assert!(
+            estimate >= cjk.chars().count(),
+            "CJK estimate {estimate} should be ~1 token per char"
+        );
+    }
+
+    #[test]
+    fn test_tool_call_arguments_are_counted() {
+        // An assistant message whose tool-call arguments carry a large payload
+        // must not be estimated as if it were empty text.
+        let big_args = serde_json::json!({ "blob": "x".repeat(4000) });
+        let with_tools = ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![thinclaw_llm_core::ToolCall {
+                id: "c0".to_string(),
+                name: "write".to_string(),
+                arguments: big_args,
+            }],
+        );
+        let bare = ChatMessage::assistant("");
+        let tool_tokens = estimate_message_tokens(&with_tools);
+        let bare_tokens = estimate_message_tokens(&bare);
+        assert!(
+            tool_tokens > bare_tokens + 800,
+            "tool-call args ({tool_tokens}) must be counted vs bare ({bare_tokens})"
+        );
     }
 
     #[test]

@@ -284,7 +284,14 @@ impl ExtensionManager {
                             shared_auth_provider: None,
                             missing_scopes: Vec::new(),
                             installed: true,
-                            activation_error: None,
+                            // Surface the last health probe failure so an
+                            // operator sees an unreachable/crashed server rather
+                            // than it silently showing as "active".
+                            activation_error: server
+                                .runtime_health
+                                .as_ref()
+                                .filter(|h| !h.connected)
+                                .and_then(|h| h.last_error.clone()),
                         });
                     }
                 }

@@ -265,7 +265,7 @@ pub fn runtime_snapshot_for_persistence(
     // `set_active_message_row_count` right after they mutate `thread.turns`.
     // Recomputing it here keeps normal turns from leaving a stale, too-small
     // watermark in place after an earlier undo.
-    runtime.active_message_row_count = Some(thread.messages().len() as i64);
+    runtime.active_message_row_count = Some(thread.persisted_message_count() as i64);
 
     runtime
 }
@@ -565,6 +565,23 @@ pub fn restore_thread_from_checkpoint(
     let description = checkpoint.description.clone();
     thread.restore_from_messages(checkpoint.messages);
     Some(description)
+}
+
+/// Restore a thread's conversation state to the start of `turn_number`.
+///
+/// Returns the restored checkpoint's `(turn_number, description)` on success,
+/// or `None` when no conversation checkpoint exists for that turn. This is the
+/// conversation half of the `/rewind` command; the caller pairs it with a
+/// filesystem checkpoint restore.
+pub fn restore_thread_to_turn(
+    thread: &mut Thread,
+    undo: &mut UndoManager,
+    turn_number: usize,
+) -> Option<(usize, String)> {
+    let checkpoint = undo.restore_to_turn(turn_number)?;
+    let restored = (checkpoint.turn_number, checkpoint.description.clone());
+    thread.restore_from_messages(checkpoint.messages);
+    Some(restored)
 }
 
 pub async fn mutate_thread_runtime_snapshot<F>(

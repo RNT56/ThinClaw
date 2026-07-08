@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Timelike, Utc};
 use regex::Regex;
+use thinclaw_agent::loop_control::{LoopKind, LoopStopReason};
 use thinclaw_agent::routine_engine::{
     ClaimedScheduledTriggerDecisionInput, EVENT_CONTENT_PREVIEW_LIMIT, FullJobRuntimeMetadata,
     HeartbeatTarget, RoutineEventEvaluationPlan, RoutineEventFilterOutcome, ScheduledTriggerAction,
@@ -23,14 +24,15 @@ use thinclaw_agent::routine_engine::{
     classify_lightweight_routine_response, compare_event_cache_routines,
     decide_claimed_scheduled_trigger, decide_missing_scheduled_trigger_routine,
     decide_routine_event_dispatch, effective_lightweight_max_tokens,
-    evaluate_routine_event_filters, full_job_metadata, heartbeat_job_metadata,
-    increment_decision_count, lightweight_routine_messages, render_trigger_payload_block,
-    routine_cooldown_allows, routine_event_evaluation_details, routine_event_owner_matches,
+    evaluate_routine_event_filters, fair_interleave_routine_events, full_job_metadata,
+    heartbeat_job_metadata, increment_decision_count, lightweight_routine_messages,
+    render_trigger_payload_block, routine_cooldown_allows, routine_event_attempts_exhausted,
+    routine_event_evaluation_details, routine_event_fairness_key, routine_event_owner_matches,
     routine_requests_desktop_capabilities, routine_runtime_update_for_run, sanitize_routine_name,
     scheduled_run_trigger_key, should_continue_queue_drain, should_jitter_trigger_type,
     should_refresh_event_cache, summarize_runtime_capabilities, truncate,
 };
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::agent::Scheduler;
@@ -50,6 +52,7 @@ use crate::config::RoutineConfig;
 use crate::db::Database;
 use crate::error::{DatabaseError, RoutineError};
 use crate::llm::{CompletionRequest, LlmProvider};
+use crate::observability::{LoopMetricGuard, NoopObserver, Observer};
 use crate::tools::ToolProfile;
 use crate::tools::execution_backend::routine_engine_runtime_descriptor;
 use crate::workspace::Workspace;
@@ -89,10 +92,13 @@ pub struct RoutineEngine {
     user_timezone: Option<String>,
     /// Stable worker id used when claiming persisted event inbox items.
     worker_id: String,
+    /// Shared observability sink for routine event/trigger loop metrics.
+    observer: Arc<dyn Observer>,
 }
 
 const EVENT_QUEUE_BATCH_LIMIT: i64 = 64;
 const TRIGGER_QUEUE_BATCH_LIMIT: i64 = 64;
+const ROUTINE_EVENT_MAX_ATTEMPTS: u32 = 3;
 
 /// Initial DB lease window (seconds) set on a routine run at spawn time,
 /// before the worker/subagent (or lightweight inline execution) has had a
@@ -104,6 +110,14 @@ const INITIAL_ROUTINE_RUN_LEASE_SECS: i64 = 300;
 struct CachedEventRoutine {
     routine: Routine,
     regex: Option<Regex>,
+}
+
+fn routine_event_batch_source_count(events: &[RoutineEvent]) -> usize {
+    events
+        .iter()
+        .map(routine_event_fairness_key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 impl RoutineEngine {
@@ -131,12 +145,19 @@ impl RoutineEngine {
             active_tasks: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
             user_timezone: None,
             worker_id: Uuid::new_v4().to_string(),
+            observer: Arc::new(NoopObserver),
         }
     }
 
     /// Set the SSE broadcast sender for emitting routine lifecycle events.
     pub fn with_sse_sender(mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) -> Self {
         self.sse_tx = Some(tx);
+        self
+    }
+
+    /// Set the shared observer for routine queue loop metrics.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = observer;
         self
     }
 
@@ -212,18 +233,23 @@ impl RoutineEngine {
     /// Called synchronously from the main loop after handle_message(). The actual
     /// execution is spawned async so this returns quickly.
     pub async fn check_event_triggers(&self, message: &IncomingMessage) -> usize {
+        let mut loop_metrics =
+            LoopMetricGuard::start(Arc::clone(&self.observer), LoopKind::RoutineEventQueue);
         self.ensure_event_cache_loaded().await;
         let event = match self.enqueue_routine_event(message).await {
             Ok(event) => event,
             Err(error) => {
+                loop_metrics.stop_with(LoopStopReason::FatalError);
                 tracing::error!("Failed to enqueue routine event: {}", error);
                 return 0;
             }
         };
+        loop_metrics.set_iterations(1);
 
         if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
             && manager.emergency_stop_active()
         {
+            loop_metrics.stop_with(LoopStopReason::Cancelled);
             tracing::warn!(
                 event_id = %event.id,
                 "Desktop autonomy emergency stop is active; leaving event queued"
@@ -232,9 +258,16 @@ impl RoutineEngine {
         }
 
         match self.try_process_routine_event(event.id).await {
-            Ok(Some(fired)) => fired,
-            Ok(None) => 0,
+            Ok(Some(fired)) => {
+                loop_metrics.stop_with(LoopStopReason::Completed);
+                fired
+            }
+            Ok(None) => {
+                loop_metrics.stop_with(LoopStopReason::NoWork);
+                0
+            }
             Err(error) => {
+                loop_metrics.stop_with(LoopStopReason::FatalError);
                 tracing::error!(
                     event_id = %event.id,
                     "Failed to process routine event: {}",
@@ -416,7 +449,12 @@ impl RoutineEngine {
     }
 
     async fn drain_pending_trigger_queue(&self) -> usize {
+        let mut loop_metrics =
+            LoopMetricGuard::start(Arc::clone(&self.observer), LoopKind::RoutineTriggerQueue);
         let mut total_fired = 0usize;
+        let mut processed_triggers = 0usize;
+        let mut saw_work = false;
+        let mut stop_reason = None;
 
         loop {
             let claimed = match self
@@ -430,6 +468,7 @@ impl RoutineEngine {
             {
                 Ok(items) => items,
                 Err(error) => {
+                    stop_reason = Some(LoopStopReason::FatalError);
                     tracing::error!("Failed to claim scheduled routine triggers: {}", error);
                     break;
                 }
@@ -439,8 +478,10 @@ impl RoutineEngine {
                 break;
             }
 
+            saw_work = true;
             let batch_len = claimed.len();
             for trigger in claimed {
+                processed_triggers += 1;
                 match self.process_claimed_trigger(trigger).await {
                     Ok(fired) => total_fired += usize::from(fired),
                     Err(error) => {
@@ -453,6 +494,13 @@ impl RoutineEngine {
                 break;
             }
         }
+
+        loop_metrics.set_iterations(processed_triggers);
+        loop_metrics.stop_with(stop_reason.unwrap_or(if saw_work {
+            LoopStopReason::Completed
+        } else {
+            LoopStopReason::NoWork
+        }));
 
         total_fired
     }
@@ -730,32 +778,69 @@ impl RoutineEngine {
         match self.process_claimed_event(event.clone()).await {
             Ok(fired) => Ok(Some(fired)),
             Err(error) => {
-                if let Err(store_error) = self
-                    .store
-                    .fail_routine_event(event.id, Utc::now(), &error.to_string())
-                    .await
-                {
-                    tracing::error!(
-                        event_id = %event.id,
-                        "Failed to mark routine event as failed: {}",
-                        store_error
-                    );
-                }
+                self.record_routine_event_failure(&event, &error).await;
                 Err(error)
             }
         }
     }
 
+    async fn record_routine_event_failure(&self, event: &RoutineEvent, error: &RoutineError) {
+        let error_message = error.to_string();
+        let terminal =
+            routine_event_attempts_exhausted(event.attempt_count, ROUTINE_EVENT_MAX_ATTEMPTS);
+        let diagnostics = serde_json::json!({
+            "content_preview": truncate(&event.content, EVENT_CONTENT_PREVIEW_LIMIT),
+            "claimed_by": self.worker_id,
+            "attempt_count": event.attempt_count,
+            "max_attempts": ROUTINE_EVENT_MAX_ATTEMPTS,
+            "last_error": error_message,
+            "dead_lettered": terminal,
+        });
+
+        let result = if terminal {
+            self.store
+                .dead_letter_routine_event(event.id, Utc::now(), &error_message, &diagnostics)
+                .await
+        } else {
+            self.store
+                .release_routine_event(event.id, &diagnostics)
+                .await
+        };
+
+        if let Err(store_error) = result {
+            tracing::error!(
+                event_id = %event.id,
+                terminal,
+                "Failed to record routine event failure: {}",
+                store_error
+            );
+        } else if terminal {
+            tracing::warn!(
+                event_id = %event.id,
+                attempts = event.attempt_count,
+                max_attempts = ROUTINE_EVENT_MAX_ATTEMPTS,
+                "Routine event dead-lettered after bounded retries"
+            );
+        }
+    }
+
     pub async fn drain_pending_event_queue(&self) -> usize {
+        let mut loop_metrics =
+            LoopMetricGuard::start(Arc::clone(&self.observer), LoopKind::RoutineEventQueue);
         if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
             && manager.emergency_stop_active()
         {
+            loop_metrics.stop_with(LoopStopReason::Cancelled);
             tracing::warn!("Desktop autonomy emergency stop is active; skipping event inbox drain");
             return 0;
         }
 
         self.ensure_event_cache_loaded().await;
         let mut total_fired = 0usize;
+        let mut processed_events = 0usize;
+        let mut retried_events = 0u32;
+        let mut saw_work = false;
+        let mut stop_reason = None;
 
         loop {
             let pending = match self
@@ -765,6 +850,7 @@ impl RoutineEngine {
             {
                 Ok(events) => events,
                 Err(error) => {
+                    stop_reason = Some(LoopStopReason::FatalError);
                     tracing::error!("Failed to load pending routine events: {}", error);
                     break;
                 }
@@ -774,8 +860,30 @@ impl RoutineEngine {
                 break;
             }
 
+            saw_work = true;
             let batch_len = pending.len();
-            for event in pending {
+            let batch_source_count = routine_event_batch_source_count(&pending);
+            let pending = fair_interleave_routine_events(pending);
+            tracing::debug!(
+                batch_len,
+                batch_source_count,
+                "Draining routine event batch with fair source interleaving"
+            );
+
+            for (batch_index, event) in pending.into_iter().enumerate() {
+                processed_events += 1;
+                if event.attempt_count > 0 {
+                    retried_events = retried_events.saturating_add(1);
+                }
+                tracing::trace!(
+                    event_id = %event.id,
+                    batch_index,
+                    batch_len,
+                    batch_source_count,
+                    source_key = %routine_event_fairness_key(&event),
+                    attempt_count = event.attempt_count,
+                    "Processing routine event from fair interleaved batch"
+                );
                 match self.try_process_routine_event(event.id).await {
                     Ok(Some(fired)) => total_fired += fired,
                     Ok(None) => {}
@@ -793,6 +901,14 @@ impl RoutineEngine {
                 break;
             }
         }
+
+        loop_metrics.set_iterations(processed_events);
+        loop_metrics.set_retries(retried_events);
+        loop_metrics.stop_with(stop_reason.unwrap_or(if saw_work {
+            LoopStopReason::Completed
+        } else {
+            LoopStopReason::NoWork
+        }));
 
         total_fired
     }
@@ -1382,6 +1498,27 @@ pub fn spawn_zombie_reaper(engine: Arc<RoutineEngine>) -> tokio::task::JoinHandl
     })
 }
 
+pub fn spawn_zombie_reaper_with_shutdown(
+    engine: Arc<RoutineEngine>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(120));
+        interval.tick().await; // skip immediate tick
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("routine zombie reaper shutting down");
+                    return;
+                }
+                _ = interval.tick() => {
+                    engine.reap_zombie_runs().await;
+                }
+            }
+        }
+    })
+}
+
 /// Spawn the cron ticker background task.
 pub fn spawn_cron_ticker(
     engine: Arc<RoutineEngine>,
@@ -1403,6 +1540,38 @@ pub fn spawn_cron_ticker(
             engine.check_cron_triggers().await;
             // IC-006: Zombie reaping is handled by the dedicated spawn_zombie_reaper
             // task (every 120s). The cron ticker only checks triggers.
+        }
+    })
+}
+
+pub fn spawn_cron_ticker_with_shutdown(
+    engine: Arc<RoutineEngine>,
+    interval: Duration,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        engine.refresh_event_cache().await;
+        engine.drain_pending_event_queue().await;
+        engine.check_cron_triggers().await;
+
+        let mut ticker = tokio::time::interval(interval);
+        // Align the first timed tick to `interval` after the startup catch-up.
+        ticker.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("routine cron ticker shutting down");
+                    return;
+                }
+                _ = ticker.tick() => {
+                    engine.refresh_event_cache().await;
+                    engine.drain_pending_event_queue().await;
+                    engine.check_cron_triggers().await;
+                    // IC-006: Zombie reaping is handled by the dedicated
+                    // spawn_zombie_reaper task. The cron ticker only checks triggers.
+                }
+            }
         }
     })
 }

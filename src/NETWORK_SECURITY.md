@@ -67,11 +67,65 @@ Both paths use **constant-time comparison** via `subtle::ConstantTimeEq` (`ct_eq
 
 If `GATEWAY_AUTH_TOKEN` is not set, a random hex token is generated at startup.
 
+#### RBAC principals (opt-in)
+
+The primary `GATEWAY_AUTH_TOKEN` always has **admin** rights. Operators may
+layer additional **principals** on top, each with its own token and a role that
+bounds what it can do. This is **opt-in and additive**: with no principals
+configured the gateway behaves exactly as before (single admin token).
+
+Principals are configured either in settings (`channels.gateway_principals`) or
+at runtime via the `GATEWAY_PRINCIPALS` env var (a JSON array; a malformed value
+is a hard config error, not a silent drop). Each entry is
+`{ "token", "principal_id", "actor_id"?, "role" }`. Blank-token entries are
+dropped at load so they can never authenticate. Principal tokens live alongside
+the primary token and are protected by the same file permissions.
+
+| Role | Capabilities |
+|------|--------------|
+| `read_only` | Read-only observation: safe methods (`GET`/`HEAD`/`OPTIONS`) on non-admin routes |
+| `operator` | Read + drive the agent (chat, sessions, jobs, memory, skills) — any non-config state change |
+| `admin` | Full control, including configuration/security/code-execution surfaces |
+
+**Capability model.** Each request is classified into one coarse capability by
+method and path, and the caller's role must grant it (`role_grants`). The
+classifier is **fail-closed**: a state-changing request that isn't explicitly
+operator-writable requires admin.
+
+- Any request to an **admin surface** (`/api/settings`, `/api/providers`,
+  `/api/tool-policies`, `/api/security`, `/api/extensions`, `/api/mcp`,
+  `/api/hooks`, `/api/principals`) → `ManageConfig` (**admin only**, read *and*
+  write — reads there can expose config and the write side installs/executes
+  code).
+- Otherwise a safe/read method (`GET`/`HEAD`/`OPTIONS`) → `ReadState`.
+- A state-changing method to an **operator-writable** prefix (`/api/chat`,
+  `/api/sessions`, `/api/memory`, `/api/jobs` — the "drive the agent" surface)
+  → `Chat`.
+- **Any other state-changing request → `ManageConfig` (admin only).** This is
+  the fail-closed default: a control-plane route that isn't on the
+  operator-writable allowlist (e.g. `/api/gateway/restart`, `/api/autonomy/*`,
+  `/api/experiments/runners`, `/api/learning/code-proposals/*/review`,
+  `/api/pairing/*/approve`) is admin-only automatically, so a newly added
+  sensitive route can't silently become Operator-accessible.
+
+Enforcement happens in the same `auth_middleware` immediately after the caller's
+identity+role is resolved: an insufficient role returns `403 Forbidden`. Because
+the primary token and trusted-proxy identities resolve to `admin`, and admin
+grants every capability, the enforcement is a no-op for the default deployment.
+The token→role→capability path (including the `?token=` fallback still being
+role-gated) is covered by end-to-end middleware tests.
+
+**References:** `crates/thinclaw-gateway/src/web/rbac.rs`
+(`capability_for_request`, `role_grants`), `crates/thinclaw-gateway/src/web/auth.rs`
+(`auth_middleware`, `enforce_capability`),
+`thinclaw_settings::gateway_rbac` (`GatewayRole`, `GatewayPrincipalConfig`)
+
 ### Unauthenticated Routes
 
 | Route | Purpose | Response |
 |-------|---------|----------|
 | `/api/health` | Health check endpoint | `{"status":"healthy","channel":"gateway"}` — no version, uptime, or fingerprinting data |
+| `/metrics` | Prometheus scrape endpoint (only when `OBSERVABILITY_BACKEND=prometheus`) | Prometheus text exposition of aggregate operational counters. **No auth by design** (scraper standard): exposes only aggregate counters; all label values are operator-controlled config (model/tool/channel names), never user input — no PII, no unbounded-cardinality vector. Restrict at the reverse proxy if the gateway is publicly exposed. See `docs/OBSERVABILITY.md`. |
 | `/` | Static HTML (embedded) | Single-page app shell |
 | `/style.css` | Static CSS (embedded) | Stylesheet |
 | `/app.js` | Static JS (embedded) | Client-side app |
@@ -459,6 +513,51 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 2. Additional domains from `SANDBOX_EXTRA_DOMAINS` env var (comma-separated)
 
 **Reference:** `src/config.rs` — sandbox allowlist assembly
+
+---
+
+## Host-Direct Command Execution
+
+The `run_shell` / `run_script` built-ins can execute directly on the host (as
+opposed to inside a Docker sandbox). Two OS-level controls wrap that execution
+in `thinclaw-tools/src/execution.rs`:
+
+### Network isolation (always on for `allow_network = false`)
+
+When a host-direct command is run with networking disabled, execution is wrapped
+so no egress is possible, using a **hard** isolation primitive where available:
+
+| Platform | Mechanism | Reference |
+|----------|-----------|-----------|
+| macOS | `sandbox-exec` seatbelt profile `(deny network*)` | `execution.rs` — `macos_network_deny_profile()` |
+| Linux | `bwrap --unshare-net` (network namespace with no interfaces) | `execution.rs` — `linux_bubblewrap_program()` |
+| Other | Best-effort `no_proxy=*` env only | `execution.rs` — `configure_env()` |
+
+`host_local_network_isolation()` reports `Hard` / `BestEffort` / `None` so
+callers can see the guarantee level.
+
+### Filesystem confinement (opt-in, default off)
+
+Set `THINCLAW_HOST_FS_SANDBOX=1` to additionally confine host-direct **writes**
+to the command's workspace root (plus temp/device paths). Reads and process exec
+stay broad so interpreters can load their libraries. This is **default-off** so
+enabling it never silently changes behavior for existing deployments; when off,
+host execution behaves exactly as before.
+
+| Platform | Mechanism | Reference |
+|----------|-----------|-----------|
+| macOS | seatbelt `(deny file-write*)` + `(allow file-write* (subpath <workspace>) …)` | `execution.rs` — `macos_confined_profile()` |
+| Linux | `bwrap --ro-bind / /` + writable `--bind <workspace>` + `--tmpfs /tmp` | `execution.rs` — `linux_bind_confinement()` |
+| Other | No confinement (flag has no effect) | — |
+
+The confinement is composed with the network profile: a confined command with
+`allow_network = false` both denies egress and scopes writes. On macOS the
+kernel-enforced boundary is verified by a behavioral test
+(`macos_sandbox_tests::confined_profile_blocks_writes_outside_root`) that proves
+a write outside the confine root is rejected.
+
+**References:** `execution.rs` — `host_fs_sandbox_enabled()`,
+`host_fs_confine_root()`, `build_shell_command()`, `build_script_command()`
 
 ---
 

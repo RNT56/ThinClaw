@@ -6,9 +6,12 @@
 //! protocol preferences.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::nostr_runtime::NostrConfig;
@@ -21,7 +24,10 @@ use thinclaw_types::error::ChannelError;
 pub struct NostrChannel {
     config: NostrConfig,
     runtime: Arc<NostrRuntime>,
+    notification_task: Mutex<Option<JoinHandle<()>>>,
 }
+
+const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl NostrChannel {
     pub fn new(config: NostrConfig) -> Result<Self, ChannelError> {
@@ -33,7 +39,11 @@ impl NostrChannel {
         config: NostrConfig,
         runtime: Arc<NostrRuntime>,
     ) -> Result<Self, ChannelError> {
-        Ok(Self { config, runtime })
+        Ok(Self {
+            config,
+            runtime,
+            notification_task: Mutex::new(None),
+        })
     }
 
     pub fn runtime(&self) -> Arc<NostrRuntime> {
@@ -52,6 +62,10 @@ impl Channel for NostrChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
+        if let Some(handle) = self.notification_task.lock().await.take() {
+            self.runtime.shutdown().await;
+            drain_channel_task(handle, "nostr").await;
+        }
         self.runtime.ensure_connected().await?;
 
         tracing::info!(
@@ -72,7 +86,7 @@ impl Channel for NostrChannel {
         let runtime = Arc::clone(&self.runtime);
         let owner_pubkey = runtime.owner_pubkey_hex();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = runtime
                 .client()
                 .handle_notifications(|notification| {
@@ -146,6 +160,7 @@ impl Channel for NostrChannel {
                 tracing::error!(error = %err, "Nostr notification handler exited");
             }
         });
+        *self.notification_task.lock().await = Some(handle);
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
@@ -241,8 +256,26 @@ impl Channel for NostrChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         self.runtime.shutdown().await;
+        if let Some(handle) = self.notification_task.lock().await.take() {
+            drain_channel_task(handle, "nostr").await;
+        }
         tracing::info!("Nostr channel shut down");
         Ok(())
+    }
+}
+
+async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
+    tokio::select! {
+        result = &mut handle => {
+            if let Err(error) = result {
+                tracing::warn!(channel = name, error = %error, "channel notification task exited with error");
+            }
+        }
+        _ = tokio::time::sleep(CHANNEL_TASK_SHUTDOWN_TIMEOUT) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(channel = name, "channel notification task did not drain before timeout; aborted");
+        }
     }
 }
 

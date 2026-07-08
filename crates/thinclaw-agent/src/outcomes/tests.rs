@@ -208,6 +208,98 @@ fn candidate_seed_and_builder_shape_repeated_negative_payload() {
 }
 
 #[test]
+fn outcome_candidate_route_failure_quarantines_proposal_and_contract() {
+    let now = Utc::now();
+    let record = outcome_candidate_route_failure_record(
+        EVALUATOR_OUTCOME,
+        "routing backend unavailable",
+        now,
+    );
+    let proposal = annotate_candidate_proposal_with_route(
+        &json!({
+            "dedupe_key": "memory:pattern",
+            "source": "outcome_backed_learning",
+        }),
+        &record,
+    );
+
+    let route = proposal
+        .get(OUTCOME_CANDIDATE_ROUTE_KEY)
+        .expect("candidate route audit");
+    assert_eq!(
+        route.get("status").and_then(|value| value.as_str()),
+        Some("quarantined")
+    );
+    assert_eq!(
+        route
+            .get("requires_operator_review")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        route.get("error").and_then(|value| value.as_str()),
+        Some("routing backend unavailable")
+    );
+
+    let mut contract = contract();
+    let candidate_id = Uuid::new_v4();
+    let candidate_id_text = candidate_id.to_string();
+    annotate_contract_with_outcome_candidate_route(&mut contract, candidate_id, &record);
+    assert_eq!(contract.updated_at, now);
+    for target in [&contract.metadata, &contract.evaluation_details] {
+        let route = target
+            .get(OUTCOME_CANDIDATE_ROUTE_KEY)
+            .expect("contract route audit");
+        assert_eq!(
+            route.get("candidate_id").and_then(|value| value.as_str()),
+            Some(candidate_id_text.as_str())
+        );
+        assert_eq!(
+            route.get("status").and_then(|value| value.as_str()),
+            Some("quarantined")
+        );
+    }
+}
+
+#[test]
+fn outcome_candidate_route_success_classifies_review_states() {
+    let now = Utc::now();
+    let manual = outcome_candidate_route_success_record(
+        EVALUATOR_OUTCOME,
+        false,
+        None,
+        &["outcome candidate queued for manual review".to_string()],
+        now,
+    );
+    assert_eq!(manual.status, "manual_review");
+    assert!(manual.requires_operator_review);
+
+    let auto = outcome_candidate_route_success_record(EVALUATOR_OUTCOME, true, None, &[], now);
+    assert_eq!(auto.status, "auto_applied");
+    assert!(!auto.requires_operator_review);
+
+    let proposal_id = Uuid::new_v4();
+    let code = outcome_candidate_route_success_record(
+        EVALUATOR_OUTCOME,
+        false,
+        Some(proposal_id),
+        &["outcome candidate routed to approval-gated code proposal".to_string()],
+        now,
+    );
+    assert_eq!(code.status, "code_proposal");
+    assert!(code.requires_operator_review);
+    let proposal = annotate_candidate_proposal_with_route(&json!({}), &code);
+    let proposal_id_text = proposal_id.to_string();
+    assert_eq!(
+        proposal
+            .get(OUTCOME_CANDIDATE_ROUTE_KEY)
+            .and_then(|value| value.get("code_proposal_id"))
+            .and_then(|value| value.as_str()),
+        Some(proposal_id_text.as_str())
+    );
+}
+
+#[test]
 fn deterministic_scoring_stays_neutral_on_silence() {
     let score = deterministic_score(&contract(), &[]);
     assert_eq!(score.verdict, VERDICT_NEUTRAL);

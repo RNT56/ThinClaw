@@ -243,6 +243,8 @@ mod stubs {
         pub async fn seed_from_sources(&self) {}
 
         pub async fn start(&self) {}
+
+        pub async fn stop(&self) {}
     }
 
     #[derive(Debug, Clone)]

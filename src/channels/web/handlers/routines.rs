@@ -6,6 +6,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::agent::outcomes;
@@ -34,6 +35,16 @@ async fn refresh_event_cache_if_present(state: &GatewayState) {
     if let Some(ref engine) = state.routine_engine {
         engine.refresh_event_cache().await;
     }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RoutineEventReplayResponse {
+    pub ok: bool,
+    pub replayed: bool,
+    pub event_id: String,
+    pub status: String,
+    pub fired_routines: usize,
+    pub engine_available: bool,
 }
 
 pub(crate) async fn routines_list_handler(
@@ -192,6 +203,7 @@ pub(crate) async fn routines_events_handler(
                 processed_at: event.processed_at,
                 matched_routines: event.matched_routines,
                 fired_routines: event.fired_routines,
+                attempt_count: event.attempt_count,
                 error_message: event.error_message,
                 diagnostics: event.diagnostics,
             })
@@ -199,6 +211,65 @@ pub(crate) async fn routines_events_handler(
         .collect();
 
     Ok(Json(routine_event_activity_response(items)))
+}
+
+pub(crate) async fn routines_event_replay_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    Path(id): Path<String>,
+) -> Result<Json<RoutineEventReplayResponse>, (StatusCode, String)> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or_else(routine_database_unavailable_error)?;
+    let event_id = Uuid::parse_str(&id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid routine event id".to_string(),
+        )
+    })?;
+    let principal_id = request_identity.principal_id.clone();
+    let actor_id = request_identity.actor_id.clone();
+    let diagnostics = serde_json::json!({
+        "replayed": true,
+        "replayed_at": chrono::Utc::now().to_rfc3339(),
+        "replayed_by": {
+            "principal_id": principal_id,
+            "actor_id": actor_id,
+        },
+    });
+
+    let Some(event) = store
+        .replay_routine_event(
+            event_id,
+            &request_identity.principal_id,
+            &request_identity.actor_id,
+            &diagnostics,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "routine event was not found or is not replayable".to_string(),
+        ));
+    };
+
+    let engine_available = state.routine_engine.is_some();
+    let fired_routines = if let Some(engine) = state.routine_engine.as_ref() {
+        engine.drain_pending_event_queue().await
+    } else {
+        0
+    };
+
+    Ok(Json(RoutineEventReplayResponse {
+        ok: true,
+        replayed: true,
+        event_id: event.id.to_string(),
+        status: event.status.to_string(),
+        fired_routines,
+        engine_available,
+    }))
 }
 
 pub(crate) async fn routines_detail_handler(

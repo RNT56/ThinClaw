@@ -584,3 +584,172 @@ async fn pending_event_queue_is_drained_on_startup_ticker() {
     assert_eq!(replayed_event.matched_routines, 1);
     assert_eq!(replayed_event.fired_routines, 1);
 }
+
+#[tokio::test]
+async fn routine_event_dead_letter_and_replay_round_trip() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+
+    let user = fixtures::user("routine_event_dead_letter_user");
+    let actor = fixtures::actor_name("routine_event_dead_letter");
+    let event = RoutineEvent {
+        id: Uuid::new_v4(),
+        principal_id: user.clone(),
+        actor_id: actor.clone(),
+        channel: "slack".to_string(),
+        event_type: "message".to_string(),
+        raw_sender_id: actor.clone(),
+        conversation_scope_id: Uuid::new_v4().to_string(),
+        stable_external_conversation_key: format!("test://slack/{user}/{actor}/dead-letter"),
+        content: "deploy now".to_string(),
+        content_hash: content_hash("deploy now").to_string(),
+        metadata: json!({"source": "dead_letter_contract"}),
+        idempotency_key: format!("dead-letter-{}", Uuid::new_v4()),
+        status: RoutineEventStatus::Pending,
+        diagnostics: json!({"content_preview": "deploy now"}),
+        claimed_by: None,
+        claimed_at: None,
+        lease_expires_at: None,
+        processed_at: None,
+        error_message: None,
+        matched_routines: 0,
+        fired_routines: 0,
+        attempt_count: 3,
+        created_at: Utc::now(),
+    };
+    ctx.db
+        .create_routine_event(&event)
+        .await
+        .expect("routine event should be inserted");
+
+    ctx.db
+        .dead_letter_routine_event(
+            event.id,
+            Utc::now(),
+            "dispatch failed repeatedly",
+            &json!({"dead_lettered": true, "max_attempts": 3}),
+        )
+        .await
+        .expect("routine event should be dead-lettered");
+
+    let dead_lettered = ctx
+        .db
+        .list_routine_events_for_actor(&user, &actor, 10)
+        .await
+        .expect("dead-lettered event should be queryable")
+        .into_iter()
+        .find(|candidate| candidate.id == event.id)
+        .expect("dead-lettered event should exist");
+    assert_eq!(dead_lettered.status, RoutineEventStatus::DeadLettered);
+    assert_eq!(
+        dead_lettered.error_message.as_deref(),
+        Some("dispatch failed repeatedly")
+    );
+
+    let wrong_actor_replay = ctx
+        .db
+        .replay_routine_event(event.id, &user, "someone-else", &json!({"replayed": true}))
+        .await
+        .expect("wrong actor replay query should succeed");
+    assert!(
+        wrong_actor_replay.is_none(),
+        "replay must be scoped to the event owner"
+    );
+
+    let replayed = ctx
+        .db
+        .replay_routine_event(event.id, &user, &actor, &json!({"replayed": true}))
+        .await
+        .expect("correct owner replay should query successfully")
+        .expect("dead-lettered event should be replayable");
+    assert_eq!(replayed.status, RoutineEventStatus::Pending);
+    assert_eq!(replayed.attempt_count, 0);
+    assert_eq!(replayed.matched_routines, 0);
+    assert_eq!(replayed.fired_routines, 0);
+    assert!(replayed.processed_at.is_none());
+    assert!(replayed.error_message.is_none());
+
+    let replay_again = ctx
+        .db
+        .replay_routine_event(event.id, &user, &actor, &json!({"replayed": true}))
+        .await
+        .expect("second replay query should succeed");
+    assert!(
+        replay_again.is_none(),
+        "pending events must not be replayed repeatedly"
+    );
+}
+
+#[tokio::test]
+async fn pending_routine_events_prioritize_fresh_events_before_retries() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+
+    let user = fixtures::user("routine_event_retry_order_user");
+    let actor = fixtures::actor_name("routine_event_retry_order");
+    let now = Utc::now();
+
+    let old_retry = RoutineEvent {
+        id: Uuid::new_v4(),
+        principal_id: user.clone(),
+        actor_id: actor.clone(),
+        channel: "slack".to_string(),
+        event_type: "message".to_string(),
+        raw_sender_id: actor.clone(),
+        conversation_scope_id: Uuid::new_v4().to_string(),
+        stable_external_conversation_key: format!("test://slack/{user}/{actor}/retry-old"),
+        content: "old retry".to_string(),
+        content_hash: content_hash("old retry").to_string(),
+        metadata: json!({"source": "retry_order_contract"}),
+        idempotency_key: format!("retry-order-old-{}", Uuid::new_v4()),
+        status: RoutineEventStatus::Pending,
+        diagnostics: json!({}),
+        claimed_by: None,
+        claimed_at: None,
+        lease_expires_at: None,
+        processed_at: None,
+        error_message: None,
+        matched_routines: 0,
+        fired_routines: 0,
+        attempt_count: 2,
+        created_at: now - chrono::Duration::minutes(10),
+    };
+    let mut fresh = old_retry.clone();
+    fresh.id = Uuid::new_v4();
+    fresh.stable_external_conversation_key = format!("test://slack/{user}/{actor}/fresh");
+    fresh.content = "fresh event".to_string();
+    fresh.content_hash = content_hash("fresh event").to_string();
+    fresh.idempotency_key = format!("retry-order-fresh-{}", Uuid::new_v4());
+    fresh.attempt_count = 0;
+    fresh.created_at = now;
+
+    ctx.db
+        .create_routine_event(&old_retry)
+        .await
+        .expect("old retry event should be inserted");
+    ctx.db
+        .create_routine_event(&fresh)
+        .await
+        .expect("fresh event should be inserted");
+
+    let pending = ctx
+        .db
+        .list_pending_routine_events(now - chrono::Duration::hours(1), 10)
+        .await
+        .expect("pending events should be queryable");
+    let old_idx = pending
+        .iter()
+        .position(|event| event.id == old_retry.id)
+        .expect("old retry should be pending");
+    let fresh_idx = pending
+        .iter()
+        .position(|event| event.id == fresh.id)
+        .expect("fresh event should be pending");
+
+    assert!(
+        fresh_idx < old_idx,
+        "fresh attempt_count=0 event should be listed before older retries"
+    );
+}

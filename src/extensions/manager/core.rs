@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::channels::ChannelManager;
@@ -29,6 +29,8 @@ use crate::tools::wasm::{
 use thinclaw_tools::builtin::extension_tools::{
     ExtensionInstallErrorKind, ExtensionInstallOutcome, ToolExtensionKind,
 };
+
+pub(super) type McpWatcherHandle = (JoinHandle<()>, oneshot::Sender<()>);
 use thinclaw_types::SetupAuthMode;
 
 /// Pending OAuth authorization state.
@@ -117,7 +119,11 @@ pub struct ExtensionManager {
     /// Active MCP clients keyed by server name.
     pub(super) mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
     /// Background config sync tasks keyed by server name.
-    pub(super) mcp_watchers: RwLock<HashMap<String, JoinHandle<()>>>,
+    pub(super) mcp_watchers: RwLock<HashMap<String, McpWatcherHandle>>,
+    /// Handle to the background MCP health monitor (probe + auto-reconnect).
+    pub(super) mcp_health_monitor: RwLock<Option<JoinHandle<()>>>,
+    /// Cooperative shutdown signal for the MCP health monitor.
+    pub(super) mcp_health_monitor_shutdown: RwLock<Option<oneshot::Sender<()>>>,
 
     // WASM tool infrastructure
     pub(super) wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
@@ -181,6 +187,8 @@ impl ExtensionManager {
             mcp_session_manager,
             mcp_clients: RwLock::new(HashMap::new()),
             mcp_watchers: RwLock::new(HashMap::new()),
+            mcp_health_monitor: RwLock::new(None),
+            mcp_health_monitor_shutdown: RwLock::new(None),
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,

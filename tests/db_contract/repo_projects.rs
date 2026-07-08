@@ -237,6 +237,8 @@ async fn repo_project_store_full_lifecycle_contract() {
         action: Some("opened".to_string()),
         repository_full_name: Some("owner/repo".to_string()),
         installation_id: Some(99),
+        raw_payload_base64: None,
+        signature_header: None,
         received_at: now,
     };
     assert!(
@@ -256,6 +258,18 @@ async fn repo_project_store_full_lifecycle_contract() {
             .await
             .expect("list deliveries")
             .is_empty()
+    );
+    assert_eq!(
+        db.get_repo_webhook_delivery(&delivery.delivery_id)
+            .await
+            .expect("get delivery"),
+        Some(delivery.clone())
+    );
+    assert!(
+        db.get_repo_webhook_delivery("missing-delivery")
+            .await
+            .expect("get missing delivery")
+            .is_none()
     );
 
     // Cleanup so repeated contract runs against a shared schema stay isolated.

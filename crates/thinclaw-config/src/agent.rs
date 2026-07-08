@@ -56,6 +56,8 @@ pub struct AgentConfig {
     pub worker_tool_profile: ToolProfile,
     /// Default tool profile for subagents and delegated execution.
     pub subagent_tool_profile: ToolProfile,
+    /// Maximum concurrent sub-agents per principal (`0` = global cap only).
+    pub subagent_max_per_principal: usize,
     /// Per-model thinking overrides. Key is a model name (exact or prefix match).
     /// When a model matches, its override takes precedence over global thinking settings.
     /// Format of env var: `MODEL_THINKING_OVERRIDE=model1:true:16000,model2:false`
@@ -174,6 +176,10 @@ impl AgentConfig {
                     .or(optional_env("SUBAGENT_TOOL_PROFILE")?)
                     .unwrap_or_else(|| settings.agent.subagent_tool_profile.clone()),
             ),
+            subagent_max_per_principal: parse_optional_env(
+                "SUBAGENT_MAX_PER_PRINCIPAL",
+                settings.agent.subagent_max_per_principal,
+            )?,
             model_thinking_overrides: parse_model_thinking_overrides()?,
             workspace_mode,
             workspace_root: optional_env("WORKSPACE_ROOT")?.map(std::path::PathBuf::from),
@@ -456,6 +462,7 @@ mod tests {
             main_tool_profile: ToolProfile::default(),
             worker_tool_profile: ToolProfile::default(),
             subagent_tool_profile: ToolProfile::default(),
+            subagent_max_per_principal: 0,
             model_thinking_overrides,
             workspace_mode: "sandboxed".to_string(),
             workspace_root: None,

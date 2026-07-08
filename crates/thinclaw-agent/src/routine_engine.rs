@@ -1,6 +1,7 @@
 //! Root-independent routine engine scheduling helpers.
 
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 use thinclaw_channels_core::IncomingMessage;
@@ -499,6 +500,53 @@ pub fn compare_event_cache_routines(left: &Routine, right: &Routine) -> Ordering
 
 pub fn should_continue_queue_drain(batch_len: usize, batch_limit: usize) -> bool {
     batch_limit > 0 && batch_len >= batch_limit
+}
+
+pub fn routine_event_attempts_exhausted(attempt_count: u32, max_attempts: u32) -> bool {
+    max_attempts > 0 && attempt_count >= max_attempts
+}
+
+pub fn routine_event_fairness_key(event: &RoutineEvent) -> String {
+    let conversation_key = if event.stable_external_conversation_key.is_empty() {
+        if event.conversation_scope_id.is_empty() {
+            event.raw_sender_id.as_str()
+        } else {
+            event.conversation_scope_id.as_str()
+        }
+    } else {
+        event.stable_external_conversation_key.as_str()
+    };
+
+    format!(
+        "{}:{}:{}:{}",
+        event.principal_id, event.actor_id, event.channel, conversation_key
+    )
+}
+
+pub fn fair_interleave_routine_events(events: Vec<RoutineEvent>) -> Vec<RoutineEvent> {
+    let mut groups: Vec<(String, VecDeque<RoutineEvent>)> = Vec::new();
+
+    for event in events {
+        let key = routine_event_fairness_key(&event);
+        if let Some((_, queue)) = groups.iter_mut().find(|(existing, _)| existing == &key) {
+            queue.push_back(event);
+        } else {
+            let mut queue = VecDeque::new();
+            queue.push_back(event);
+            groups.push((key, queue));
+        }
+    }
+
+    let total = groups.iter().map(|(_, queue)| queue.len()).sum();
+    let mut ordered = Vec::with_capacity(total);
+    while ordered.len() < total {
+        for (_, queue) in &mut groups {
+            if let Some(event) = queue.pop_front() {
+                ordered.push(event);
+            }
+        }
+    }
+    ordered
 }
 
 pub fn routine_event_owner_matches(routine: &Routine, event: &RoutineEvent) -> bool {
@@ -1514,6 +1562,62 @@ mod tests {
         assert!(should_continue_queue_drain(64, 64));
         assert!(!should_continue_queue_drain(63, 64));
         assert!(!should_continue_queue_drain(0, 0));
+    }
+
+    #[test]
+    fn event_attempt_policy_dead_letters_only_at_positive_ceiling() {
+        assert!(!routine_event_attempts_exhausted(0, 3));
+        assert!(!routine_event_attempts_exhausted(2, 3));
+        assert!(routine_event_attempts_exhausted(3, 3));
+        assert!(routine_event_attempts_exhausted(4, 3));
+        assert!(!routine_event_attempts_exhausted(4, 0));
+    }
+
+    #[test]
+    fn routine_event_fairness_key_falls_back_to_scope_then_sender() {
+        let mut event = test_event();
+        event.stable_external_conversation_key = String::new();
+        event.conversation_scope_id = "scope-a".to_string();
+        assert_eq!(
+            routine_event_fairness_key(&event),
+            "default:default:slack:scope-a"
+        );
+
+        event.conversation_scope_id = String::new();
+        event.raw_sender_id = "sender-fallback".to_string();
+        assert_eq!(
+            routine_event_fairness_key(&event),
+            "default:default:slack:sender-fallback"
+        );
+    }
+
+    #[test]
+    fn routine_event_batches_are_fairly_interleaved_by_source() {
+        fn event_for(source: &str, sequence: usize) -> RoutineEvent {
+            let mut event = test_event();
+            event.id = Uuid::from_u128(sequence as u128 + 1);
+            event.stable_external_conversation_key = format!("source://{source}");
+            event.content = format!("{source}-{sequence}");
+            event.content_hash = content_hash(&event.content).to_string();
+            event.idempotency_key = format!("event:{source}:{sequence}");
+            event.created_at = Utc::now() + chrono::Duration::milliseconds(sequence as i64);
+            event
+        }
+
+        let ordered = fair_interleave_routine_events(vec![
+            event_for("a", 0),
+            event_for("a", 1),
+            event_for("a", 2),
+            event_for("b", 3),
+            event_for("c", 4),
+            event_for("b", 5),
+        ]);
+        let contents = ordered
+            .into_iter()
+            .map(|event| event.content)
+            .collect::<Vec<_>>();
+
+        assert_eq!(contents, vec!["a-0", "b-3", "c-4", "a-1", "b-5", "a-2"]);
     }
 
     #[test]

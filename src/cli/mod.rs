@@ -14,6 +14,7 @@
 //! - Checking system health (`status`)
 
 pub mod agents;
+mod backup;
 mod browser;
 mod channels;
 mod comfy;
@@ -45,6 +46,7 @@ pub mod trajectory;
 mod update;
 
 pub use agents::{AgentCommand, run_agents_command};
+pub use backup::{BackupCommand, run_backup_command};
 pub use browser::{BrowserCommand, run_browser_command};
 pub use channels::{ChannelCommand, run_channels_command};
 pub use comfy::{ComfyCommand, run_comfy_command};
@@ -219,6 +221,10 @@ pub enum Command {
     /// Manage the GitHub repository project supervisor
     #[command(subcommand)]
     RepoProjects(RepoProjectCommand),
+
+    /// Export or restore an encrypted whole-agent backup
+    #[command(subcommand)]
+    Backup(BackupCommand),
 
     /// Manage MCP servers (hosted tool providers)
     #[command(subcommand)]

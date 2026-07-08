@@ -188,8 +188,20 @@ pub async fn prepare_tool_call(
         .map_err(|reason| tool_execution_failed(request.tool_name, reason))?;
     }
 
+    // Argument-scoped policy on the final (post-hook) parameters. `Deny`
+    // short-circuits; `RequireApproval` composes with the tool's own approval
+    // class below.
+    let arg_decision = tool_policies.evaluate_arg_policy(request.tool_name, &params);
+    if let crate::tools::policy::ArgPolicyDecision::Deny(reason) = &arg_decision {
+        return Err(tool_execution_failed(request.tool_name, reason.clone()));
+    }
+    let arg_force_approval = matches!(
+        arg_decision,
+        crate::tools::policy::ArgPolicyDecision::RequireApproval
+    );
+
     let approval = tool.requires_approval(&params);
-    if approval_required(approval, request.approval_mode) {
+    if arg_force_approval || approval_required(approval, request.approval_mode) {
         return Ok(ToolPrepareOutcome::NeedsApproval(PendingToolApproval {
             tool,
             descriptor,

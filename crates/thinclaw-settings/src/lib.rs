@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 
 mod agent;
+mod arg_policy;
 mod builder;
 mod channels;
 mod comfyui;
@@ -20,6 +21,7 @@ mod discovery;
 mod embeddings;
 mod experiments;
 mod extensions;
+mod gateway_rbac;
 mod heartbeat;
 mod learning;
 mod notifications;
@@ -37,6 +39,9 @@ mod tunnel;
 mod wasm;
 
 pub use agent::*;
+pub use arg_policy::{
+    ArgAction, ArgPolicyDecision, ArgRule, ArgScopedPolicy, evaluate_arg_policies,
+};
 pub use builder::*;
 pub use channels::*;
 pub use comfyui::*;
@@ -45,6 +50,7 @@ pub use discovery::*;
 pub use embeddings::*;
 pub use experiments::*;
 pub use extensions::*;
+pub use gateway_rbac::{GatewayPrincipalConfig, GatewayRole, parse_gateway_principals};
 pub use heartbeat::*;
 pub use learning::*;
 pub use notifications::*;

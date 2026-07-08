@@ -135,7 +135,9 @@ impl Agent {
         }
 
         // Reset the file checkpoint dedup bucket for this thread's new turn.
-        crate::agent::checkpoint::new_turn(thread_id.to_string());
+        // The turn number is tagged just below (once the session is locked) so
+        // filesystem checkpoints align with the conversation undo checkpoint.
+        crate::agent::checkpoint::new_turn(thread_id.to_string(), None);
         let resolved_identity = message.resolved_identity();
 
         // Natural language goes through the agentic loop
@@ -248,6 +250,10 @@ impl Agent {
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             let mut mgr = undo_mgr.lock().await;
+            // Tag filesystem checkpoints created during this turn with the same
+            // turn number the undo checkpoint uses (captured before the bump
+            // inside start_user_turn), so `/rewind <n>` restores both together.
+            crate::agent::checkpoint::new_turn(thread_id.to_string(), Some(thread.turn_number()));
             thinclaw_agent::thread_ops::start_user_turn(
                 thread,
                 &mut mgr,

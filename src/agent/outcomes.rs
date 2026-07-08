@@ -15,12 +15,13 @@ use thinclaw_agent::outcomes::{
 };
 #[cfg(test)]
 use thinclaw_agent::outcomes::{VERDICT_NEUTRAL, VERDICT_POSITIVE};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 pub use outcome_policy::{contract_last_evaluator, ledger_learning_event_id};
 
-use crate::agent::learning::LearningOrchestrator;
+use crate::agent::learning::{LearningOrchestrator, LearningOutcome};
 use crate::agent::routine::{Routine, RoutineRun};
 use crate::db::Database;
 use crate::history::{
@@ -197,13 +198,15 @@ impl OutcomeService {
         if let Some(candidate) = self
             .maybe_generate_candidate(&contract, &score, &observations, learning_event_id)
             .await?
-            && let Err(err) = self.route_outcome_candidate(&candidate).await
+            && let Err(err) = self
+                .route_and_record_outcome_candidate(&mut contract, &candidate)
+                .await
         {
             tracing::debug!(
                 contract_id = %contract.id,
                 candidate_id = %candidate.id,
                 error = %err,
-                "Outcome candidate routing failed"
+                "Outcome candidate routing audit failed"
             );
         }
         Ok(())
@@ -372,7 +375,77 @@ impl OutcomeService {
         Ok(Some(candidate))
     }
 
-    async fn route_outcome_candidate(&self, candidate: &LearningCandidate) -> Result<(), String> {
+    async fn route_and_record_outcome_candidate(
+        &self,
+        contract: &mut OutcomeContract,
+        candidate: &LearningCandidate,
+    ) -> Result<(), String> {
+        let record = match self.route_outcome_candidate(candidate).await {
+            Ok(outcome) => outcome_policy::outcome_candidate_route_success_record(
+                EVALUATOR_OUTCOME,
+                outcome.auto_applied,
+                outcome.code_proposal_id,
+                &outcome.notes,
+                Utc::now(),
+            ),
+            Err(err) => {
+                tracing::warn!(
+                    contract_id = %contract.id,
+                    candidate_id = %candidate.id,
+                    error = %err,
+                    "Outcome candidate routing failed; quarantining candidate for review"
+                );
+                outcome_policy::outcome_candidate_route_failure_record(
+                    EVALUATOR_OUTCOME,
+                    &err,
+                    Utc::now(),
+                )
+            }
+        };
+
+        let mut persist_errors = Vec::new();
+        let proposal =
+            outcome_policy::annotate_candidate_proposal_with_route(&candidate.proposal, &record);
+        if let Err(err) = self
+            .store
+            .update_learning_candidate_proposal(candidate.id, &proposal)
+            .await
+        {
+            tracing::warn!(
+                contract_id = %contract.id,
+                candidate_id = %candidate.id,
+                error = %err,
+                "Failed to persist outcome candidate routing audit"
+            );
+            persist_errors.push(format!("candidate proposal audit update failed: {err}"));
+        }
+
+        outcome_policy::annotate_contract_with_outcome_candidate_route(
+            contract,
+            candidate.id,
+            &record,
+        );
+        if let Err(err) = self.store.update_outcome_contract(contract).await {
+            tracing::warn!(
+                contract_id = %contract.id,
+                candidate_id = %candidate.id,
+                error = %err,
+                "Failed to persist outcome contract routing audit"
+            );
+            persist_errors.push(format!("contract routing audit update failed: {err}"));
+        }
+
+        if persist_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(persist_errors.join("; "))
+        }
+    }
+
+    async fn route_outcome_candidate(
+        &self,
+        candidate: &LearningCandidate,
+    ) -> Result<LearningOutcome, String> {
         let outcome = self
             .learning_orchestrator
             .route_existing_candidate(EVALUATOR_OUTCOME, candidate)
@@ -384,7 +457,7 @@ impl OutcomeService {
             notes = ?outcome.notes,
             "Outcome candidate routed through learning orchestrator"
         );
-        Ok(())
+        Ok(outcome)
     }
 
     async fn prompt_candidate_payload(
@@ -474,6 +547,46 @@ pub fn spawn_outcome_service(service: Arc<OutcomeService>) -> JoinHandle<()> {
                 }
             };
             tokio::time::sleep(Duration::from_secs(plan.sleep_interval_secs)).await;
+            for user_id in plan.user_ids {
+                if let Err(err) = service.run_once_for_user(&user_id).await {
+                    tracing::debug!(
+                        user_id = %user_id,
+                        error = %err,
+                        "Outcome service tick failed"
+                    );
+                }
+            }
+        }
+    })
+}
+
+pub fn spawn_outcome_service_with_shutdown(
+    service: Arc<OutcomeService>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let plan = match service.scheduler_plan(Utc::now()).await {
+                Ok(plan) => plan,
+                Err(err) => {
+                    tracing::debug!(error = %err, "Outcome service scheduler plan failed");
+                    outcome_policy::OutcomeSchedulerPlan {
+                        user_ids: Vec::new(),
+                        sleep_interval_secs: DEFAULT_EVALUATION_INTERVAL_SECS,
+                    }
+                }
+            };
+
+            let sleep = tokio::time::sleep(Duration::from_secs(plan.sleep_interval_secs));
+            tokio::pin!(sleep);
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("outcome service shutting down");
+                    return;
+                }
+                _ = &mut sleep => {}
+            }
+
             for user_id in plan.user_ids {
                 if let Err(err) = service.run_once_for_user(&user_id).await {
                     tracing::debug!(

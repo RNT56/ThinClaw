@@ -20,7 +20,7 @@ Some delivery surfaces are compiled into the trusted Rust host. Others are packa
 | REPL | native | local process surface |
 | Signal | native | long-lived bridge and daemon integration |
 | Nostr | native | persistent relay connections |
-| Gmail | native | Pub/Sub pull and OAuth-heavy host integration |
+| Gmail | native | Pub/Sub pull and OAuth-heavy host integration, incl. unattended token refresh (see below) |
 | iMessage | native | local `chat.db` access on macOS |
 | Apple Mail | native | local mail index access on macOS |
 | Discord Gateway | native | persistent Gateway connection |
@@ -74,6 +74,25 @@ Examples:
 - Signal
 - iMessage
 - Apple Mail
+
+### Gmail token lifecycle
+
+The Gmail channel is a concrete example of native "token refresh / stateful
+lifecycle" (criterion 4). A Google OAuth **access token expires after ~1 hour**,
+so on a long-running deployment the channel keeps itself authenticated:
+
+- **Proactive:** when `GMAIL_REFRESH_TOKEN`, `GMAIL_CLIENT_ID`, and
+  `GMAIL_CLIENT_SECRET` are configured, a background task refreshes the access
+  token before it expires (scheduling from the token's own `expires_in` with a
+  safety margin), so send/receive never lapses.
+- **Reactive:** if a poll fails with an auth error, the channel refreshes
+  immediately and recovers within one poll cycle.
+- **Fallback:** with only `GMAIL_OAUTH_TOKEN` and no refresh credentials, the
+  channel runs until that token expires and then requires re-authentication
+  (via the ThinClaw Desktop Gmail setup).
+
+Operator status surfaces treat a refresh-credential-only configuration as fully
+configured (not "needs OAuth").
 
 ## When ThinClaw Uses WASM Channels
 

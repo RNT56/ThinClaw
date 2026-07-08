@@ -418,7 +418,9 @@ async fn cron_ticker_checks_due_routines_immediately_on_startup() {
     routine.next_fire_at = Some(Utc::now() - ChronoDuration::minutes(1));
     db.create_routine(&routine).await.unwrap();
 
-    let handle = spawn_cron_ticker(Arc::clone(&engine), Duration::from_secs(60));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let handle =
+        spawn_cron_ticker_with_shutdown(Arc::clone(&engine), Duration::from_secs(60), shutdown_rx);
 
     let mut fired = false;
     for _ in 0..20 {
@@ -430,7 +432,11 @@ async fn cron_ticker_checks_due_routines_immediately_on_startup() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    handle.abort();
+    shutdown_tx.send(()).expect("cron ticker should be running");
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("cron ticker should stop after shutdown signal")
+        .expect("cron ticker task should join cleanly");
     unsafe {
         std::env::remove_var("CRON_STAGGER_SECS");
     }

@@ -41,6 +41,36 @@ async fn tool_failure_threshold_and_repair_contract() {
         .await
         .expect("increment_repair_attempts should succeed");
     ctx.db
+        .record_tool_repair_result(
+            &tool,
+            &serde_json::json!({
+                "status": "retry",
+                "attempt": 1,
+                "terminal": false,
+                "error": "compile failed",
+            }),
+        )
+        .await
+        .expect("record_tool_repair_result should succeed");
+    let with_repair_result = ctx
+        .db
+        .get_broken_tools(2)
+        .await
+        .expect("get_broken_tools should return repair evidence");
+    let repaired_attempt = with_repair_result
+        .iter()
+        .find(|entry| entry.name == tool)
+        .expect("tool should still be broken before repair");
+    assert_eq!(
+        repaired_attempt
+            .last_build_result
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(|value| value.as_str()),
+        Some("retry")
+    );
+
+    ctx.db
         .mark_tool_repaired(&tool)
         .await
         .expect("mark_tool_repaired should succeed");

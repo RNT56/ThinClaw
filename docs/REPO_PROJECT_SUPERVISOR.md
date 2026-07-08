@@ -18,6 +18,12 @@ Implemented:
 - Restart recovery that reconciles sandbox jobs completed while the supervisor was down and blocks any task left `Running` with no worker record.
 - Live SSE for `repo_project_updated`, `repo_task_updated`, `repo_worker_run_updated`, `repo_project_event`, and `repo_merge_gate_updated`.
 - Durable, restart-surviving webhook delivery storage (`repo_webhook_deliveries`) used for idempotency and audit; the in-memory deduper remains a fast pre-check.
+- Authenticated webhook delivery replay for stored GitHub deliveries:
+  `POST /api/repo-projects/webhooks/github/{delivery_id}/replay` reloads the
+  durable delivery record, parses the original stored raw payload when present
+  (legacy records fall back to derived metadata), re-matches the enrolled repo,
+  emits a replay SSE event, and wakes the supervisor with the original delivery
+  id.
 - Durable project-run records (`repo_project_runs`): the supervisor opens a run on first dispatch and closes it with final task tallies on project completion (`ProjectRunStarted`/`ProjectRunCompleted` events).
 - Optional one-shot "review readiness" PR comment at the review stage (env `REPO_PROJECTS_REVIEW_SUMMARY=true`) summarizing CI + merge-gate status.
 - Optional one-shot **sandbox code review** of the pushed branch (env `REPO_PROJECTS_REVIEWER_BACKEND=claude_code|codex_code|worker`): the executor checks out the *pushed* branch content into a detached review worktree, dispatches a read-only review job that posts findings to the PR, and the worker run is skipped by task-state reconciliation. Advisory — it does not by itself block the gate.
@@ -28,10 +34,13 @@ Implemented:
 Validation:
 
 - Two-backend DB parity is checked in CI/Docker: `schema_divergence` confirms the libSQL schema block and the Postgres `V*.sql` migrations (incl. `V26` runs + webhook deliveries) match, and a `db_contract` repo-projects test round-trips the full store (projects/repos/tasks/runs/worker-runs/events/merge-gates/webhook deliveries) against real Postgres.
+- Stored-delivery replay is covered by `cargo test -p thinclaw --features
+  desktop,libsql github_webhook --lib -- --test-threads=1`, including missing
+  delivery handling, enrolled repo matching, raw-payload replay, SSE emission
+  path setup, and supervisor wake routing with the original delivery id.
 
 Integration-pending:
 
-- Webhook **replay** tooling. Deliveries are now stored durably for idempotency/audit, but there is no operator command to replay a stored delivery.
 - Mapping individual GitHub webhook payloads directly into task state transitions; today a webhook wakes the supervisor, which then re-derives state from the GitHub API on the next reconcile.
 - A running fake-Docker coding-bridge end-to-end in CI. The GitHub side has a pipeline E2E and a supervisor-reconcile E2E; the sandbox dispatch path has a real-Docker E2E (`tests/repo_project_docker_e2e.rs`, dispatches an actual container via `RepoProjectExecutor`) that is `#[ignore]`d by default because it needs a local `thinclaw-worker:latest` image (`docker build -f Dockerfile.worker -t thinclaw-worker .`).
 
@@ -177,7 +186,7 @@ Recommended webhook events for the target design:
 - `installation`
 - `installation_repositories`
 
-Current code verifies `X-Hub-Signature-256`, parses `X-GitHub-Delivery`, dedupes recent deliveries in memory, extracts `installation.id`, `repository.full_name`, and `action`, broadcasts a project event, and wakes the live supervisor, which then re-derives PR/CI/review state from the GitHub API on its next reconcile. The durable delivery replay path still needs to be wired.
+Current code verifies `X-Hub-Signature-256`, parses `X-GitHub-Delivery`, dedupes recent deliveries in memory, extracts `installation.id`, `repository.full_name`, and `action`, broadcasts a project event, durably stores derived metadata plus the original raw payload/signature header, and wakes the live supervisor, which then re-derives PR/CI/review state from the GitHub API on its next reconcile. Operators can replay a stored delivery through the authenticated replay API; replay parses the original stored payload for new records and falls back to derived metadata for legacy records.
 
 ## Workspace Layout
 
@@ -336,5 +345,8 @@ Escalate to code repair when:
 
 - A task is repeatedly blocked by recovery as `Running` with no worker-run/job record (recovery blocks it once; repeated occurrences indicate a dispatch/persistence bug).
 - A merge gate is approved for a task whose head SHA or PR number no longer matches GitHub.
-- Webhook delivery replay becomes necessary; durable webhook storage is not implemented yet.
+- Webhook delivery replay is available from durable records. If a legacy
+  delivery predates raw payload persistence, replay falls back to derived
+  metadata and should be treated as a reconciliation wake rather than exact
+  payload reprocessing.
 - The supervisor logs repeated GitHub API auth failures despite a configured App private-key secret or `github_token` (check the secret name, installation id, and App permissions).

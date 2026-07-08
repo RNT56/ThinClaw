@@ -176,6 +176,9 @@ pub struct GatewayState {
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Shared cost tracker — richer historical data (daily/monthly/per-agent).
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    /// Prometheus registry handle for the `/metrics` endpoint, present only when
+    /// the observability backend is `prometheus`.
+    pub metrics_registry: Option<Arc<crate::observability::PrometheusObserver>>,
     /// Shared response cache for remote dashboard cache stats.
     pub response_cache:
         Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
@@ -835,6 +838,7 @@ pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth_token: String,
+    principals: Vec<thinclaw_settings::GatewayPrincipalConfig>,
     extra_public_routes: Vec<axum::Router>,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -866,6 +870,9 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
+        // Prometheus scrape endpoint — no auth (scraper standard); exposes only
+        // aggregate operational counters with operator-controlled label values.
+        .route("/metrics", get(metrics_handler))
         .route(
             "/api/experiments/leases/{lease_id}/job",
             get(experiment_lease_job_handler),
@@ -923,6 +930,13 @@ pub async fn start_server(
                 "Trusted-proxy auth mode enabled"
             );
         }
+        if !principals.is_empty() {
+            tracing::info!(
+                count = principals.len(),
+                "Gateway RBAC enabled: {} extra principal(s) beyond the admin token",
+                principals.len()
+            );
+        }
         AuthState {
             token: auth_token,
             trusted_proxy_header,
@@ -935,6 +949,7 @@ pub async fn start_server(
             }),
             // Device-token auth (milestone B1, `thinclaw-gateway::web::devices`).
             devices: Some(Arc::clone(&state.device_registry)),
+            principals,
         }
     };
     let protected = Router::new()
@@ -1005,6 +1020,10 @@ pub async fn start_server(
             get(repo_project_readiness_handler),
         )
         .route("/api/repo-projects/setup", post(repo_project_setup_handler))
+        .route(
+            "/api/repo-projects/webhooks/github/{delivery_id}/replay",
+            post(github_repo_projects_webhook_replay_handler),
+        )
         .route(
             "/api/repo-projects/credentials",
             post(repo_project_credential_handler),
@@ -1152,6 +1171,10 @@ pub async fn start_server(
         )
         .route("/api/routines/summary", get(routines_summary_handler))
         .route("/api/routines/events", get(routines_events_handler))
+        .route(
+            "/api/routines/events/{id}/replay",
+            post(routines_event_replay_handler),
+        )
         .route(
             "/api/routines/runs",
             axum::routing::delete(routines_clear_runs_handler),

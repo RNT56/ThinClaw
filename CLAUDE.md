@@ -49,6 +49,8 @@ Use these as the current documentation authority before updating surrounding doc
 | LLM provider catalog | `src/config/provider_catalog.rs` |
 | LLM provider user guide | `docs/LLM_PROVIDERS.md` |
 | Build profiles and feature flags | `docs/BUILD_PROFILES.md` |
+| Observability, metrics, and health | `docs/OBSERVABILITY.md` |
+| Client SDK (`thinclaw-client`) | `docs/CLIENT_SDK.md` |
 | Feature-tracking changes | `FEATURE_PARITY.md` |
 
 When these docs disagree with broad overview docs, code and canonical docs win.

@@ -42,6 +42,7 @@ pub const SOURCE_CODE_PROPOSAL: &str = "learning_code_proposal";
 pub const SOURCE_ROUTINE_RUN: &str = "routine_run";
 
 pub const LEDGER_EVENT_ID_KEY: &str = "ledger_learning_event_id";
+pub const OUTCOME_CANDIDATE_ROUTE_KEY: &str = "outcome_candidate_route";
 
 const MIN_EVALUATION_INTERVAL_SECS: u64 = 1;
 
@@ -153,6 +154,19 @@ pub struct OutcomeScore {
     pub verdict: String,
     pub score: f64,
     pub details: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutcomeCandidateRouteRecord {
+    pub status: String,
+    pub evaluator: String,
+    pub routed_at: DateTime<Utc>,
+    pub terminal: bool,
+    pub requires_operator_review: bool,
+    pub auto_applied: bool,
+    pub code_proposal_id: Option<Uuid>,
+    pub notes: Vec<String>,
+    pub error: Option<String>,
 }
 
 pub fn outcomes_enabled(settings: &OutcomeRuntimeSettings) -> bool {
@@ -860,6 +874,138 @@ pub fn candidate_dedupe_exists(candidates: &[LearningCandidate], dedupe_key: &st
     })
 }
 
+pub fn outcome_candidate_route_success_record(
+    evaluator: &str,
+    auto_applied: bool,
+    code_proposal_id: Option<Uuid>,
+    notes: &[String],
+    routed_at: DateTime<Utc>,
+) -> OutcomeCandidateRouteRecord {
+    let status = outcome_candidate_success_route_status(auto_applied, code_proposal_id, notes);
+    OutcomeCandidateRouteRecord {
+        status: status.to_string(),
+        evaluator: evaluator.to_string(),
+        routed_at,
+        terminal: true,
+        requires_operator_review: matches!(
+            status,
+            "code_proposal" | "held_for_review" | "manual_review"
+        ),
+        auto_applied,
+        code_proposal_id,
+        notes: notes.iter().map(|note| bounded_route_text(note)).collect(),
+        error: None,
+    }
+}
+
+pub fn outcome_candidate_route_failure_record(
+    evaluator: &str,
+    error: &str,
+    routed_at: DateTime<Utc>,
+) -> OutcomeCandidateRouteRecord {
+    OutcomeCandidateRouteRecord {
+        status: "quarantined".to_string(),
+        evaluator: evaluator.to_string(),
+        routed_at,
+        terminal: true,
+        requires_operator_review: true,
+        auto_applied: false,
+        code_proposal_id: None,
+        notes: vec![
+            "outcome candidate routing failed; candidate quarantined for manual review".to_string(),
+        ],
+        error: Some(bounded_route_text(error)),
+    }
+}
+
+pub fn annotate_candidate_proposal_with_route(
+    proposal: &serde_json::Value,
+    record: &OutcomeCandidateRouteRecord,
+) -> serde_json::Value {
+    let mut next = if proposal.is_object() {
+        proposal.clone()
+    } else {
+        json!({ "original_proposal": proposal })
+    };
+    upsert_json_value(
+        &mut next,
+        OUTCOME_CANDIDATE_ROUTE_KEY,
+        outcome_candidate_route_record_value(record),
+    );
+    next
+}
+
+pub fn annotate_contract_with_outcome_candidate_route(
+    contract: &mut OutcomeContract,
+    candidate_id: Uuid,
+    record: &OutcomeCandidateRouteRecord,
+) {
+    let mut route = outcome_candidate_route_record_value(record);
+    upsert_json_string(&mut route, "candidate_id", candidate_id.to_string());
+    upsert_json_value(
+        &mut contract.metadata,
+        OUTCOME_CANDIDATE_ROUTE_KEY,
+        route.clone(),
+    );
+    upsert_json_value(
+        &mut contract.evaluation_details,
+        OUTCOME_CANDIDATE_ROUTE_KEY,
+        route,
+    );
+    contract.updated_at = record.routed_at;
+}
+
+fn outcome_candidate_success_route_status(
+    auto_applied: bool,
+    code_proposal_id: Option<Uuid>,
+    notes: &[String],
+) -> &'static str {
+    if auto_applied {
+        return "auto_applied";
+    }
+    if code_proposal_id.is_some() {
+        return "code_proposal";
+    }
+    let note_contains = |needle: &str| {
+        notes
+            .iter()
+            .any(|note| note.to_ascii_lowercase().contains(needle))
+    };
+    if note_contains("held for review") || note_contains("safe mode") {
+        "held_for_review"
+    } else if note_contains("manual review") {
+        "manual_review"
+    } else if note_contains("persisted only") {
+        "persisted_only"
+    } else {
+        "routed"
+    }
+}
+
+fn outcome_candidate_route_record_value(record: &OutcomeCandidateRouteRecord) -> serde_json::Value {
+    json!({
+        "status": record.status.clone(),
+        "evaluator": record.evaluator.clone(),
+        "routed_at": record.routed_at.to_rfc3339(),
+        "terminal": record.terminal,
+        "requires_operator_review": record.requires_operator_review,
+        "auto_applied": record.auto_applied,
+        "code_proposal_id": record.code_proposal_id.map(|id| id.to_string()),
+        "notes": record.notes.clone(),
+        "error": record.error.clone(),
+    })
+}
+
+fn bounded_route_text(value: &str) -> String {
+    const MAX_ROUTE_TEXT_CHARS: usize = 2_048;
+    if value.chars().count() <= MAX_ROUTE_TEXT_CHARS {
+        return value.to_string();
+    }
+    let mut text = value.chars().take(MAX_ROUTE_TEXT_CHARS).collect::<String>();
+    text.push_str("...");
+    text
+}
+
 #[derive(Debug, Clone)]
 pub struct BuildOutcomeCandidateInput<'a> {
     pub id: Uuid,
@@ -1390,11 +1536,15 @@ pub fn verdict_score(verdict: &str) -> f64 {
 }
 
 pub fn upsert_json_string(target: &mut serde_json::Value, key: &str, value: String) {
+    upsert_json_value(target, key, json!(value));
+}
+
+pub fn upsert_json_value(target: &mut serde_json::Value, key: &str, value: serde_json::Value) {
     if !target.is_object() {
         *target = json!({});
     }
     if let Some(map) = target.as_object_mut() {
-        map.insert(key.to_string(), json!(value));
+        map.insert(key.to_string(), value);
     }
 }
 

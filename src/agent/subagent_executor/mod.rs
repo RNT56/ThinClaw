@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use thinclaw_agent::loop_control::{LoopKind, LoopRunSummary, LoopStopReason};
 use thinclaw_agent::prompt_assembly::{
     SUBAGENT_AVAILABLE_SKILL_INSTRUCTION, render_skill_sections,
 };
@@ -70,6 +71,7 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
+use crate::observability::{NoopObserver, Observer, ObserverMetric};
 use crate::safety::SafetyLayer;
 use crate::skills::{LoadedSkill, SkillRegistry, prefilter_skills};
 use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
@@ -176,6 +178,9 @@ pub struct SubagentHandle {
     join_handle: Option<JoinHandle<SubagentResult>>,
     /// Send messages from the parent to this sub-agent.
     pub parent_to_sub_tx: mpsc::Sender<String>,
+    /// Principal that spawned this sub-agent, used for per-principal
+    /// concurrency accounting so one principal cannot starve others.
+    pub parent_user_id: String,
 }
 
 /// The sub-agent executor manages sub-agent lifecycle.
@@ -196,12 +201,20 @@ pub struct SubagentExecutor {
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
     /// Optional shared cost tracker for sub-agent LLM calls.
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    /// Optional shared cost guard enforcing daily-budget/hourly-rate limits.
+    ///
+    /// This is the SAME guard instance that gates the main dispatcher loop, so
+    /// delegated sub-agent work draws from the same budget rather than being
+    /// an unmetered side channel. Checked before every sub-agent LLM iteration.
+    cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Optional workspace for loading identity/system prompt context.
     workspace: Option<Arc<Workspace>>,
     /// Optional skill registry for skill discovery in sub-agents.
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
     /// Optional skills config for deterministic skill prefiltering.
     skills_config: Option<SkillsConfig>,
+    /// Shared observability sink for subagent loop lifecycle metrics.
+    observer: Arc<dyn Observer>,
 }
 
 impl SubagentExecutor {
@@ -228,9 +241,11 @@ impl SubagentExecutor {
             store: None,
             sse_tx: None,
             cost_tracker: None,
+            cost_guard: None,
             workspace: None,
             skill_registry: None,
             skills_config: None,
+            observer: Arc::new(NoopObserver),
         };
         (executor, result_rx)
     }
@@ -256,6 +271,13 @@ impl SubagentExecutor {
         self
     }
 
+    /// Set the cost guard so sub-agent iterations are gated by the same
+    /// daily-budget/hourly-rate limits as the main dispatcher loop.
+    pub fn with_cost_guard(mut self, guard: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
+        self.cost_guard = Some(guard);
+        self
+    }
+
     /// Set the workspace so sub-agents can inherit identity/system prompt files.
     pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
         self.workspace = Some(workspace);
@@ -270,6 +292,12 @@ impl SubagentExecutor {
     ) -> Self {
         self.skill_registry = Some(skill_registry);
         self.skills_config = Some(skills_config);
+        self
+    }
+
+    /// Set the shared observer so sub-agent loops emit lifecycle metrics.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = observer;
         self
     }
 
@@ -341,7 +369,20 @@ impl SubagentExecutor {
                 .values()
                 .filter(|h| h.status == SubagentStatus::Running)
                 .count();
-            let concurrency = SubagentConcurrency::new(running, self.config.max_concurrent);
+            // Per-principal running count so a single principal's burst cannot
+            // consume the whole global pool on a shared/multi-user gateway.
+            let principal_running = active
+                .values()
+                .filter(|h| {
+                    h.status == SubagentStatus::Running && h.parent_user_id == parent_user_id
+                })
+                .count();
+            let concurrency = SubagentConcurrency::with_principal_scope(
+                running,
+                self.config.max_concurrent,
+                principal_running,
+                self.config.max_per_principal,
+            );
             if let SubagentSpawnAdmission::Rejected { reason } = concurrency.admission() {
                 return Err(Error::Tool(crate::error::ToolError::ExecutionFailed {
                     name: "spawn_subagent".to_string(),
@@ -363,6 +404,7 @@ impl SubagentExecutor {
                     cancel_tx: cancel_tx.clone(),
                     join_handle: None, // filled in after tokio::spawn
                     parent_to_sub_tx: parent_to_sub_tx.clone(),
+                    parent_user_id: parent_user_id.to_string(),
                 },
             );
         }
@@ -470,6 +512,8 @@ impl SubagentExecutor {
         let store_for_task = self.store.clone();
         let sse_tx_for_task = self.sse_tx.clone();
         let cost_tracker_for_task = self.cost_tracker.clone();
+        let cost_guard_for_task = self.cost_guard.clone();
+        let observer_for_task = Arc::clone(&self.observer);
 
         // Emit SubagentSpawned event
         let _ = channels
@@ -494,6 +538,7 @@ impl SubagentExecutor {
         let active_for_task = self.active.clone();
         let join_handle = tokio::spawn(async move {
             let start = Instant::now();
+            observer_for_task.record_metric(&ObserverMetric::LoopStarted(LoopKind::Subagent));
             let (activity_tx, activity_rx) = watch::channel(Instant::now());
             let store_for_subagent_loop = store_for_task.clone();
             let cancel_watch_outer = cancel_rx.clone();
@@ -541,6 +586,7 @@ impl SubagentExecutor {
                     &id.to_string(),
                     activity_tx,
                     cost_tracker_for_task.clone(),
+                    cost_guard_for_task,
                 ),
             )
             .await;
@@ -549,15 +595,18 @@ impl SubagentExecutor {
 
             let duration_ms = start.elapsed().as_millis() as u64;
 
-            let subagent_result = match result {
-                Ok(Ok((response, iterations))) => subagent_result_from_completion(
-                    id,
-                    agent_name.clone(),
-                    duration_ms,
-                    SubagentCompletionOutcome::Success {
-                        response,
-                        iterations,
-                    },
+            let (subagent_result, loop_stop_reason) = match result {
+                Ok(Ok((response, iterations))) => (
+                    subagent_result_from_completion(
+                        id,
+                        agent_name.clone(),
+                        duration_ms,
+                        SubagentCompletionOutcome::Success {
+                            response,
+                            iterations,
+                        },
+                    ),
+                    LoopStopReason::Completed,
                 ),
                 Ok(Err(e)) => {
                     // A cancel signal makes the loop exit with an error; report
@@ -567,15 +616,37 @@ impl SubagentExecutor {
                     } else {
                         SubagentCompletionOutcome::Error(e.to_string())
                     };
-                    subagent_result_from_completion(id, agent_name.clone(), duration_ms, outcome)
+                    let stop_reason = if *cancel_watch_outer.borrow() {
+                        LoopStopReason::Cancelled
+                    } else {
+                        LoopStopReason::FatalError
+                    };
+                    (
+                        subagent_result_from_completion(
+                            id,
+                            agent_name.clone(),
+                            duration_ms,
+                            outcome,
+                        ),
+                        stop_reason,
+                    )
                 }
-                Err(_timeout) => subagent_result_from_completion(
-                    id,
-                    agent_name.clone(),
-                    duration_ms,
-                    SubagentCompletionOutcome::TimedOut,
+                Err(_timeout) => (
+                    subagent_result_from_completion(
+                        id,
+                        agent_name.clone(),
+                        duration_ms,
+                        SubagentCompletionOutcome::TimedOut,
+                    ),
+                    LoopStopReason::WallTimeBudgetExceeded,
                 ),
             };
+            observer_for_task.record_metric(&ObserverMetric::LoopRun(LoopRunSummary::new(
+                LoopKind::Subagent,
+                loop_stop_reason,
+                subagent_result.iterations,
+                0,
+            )));
 
             let _ = channels
                 .send_status(
@@ -1084,6 +1155,7 @@ async fn run_subagent_loop(
     agent_id: &str,
     activity_tx: watch::Sender<Instant>,
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
 ) -> Result<(String, usize), Error> {
     let mut context_messages = vec![ChatMessage::user(task.to_string())];
 
@@ -1167,6 +1239,20 @@ async fn run_subagent_loop(
         // Check cancellation
         if *cancel_rx.borrow() {
             return Err(subagent_cancelled_error());
+        }
+
+        // Enforce the shared cost guardrails before every LLM call, exactly
+        // like the main dispatcher loop (dispatcher/loop.rs). Without this,
+        // delegated sub-agent work was an unmetered side channel around the
+        // operator's daily-budget/hourly-rate limits.
+        if let Some(ref guard) = cost_guard
+            && let Err(limit) = guard.check_allowed().await
+        {
+            return Err(crate::error::LlmError::InvalidResponse {
+                provider: "subagent".to_string(),
+                reason: limit.to_string(),
+            }
+            .into());
         }
 
         // Renew the routine run's DB lease (time-gated inside the helper) so
