@@ -4583,7 +4583,7 @@ dependencies = [
  "log",
  "md-5 0.10.6",
  "nom 8.0.0",
- "rand 0.10.1",
+ "rand 0.10.2",
  "rangemap",
  "sha2 0.10.9",
  "stringprep",
@@ -5763,7 +5763,7 @@ dependencies = [
  "hmac 0.13.0",
  "md-5 0.11.0",
  "memchr",
- "rand 0.10.1",
+ "rand 0.10.2",
  "sha2 0.11.0",
  "stringprep",
 ]
@@ -6054,9 +6054,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20 0.10.0",
  "getrandom 0.4.2",
@@ -7850,7 +7850,7 @@ dependencies = [
  "postgres-types",
  "pretty_assertions",
  "qrcode",
- "rand 0.10.1",
+ "rand 0.10.2",
  "ratatui",
  "ratatui-textarea",
  "rcgen",
@@ -7944,7 +7944,7 @@ dependencies = [
  "futures",
  "hex",
  "mime_guess",
- "rand 0.10.1",
+ "rand 0.10.2",
  "regex",
  "reqwest 0.12.28",
  "rust_decimal",
@@ -8014,7 +8014,7 @@ dependencies = [
  "jsonwebtoken",
  "lru 0.18.0",
  "nostr-sdk",
- "rand 0.10.1",
+ "rand 0.10.2",
  "regex",
  "reqwest 0.12.28",
  "secrecy",
@@ -8151,7 +8151,7 @@ dependencies = [
  "futures",
  "hex",
  "ipnet",
- "rand 0.10.1",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -8210,7 +8210,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
- "rand 0.10.1",
+ "rand 0.10.2",
  "regex",
  "reqwest 0.12.28",
  "rig-core",
@@ -8334,7 +8334,7 @@ dependencies = [
  "deadpool-postgres",
  "hkdf 0.13.0",
  "libsql",
- "rand 0.10.1",
+ "rand 0.10.2",
  "secrecy",
  "secret-service",
  "security-framework",
@@ -8392,7 +8392,7 @@ dependencies = [
  "libsql",
  "mime_guess",
  "nostr-sdk",
- "rand 0.10.1",
+ "rand 0.10.2",
  "readabilityrs",
  "regex",
  "reqwest 0.12.28",
@@ -8701,7 +8701,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
- "rand 0.10.1",
+ "rand 0.10.2",
  "socket2 0.6.3",
  "tokio",
  "tokio-util",
