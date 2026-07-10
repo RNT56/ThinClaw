@@ -292,7 +292,7 @@ async fn handle_client_message(
             // enforced server-side so a compromised watch client cannot approve
             // a destructive tool over the WebSocket. Mirrors the HTTP
             // `/api/chat/approval` gate; only an approve/always is gated (deny is
-            // always allowed) and a cache miss fails closed (treated high-risk).
+            // always allowed) and a registry miss fails closed (treated high-risk).
             if approved && device_ctx.is_some_and(|ctx| ctx.is_watch_companion()) {
                 let cached_risk = state
                     .pending_approvals
@@ -356,7 +356,7 @@ async fn handle_client_message(
                     })
                     .await;
             } else if let Ok(mut cache) = state.pending_approvals.lock() {
-                // Drain the pull-endpoint cache so a resolved approval stops
+                // Drain the durable registry so a resolved approval stops
                 // showing as pending (mirrors chat_approval_handler).
                 cache.remove(&request_id);
             }
@@ -520,7 +520,7 @@ async fn handle_client_message(
                 .await
                 {
                     Ok(()) => {
-                        tracing::info!("WS secret.set: key={} stored", key);
+                        tracing::info!("WS secret setting stored");
                         let _ = direct_tx
                             .send(WsServerMessage::SecretResult {
                                 key,
@@ -972,9 +972,9 @@ mod tests {
             metrics_registry: None,
             response_cache: None,
             device_registry: crate::channels::web::server::test_device_registry(),
-            pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            pending_approvals: std::sync::Arc::new(
+                crate::channels::web::server::PendingApprovalsStore::in_memory(),
+            ),
         }
     }
 }

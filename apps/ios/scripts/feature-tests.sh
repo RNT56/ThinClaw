@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# feature-tests.sh — run the iOS-only Feature package test suites on a concrete
-# iOS 26 simulator.
+# feature-tests.sh — run iOS-only package tests on a concrete supported
+# simulator. Defaults to the newest installed iOS runtime (18 or newer); set
+# IOS_RUNTIME_MAJOR to certify a specific release.
 #
 # Why this exists: the Feature packages under Packages/Features/* declare
-# `.iOS(.v26)` only (no macOS), so `swift test` (which builds for the host Mac)
+# iOS-only support (no macOS), so `swift test` (which builds for the host Mac)
 # cannot run them — the swift-test CI matrix skips them entirely. Their unit
 # tests (e.g. FeatureOnboarding's DiscoveryStoreTests + OnboardingStoreTests)
 # therefore need a real simulator destination. `xcodebuild test -scheme <Pkg>`
@@ -12,57 +13,65 @@
 # simulator, no Tuist workspace required.
 #
 # Behaviour:
-#   * Auto-discovers every Packages/Features/* package that has a Tests/ target.
-#   * Picks a booted iOS 26 simulator if one is booted, else the first available
-#     iOS 26 device, and boots it.
-#   * If NO iOS 26 simulator/runtime is available, this is a SOFT no-op: it
+#   * Auto-discovers every Packages/Features/* package that has a Tests/ target
+#     plus iOS-only shared packages with tests.
+#   * Picks a booted matching simulator, else the first available device.
+#   * If no matching simulator/runtime is available, this is a SOFT no-op: it
 #     prints a clear ::warning:: and exits 0 so contributors are never blocked
 #     by runner image drift. Set FEATURE_TESTS_REQUIRE_SIM=1 to make a missing
-#     simulator a hard failure instead (recommended once the runner image is
-#     known to always ship an iOS 26 runtime).
+#     simulator a hard failure instead. CI always enables this requirement.
 #
 # Usage:
 #   apps/ios/scripts/feature-tests.sh
-#   FEATURE_TESTS_REQUIRE_SIM=1 apps/ios/scripts/feature-tests.sh
+#   FEATURE_TESTS_REQUIRE_SIM=1 IOS_RUNTIME_MAJOR=18 apps/ios/scripts/feature-tests.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FEATURES_DIR="${IOS_DIR}/Packages/Features"
 REQUIRE_SIM="${FEATURE_TESTS_REQUIRE_SIM:-0}"
+REQUESTED_RUNTIME="${IOS_RUNTIME_MAJOR:-}"
 
 # GitHub Actions annotation helpers that degrade to plain echo locally.
 warn() { echo "::warning::$*" 2>/dev/null || echo "WARN: $*"; }
 note() { echo "::notice::$*" 2>/dev/null || echo "NOTE: $*"; }
 
 # --- Discover feature packages that actually carry tests -------------------
-PACKAGES=()
+PACKAGE_DIRS=()
 for dir in "${FEATURES_DIR}"/*/; do
-  name="$(basename "${dir}")"
   if find "${dir}Tests" -name '*.swift' -type f >/dev/null 2>&1 \
     && [ -n "$(find "${dir}Tests" -name '*.swift' -type f 2>/dev/null)" ]; then
-    PACKAGES+=("${name}")
+    PACKAGE_DIRS+=("${dir%/}")
+  fi
+done
+for dir in "${IOS_DIR}/Packages/ThinClawWidgetKitShared"; do
+  if [ -d "${dir}/Tests" ] && [ -n "$(find "${dir}/Tests" -name '*.swift' -type f 2>/dev/null)" ]; then
+    PACKAGE_DIRS+=("${dir}")
   fi
 done
 
-if [ "${#PACKAGES[@]}" -eq 0 ]; then
+if [ "${#PACKAGE_DIRS[@]}" -eq 0 ]; then
   note "No Feature packages have test targets yet; nothing to run."
   exit 0
 fi
-echo "==> Feature packages with tests: ${PACKAGES[*]}"
+echo "==> iOS packages with tests: ${PACKAGE_DIRS[*]}"
 
-# --- Find (and boot) an iOS 26 simulator ----------------------------------
-# Prefer an already-booted iOS 26 device; otherwise the first available one.
+# --- Find (and boot) a supported simulator --------------------------------
 # Note: simctl JSON is captured to a variable first, then piped into python,
 # so the python here-doc (its own stdin) does not swallow the JSON.
 SIMCTL_JSON="$(xcrun simctl list devices available --json 2>/dev/null || echo '{}')"
 DEVICE_UDID="$(
-  printf '%s' "${SIMCTL_JSON}" | python3 -c '
-import json, sys
+  printf '%s' "${SIMCTL_JSON}" | REQUESTED_RUNTIME="${REQUESTED_RUNTIME}" python3 -c '
+import json, os, re, sys
 data = json.load(sys.stdin)
-booted, first = None, None
+requested = os.environ.get("REQUESTED_RUNTIME")
+candidates = []
 for runtime, devices in data.get("devices", {}).items():
-    if "iOS-26" not in runtime:
+    match = re.search(r"iOS-(\d+)", runtime)
+    if not match:
+        continue
+    major = int(match.group(1))
+    if major < 18 or (requested and major != int(requested)):
         continue
     for dev in devices:
         if not dev.get("isAvailable", True):
@@ -71,25 +80,23 @@ for runtime, devices in data.get("devices", {}).items():
         # canonical destination.
         if "iPad" in dev.get("name", ""):
             continue
-        if first is None:
-            first = dev["udid"]
-        if dev.get("state") == "Booted" and booted is None:
-            booted = dev["udid"]
-print(booted or first or "")
+        candidates.append((major, dev.get("state") == "Booted", dev["udid"]))
+candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+print(candidates[0][2] if candidates else "")
 '
 )"
 
 if [ -z "${DEVICE_UDID}" ]; then
-  msg="No available iOS 26 simulator on this machine; skipping Feature package tests."
+  msg="No available supported iOS simulator${REQUESTED_RUNTIME:+ for iOS ${REQUESTED_RUNTIME}}; skipping iOS package tests."
   if [ "${REQUIRE_SIM}" = "1" ]; then
     echo "error: ${msg} (FEATURE_TESTS_REQUIRE_SIM=1)" >&2
     exit 1
   fi
-  warn "${msg} Install an iOS 26 runtime (Xcode 26) to run them. Set FEATURE_TESTS_REQUIRE_SIM=1 to make this a hard failure."
+  warn "${msg} Install the requested runtime to run them. Set FEATURE_TESTS_REQUIRE_SIM=1 to make this a hard failure."
   exit 0
 fi
 
-echo "==> Using iOS 26 simulator udid: ${DEVICE_UDID}"
+echo "==> Using supported iOS simulator udid: ${DEVICE_UDID}"
 # Boot it if needed (idempotent; 'already booted' is not an error we care about).
 xcrun simctl bootstatus "${DEVICE_UDID}" -b >/dev/null 2>&1 \
   || xcrun simctl boot "${DEVICE_UDID}" >/dev/null 2>&1 \
@@ -99,12 +106,13 @@ DESTINATION="platform=iOS Simulator,id=${DEVICE_UDID}"
 
 # --- Run each package's tests ---------------------------------------------
 FAILED=()
-for pkg in "${PACKAGES[@]}"; do
+for pkg_dir in "${PACKAGE_DIRS[@]}"; do
+  pkg="$(basename "${pkg_dir}")"
   echo ""
   echo "=============================================================="
   echo "==> xcodebuild test: ${pkg}"
   echo "=============================================================="
-  if ( cd "${FEATURES_DIR}/${pkg}" && xcodebuild test \
+  if ( cd "${pkg_dir}" && xcodebuild test \
         -scheme "${pkg}" \
         -destination "${DESTINATION}" \
         -skipPackagePluginValidation \
@@ -121,4 +129,4 @@ if [ "${#FAILED[@]}" -ne 0 ]; then
   echo "error: feature tests failed: ${FAILED[*]}" >&2
   exit 1
 fi
-echo "==> All feature package tests passed: ${PACKAGES[*]}"
+echo "==> All iOS package tests passed."

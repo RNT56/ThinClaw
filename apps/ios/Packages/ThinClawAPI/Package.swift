@@ -19,12 +19,12 @@ let package = Package(
     name: "ThinClawAPI",
     platforms: [
         .macOS(.v14),
-        .iOS(.v26),
+        .iOS(.v18),
         // watchOS is declared so the watch-side direct-HTTP fallback route
         // (ThinClawWatchBridge `WatchGatewayProxy`, D-K4) can reach the gateway
         // with the generated REST client when relay is unavailable. Apple's
         // openapi-runtime/urlsession both support watchOS.
-        .watchOS(.v26),
+        .watchOS(.v11),
     ],
     products: [
         .library(name: "ThinClawAPI", targets: ["ThinClawAPI"])
@@ -32,6 +32,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.8.0"),
         .package(url: "https://github.com/apple/swift-openapi-urlsession", from: "1.1.0"),
+        .package(url: "https://github.com/apple/swift-http-types", from: "1.4.0"),
     ],
     targets: [
         .target(
@@ -39,6 +40,7 @@ let package = Package(
             dependencies: [
                 .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
                 .product(name: "OpenAPIURLSession", package: "swift-openapi-urlsession"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
             ],
             // Docs that live next to committed generated sources — not build inputs.
             exclude: ["Generated/README.md"]

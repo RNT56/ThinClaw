@@ -5,7 +5,7 @@ import ThinClawAuth
 /// How the one-time pairing credential was obtained, which drives the
 /// `/api/devices/pair/complete` redemption path (D-P1): the 32-byte QR secret
 /// or the short human-typable no-camera code — exactly one, never both.
-public enum PairingRedemption: Sendable, Equatable {
+public enum PairingRedemption: Sendable, Equatable, Codable {
     /// The base64url one-time secret carried in the QR payload (`sec`).
     case secret(String)
     /// The short human code typed in the no-camera fallback.
@@ -40,6 +40,9 @@ public enum PairingError: Error, Equatable, Sendable {
     case server(status: Int)
     /// The pinned SPKI did not match the live TLS identity (possible MITM).
     case pinMismatch
+    /// The authenticated gateway returned a different installation identity
+    /// than the QR payload claimed.
+    case gatewayIdentityMismatch
     /// A network-level failure (unreachable, timed out).
     case transport(URLError.Code)
     /// Generating the Secure-Enclave / software device key failed.
@@ -83,6 +86,8 @@ public enum PairingError: Error, Equatable, Sendable {
         case .pinMismatch:
             return "The gateway's TLS identity didn't match what the QR promised. "
                 + "For safety, pairing was stopped. Re-pair only from a trusted QR."
+        case .gatewayIdentityMismatch:
+            return "The gateway identity did not match the pairing code. For safety, pairing was stopped."
         case .transport:
             return "Couldn't reach the gateway. Check the connection and retry."
         case .keyGenerationFailed:

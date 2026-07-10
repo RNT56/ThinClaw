@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import GRDB
 import ThinClawCore
@@ -70,6 +71,85 @@ public final class GRDBTranscriptStore: TranscriptStoring {
         let dir = base.appendingPathComponent("ThinClaw", isDirectory: true)
         let dbURL = dir.appendingPathComponent("transcripts.sqlite", isDirectory: false)
         return try GRDBTranscriptStore(path: dbURL)
+    }
+
+    /// Open the transcript database in a gateway-instance namespace. The
+    /// directory name is a SHA-256 digest so server-controlled identifiers can
+    /// never escape the storage root or leak into local paths.
+    public static func atGatewayLocation(
+        installationID: String,
+        fileManager: FileManager = .default
+    ) throws -> GRDBTranscriptStore {
+        let base = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true)
+        let root = base.appendingPathComponent("ThinClaw", isDirectory: true)
+        let digest = SHA256.hash(data: Data(installationID.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let target =
+            root
+            .appendingPathComponent("Gateways", isDirectory: true)
+            .appendingPathComponent(digest, isDirectory: true)
+            .appendingPathComponent("transcripts.sqlite", isDirectory: false)
+
+        let legacy = root.appendingPathComponent("transcripts.sqlite", isDirectory: false)
+        let migrated = try migrateLegacyIfNeeded(
+            from: legacy,
+            to: target,
+            fileManager: fileManager)
+        do {
+            let store = try GRDBTranscriptStore(path: target)
+            try store.verifyIntegrity()
+            if migrated {
+                removeDatabaseFiles(at: legacy, fileManager: fileManager)
+            }
+            return store
+        } catch {
+            if migrated {
+                removeDatabaseFiles(at: target, fileManager: fileManager)
+            }
+            throw error
+        }
+    }
+
+    private static func migrateLegacyIfNeeded(
+        from legacy: URL,
+        to target: URL,
+        fileManager: FileManager
+    ) throws -> Bool {
+        guard fileManager.fileExists(atPath: legacy.path),
+            !fileManager.fileExists(atPath: target.path)
+        else { return false }
+        try prepareDirectory(for: target)
+        for suffix in ["", "-wal", "-shm"] {
+            let source = URL(fileURLWithPath: legacy.path + suffix)
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            let destination = URL(fileURLWithPath: target.path + suffix)
+            try fileManager.copyItem(at: source, to: destination)
+        }
+        return true
+    }
+
+    private static func removeDatabaseFiles(
+        at url: URL,
+        fileManager: FileManager
+    ) {
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = URL(fileURLWithPath: url.path + suffix)
+            try? fileManager.removeItem(at: candidate)
+        }
+    }
+
+    private func verifyIntegrity() throws {
+        let result = try dbPool.read { db in
+            try String.fetchOne(db, sql: "PRAGMA quick_check")
+        }
+        guard result == "ok" else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
     }
 
     // MARK: - Directory + file protection
@@ -296,6 +376,44 @@ public final class GRDBTranscriptStore: TranscriptStoring {
         }
     }
 
+    public func enqueueOutbox(
+        _ message: OutboxMessage,
+        timelineItem: TimelineItem,
+        in thread: ThreadID
+    ) async throws {
+        let timelinePayload = try Self.encode(timelineItem)
+        let messagePayload = try Self.encode(message)
+        try await dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO timeline_items (thread_id, item_id, timestamp, payload)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(thread_id, item_id) DO UPDATE SET
+                        timestamp = excluded.timestamp,
+                        payload = excluded.payload
+                    """,
+                arguments: [
+                    thread.rawValue,
+                    timelineItem.id.rawValue,
+                    timelineItem.timestamp.timeIntervalSince1970,
+                    timelinePayload,
+                ])
+            try db.execute(
+                sql: """
+                    INSERT INTO outbox (id, queued_at, payload)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        queued_at = excluded.queued_at,
+                        payload = excluded.payload
+                    """,
+                arguments: [
+                    message.id.uuidString,
+                    message.queuedAt.timeIntervalSince1970,
+                    messagePayload,
+                ])
+        }
+    }
+
     public func outbox() async throws -> [OutboxMessage] {
         try await dbPool.read { db in
             let rows = try Row.fetchAll(
@@ -313,6 +431,20 @@ public final class GRDBTranscriptStore: TranscriptStoring {
         let raw = id.uuidString
         try await dbPool.write { db in
             try db.execute(sql: "DELETE FROM outbox WHERE id = ?", arguments: [raw])
+        }
+    }
+
+    public func clearAll() async throws {
+        try await dbPool.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+            try db.inTransaction {
+                try db.execute(sql: "DELETE FROM timeline_items")
+                try db.execute(sql: "DELETE FROM outbox")
+                try db.execute(sql: "DELETE FROM threads")
+                return .commit
+            }
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            try db.execute(sql: "VACUUM")
         }
     }
 

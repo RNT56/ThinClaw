@@ -183,12 +183,11 @@ public struct Client: APIProtocol {
             }
         )
     }
-    /// Pull-based fallback for pending tool approvals (milestone B1): a mobile
+    /// Authoritative pull surface for pending tool approvals: a mobile
     /// client that was not holding an open SSE/WS stream when
     /// `SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of
-    /// missing the approval entirely. **Best-effort and lossy** — see
-    /// `PendingApprovalEntry`'s doc comment: the backing cache lives only in
-    /// gateway process memory, is not persisted, and is cleared on restart.
+    /// missing the approval entirely. The registry is persisted across restarts
+    /// and drained only after an approval decision is accepted.
     ///
     /// - Remark: HTTP `GET /api/chat/approvals`.
     /// - Remark: Generated from `#/paths//api/chat/approvals/get(chat_approvals_handler)`.

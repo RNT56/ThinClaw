@@ -61,26 +61,30 @@ struct QuickAskView: View {
     }
 
     private var smallBody: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "bubble.left.and.text.bubble.right")
-                .font(.title2)
-            Text("Ask ThinClaw")
-                .font(.caption)
-            if let receipt = entry.receipt, isRecent(receipt.generatedAt) {
-                receiptLabel(receipt)
+        Button(intent: QuickAskIntent(prompt: "Give me a concise status update.")) {
+            VStack(spacing: 6) {
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .font(.title2)
+                Text("Ask ThinClaw")
+                    .font(.caption)
+                if let receipt = entry.receipt, isRecent(receipt.generatedAt) {
+                    receiptLabel(receipt)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .widgetURL(URL(string: "thinclaw://quick-ask"))
+        .buttonStyle(.plain)
     }
 
     private var circularBody: some View {
-        ZStack {
-            AccessoryWidgetBackground()
-            Image(systemName: "bubble.left.and.text.bubble.right")
-                .font(.title3)
+        Button(intent: QuickAskIntent(prompt: "Give me a concise status update.")) {
+            ZStack {
+                AccessoryWidgetBackground()
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .font(.title3)
+            }
         }
-        .widgetURL(URL(string: "thinclaw://quick-ask"))
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder

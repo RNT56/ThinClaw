@@ -1,6 +1,7 @@
 import Foundation
 import ThinClawAPI
-import UserNotifications
+import ThinClawWidgetKitShared
+@preconcurrency import UserNotifications
 
 /// `UNUserNotificationCenter` delegate: registers the notification categories,
 /// maps content-free pushes (category + ids only — docs/MOBILE_SECURITY.md
@@ -17,8 +18,7 @@ import UserNotifications
 /// Category split (D-K3 / D-N3): low-risk approvals get inline Approve/Deny
 /// actions; high-risk approvals get an "Open" action only and always deep-link
 /// into the app so the approval clears the Face ID gate there.
-@MainActor
-final class PushCoordinator: NSObject, UNUserNotificationCenterDelegate {
+final class PushCoordinator: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     static let messageCategory = "THINCLAW_MESSAGE"
     /// Back-compat base approval category (used by callers that route on the
     /// approval family). Live pushes use the risk-split categories below.
@@ -34,14 +34,14 @@ final class PushCoordinator: NSObject, UNUserNotificationCenterDelegate {
     private let dependencies: AppDependencies
     private let router: AppRouter
 
-    init(dependencies: AppDependencies, router: AppRouter) {
+    @MainActor init(dependencies: AppDependencies, router: AppRouter) {
         self.dependencies = dependencies
         self.router = router
     }
 
     /// Register this coordinator as the notification-center delegate and install
     /// the category set. Called once at launch.
-    func configure() {
+    @MainActor func configure() {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.setNotificationCategories(Self.categories())
@@ -51,7 +51,7 @@ final class PushCoordinator: NSObject, UNUserNotificationCenterDelegate {
     /// carries inline Approve/Deny buttons; the high-risk one offers "Open"
     /// (deep-link → Face ID in-app) so a high-risk tool is never approved from
     /// the lock screen (D-K3).
-    static func categories() -> Set<UNNotificationCategory> {
+    @MainActor static func categories() -> Set<UNNotificationCategory> {
         let approve = UNNotificationAction(
             identifier: approveActionID,
             title: "Approve",
@@ -94,7 +94,7 @@ final class PushCoordinator: NSObject, UNUserNotificationCenterDelegate {
     /// while the user is in the app is not silently dropped. (Live Activity
     /// suppression is a gateway-side decision; by the time a push reaches here it
     /// was already deemed worth delivering.)
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
@@ -104,13 +104,22 @@ final class PushCoordinator: NSObject, UNUserNotificationCenterDelegate {
     /// The user tapped the notification or one of its actions. Route by action:
     /// low-risk Approve/Deny POST directly; everything else (default tap, Open)
     /// deep-links into the app via ``AppRouter``.
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
         let ids = PushIDs(userInfo: response.notification.request.content.userInfo)
 
-        switch response.actionIdentifier {
+        await handle(
+            ids: ids,
+            actionIdentifier: response.actionIdentifier,
+            category: response.notification.request.content.categoryIdentifier)
+    }
+
+    @MainActor
+    private func handle(ids: PushIDs, actionIdentifier: String, category: String) async {
+        AppLog.push.debug("Handling content-free notification action")
+        switch actionIdentifier {
         case Self.approveActionID:
             await submitApproval(ids, action: "approve")
         case Self.denyActionID:
@@ -118,7 +127,7 @@ final class PushCoordinator: NSObject, UNUserNotificationCenterDelegate {
         default:
             // Default tap or the high-risk "Open" action: deep-link so the
             // in-app surface (with its Face ID gate) handles it.
-            if let url = ids.deepLink(category: response.notification.request.content.categoryIdentifier) {
+            if let url = ids.deepLink(category: category) {
                 router.handle(deepLink: url)
             }
         }
@@ -128,18 +137,28 @@ final class PushCoordinator: NSObject, UNUserNotificationCenterDelegate {
     /// actions are offered only for low-risk categories, enforced again here by
     /// only wiring Approve/Deny to `THINCLAW_APPROVAL_LOW`). Best-effort; the
     /// POST is idempotent by `request_id` server-side.
+    @MainActor
     private func submitApproval(_ ids: PushIDs, action: String) async {
         guard let requestID = ids.requestID, let client = dependencies.makePushClient() else {
             return
         }
-        _ = try? await client.chatApprovalHandler(
-            body: .json(.init(action: action, requestId: requestID, threadId: ids.threadID)))
+        do {
+            _ = try await client.chatApprovalHandler(
+                body: .json(.init(action: action, requestId: requestID, threadId: ids.threadID)))
+        } catch {
+            AppLog.push.error("Notification approval submission failed")
+        }
+        // The authoritative pull snapshot reconciles repeated/cross-device
+        // decisions, including a request that desktop resolved first.
+        if let approvals = dependencies.makeApprovalsStore() {
+            await approvals.refresh()
+        }
     }
 }
 
 /// The id-only payload the gateway ships under the `tc` dict (D-N1). Every field
 /// is optional because a given category only carries the ids it needs.
-private struct PushIDs {
+private struct PushIDs: Sendable {
     let requestID: String?
     let threadID: String?
     let jobID: String?
@@ -160,20 +179,11 @@ private struct PushIDs {
             PushCoordinator.approvalHighCategory,
             PushCoordinator.approvalCategory:
             guard let requestID else { return nil }
-            var components = URLComponents()
-            components.scheme = "thinclaw"
-            components.host = "approval"
-            components.path = "/\(requestID)"
-            if let threadID {
-                components.queryItems = [URLQueryItem(name: "thread", value: threadID)]
-            }
-            return components.url
+            return AppRoute.approvals(requestID: requestID, threadID: threadID).url
         case PushCoordinator.jobCategory:
-            guard let jobID else { return URL(string: "thinclaw://job") }
-            return URL(string: "thinclaw://job/\(jobID)")
+            return AppRoute.job(jobID).url
         default:
-            guard let threadID else { return URL(string: "thinclaw://thread") }
-            return URL(string: "thinclaw://thread/\(threadID)")
+            return AppRoute.thread(threadID).url
         }
     }
 }

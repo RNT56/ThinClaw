@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Security
 import ThinClawAPI
 import ThinClawAuth
@@ -18,44 +19,45 @@ import UserNotifications
 /// The extension links only what it needs: ``ThinClawAuth`` (shared Keychain +
 /// TLS pinning) and ``ThinClawAPI`` (generated REST client). It intentionally
 /// does not touch the app's feature graph.
-final class NotificationService: UNNotificationServiceExtension {
-    private var contentHandler: ((UNNotificationContent) -> Void)?
-    private var bestAttempt: UNMutableNotificationContent?
+final class NotificationService: UNNotificationServiceExtension, @unchecked Sendable {
+    private let completion = NotificationCompletionGate()
+    private let logger = Logger(
+        subsystem: "com.thinclaw.ios",
+        category: "notification-extension-timing")
 
     override func didReceive(
         _ request: UNNotificationRequest,
         withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
-        self.contentHandler = contentHandler
-        let mutable = request.content.mutableCopy() as? UNMutableNotificationContent
-        bestAttempt = mutable
+        let canMutate = request.content.mutableCopy() is UNMutableNotificationContent
+        completion.install(handler: contentHandler, bestAttempt: request.content)
 
-        guard let mutable else {
-            contentHandler(request.content)
+        guard canMutate else {
+            completion.finish()
             return
         }
 
         let ids = PushIDs(userInfo: request.content.userInfo)
+        let category = request.content.categoryIdentifier
 
-        Task {
+        let work = Task { [completion] in
             if let rewrite = await Self.fetchRewrite(
-                category: request.content.categoryIdentifier, ids: ids)
+                category: category, ids: ids)
             {
-                mutable.title = rewrite.title
-                mutable.body = rewrite.body
+                completion.apply(title: rewrite.title, body: rewrite.body)
             }
             // Either way, deliver: on success with local content, otherwise with
             // the generic text APNs carried.
-            contentHandler(mutable)
+            completion.finish()
         }
+        completion.setWork(work)
     }
 
     /// The system is about to kill the extension (time budget spent): hand back
     /// the best content we have, which is at worst the generic APNs text.
     override func serviceExtensionTimeWillExpire() {
-        if let contentHandler, let bestAttempt {
-            contentHandler(bestAttempt)
-        }
+        logger.notice("Notification service extension reached its time budget")
+        completion.cancelAndFinish()
     }
 
     /// Fetch the real content for this push from the gateway and return the
@@ -110,9 +112,62 @@ final class NotificationService: UNNotificationServiceExtension {
     }
 }
 
+/// Serializes the NSE's mutable content and guarantees that the system handler
+/// is consumed at most once, including the expiry race.
+final class NotificationCompletionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: ((UNNotificationContent) -> Void)?
+    private var bestAttempt: UNMutableNotificationContent?
+    private var work: Task<Void, Never>?
+
+    func install(
+        handler: @escaping (UNNotificationContent) -> Void,
+        bestAttempt: UNNotificationContent
+    ) {
+        lock.withLock {
+            self.handler = handler
+            self.bestAttempt = bestAttempt.mutableCopy() as? UNMutableNotificationContent
+        }
+    }
+
+    func setWork(_ work: Task<Void, Never>) {
+        let shouldCancel = lock.withLock { () -> Bool in
+            guard handler != nil else { return true }
+            self.work = work
+            return false
+        }
+        if shouldCancel { work.cancel() }
+    }
+
+    func apply(title: String, body: String) {
+        lock.withLock {
+            bestAttempt?.title = title
+            bestAttempt?.body = body
+        }
+    }
+
+    func cancelAndFinish() {
+        let work = lock.withLock { self.work }
+        work?.cancel()
+        finish()
+    }
+
+    func finish() {
+        let delivery = lock.withLock {
+            () -> (((UNNotificationContent) -> Void), UNNotificationContent)? in
+            guard let handler, let bestAttempt else { return nil }
+            self.handler = nil
+            self.bestAttempt = nil
+            self.work = nil
+            return (handler, bestAttempt)
+        }
+        if let (handler, content) = delivery { handler(content) }
+    }
+}
+
 /// The id-only payload the gateway ships under the `tc` dict (D-N1); mirrors the
 /// app-side reader. Kept local so the extension links no app code.
-private struct PushIDs {
+struct PushIDs: Sendable {
     let requestID: String?
     let threadID: String?
     let jobID: String?
@@ -138,7 +193,7 @@ private let categoryApprovalHigh = "THINCLAW_APPROVAL_HIGH"
 /// links no app code. The keys + raw values are the stable cross-process
 /// contract written by `ThinClawCore.NotificationPreferencesStore`; kept local
 /// here to keep the NSE's dependency surface minimal.
-private enum NotificationPreviewPreference {
+enum NotificationPreviewPreference {
     /// Push categories the operator can gate. Only `approval` is consulted in the
     /// NSE today (the only category with a content rewrite), but the enum mirrors
     /// the full model so the key contract stays honest.
@@ -178,40 +233,16 @@ extension NotificationPreviewPreference.Mode {
     /// `never`/`appOnly` never rewrite; `whenUnlocked` rewrites only while the
     /// device is unlocked (probed via ``deviceIsUnlocked``, failing closed when
     /// the probe is inconclusive); `always` always rewrites.
-    func allowsRewrite() -> Bool {
+    func allowsRewrite(
+        isUnlocked: () -> Bool = { DeviceUnlockProbe.isUnlocked() }
+    ) -> Bool {
         switch self {
         case .always:
             return true
         case .never, .appOnly:
             return false
         case .whenUnlocked:
-            return deviceIsUnlocked()
+            return isUnlocked()
         }
-    }
-}
-
-/// Best-effort device-unlocked probe for the NSE: attempt to read a Keychain
-/// item classed `WhenUnlockedThisDeviceOnly`. A successful read means the device
-/// is unlocked; `errSecInteractionNotAllowed` means locked. Any other error (or
-/// a missing probe item — never provisioned) is treated as **locked** so the
-/// `whenUnlocked` preview fails closed to the generic content-free text.
-///
-/// The probe item is optional infrastructure: when absent the NSE simply keeps
-/// previews off for `whenUnlocked`, which is the private-by-default outcome.
-private func deviceIsUnlocked() -> Bool {
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "com.thinclaw.lockprobe",
-        kSecReturnData as String: false,
-        kSecMatchLimit as String: kSecMatchLimitOne,
-    ]
-    let status = SecItemCopyMatching(query as CFDictionary, nil)
-    switch status {
-    case errSecSuccess:
-        return true
-    default:
-        // errSecInteractionNotAllowed (locked), errSecItemNotFound (no probe),
-        // or anything else → treat as locked / fail closed.
-        return false
     }
 }

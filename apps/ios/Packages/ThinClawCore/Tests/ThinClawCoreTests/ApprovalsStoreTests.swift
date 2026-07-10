@@ -117,6 +117,18 @@ struct ApprovalsStoreTests {
         #expect(store.badgeCount == 2)
     }
 
+    @Test("refresh replaces the authoritative snapshot and removes resolved entries")
+    func authoritativeReplacement() async {
+        let gateway = MockApprovalsGateway(pending: [request("r1"), request("r2")])
+        let store = ApprovalsStore(gateway: gateway, biometrics: MockBiometricGate(result: true))
+        await store.refresh()
+        gateway.setPending([request("r2")])
+
+        await store.refresh()
+
+        #expect(store.pending.map(\.requestID) == ["r2"])
+    }
+
     @Test("low-risk approve submits without a biometric prompt and removes the entry")
     func lowRiskApproveNoGate() async {
         let gateway = MockApprovalsGateway(pending: [request("r1", risk: .low)])

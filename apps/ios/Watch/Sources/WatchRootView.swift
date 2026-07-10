@@ -183,6 +183,6 @@ enum SnapshotStaleness {
         asOf now: Date = .now,
         maxAge: TimeInterval = 30 * 60
     ) -> Bool {
-        now.timeIntervalSince(snapshot.generatedAt) > maxAge
+        snapshot.isKnownStale || now.timeIntervalSince(snapshot.generatedAt) > maxAge
     }
 }

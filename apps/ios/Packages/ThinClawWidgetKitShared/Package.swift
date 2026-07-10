@@ -13,7 +13,7 @@ import PackageDescription
 let package = Package(
     name: "ThinClawWidgetKitShared",
     platforms: [
-        .iOS(.v26)
+        .iOS(.v18)
     ],
     products: [
         .library(name: "ThinClawWidgetKitShared", targets: ["ThinClawWidgetKitShared"])
@@ -23,6 +23,10 @@ let package = Package(
         .package(path: "../ThinClawAuth"),
         .package(path: "../ThinClawAPI"),
         .package(path: "../ThinClawDesign"),
+        // Generated API method signatures expose OpenAPIRuntime protocol and
+        // header types, so this package has a real (not merely transitive)
+        // link dependency on the runtime.
+        .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.8.0"),
     ],
     targets: [
         .target(
@@ -32,7 +36,12 @@ let package = Package(
                 .product(name: "ThinClawAuth", package: "ThinClawAuth"),
                 .product(name: "ThinClawAPI", package: "ThinClawAPI"),
                 .product(name: "ThinClawDesign", package: "ThinClawDesign"),
+                .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "ThinClawWidgetKitSharedTests",
+            dependencies: ["ThinClawWidgetKitShared"]
+        ),
     ]
 )

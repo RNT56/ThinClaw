@@ -1,5 +1,6 @@
 import BackgroundTasks
 import Foundation
+import OSLog
 
 #if canImport(UIKit)
     import UIKit
@@ -31,6 +32,9 @@ enum BackgroundRefresh {
     /// Minimum spacing between `BGAppRefresh` runs. The system treats this as a
     /// floor, not a guarantee — actual cadence depends on usage and power.
     static let minimumRefreshInterval: TimeInterval = 15 * 60
+    private static let logger = Logger(
+        subsystem: "com.thinclaw.ios", category: "background-refresh")
+    private static let diagnostics = BackgroundRefreshDiagnostics()
 
     // MARK: - BGTaskScheduler wiring
 
@@ -62,15 +66,15 @@ enum BackgroundRefresh {
         ) {
             scheduleAppRefresh()
 
+            let completion = BackgroundTaskCompletion(task: task)
             let work = Task { @MainActor in
                 let produced = await (dependencies()?.refreshSnapshots() ?? false)
                 reloadWidgets()
-                return produced
+                completion.finish(success: produced)
             }
-            task.expirationHandler = { work.cancel() }
-            Task {
-                let produced = await work.value
-                task.setTaskCompleted(success: produced)
+            task.expirationHandler = {
+                work.cancel()
+                completion.finish(success: false)
             }
         }
 
@@ -81,7 +85,13 @@ enum BackgroundRefresh {
         static func scheduleAppRefresh() {
             let request = BGAppRefreshTaskRequest(identifier: taskIdentifier)
             request.earliestBeginDate = Date(timeIntervalSinceNow: minimumRefreshInterval)
-            try? BGTaskScheduler.shared.submit(request)
+            do {
+                try BGTaskScheduler.shared.submit(request)
+                Task { await diagnostics.recordSchedulingSuccess() }
+            } catch {
+                Task { await diagnostics.recordSchedulingFailure() }
+                logger.error("Unable to schedule app refresh: \(String(describing: error), privacy: .public)")
+            }
         }
     #else
         static func register(dependencies: @escaping @MainActor @Sendable () -> AppDependencies?) {}
@@ -110,6 +120,39 @@ enum BackgroundRefresh {
         #endif
     }
 }
+
+actor BackgroundRefreshDiagnostics {
+    private(set) var lastScheduledAt: Date?
+    private(set) var lastSchedulingFailed = false
+
+    func recordSchedulingSuccess() {
+        lastScheduledAt = .now
+        lastSchedulingFailed = false
+    }
+
+    func recordSchedulingFailure() {
+        lastSchedulingFailed = true
+    }
+}
+
+#if canImport(BackgroundTasks) && canImport(UIKit)
+    private final class BackgroundTaskCompletion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: BGTask?
+
+        init(task: BGTask) {
+            self.task = task
+        }
+
+        func finish(success: Bool) {
+            let task = lock.withLock { () -> BGTask? in
+                defer { self.task = nil }
+                return self.task
+            }
+            task?.setTaskCompleted(success: success)
+        }
+    }
+#endif
 
 #if canImport(UIKit)
     /// Bridge to `UIBackgroundFetchResult` without leaking UIKit into callers on

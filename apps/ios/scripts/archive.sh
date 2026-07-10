@@ -102,6 +102,8 @@ EOF
 fi
 
 echo "==> Apple team: ${DEVELOPMENT_TEAM}"
+BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-$(date -u +%Y%m%d%H%M)}}"
+echo "==> Build number: ${BUILD_NUMBER}"
 
 # ---------------------------------------------------------------------------
 # Prepare a private, gitignored workspace for the .p8 key and export options.
@@ -145,6 +147,7 @@ xcodebuild archive \
   -authenticationKeyID "${APP_STORE_CONNECT_KEY_ID}" \
   -authenticationKeyIssuerID "${APP_STORE_CONNECT_ISSUER_ID}" \
   -allowProvisioningUpdates \
+  CURRENT_PROJECT_VERSION="${BUILD_NUMBER}" \
   DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM}"
 
 echo "==> xcodebuild -exportArchive"

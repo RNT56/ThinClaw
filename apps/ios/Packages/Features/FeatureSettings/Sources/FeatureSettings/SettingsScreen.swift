@@ -19,6 +19,7 @@ import ThinClawDesign
 public struct SettingsScreen: View {
     @State private var store: SettingsStore
     @State private var notificationAuthDenied = false
+    @State private var showsUnpairOptions = false
     @Environment(\.scenePhase) private var scenePhase
 
     public init(store: SettingsStore) {
@@ -42,6 +43,23 @@ public struct SettingsScreen: View {
             // foreground so a resumed session re-gates it (D-K3).
             if phase != .active { store.hideConnectionDetail() }
         }
+        .confirmationDialog(
+            "Remove this gateway?",
+            isPresented: $showsUnpairOptions,
+            titleVisibility: .visible
+        ) {
+            Button("Revoke device and erase local data", role: .destructive) {
+                Task { await store.unpair() }
+            }
+            Button("Erase local data only", role: .destructive) {
+                Task { await store.removeLocalDataOnly() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Use local-only removal when the gateway is unreachable. An administrator must revoke the orphaned device record later."
+            )
+        }
     }
 
     // MARK: - This device
@@ -64,7 +82,7 @@ public struct SettingsScreen: View {
     }
 
     @ViewBuilder private func scopeChips(_ scopes: [DeviceScopeTag]) -> some View {
-        HStack(spacing: ThinClawSpacing.xs) {
+        AdaptiveFlowLayout(spacing: ThinClawSpacing.xs) {
             ForEach(Array(scopes.enumerated()), id: \.offset) { _, scope in
                 Text(scope.label)
                     .font(.caption2)
@@ -112,13 +130,13 @@ public struct SettingsScreen: View {
         Section {
             ForEach(NotificationCategory.allCases, id: \.self) { category in
                 Picker(
-                    categoryTitle(category),
+                    Self.categoryTitle(category),
                     selection: Binding(
                         get: { store.notificationPreferences.mode(for: category) },
                         set: { store.setPreviewMode($0, for: category) })
                 ) {
                     ForEach(NotificationPreferences.allowedModes(for: category), id: \.self) { mode in
-                        Text(previewModeTitle(mode)).tag(mode)
+                        Text(Self.previewModeTitle(mode)).tag(mode)
                     }
                 }
             }
@@ -181,10 +199,10 @@ public struct SettingsScreen: View {
     @ViewBuilder private var unpairSection: some View {
         Section {
             Button("Unpair this device", role: .destructive) {
-                Task { await store.unpair() }
+                showsUnpairOptions = true
             }
         } footer: {
-            Text("Signs out of the gateway and erases this device's credential.")
+            Text("Revokes this device when reachable and erases its protected local data.")
         }
     }
 
@@ -208,7 +226,7 @@ public struct SettingsScreen: View {
 
     // MARK: - Labels
 
-    private func categoryTitle(_ category: NotificationCategory) -> String {
+    static func categoryTitle(_ category: NotificationCategory) -> String {
         switch category {
         case .message: return "Messages"
         case .approval: return "Approvals"
@@ -216,7 +234,7 @@ public struct SettingsScreen: View {
         }
     }
 
-    private func previewModeTitle(_ mode: PreviewMode) -> String {
+    static func previewModeTitle(_ mode: PreviewMode) -> String {
         switch mode {
         case .always: return "Always"
         case .whenUnlocked: return "When unlocked"

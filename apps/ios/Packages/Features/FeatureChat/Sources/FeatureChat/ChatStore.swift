@@ -47,6 +47,7 @@ public final class ChatStore {
     private let session: GatewaySession
     private let store: any TranscriptStoring
     private let now: @Sendable () -> Date
+    private let sleep: @Sendable (Duration) async throws -> Void
 
     // MARK: - Pure state models
 
@@ -57,11 +58,9 @@ public final class ChatStore {
 
     private var eventTask: Task<Void, Never>?
     private var connectionTask: Task<Void, Never>?
+    private var cooldownTask: Task<Void, Never>?
     /// Oldest timestamp currently held, used as the `before:` history cursor.
     private var oldestTimestamp: Date?
-    /// Original text for each failed row, so ``retry(rowID:)`` can resend
-    /// without the user retyping.
-    private var retryTexts: [MessageID: String] = [:]
     /// Whether we have ever been live, so the first `connected` is a cold start
     /// and later ones are reconnects (which trigger reconcile + outbox flush).
     private var hasConnectedBefore = false
@@ -73,12 +72,16 @@ public final class ChatStore {
         threadID: ThreadID,
         session: GatewaySession,
         store: any TranscriptStoring,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        sleep: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        }
     ) {
         self.threadID = threadID
         self.session = session
         self.store = store
         self.now = now
+        self.sleep = sleep
         self.reducer = ChatTimelineReducer(threadID: threadID, now: now)
     }
 
@@ -98,6 +101,8 @@ public final class ChatStore {
         eventTask = nil
         connectionTask?.cancel()
         connectionTask = nil
+        cooldownTask?.cancel()
+        cooldownTask = nil
     }
 
     private func hydrateFromCache() async {
@@ -193,14 +198,19 @@ public final class ChatStore {
         }
 
         do {
-            _ = try await session.send(text, in: threadID)
+            _ = try await session.send(
+                text,
+                in: threadID,
+                clientMessageID: UUID(uuidString: rowID.rawValue))
+            reducer.markSent(rowID: rowID)
+            publish()
             await persistTimeline()
         } catch let error as APIError {
             await handleSendFailure(error, text: text, rowID: rowID)
         } catch {
-            retryTexts[rowID] = text
             reducer.markFailure(rowID: rowID, message: "Send failed. Tap to retry.")
             publish()
+            await persistTimeline()
         }
     }
 
@@ -209,8 +219,8 @@ public final class ChatStore {
         case .rateLimited(let retryAfter):
             cooldown.begin(retryAfter: retryAfter, now: now())
             refreshCooldown()
+            startCooldownTicker()
             // The message itself was rejected; mark it retryable.
-            retryTexts[rowID] = text
             reducer.markFailure(rowID: rowID, message: "Rate limited. Tap to retry.")
         case .transport, .server, .notPaired:
             // Likely transient / connectivity: queue it so it flushes on
@@ -218,20 +228,34 @@ public final class ChatStore {
             await enqueue(text, replacing: rowID)
             return
         case .unauthorized, .forbidden, .pinMismatch, .unexpected:
-            retryTexts[rowID] = text
             reducer.markFailure(rowID: rowID, message: "Send failed. Tap to retry.")
         }
         publish()
+        await persistTimeline()
     }
 
-    /// Replace an optimistic row with a queued placeholder and persist the
-    /// message to the outbox for ordered flush on reconnect.
+    /// Mark the optimistic user row as queued and persist its stable identity
+    /// with the outbox record for ordered flush on reconnect.
     private func enqueue(_ text: String, replacing rowID: MessageID) async {
-        reducer.removeRow(rowID)
-        _ = reducer.appendQueuedNote(text)
+        reducer.markQueued(rowID: rowID)
         publish()
-        let message = OutboxMessage(threadID: threadID, content: text, queuedAt: now())
-        try? await store.enqueueOutbox(message)
+        let message = OutboxMessage(
+            id: UUID(uuidString: rowID.rawValue) ?? UUID(),
+            threadID: threadID,
+            content: text,
+            queuedAt: now(),
+            timelineItemID: rowID)
+        guard let timelineItem = timeline.first(where: { $0.id == rowID }) else { return }
+        do {
+            try await store.enqueueOutbox(
+                message,
+                timelineItem: timelineItem,
+                in: threadID)
+        } catch {
+            reducer.markFailure(rowID: rowID, message: "Could not save offline message.")
+            publish()
+            await persistTimeline()
+        }
     }
 
     /// Flush queued messages in enqueue order once the gateway is reachable.
@@ -248,8 +272,16 @@ public final class ChatStore {
         let queued = (try? await store.outbox()) ?? []
         for message in queued where message.threadID == threadID {
             do {
-                _ = try await session.send(message.content, in: threadID)
+                _ = try await session.send(
+                    message.content,
+                    in: threadID,
+                    clientMessageID: message.id)
+                if let rowID = message.timelineItemID {
+                    reducer.markSent(rowID: rowID)
+                }
                 try? await store.removeFromOutbox(message.id)
+                publish()
+                await persistTimeline()
             } catch {
                 // Leave this and everything after it queued; retry next reconnect.
                 break
@@ -257,19 +289,50 @@ public final class ChatStore {
         }
     }
 
-    /// Retry a failed row: drop the failure row, then resend its original text
-    /// through the normal send path (which re-applies offline/429/optimistic
-    /// handling). No-op if the row is not a failure we captured text for.
+    /// Retry a failed operator row with the same stable client message id, so
+    /// an ambiguous first attempt is deduplicated by the gateway.
     public func retry(rowID: MessageID) async {
         guard let item = timeline.first(where: { $0.id == rowID }),
-            case .failure = item.kind,
-            let text = retryTexts[rowID]
+            case .userMessage(let text) = item.kind,
+            item.deliveryState == .failed
         else { return }
-        retryTexts.removeValue(forKey: rowID)
-        reducer.removeRow(rowID)
+        reducer.markSending(rowID: rowID)
         publish()
-        draft = text
-        await send()
+
+        if isOffline {
+            await enqueue(text, replacing: rowID)
+            return
+        }
+
+        do {
+            _ = try await session.send(
+                text,
+                in: threadID,
+                clientMessageID: UUID(uuidString: rowID.rawValue))
+            reducer.markSent(rowID: rowID)
+            publish()
+            await persistTimeline()
+        } catch let error as APIError {
+            await handleSendFailure(error, text: text, rowID: rowID)
+        } catch {
+            reducer.markFailure(rowID: rowID, message: "Send failed. Tap to retry.")
+            publish()
+            await persistTimeline()
+        }
+    }
+
+    /// Delete a failed local message and any matching queued outbox record.
+    public func delete(rowID: MessageID) async {
+        guard let item = timeline.first(where: { $0.id == rowID }),
+            case .userMessage = item.kind,
+            item.deliveryState == .failed
+        else { return }
+        reducer.removeRow(rowID)
+        if let id = UUID(uuidString: rowID.rawValue) {
+            try? await store.removeFromOutbox(id)
+        }
+        publish()
+        await persistTimeline()
     }
 
     // MARK: - History paging
@@ -346,6 +409,22 @@ public final class ChatStore {
 
     private func refreshCooldown() {
         cooldownRemaining = cooldown.remaining(now: now())
+    }
+
+    private func startCooldownTicker() {
+        cooldownTask?.cancel()
+        cooldownTask = Task { [weak self, sleep] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.refreshCooldown()
+                guard self.cooldownRemaining > 0 else { return }
+                do {
+                    try await sleep(.seconds(1))
+                } catch {
+                    return
+                }
+            }
+        }
     }
 
     private func persistTimeline() async {

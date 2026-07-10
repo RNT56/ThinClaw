@@ -1,5 +1,6 @@
 import AppIntents
 import Foundation
+import ThinClawAuth
 import ThinClawSnapshotKit
 
 /// Approve a pending low-risk tool request directly from the widget process.
@@ -127,10 +128,14 @@ public struct QuickAskIntent: AppIntent {
                 writeReceipt(text: trimmed, state: .sent)
                 return .result(dialog: "Sent to ThinClaw.")
             } catch {
-                // Queue locally so the app can retry on next foreground, and
-                // tell the user honestly that it did not go through yet.
-                writeReceipt(text: trimmed, state: .failed)
-                return .result(dialog: "Couldn't reach ThinClaw — saved to send later.")
+                do {
+                    try QuickAskOutbox.enqueue(trimmed, threadID: nil)
+                    writeReceipt(text: trimmed, state: .queued)
+                    return .result(dialog: "ThinClaw is offline. Your prompt is queued.")
+                } catch {
+                    writeReceipt(text: trimmed, state: .failed)
+                    return .result(dialog: "Couldn't reach ThinClaw. Your prompt was not sent.")
+                }
             }
         #else
             return .result(dialog: "Sent to ThinClaw.")
@@ -140,7 +145,11 @@ public struct QuickAskIntent: AppIntent {
     private func writeReceipt(text: String, state: QuickAskReceipt.DeliveryState) {
         guard let store = WidgetSnapshotAccess.store() else { return }
         let receipt = QuickAskReceipt(
-            generatedAt: .now, text: text, threadID: nil, deliveryState: state)
+            gatewayInstanceID: SharedGatewayConnection.loadCredential()?.installationID,
+            generatedAt: .now,
+            text: text,
+            threadID: nil,
+            deliveryState: state)
         try? store.save(receipt)
         #if canImport(WidgetKit)
             WidgetReload.quickAsk()

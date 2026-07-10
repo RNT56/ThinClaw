@@ -16,6 +16,9 @@ public final class SessionsStore {
     /// True after the first successful network refresh, so the UI can tell an
     /// empty-but-loading list from a genuinely empty one.
     public private(set) var hasRefreshed: Bool = false
+    public private(set) var isLoading = false
+    public private(set) var errorMessage: String?
+    public private(set) var isShowingCachedData = false
 
     private let session: GatewaySession
     private let store: any TranscriptStoring
@@ -36,18 +39,29 @@ public final class SessionsStore {
     public func hydrateFromCache() async {
         let cached = (try? await store.threads()) ?? []
         model.hydrate(cached: cached)
+        isShowingCachedData = !cached.isEmpty
         publish()
     }
 
     /// Refresh from the gateway and persist the authoritative listing back into
     /// the cache. A failure leaves the cached rows on screen.
     public func refresh() async {
-        guard let fetched = try? await session.threads() else { return }
-        model.refresh(fetched: fetched)
-        publish()
-        // Warm the cache for next launch.
-        for thread in fetched {
-            try? await store.upsert(thread: thread)
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let fetched = try await session.threads()
+            model.refresh(fetched: fetched)
+            errorMessage = nil
+            isShowingCachedData = false
+            publish()
+            // Warm the cache for next launch.
+            for thread in fetched {
+                try? await store.upsert(thread: thread)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            errorMessage = "Couldn't refresh sessions. Pull to try again."
         }
     }
 

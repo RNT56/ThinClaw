@@ -24,10 +24,10 @@
         }
 
         func relay(_ envelope: WatchRelayEnvelope) async throws -> WatchRelayResponse {
-            let payload = try envelope.messagePayload()
             return try await withThrowingTaskGroup(of: WatchRelayResponse.self) { group in
                 group.addTask {
-                    try await Self.sendMessage(session, payload)
+                    let payload = try envelope.messagePayload()
+                    return try await Self.sendMessage(session, payload)
                 }
                 group.addTask {
                     try await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))

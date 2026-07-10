@@ -234,9 +234,9 @@ async fn start_test_server_with_provider(
             .await
             .expect("load device store for test"),
         ),
-        pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        pending_approvals: std::sync::Arc::new(
+            thinclaw::channels::web::server::PendingApprovalsStore::in_memory(),
+        ),
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,
@@ -750,9 +750,9 @@ async fn test_no_llm_provider_returns_503() {
             .await
             .expect("load device store for test"),
         ),
-        pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        pending_approvals: std::sync::Arc::new(
+            thinclaw::channels::web::server::PendingApprovalsStore::in_memory(),
+        ),
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,

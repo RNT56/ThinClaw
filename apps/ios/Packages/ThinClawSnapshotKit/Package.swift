@@ -13,8 +13,8 @@ let package = Package(
     name: "ThinClawSnapshotKit",
     platforms: [
         .macOS(.v14),
-        .iOS(.v26),
-        .watchOS(.v26),
+        .iOS(.v18),
+        .watchOS(.v11),
     ],
     products: [
         .library(name: "ThinClawSnapshotKit", targets: ["ThinClawSnapshotKit"])

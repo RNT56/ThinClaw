@@ -301,9 +301,9 @@ async fn start_routine_gateway_server(
             .await
             .expect("load device store for test"),
         ),
-        pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        pending_approvals: std::sync::Arc::new(
+            thinclaw::channels::web::server::PendingApprovalsStore::in_memory(),
+        ),
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,

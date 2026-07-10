@@ -61,29 +61,35 @@ public struct ChatTimelineReducer: Sendable {
     @discardableResult
     public mutating func appendOptimisticUserMessage(_ text: String) -> MessageID {
         let item = TimelineItem(
-            threadID: threadID, timestamp: now(), kind: .userMessage(text: text))
+            threadID: threadID,
+            timestamp: now(),
+            kind: .userMessage(text: text),
+            deliveryState: .sending)
         items.append(item)
         return item.id
     }
 
-    /// Insert a "queued (offline)" placeholder as a status note tied to an
-    /// outbox message, so the composer shows the send was accepted locally.
-    @discardableResult
-    public mutating func appendQueuedNote(_ text: String) -> MessageID {
-        let item = TimelineItem(
-            threadID: threadID, timestamp: now(),
-            kind: .statusNote(text: "Queued: \(text)"))
-        items.append(item)
-        return item.id
-    }
-
-    /// Replace the row `id` with a failure row carrying `message` (used when an
-    /// optimistic send fails and the UI offers retry). No-op if the id is gone.
-    public mutating func markFailure(rowID id: MessageID, message: String) {
+    /// Preserve the operator's message and mark its delivery as failed. The
+    /// original content remains visible and available for retry or deletion.
+    public mutating func markFailure(rowID id: MessageID, message _: String) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        items[index] = TimelineItem(
-            id: id, threadID: threadID, timestamp: items[index].timestamp,
-            kind: .failure(message: message))
+        guard case .userMessage = items[index].kind else { return }
+        items[index].deliveryState = .failed
+    }
+
+    public mutating func markSending(rowID id: MessageID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].deliveryState = .sending
+    }
+
+    public mutating func markQueued(rowID id: MessageID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].deliveryState = .queued
+    }
+
+    public mutating func markSent(rowID id: MessageID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].deliveryState = nil
     }
 
     /// Remove a row by id (e.g. dropping a "queued" note once the send lands).

@@ -12,8 +12,8 @@ import PackageDescription
 let package = Package(
     name: "ThinClawDesign",
     platforms: [
-        .iOS(.v26),
-        .watchOS(.v26),
+        .iOS(.v18),
+        .watchOS(.v11),
     ],
     products: [
         .library(name: "ThinClawDesign", targets: ["ThinClawDesign"])

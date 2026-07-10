@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::{
     Json,
@@ -40,6 +41,87 @@ use thinclaw_gateway::web::ports::{
 pub(crate) use thinclaw_gateway::web::submission::gateway_submission_error;
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct AcceptedClientMessage {
+    message_id: Uuid,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+}
+
+type AcceptedClientMessages = HashMap<String, AcceptedClientMessage>;
+static ACCEPTED_CLIENT_MESSAGES: OnceLock<Mutex<AcceptedClientMessages>> = OnceLock::new();
+const CLIENT_MESSAGE_TTL_HOURS: i64 = 24;
+const MAX_CLIENT_MESSAGE_IDS: usize = 4096;
+
+fn accepted_client_messages() -> &'static Mutex<AcceptedClientMessages> {
+    ACCEPTED_CLIENT_MESSAGES.get_or_init(|| {
+        #[cfg(test)]
+        let cache = HashMap::new();
+        #[cfg(not(test))]
+        let cache = {
+            let path =
+                crate::platform::resolve_data_dir("mobile").join("accepted-client-messages.json");
+            let mut loaded: AcceptedClientMessages = std::fs::read(path)
+                .ok()
+                .and_then(|data| serde_json::from_slice(&data).ok())
+                .unwrap_or_default();
+            prune_accepted_client_messages(&mut loaded);
+            loaded
+        };
+        Mutex::new(cache)
+    })
+}
+
+fn prune_accepted_client_messages(cache: &mut AcceptedClientMessages) {
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(CLIENT_MESSAGE_TTL_HOURS);
+    cache.retain(|_, accepted| accepted.accepted_at > cutoff);
+}
+
+fn accepted_client_message(key: &str) -> Option<Uuid> {
+    let mut cache = accepted_client_messages().lock().ok()?;
+    prune_accepted_client_messages(&mut cache);
+    cache.get(key).map(|accepted| accepted.message_id)
+}
+
+fn remember_client_message(key: String, id: Uuid) {
+    let Ok(mut cache) = accepted_client_messages().lock() else {
+        return;
+    };
+    prune_accepted_client_messages(&mut cache);
+    if cache.len() >= MAX_CLIENT_MESSAGE_IDS
+        && let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, accepted)| accepted.accepted_at.timestamp_millis())
+            .map(|(key, _)| key.clone())
+    {
+        cache.remove(&oldest);
+    }
+    cache.insert(
+        key,
+        AcceptedClientMessage {
+            message_id: id,
+            accepted_at: chrono::Utc::now(),
+        },
+    );
+    #[cfg(not(test))]
+    persist_accepted_client_messages(&cache);
+}
+
+#[cfg(not(test))]
+fn persist_accepted_client_messages(cache: &AcceptedClientMessages) {
+    let path = crate::platform::resolve_data_dir("mobile").join("accepted-client-messages.json");
+    let Some(parent) = path.parent() else { return };
+    let result = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(parent)?;
+        let data = serde_json::to_vec(cache).map_err(std::io::Error::other)?;
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, data)?;
+        std::fs::rename(temporary, &path)
+    })();
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to persist accepted client message ids");
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/chat/send",
@@ -59,10 +141,6 @@ pub(crate) async fn chat_send_handler(
     request_identity: GatewayRequestIdentity,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
-    if !state.chat_rate_limiter.check() {
-        return Err(chat_rate_limit_error());
-    }
-
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -70,17 +148,54 @@ pub(crate) async fn chat_send_handler(
         req.actor_id.as_deref(),
     )
     .await;
+    let client_message_id = req
+        .client_message_id
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "client_message_id must be a UUID".to_string(),
+            )
+        })?;
+    let idempotency_key = client_message_id.map(|id| {
+        format!(
+            "{}:{}:{}",
+            request_identity.principal_id,
+            req.thread_id.as_deref().unwrap_or_default(),
+            id
+        )
+    });
+    if let Some(key) = idempotency_key.as_deref()
+        && let Some(message_id) = accepted_client_message(key)
+    {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(send_message_response(message_id)),
+        ));
+    }
+    if !state.chat_rate_limiter.check() {
+        return Err(chat_rate_limit_error());
+    }
+
     let browser_origin = request_origin_from_headers(&headers);
-    let msg = build_gateway_message(
+    let mut msg = build_gateway_message(
         "gateway",
         &request_identity,
         req.content.as_str(),
         req.thread_id.as_deref(),
         browser_origin.as_deref(),
     );
+    if let Some(client_message_id) = client_message_id {
+        msg.id = client_message_id;
+    }
     let msg_id = submit_gateway_message(state.as_ref(), msg)
         .await
         .map_err(gateway_submission_error)?;
+    if let Some(key) = idempotency_key {
+        remember_client_message(key, msg_id);
+    }
 
     Ok((StatusCode::ACCEPTED, Json(send_message_response(msg_id))))
 }
@@ -119,9 +234,10 @@ pub(crate) async fn chat_approval_handler(
     // all, but the gateway enforces the rule server-side so a compromised or
     // spoofed watch client cannot approve a destructive action from the wrist.
     // The risk tier is the gateway-side single source of truth carried in the
-    // pending-approvals cache (populated from the `ApprovalNeeded` broadcast).
+    // Durable pending-approvals registry populated at the central
+    // `ApprovalNeeded` broadcast boundary.
     // Only an *approve* is gated — a companion may always DENY. The check runs
-    // before the cache entry is dropped below. `always` implies approve, so it
+    // before the registry entry is dropped below. `always` implies approve, so it
     // is gated too. Denies fall through regardless of risk.
     let is_watch_companion = device_ctx
         .as_ref()
@@ -132,8 +248,8 @@ pub(crate) async fn chat_approval_handler(
             .lock()
             .ok()
             .and_then(|cache| cache.get(&req.request_id).map(|entry| entry.risk));
-        // Fail closed: an unknown/absent risk (cache miss — e.g. a stale
-        // request_id or a post-restart gap) is treated as high-risk and
+        // Fail closed: an unknown/absent risk (registry miss — e.g. a stale
+        // request_id) is treated as high-risk and
         // refused, matching the classifier's own least-privilege default.
         let is_low = matches!(
             cached_risk,
@@ -147,15 +263,6 @@ pub(crate) async fn chat_approval_handler(
                 "this device may only approve low-risk actions".to_string(),
             ));
         }
-    }
-
-    // Best-effort pending-approvals cache (milestone B1, `GET
-    // /api/chat/approvals`): the decision is about to be submitted, so drop
-    // the cached entry regardless of the submission's outcome below — a
-    // stale "still pending" entry is worse than a dropped one a client
-    // could re-request via the SSE stream.
-    if let Ok(mut cache) = state.pending_approvals.lock() {
-        cache.remove(&req.request_id);
     }
 
     let approval = crate::agent::submission::Submission::ExecApproval {
@@ -189,15 +296,21 @@ pub(crate) async fn chat_approval_handler(
         .await
         .map_err(gateway_submission_error)?;
 
+    // Remove only after the agent loop accepted the decision. A transport or
+    // submission failure leaves the request pending so another surface can
+    // retry. The durable guard persists this mutation atomically.
+    if let Ok(mut approvals) = state.pending_approvals.lock() {
+        approvals.remove(&req.request_id);
+    }
+
     Ok((StatusCode::ACCEPTED, Json(send_message_response(msg_id))))
 }
 
-/// Pull-based fallback for pending tool approvals (milestone B1): a mobile
+/// Authoritative pull surface for pending tool approvals: a mobile
 /// client that was not holding an open SSE/WS stream when
 /// `SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of
-/// missing the approval entirely. **Best-effort and lossy** — see
-/// `PendingApprovalEntry`'s doc comment: the backing cache lives only in
-/// gateway process memory, is not persisted, and is cleared on restart.
+/// missing the approval entirely. The registry is persisted across restarts
+/// and drained only after an approval decision is accepted.
 #[utoipa::path(
     get,
     path = "/api/chat/approvals",
@@ -211,6 +324,7 @@ pub(crate) async fn chat_approval_handler(
 pub(crate) async fn chat_approvals_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Json<PendingApprovalsResponse> {
+    crate::channels::web::server::reconcile_pending_approvals(&state).await;
     let entries = match state.pending_approvals.lock() {
         Ok(cache) => cache.values().cloned().collect(),
         Err(_) => Vec::new(),
@@ -1001,6 +1115,16 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
+    #[test]
+    fn accepted_client_message_ids_are_idempotent() {
+        let key = format!("test-principal:test-thread:{}", Uuid::new_v4());
+        let gateway_message_id = Uuid::new_v4();
+
+        assert_eq!(accepted_client_message(&key), None);
+        remember_client_message(key.clone(), gateway_message_id);
+        assert_eq!(accepted_client_message(&key), Some(gateway_message_id));
+    }
+
     fn test_gateway_state(
         session_manager: Arc<crate::agent::SessionManager>,
         store: Option<Arc<dyn crate::db::Database>>,
@@ -1044,9 +1168,9 @@ mod tests {
             channel_manager: None,
             hooks: None,
             device_registry: crate::channels::web::server::test_device_registry(),
-            pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            pending_approvals: std::sync::Arc::new(
+                crate::channels::web::server::PendingApprovalsStore::in_memory(),
+            ),
         })
     }
 
@@ -1159,7 +1283,7 @@ mod tests {
         // A DENY is never gated by the low-risk rule — it must pass the watch
         // check regardless of risk. It reaches submission; with no configured
         // agent loop that fails 503, but crucially NOT 403 (the watch gate did
-        // not block it) and the cache entry is dropped (decision submitted).
+        // not block it). The durable entry remains pending until accepted.
         let session_manager = Arc::new(crate::agent::SessionManager::new());
         let state = test_gateway_state(session_manager, None);
         let request_id = Uuid::new_v4().to_string();
@@ -1186,9 +1310,10 @@ mod tests {
                 "deny must not hit the watch gate"
             );
         }
-        // Decision path was entered: the cache entry was dropped.
+        // Submission did not reach the agent loop, so the durable entry stays
+        // pending for retry from this or another surface.
         assert!(
-            !state
+            state
                 .pending_approvals
                 .lock()
                 .unwrap()

@@ -18,12 +18,11 @@ public protocol APIProtocol: Sendable {
     /// - Remark: HTTP `POST /api/chat/approval`.
     /// - Remark: Generated from `#/paths//api/chat/approval/post(chat_approval_handler)`.
     func chatApprovalHandler(_ input: Operations.ChatApprovalHandler.Input) async throws -> Operations.ChatApprovalHandler.Output
-    /// Pull-based fallback for pending tool approvals (milestone B1): a mobile
+    /// Authoritative pull surface for pending tool approvals: a mobile
     /// client that was not holding an open SSE/WS stream when
     /// `SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of
-    /// missing the approval entirely. **Best-effort and lossy** — see
-    /// `PendingApprovalEntry`'s doc comment: the backing cache lives only in
-    /// gateway process memory, is not persisted, and is cleared on restart.
+    /// missing the approval entirely. The registry is persisted across restarts
+    /// and drained only after an approval decision is accepted.
     ///
     /// - Remark: HTTP `GET /api/chat/approvals`.
     /// - Remark: Generated from `#/paths//api/chat/approvals/get(chat_approvals_handler)`.
@@ -150,12 +149,11 @@ extension APIProtocol {
             body: body
         ))
     }
-    /// Pull-based fallback for pending tool approvals (milestone B1): a mobile
+    /// Authoritative pull surface for pending tool approvals: a mobile
     /// client that was not holding an open SSE/WS stream when
     /// `SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of
-    /// missing the approval entirely. **Best-effort and lossy** — see
-    /// `PendingApprovalEntry`'s doc comment: the backing cache lives only in
-    /// gateway process memory, is not persisted, and is cleared on restart.
+    /// missing the approval entirely. The registry is persisted across restarts
+    /// and drained only after an approval decision is accepted.
     ///
     /// - Remark: HTTP `GET /api/chat/approvals`.
     /// - Remark: Generated from `#/paths//api/chat/approvals/get(chat_approvals_handler)`.
@@ -1504,6 +1502,12 @@ public enum Components {
             public var pairingId: Swift.String
             /// - Remark: Generated from `#/components/schemas/PairStartResponse/qr_payload`.
             public var qrPayload: Components.Schemas.QrPairingPayload
+            /// Self-contained SVG rendering of `qr_uri` for the authenticated gateway
+            /// pairing panel. Optional so newer clients remain compatible with older
+            /// gateways and non-visual gateway hosts can omit it.
+            ///
+            /// - Remark: Generated from `#/components/schemas/PairStartResponse/qr_svg`.
+            public var qrSvg: Swift.String?
             /// Rendered `thinclaw://pair?d=<base64url(json)>` URI.
             ///
             /// - Remark: Generated from `#/components/schemas/PairStartResponse/qr_uri`.
@@ -1515,18 +1519,21 @@ public enum Components {
             ///   - humanCode: Short human-typable code (no-camera fallback), same lockout as the
             ///   - pairingId: Internal pairing-record id, used by the `require_confirm` admin
             ///   - qrPayload:
+            ///   - qrSvg: Self-contained SVG rendering of `qr_uri` for the authenticated gateway
             ///   - qrUri: Rendered `thinclaw://pair?d=<base64url(json)>` URI.
             public init(
                 expiresAt: Swift.Int64,
                 humanCode: Swift.String,
                 pairingId: Swift.String,
                 qrPayload: Components.Schemas.QrPairingPayload,
+                qrSvg: Swift.String? = nil,
                 qrUri: Swift.String
             ) {
                 self.expiresAt = expiresAt
                 self.humanCode = humanCode
                 self.pairingId = pairingId
                 self.qrPayload = qrPayload
+                self.qrSvg = qrSvg
                 self.qrUri = qrUri
             }
             public enum CodingKeys: String, CodingKey {
@@ -1534,6 +1541,7 @@ public enum Components {
                 case humanCode = "human_code"
                 case pairingId = "pairing_id"
                 case qrPayload = "qr_payload"
+                case qrSvg = "qr_svg"
                 case qrUri = "qr_uri"
             }
         }
@@ -1656,13 +1664,9 @@ public enum Components {
         ///
         /// Populated from the `StatusUpdate::ApprovalNeeded` -> `SseEvent::ApprovalNeeded`
         /// projection at broadcast time (see `src/channels/web/mod.rs::send_status`),
-        /// and removed once `chat_approval_handler` submits a decision for the
-        /// `request_id`. This cache is **best-effort**: it lives only in gateway
-        /// process memory, is not persisted, and is cleared on restart — a client
-        /// that misses the SSE broadcast *and* queries after a restart will not see
-        /// an approval that was already resolved or that predates the restart. It
-        /// exists to close the gap for a client that connects (or reconnects) after
-        /// the SSE event already fired, not to be an authoritative durable queue.
+        /// and removed once the underlying decision is accepted. The gateway persists
+        /// this registry so reconnecting mobile clients receive an authoritative
+        /// snapshot across process restarts.
         ///
         /// - Remark: Generated from `#/components/schemas/PendingApprovalEntry`.
         public struct PendingApprovalEntry: Codable, Hashable, Sendable {
@@ -2024,6 +2028,11 @@ public enum Components {
         public struct SendMessageRequest: Codable, Hashable, Sendable {
             /// - Remark: Generated from `#/components/schemas/SendMessageRequest/actor_id`.
             public var actorId: Swift.String?
+            /// Optional client-generated UUID used to make offline/retry sends
+            /// idempotent across ambiguous transport failures.
+            ///
+            /// - Remark: Generated from `#/components/schemas/SendMessageRequest/client_message_id`.
+            public var clientMessageId: Swift.String?
             /// - Remark: Generated from `#/components/schemas/SendMessageRequest/content`.
             public var content: Swift.String
             /// - Remark: Generated from `#/components/schemas/SendMessageRequest/thread_id`.
@@ -2034,22 +2043,26 @@ public enum Components {
             ///
             /// - Parameters:
             ///   - actorId:
+            ///   - clientMessageId: Optional client-generated UUID used to make offline/retry sends
             ///   - content:
             ///   - threadId:
             ///   - userId:
             public init(
                 actorId: Swift.String? = nil,
+                clientMessageId: Swift.String? = nil,
                 content: Swift.String,
                 threadId: Swift.String? = nil,
                 userId: Swift.String? = nil
             ) {
                 self.actorId = actorId
+                self.clientMessageId = clientMessageId
                 self.content = content
                 self.threadId = threadId
                 self.userId = userId
             }
             public enum CodingKeys: String, CodingKey {
                 case actorId = "actor_id"
+                case clientMessageId = "client_message_id"
                 case content
                 case threadId = "thread_id"
                 case userId = "user_id"
@@ -2775,12 +2788,11 @@ public enum Operations {
             }
         }
     }
-    /// Pull-based fallback for pending tool approvals (milestone B1): a mobile
+    /// Authoritative pull surface for pending tool approvals: a mobile
     /// client that was not holding an open SSE/WS stream when
     /// `SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of
-    /// missing the approval entirely. **Best-effort and lossy** — see
-    /// `PendingApprovalEntry`'s doc comment: the backing cache lives only in
-    /// gateway process memory, is not persisted, and is cleared on restart.
+    /// missing the approval entirely. The registry is persisted across restarts
+    /// and drained only after an approval decision is accepted.
     ///
     /// - Remark: HTTP `GET /api/chat/approvals`.
     /// - Remark: Generated from `#/paths//api/chat/approvals/get(chat_approvals_handler)`.

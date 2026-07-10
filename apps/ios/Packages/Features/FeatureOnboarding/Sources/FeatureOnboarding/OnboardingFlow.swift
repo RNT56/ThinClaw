@@ -85,14 +85,23 @@ public struct OnboardingFlow: View {
     }
 
     private var welcome: some View {
-        ContentUnavailableView {
-            Label("Pair with your ThinClaw", systemImage: "qrcode.viewfinder")
-        } description: {
-            Text(
-                "Run `thinclaw devices pair` or open the gateway settings, "
-                    + "then scan the QR code it shows.")
-        } actions: {
-            VStack(spacing: ThinClawSpacing.md) {
+        ScrollView {
+            VStack(spacing: ThinClawSpacing.lg) {
+                Image(systemName: "qrcode.viewfinder")
+                    .font(.system(size: 52, weight: .medium))
+                    .foregroundStyle(.tint)
+                    .accessibilityHidden(true)
+                VStack(spacing: ThinClawSpacing.sm) {
+                    Text("Connect to ThinClaw")
+                        .font(.largeTitle.bold())
+                        .accessibilityIdentifier("onboarding.title")
+                    Text(
+                        "Open pairing on your gateway, then scan its QR code or enter the pairing details."
+                    )
+                    .font(ThinClawTypography.body)
+                    .foregroundStyle(ThinClawColor.secondaryText)
+                    .multilineTextAlignment(.center)
+                }
                 if QRScannerSheet.isSupported {
                     Button {
                         store.startScanning()
@@ -101,7 +110,8 @@ public struct OnboardingFlow: View {
                         Label("Scan QR code", systemImage: "qrcode.viewfinder")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.glassProminent)
+                    .thinClawButtonStyle(prominent: true)
+                    .accessibilityIdentifier("onboarding.scan")
                 }
                 Button {
                     presentManualEntry()
@@ -109,13 +119,15 @@ public struct OnboardingFlow: View {
                     Label("Enter link or code", systemImage: "keyboard")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.glass)
+                .thinClawButtonStyle()
+                .accessibilityIdentifier("onboarding.manual")
 
                 DiscoverySection(discovery: discovery) { gateway in
                     presentManualEntry(prefill: gateway.suggestedBaseURL?.absoluteString ?? "")
                 }
             }
-            .frame(maxWidth: 320)
+            .frame(maxWidth: 420)
+            .padding(.vertical, ThinClawSpacing.xl)
         }
     }
 
@@ -128,14 +140,22 @@ public struct OnboardingFlow: View {
                 .font(.title3.bold())
             Text(
                 "Your gateway requires an operator to approve new devices. "
-                    + "Approve this device from the ThinClaw web UI or CLI, then "
-                    + "reopen the app."
+                    + "Approve this device from the ThinClaw web UI or CLI. "
+                    + "This screen checks again automatically."
             )
             .font(ThinClawTypography.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ThinClawColor.secondaryText)
             .multilineTextAlignment(.center)
-            Button("Start over") { store.reset() }
-                .buttonStyle(.glass)
+            HStack(spacing: ThinClawSpacing.md) {
+                Button("Start over") { store.reset() }
+                    .thinClawButtonStyle()
+                    .accessibilityIdentifier("pairing.start-over")
+                Button("I’ve approved") {
+                    Task { await store.retry() }
+                }
+                .thinClawButtonStyle(prominent: true)
+                .accessibilityIdentifier("pairing.retry-approved")
+            }
         }
     }
 
@@ -149,11 +169,13 @@ public struct OnboardingFlow: View {
                 .multilineTextAlignment(.center)
             HStack(spacing: ThinClawSpacing.md) {
                 Button("Start over") { store.reset() }
-                    .buttonStyle(.glass)
+                    .thinClawButtonStyle()
+                    .accessibilityIdentifier("pairing.start-over")
                 Button("Try again") {
                     Task { await store.retry() }
                 }
-                .buttonStyle(.glassProminent)
+                .thinClawButtonStyle(prominent: true)
+                .accessibilityIdentifier("pairing.retry")
             }
         }
     }
@@ -174,13 +196,13 @@ struct ConfirmGatewaySheet: View {
             VStack(alignment: .leading, spacing: ThinClawSpacing.xs) {
                 Text("Pair with")
                     .font(ThinClawTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ThinClawColor.secondaryText)
                 Text(name)
                     .font(.title2.bold())
                 if !instanceID.isEmpty {
                     Text(instanceID)
                         .font(ThinClawTypography.mono)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ThinClawColor.secondaryText)
                 }
             }
 
@@ -189,18 +211,20 @@ struct ConfirmGatewaySheet: View {
             VStack(alignment: .leading, spacing: ThinClawSpacing.xs) {
                 Text("This device's name")
                     .font(ThinClawTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ThinClawColor.secondaryText)
                 TextField("Device name", text: $deviceName)
                     .textFieldStyle(.roundedBorder)
                     .textInputAutocapitalization(.words)
+                    .accessibilityIdentifier("pairing.device-name")
             }
 
             HStack(spacing: ThinClawSpacing.md) {
                 Button("Cancel", action: onCancel)
-                    .buttonStyle(.glass)
+                    .thinClawButtonStyle()
                 Button("Pair") { Task { await onPair() } }
-                    .buttonStyle(.glassProminent)
+                    .thinClawButtonStyle(prominent: true)
                     .disabled(deviceName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .accessibilityIdentifier("pairing.confirm")
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -256,7 +280,7 @@ struct ManualEntrySheet: View {
                             Image(systemName: "bonjour")
                         }
                         .font(ThinClawTypography.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ThinClawColor.secondaryText)
                     }
                 }
                 Section("Paste pairing link") {
@@ -317,7 +341,7 @@ struct DiscoverySection: View {
                     Label("Discover on this network", systemImage: "bonjour")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.glass)
+                .thinClawButtonStyle()
             } else {
                 browsingBody
             }
@@ -329,7 +353,7 @@ struct DiscoverySection: View {
             ProgressView().controlSize(.small)
             Text("Looking for gateways…")
                 .font(ThinClawTypography.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(ThinClawColor.secondaryText)
             Spacer()
             Button("Stop") { discovery.stop() }
                 .font(ThinClawTypography.caption)
@@ -342,7 +366,7 @@ struct DiscoverySection: View {
                     + "gateway, or pair with the QR code above."
             )
             .font(ThinClawTypography.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ThinClawColor.secondaryText)
             .multilineTextAlignment(.center)
         } else {
             ForEach(discovery.gateways) { gateway in
@@ -351,13 +375,13 @@ struct DiscoverySection: View {
                 } label: {
                     DiscoveredGatewayRow(gateway: gateway)
                 }
-                .buttonStyle(.glass)
+                .thinClawButtonStyle()
             }
         }
 
         Text("Discovery just finds candidates — you still confirm with the QR code or short code.")
             .font(ThinClawTypography.caption)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(ThinClawColor.secondaryText)
             .multilineTextAlignment(.center)
     }
 }
@@ -377,7 +401,7 @@ private struct DiscoveredGatewayRow: View {
                     .foregroundStyle(.primary)
                 Text(subtitle)
                     .font(ThinClawTypography.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ThinClawColor.secondaryText)
             }
             Spacer()
             Image(systemName: "chevron.right")

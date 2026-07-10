@@ -182,7 +182,7 @@ impl GatewayChannel {
             channel_manager: None,
             hooks: None,
             device_registry: load_device_registry(),
-            pending_approvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            pending_approvals: Arc::new(server::PendingApprovalsStore::persisted_default()),
         });
 
         Self {
@@ -474,6 +474,10 @@ impl Channel for GatewayChannel {
         let (tx, rx) = mpsc::channel(256);
         *self.state.msg_tx.write().await = Some(tx);
 
+        // All runtime/store dependencies have been injected by this point.
+        // Reconcile before the first authoritative mobile snapshot is served.
+        server::reconcile_pending_approvals(&self.state).await;
+
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
             .parse()
             .map_err(|e| ChannelError::StartupFailed {
@@ -551,12 +555,11 @@ impl Channel for GatewayChannel {
             .map(String::from);
         let event = status_update_to_sse_event(status, thread_id);
 
-        // Feed the best-effort pending-approvals cache (milestone B1,
-        // `GET /api/chat/approvals`) at the same point the SSE event is
+        // Feed the durable pending-approvals registry used by
+        // `GET /api/chat/approvals` at the same point the SSE event is
         // produced, so a client that queries the pull endpoint instead of
-        // holding an open stream still sees the approval. See
-        // `PendingApprovalEntry`'s doc comment for the lossiness caveat —
-        // entries are removed by `chat_approval_handler`, not here.
+        // holding an open stream still sees the approval. Entries are removed
+        // only after resolution or a terminal thread event.
         if let SseEvent::ApprovalNeeded {
             ref request_id,
             ref tool_name,
@@ -566,7 +569,7 @@ impl Channel for GatewayChannel {
             ref thread_id,
         } = event
         {
-            let entry = thinclaw_gateway::web::types::PendingApprovalEntry {
+            let mut entry = thinclaw_gateway::web::types::PendingApprovalEntry {
                 request_id: request_id.clone(),
                 tool_name: tool_name.clone(),
                 description: description.clone(),
@@ -578,24 +581,25 @@ impl Channel for GatewayChannel {
                 thread_id: thread_id.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
-            if let Ok(mut cache) = self.state.pending_approvals.lock() {
-                // Bound the best-effort cache: approvals resolved on other
-                // surfaces (TUI/desktop) or that time out are never drained
-                // here, so cap total entries and evict the oldest by
-                // `created_at` (rfc3339 sorts chronologically) to keep this
-                // from growing unboundedly for the lifetime of the process.
-                const MAX_PENDING_APPROVALS: usize = 256;
-                if cache.len() >= MAX_PENDING_APPROVALS
-                    && !cache.contains_key(&entry.request_id)
-                    && let Some(oldest_id) = cache
-                        .values()
-                        .min_by(|a, b| a.created_at.cmp(&b.created_at))
-                        .map(|e| e.request_id.clone())
-                {
-                    cache.remove(&oldest_id);
+            if let Ok(mut registry) = self.state.pending_approvals.lock() {
+                // Re-broadcasts of the same request must not make it appear
+                // newer in the authoritative oldest-first snapshot.
+                if let Some(existing) = registry.get(request_id) {
+                    entry.created_at.clone_from(&existing.created_at);
                 }
-                cache.insert(entry.request_id.clone(), entry);
+                registry.insert(entry.request_id.clone(), entry);
             }
+        }
+
+        match &event {
+            SseEvent::Error {
+                thread_id: Some(thread_id),
+                ..
+            }
+            | SseEvent::ConversationDeleted { thread_id, .. } => {
+                self.state.pending_approvals.remove_for_thread(thread_id);
+            }
+            _ => {}
         }
 
         self.state.sse.broadcast(event);
@@ -607,9 +611,16 @@ impl Channel for GatewayChannel {
         _user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let thread_id = response.thread_id.unwrap_or_default();
+        if !thread_id.is_empty() {
+            // A terminal response means the agent is no longer blocked on an
+            // approval in this thread, including decisions made in the TUI or
+            // desktop rather than through the mobile HTTP/WS endpoints.
+            self.state.pending_approvals.remove_for_thread(&thread_id);
+        }
         self.state.sse.broadcast(SseEvent::Response {
             content: response.content,
-            thread_id: response.thread_id.unwrap_or_default(),
+            thread_id,
             attachments: response
                 .attachments
                 .iter()
