@@ -285,8 +285,12 @@ async fn render_panel(
 ) -> Result<Html<String>, StatusCode> {
     let panel = store.get(&panel_id).await.ok_or(StatusCode::NOT_FOUND)?;
 
-    let components_json =
-        serde_json::to_string(&panel.components).unwrap_or_else(|_| "[]".to_string());
+    // Escape for inline <script> embedding: panel content can carry untrusted
+    // data the agent fetched, and a raw `</script>` in a component string would
+    // otherwise break out of the script block.
+    let components_json = escape_json_for_script(
+        &serde_json::to_string(&panel.components).unwrap_or_else(|_| "[]".to_string()),
+    );
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -436,9 +440,41 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+/// Escape an already-serialized JSON string for safe embedding inside an inline
+/// `<script>` element. `<`, `>`, and `&` become their `\uXXXX` forms (so a
+/// `</script>`, `<!--`, or `]]>` in the data cannot break out of the block), and
+/// the U+2028/U+2029 line separators are escaped (they are legal in JSON but
+/// terminate JavaScript string literals). The result remains valid JSON/JS.
+fn escape_json_for_script(json: &str) -> String {
+    json.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_json_for_script_neutralizes_script_breakout() {
+        // A component string containing `</script>` must not be able to close
+        // the inline script block.
+        let json = serde_json::to_string(&serde_json::json!([
+            {"text": "</script><img src=x onerror=alert(1)>"}
+        ]))
+        .unwrap();
+        let escaped = escape_json_for_script(&json);
+        assert!(
+            !escaped.contains("</script>"),
+            "raw </script> survived: {escaped}"
+        );
+        assert!(!escaped.contains('<'), "unescaped '<' survived: {escaped}");
+        // Round-trips back to the original once a JS/JSON parser decodes it.
+        let decoded: serde_json::Value = serde_json::from_str(&escaped).unwrap();
+        assert_eq!(decoded[0]["text"], "</script><img src=x onerror=alert(1)>");
+    }
 
     #[tokio::test]
     async fn test_store_upsert_and_get() {

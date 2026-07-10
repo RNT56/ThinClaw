@@ -25,6 +25,12 @@ pub struct HealthMonitorConfig {
     pub restart_cooldown: Duration,
     /// Whether to automatically restart failed channels.
     pub auto_restart: bool,
+    /// Consecutive healthy checks after which a channel's restart budget is
+    /// replenished (default: 5). Requiring a sustained recovery — rather than a
+    /// single healthy check — stops a flapping channel from restarting forever
+    /// while still letting a genuinely-recovered channel regain its budget
+    /// across separate outages over a long-running deployment.
+    pub restart_budget_reset_after: u32,
 }
 
 impl Default for HealthMonitorConfig {
@@ -34,6 +40,7 @@ impl Default for HealthMonitorConfig {
             max_restart_attempts: 3,
             restart_cooldown: Duration::from_secs(30),
             auto_restart: true,
+            restart_budget_reset_after: 5,
         }
     }
 }
@@ -45,8 +52,27 @@ struct ChannelState {
     consecutive_failures: u32,
     /// Number of restart attempts so far.
     restart_attempts: u32,
+    /// Consecutive healthy checks since the last failure — used to replenish
+    /// the restart budget after a sustained recovery.
+    healthy_streak: u32,
     /// Next instant when the channel is eligible for health checks again.
     cooldown_until: Option<std::time::Instant>,
+}
+
+impl ChannelState {
+    /// Record a healthy check. Clears the failure count, extends the healthy
+    /// streak, and — after `reset_after` consecutive healthy checks — replenishes
+    /// the restart budget. Returns `true` when the budget was replenished.
+    fn record_healthy(&mut self, reset_after: u32) -> bool {
+        self.consecutive_failures = 0;
+        self.healthy_streak = self.healthy_streak.saturating_add(1);
+        if self.restart_attempts > 0 && self.healthy_streak >= reset_after {
+            self.restart_attempts = 0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Monitors channel health and restarts failed channels.
@@ -130,11 +156,20 @@ impl ChannelHealthMonitor {
                                         "Channel recovered"
                                     );
                                 }
-                                state.consecutive_failures = 0;
-                                // Don't reset restart_attempts — keep the history
+                                // Replenish the restart budget only after a
+                                // sustained recovery, so the channel can survive
+                                // future outages over a long-running deployment
+                                // without a flapping channel restarting forever.
+                                if state.record_healthy(config.restart_budget_reset_after) {
+                                    tracing::info!(
+                                        channel = %name,
+                                        "Channel stable; replenishing restart budget"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 state.consecutive_failures += 1;
+                                state.healthy_streak = 0;
                                 let consecutive_failures = state.consecutive_failures;
                                 let restart_attempts = state.restart_attempts;
                                 tracing::warn!(
@@ -305,6 +340,47 @@ mod tests {
         assert_eq!(state.consecutive_failures, 0);
         assert_eq!(state.restart_attempts, 0);
         assert!(state.cooldown_until.is_none());
+    }
+
+    #[test]
+    fn restart_budget_replenishes_only_after_sustained_recovery() {
+        let mut state = ChannelState {
+            restart_attempts: 3,
+            consecutive_failures: 2,
+            ..Default::default()
+        };
+
+        // A single healthy check clears failures but does not restore the budget.
+        assert!(!state.record_healthy(3));
+        assert_eq!(state.consecutive_failures, 0);
+        assert_eq!(state.restart_attempts, 3);
+
+        // Still short of the threshold.
+        assert!(!state.record_healthy(3));
+        assert_eq!(state.restart_attempts, 3);
+
+        // The third consecutive healthy check replenishes the budget.
+        assert!(state.record_healthy(3));
+        assert_eq!(state.restart_attempts, 0);
+    }
+
+    #[test]
+    fn a_failure_resets_the_healthy_streak_so_flapping_never_replenishes() {
+        let mut state = ChannelState {
+            restart_attempts: 3,
+            ..Default::default()
+        };
+        // Two healthy checks, then a failure, must not accumulate toward the
+        // threshold — a flapping channel keeps its exhausted budget.
+        assert!(!state.record_healthy(3));
+        assert!(!state.record_healthy(3));
+        state.healthy_streak = 0; // simulate the failure branch resetting it
+        assert!(!state.record_healthy(3));
+        assert!(!state.record_healthy(3));
+        assert_eq!(state.restart_attempts, 3, "budget must remain exhausted");
+        // Only a full uninterrupted streak restores it.
+        assert!(state.record_healthy(3));
+        assert_eq!(state.restart_attempts, 0);
     }
 
     #[tokio::test]
