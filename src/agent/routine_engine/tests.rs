@@ -10,9 +10,10 @@ use rust_decimal::Decimal;
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
+#[cfg(feature = "libsql")]
+use crate::agent::routine::RoutineTriggerStatus;
 use crate::agent::routine::{
-    NotifyConfig, RoutineEventDecision, RoutineEventStatus, RoutineTriggerStatus, RunStatus,
-    content_hash,
+    NotifyConfig, RoutineEventDecision, RoutineEventStatus, RunStatus, content_hash,
 };
 #[cfg(feature = "libsql")]
 use crate::error::LlmError;
