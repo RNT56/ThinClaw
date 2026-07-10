@@ -247,6 +247,17 @@ fn provider_channel_inbound_hardening_is_declared() {
         Some("twilio_request_signature")
     );
 
+    // Slack declares native v0 request-signature verification, so its
+    // `production` status reflects real inbound auth (host-side HMAC + replay
+    // window), not a shared-secret compare.
+    let slack = load_caps(root, "slack");
+    assert_eq!(
+        slack
+            .pointer("/capabilities/channel/webhook/secret_validation")
+            .and_then(Value::as_str),
+        Some("slack_v0_signature")
+    );
+
     for name in ["wecom", "weixin", "feishu_lark"] {
         let caps = load_caps(root, name);
         assert!(

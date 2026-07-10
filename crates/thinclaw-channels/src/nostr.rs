@@ -6,6 +6,7 @@
 //! protocol preferences.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -25,6 +26,10 @@ pub struct NostrChannel {
     config: NostrConfig,
     runtime: Arc<NostrRuntime>,
     notification_task: Mutex<Option<JoinHandle<()>>>,
+    /// True while the notification handler task is running. The SDK loop can end
+    /// on a broadcast lag; without this, the channel would go silently deaf
+    /// while `health_check` still reported healthy (relays stay "connected").
+    handler_alive: Arc<AtomicBool>,
 }
 
 const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -43,6 +48,7 @@ impl NostrChannel {
             config,
             runtime,
             notification_task: Mutex::new(None),
+            handler_alive: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -85,6 +91,9 @@ impl Channel for NostrChannel {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         let runtime = Arc::clone(&self.runtime);
         let owner_pubkey = runtime.owner_pubkey_hex();
+
+        self.handler_alive.store(true, Ordering::Relaxed);
+        let handler_alive = Arc::clone(&self.handler_alive);
 
         let handle = tokio::spawn(async move {
             let result = runtime
@@ -156,8 +165,19 @@ impl Channel for NostrChannel {
                 })
                 .await;
 
-            if let Err(err) = result {
-                tracing::error!(error = %err, "Nostr notification handler exited");
+            // The handler ended — on error, on a broadcast lag, or on a clean
+            // stop. Mark the channel unhealthy so the health monitor restarts it
+            // instead of leaving it silently deaf.
+            handler_alive.store(false, Ordering::Relaxed);
+            match result {
+                Err(err) => {
+                    tracing::error!(error = %err, "Nostr notification handler exited with error")
+                }
+                Ok(()) => {
+                    tracing::warn!(
+                        "Nostr notification handler stopped; channel will report unhealthy"
+                    )
+                }
             }
         });
         *self.notification_task.lock().await = Some(handle);
@@ -233,6 +253,13 @@ impl Channel for NostrChannel {
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
+        // A dead notification handler means we receive nothing even if relays
+        // are still "connected", so check handler liveness first.
+        if !self.handler_alive.load(Ordering::Relaxed) {
+            return Err(ChannelError::NotConnected(
+                "Nostr notification handler is not running".to_string(),
+            ));
+        }
         if self.runtime.connected_relay_count().await == 0 {
             return Err(ChannelError::NotConnected(
                 "No Nostr relays connected".to_string(),

@@ -14,6 +14,25 @@ use wasmtime::{Config, Engine, OptLevel};
 use crate::wasm::error::WasmChannelError;
 use crate::wasm::limits::{FuelConfig, ResourceLimits};
 
+/// How often the background thread advances the engine epoch. The epoch trap is
+/// a backup timeout for guests that ignore fuel (or run with fuel disabled).
+pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Epoch ticks granted beyond the callback timeout. The outer async timeout is
+/// the primary deadline; the epoch trap fires a little later, only to stop a
+/// guest still spinning on a blocking thread after its result was abandoned.
+const EPOCH_DEADLINE_MARGIN_TICKS: u64 = 8;
+
+/// Epoch-tick budget for a callback whose wall-clock timeout is `timeout`.
+/// Always at least one tick so a zero/absurd timeout can never disable the trap.
+pub(crate) fn epoch_deadline_ticks(timeout: Duration) -> u64 {
+    let tick_ms = EPOCH_TICK_INTERVAL.as_millis().max(1) as u64;
+    let timeout_ms = timeout.as_millis() as u64;
+    (timeout_ms / tick_ms)
+        .saturating_add(EPOCH_DEADLINE_MARGIN_TICKS)
+        .max(1)
+}
+
 /// Configuration for the WASM channel runtime.
 #[derive(Debug, Clone)]
 pub struct WasmChannelRuntimeConfig {
@@ -157,6 +176,24 @@ impl WasmChannelRuntime {
             WasmChannelError::Config(format!("Failed to create Wasmtime engine: {}", e))
         })?;
 
+        // Advance the engine epoch on a background thread. Without this,
+        // `epoch_deadline_trap()` never fires, so the epoch timeout is inert and
+        // a guest that ignores fuel (or runs with fuel disabled) can spin
+        // forever on a blocking thread. The runtime is a process-lifetime
+        // singleton, so one ticker thread is created for the whole process.
+        let ticker_engine = engine.clone();
+        std::thread::Builder::new()
+            .name("wasm-channel-epoch-ticker".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(EPOCH_TICK_INTERVAL);
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .map_err(|e| {
+                WasmChannelError::Config(format!("Failed to spawn epoch ticker thread: {}", e))
+            })?;
+
         Ok(Self {
             engine,
             config,
@@ -264,7 +301,21 @@ impl std::fmt::Debug for WasmChannelRuntime {
 
 #[cfg(test)]
 mod tests {
-    use crate::wasm::runtime::{WasmChannelRuntime, WasmChannelRuntimeConfig};
+    use crate::wasm::runtime::{
+        WasmChannelRuntime, WasmChannelRuntimeConfig, epoch_deadline_ticks,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn epoch_deadline_scales_with_timeout_and_never_zero() {
+        // 30s / 500ms = 60 ticks, plus the 8-tick margin.
+        assert_eq!(epoch_deadline_ticks(Duration::from_secs(30)), 68);
+        // A zero/absurd timeout must still leave the trap armed (>= 1 tick).
+        assert!(epoch_deadline_ticks(Duration::ZERO) >= 1);
+        // The deadline exceeds the timeout so the outer async timeout fires first.
+        let ticks = epoch_deadline_ticks(Duration::from_secs(5));
+        assert!(ticks * 500 > 5_000, "deadline must exceed the timeout");
+    }
 
     #[test]
     fn test_runtime_config_default() {

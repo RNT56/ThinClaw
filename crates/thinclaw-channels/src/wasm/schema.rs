@@ -550,6 +550,9 @@ pub enum WebhookSecretValidation {
     TwitchEventsubHmacSha256,
     /// Validate Twilio signatures over callback URL plus sorted form fields.
     TwilioRequestSignature,
+    /// Validate Slack signatures: `v0=<hex>` HMAC-SHA256 over
+    /// `v0:{X-Slack-Request-Timestamp}:{body}`, with a 5-minute replay window.
+    SlackV0Signature,
     /// Validate Discord interaction signatures: an Ed25519 signature over
     /// `X-Signature-Timestamp` concatenated with the raw request body, verified
     /// against the application's hex-encoded public key (`discord_public_key`).

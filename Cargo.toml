@@ -90,8 +90,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures = { workspace = true }
 async-stream = "0.3"
 
-# HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
+# HTTP client. `http2` is required so the native APNs client can negotiate h2
+# via ALPN — Apple's push endpoint only accepts HTTP/2.
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream", "http2"] }
 
 # Serialization
 serde = { workspace = true }

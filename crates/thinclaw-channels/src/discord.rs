@@ -51,6 +51,15 @@ const API_BASE: &str = "https://discord.com/api/v10";
 
 const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Upper bound on the exponential reconnect backoff.
+const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Fallback heartbeat interval (ms) if the Gateway sends an out-of-range value.
+const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 45_000;
+
+/// Times a rate-limited (429) Discord REST call is retried before giving up.
+const MAX_REST_RETRIES: u32 = 3;
+
 /// Gateway intents: GUILDS (1) + GUILD_MESSAGES (512) + MESSAGE_CONTENT (32768) + DIRECT_MESSAGES (4096)
 const GATEWAY_INTENTS: u64 = 1 | 512 | 4096 | 32768;
 
@@ -205,16 +214,13 @@ impl DiscordChannel {
         let chunks = split_message(text);
 
         for chunk in chunks {
-            let resp = client
-                .post(format!("{API_BASE}/channels/{channel_id}/messages"))
-                .header("Authorization", format!("Bot {bot_token}"))
-                .json(&serde_json::json!({ "content": chunk }))
-                .send()
-                .await
-                .map_err(|e| ChannelError::SendFailed {
-                    name: NAME.to_string(),
-                    reason: format!("POST message: {e}"),
-                })?;
+            let resp = send_rest(|| {
+                client
+                    .post(format!("{API_BASE}/channels/{channel_id}/messages"))
+                    .header("Authorization", format!("Bot {bot_token}"))
+                    .json(&serde_json::json!({ "content": chunk.as_str() }))
+            })
+            .await?;
 
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
@@ -286,16 +292,13 @@ impl DiscordChannel {
         channel_id: &str,
         text: &str,
     ) -> Result<String, ChannelError> {
-        let resp = client
-            .post(format!("{API_BASE}/channels/{channel_id}/messages"))
-            .header("Authorization", format!("Bot {bot_token}"))
-            .json(&serde_json::json!({ "content": text }))
-            .send()
-            .await
-            .map_err(|e| ChannelError::SendFailed {
-                name: NAME.to_string(),
-                reason: format!("POST message: {e}"),
-            })?;
+        let resp = send_rest(|| {
+            client
+                .post(format!("{API_BASE}/channels/{channel_id}/messages"))
+                .header("Authorization", format!("Bot {bot_token}"))
+                .json(&serde_json::json!({ "content": text }))
+        })
+        .await?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -321,18 +324,15 @@ impl DiscordChannel {
         message_id: &str,
         text: &str,
     ) -> Result<(), ChannelError> {
-        let resp = client
-            .patch(format!(
-                "{API_BASE}/channels/{channel_id}/messages/{message_id}"
-            ))
-            .header("Authorization", format!("Bot {bot_token}"))
-            .json(&serde_json::json!({ "content": text }))
-            .send()
-            .await
-            .map_err(|e| ChannelError::SendFailed {
-                name: NAME.to_string(),
-                reason: format!("PATCH message: {e}"),
-            })?;
+        let resp = send_rest(|| {
+            client
+                .patch(format!(
+                    "{API_BASE}/channels/{channel_id}/messages/{message_id}"
+                ))
+                .header("Authorization", format!("Bot {bot_token}"))
+                .json(&serde_json::json!({ "content": text }))
+        })
+        .await?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -397,11 +397,12 @@ impl Channel for DiscordChannel {
             fields: vec![
                 ConfigField {
                     id: "allow_from".to_string(),
-                    label: "Allowed user IDs".to_string(),
+                    label: "Allowed channel IDs".to_string(),
                     field_type: "textarea".to_string(),
                     required: false,
                     help_text: Some(
-                        "One Discord user ID per line. Empty allows all users.".to_string(),
+                        "One Discord channel ID per line. Empty allows every channel and DM."
+                            .to_string(),
                     ),
                     default_value: None,
                     options: None,
@@ -471,27 +472,44 @@ impl Channel for DiscordChannel {
         // Spawn Gateway connection
         let handle = tokio::spawn(async move {
             let sequence = Arc::new(AtomicU64::new(0));
+            // Resume state captured from READY; lets a reconnect replay missed
+            // events instead of re-Identifying (which burns the daily quota).
+            let mut session_id: Option<String> = None;
+            let mut resume_gateway_url: Option<String> = None;
+            let mut reconnect_backoff = Duration::from_secs(1);
 
             'gateway: loop {
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
 
-                // Get Gateway URL
-                let ws_url = match Self::get_gateway_url(&client, &bot_token).await {
-                    Ok(url) => url,
-                    Err(e) => {
-                        tracing::error!("Discord: failed to get gateway URL: {e}");
-                        if sleep_or_channel_shutdown(
-                            &shutdown,
-                            &shutdown_notify,
-                            Duration::from_secs(10),
-                        )
-                        .await
-                        {
-                            break;
+                // Resume only when we hold a full session and have seen events.
+                let resuming = session_id.is_some()
+                    && resume_gateway_url.is_some()
+                    && sequence.load(Ordering::Relaxed) > 0;
+
+                // Resume uses the session's dedicated gateway URL; a fresh
+                // connect discovers one via GET /gateway/bot.
+                let ws_url = if resuming {
+                    format!(
+                        "{}?v=10&encoding=json",
+                        resume_gateway_url
+                            .as_deref()
+                            .unwrap_or_default()
+                            .trim_end_matches('/')
+                    )
+                } else {
+                    match Self::get_gateway_url(&client, &bot_token).await {
+                        Ok(url) => url,
+                        Err(e) => {
+                            tracing::error!("Discord: failed to get gateway URL: {e}");
+                            if sleep_backoff(&shutdown, &shutdown_notify, &mut reconnect_backoff)
+                                .await
+                            {
+                                break;
+                            }
+                            continue;
                         }
-                        continue;
                     }
                 };
 
@@ -500,12 +518,12 @@ impl Channel for DiscordChannel {
                     Ok((stream, _)) => stream,
                     Err(e) => {
                         tracing::error!("Discord: WebSocket connect failed: {e}");
-                        if sleep_or_channel_shutdown(
-                            &shutdown,
-                            &shutdown_notify,
-                            Duration::from_secs(10),
-                        )
-                        .await
+                        // A bad resume URL must not trap us; force rediscovery.
+                        if resuming {
+                            session_id = None;
+                            resume_gateway_url = None;
+                        }
+                        if sleep_backoff(&shutdown, &shutdown_notify, &mut reconnect_backoff).await
                         {
                             break;
                         }
@@ -513,7 +531,7 @@ impl Channel for DiscordChannel {
                     }
                 };
 
-                tracing::info!("Discord Gateway connected");
+                tracing::info!(resuming, "Discord Gateway connected");
                 let (mut ws_write, mut ws_read) = ws_stream.split();
 
                 // Wait for Hello (op 10)
@@ -543,18 +561,13 @@ impl Channel for DiscordChannel {
                             payload.d.unwrap_or_default(),
                         )
                         .unwrap_or(HelloData {
-                            heartbeat_interval: 45000,
+                            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL_MS,
                         });
-                        hello.heartbeat_interval
+                        sanitize_heartbeat_interval(hello.heartbeat_interval)
                     }
                     _ => {
                         tracing::error!("Discord: no Hello received");
-                        if sleep_or_channel_shutdown(
-                            &shutdown,
-                            &shutdown_notify,
-                            Duration::from_secs(5),
-                        )
-                        .await
+                        if sleep_backoff(&shutdown, &shutdown_notify, &mut reconnect_backoff).await
                         {
                             break;
                         }
@@ -562,16 +575,38 @@ impl Channel for DiscordChannel {
                     }
                 };
 
-                // Send Identify
-                let identify = Self::identify_payload(&bot_token);
+                // Send Resume (op 6) to replay the existing session, or Identify
+                // (op 2) to start a fresh one.
+                let handshake = if resuming {
+                    serde_json::json!({
+                        "op": 6,
+                        "d": {
+                            "token": bot_token,
+                            "session_id": session_id,
+                            "seq": sequence.load(Ordering::Relaxed),
+                        }
+                    })
+                } else {
+                    Self::identify_payload(&bot_token)
+                };
                 if ws_write
-                    .send(WsMessage::Text(identify.to_string().into()))
+                    .send(WsMessage::Text(handshake.to_string().into()))
                     .await
                     .is_err()
                 {
-                    tracing::error!("Discord: failed to send Identify");
+                    tracing::error!("Discord: failed to send handshake");
+                    if sleep_backoff(&shutdown, &shutdown_notify, &mut reconnect_backoff).await {
+                        break;
+                    }
                     continue;
                 }
+
+                // Handshake sent successfully — the connection is healthy, so
+                // reset the reconnect backoff for the next disconnect.
+                reconnect_backoff = Duration::from_secs(1);
+                // Tracks whether the last heartbeat we sent has been ACKed; a
+                // missed ACK means the socket is a zombie and must be replaced.
+                let mut awaiting_heartbeat_ack = false;
 
                 let mut heartbeat_tick =
                     tokio::time::interval(Duration::from_millis(heartbeat_interval));
@@ -585,6 +620,16 @@ impl Channel for DiscordChannel {
                     let msg = tokio::select! {
                         msg = ws_read.next() => msg,
                         _ = heartbeat_tick.tick() => {
+                            // Discord ACKs every heartbeat (op 11). If the prior
+                            // beat was never ACKed, the connection is a zombie
+                            // (half-open TCP) — tear it down and reconnect
+                            // instead of writing into a dead socket.
+                            if awaiting_heartbeat_ack {
+                                tracing::warn!(
+                                    "Discord: heartbeat not ACKed; connection is a zombie, reconnecting"
+                                );
+                                break;
+                            }
                             let seq = sequence.load(Ordering::Relaxed);
                             let hb = if seq == 0 {
                                 r#"{"op":1,"d":null}"#.to_string()
@@ -595,6 +640,7 @@ impl Channel for DiscordChannel {
                                 tracing::warn!("Discord: failed to send heartbeat");
                                 break;
                             }
+                            awaiting_heartbeat_ack = true;
                             continue;
                         }
                         _ = shutdown_notify.notified() => {
@@ -607,8 +653,27 @@ impl Channel for DiscordChannel {
 
                     let text = match msg {
                         Some(Ok(WsMessage::Text(t))) => t,
-                        Some(Ok(WsMessage::Close(_))) | None => {
-                            tracing::warn!("Discord: Gateway closed, reconnecting...");
+                        Some(Ok(WsMessage::Close(frame))) => {
+                            let code = frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(0);
+                            let reason = frame
+                                .as_ref()
+                                .map(|f| f.reason.to_string())
+                                .unwrap_or_default();
+                            if is_fatal_close_code(code) {
+                                tracing::error!(
+                                    code,
+                                    reason = %reason,
+                                    "Discord: Gateway closed with a non-recoverable code; not reconnecting (check bot token/intents)"
+                                );
+                                break 'gateway;
+                            }
+                            tracing::warn!(code, reason = %reason, "Discord: Gateway closed, reconnecting...");
+                            // A close often invalidates the session; a fresh
+                            // Identify is safest unless Discord told us to resume.
+                            break;
+                        }
+                        None => {
+                            tracing::warn!("Discord: Gateway stream ended, reconnecting...");
                             break;
                         }
                         Some(Ok(_)) => continue,
@@ -631,12 +696,30 @@ impl Channel for DiscordChannel {
                     match payload.op {
                         // Dispatch (events)
                         0 => {
-                            let event_name = match &payload.t {
-                                Some(t) => t.as_str(),
+                            let event_name = match payload.t.as_deref() {
+                                Some(t) => t.to_string(),
                                 None => continue,
                             };
 
+                            // Capture resume state from READY so a later
+                            // reconnect can op-6 Resume instead of re-Identify.
+                            if event_name == "READY" {
+                                if let Some(d) = payload.d.as_ref() {
+                                    session_id = d
+                                        .get("session_id")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                    resume_gateway_url = d
+                                        .get("resume_gateway_url")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                }
+                                continue;
+                            }
+
                             if event_name != "MESSAGE_CREATE" {
+                                // RESUMED and other dispatches are handled by
+                                // advancing the sequence counter above.
                                 continue;
                             }
 
@@ -711,8 +794,10 @@ impl Channel for DiscordChannel {
                                 return;
                             }
                         }
-                        // Heartbeat ACK
-                        11 => {}
+                        // Heartbeat ACK — the connection is alive.
+                        11 => {
+                            awaiting_heartbeat_ack = false;
+                        }
                         // Heartbeat request
                         1 => {
                             let seq = sequence.load(Ordering::Relaxed);
@@ -723,22 +808,27 @@ impl Channel for DiscordChannel {
                             };
                             let _ = ws_write.send(WsMessage::Text(hb.into())).await;
                         }
-                        // Reconnect
+                        // Reconnect — Discord asks us to reconnect and resume.
                         7 => {
                             tracing::info!("Discord: received reconnect request");
                             break;
                         }
-                        // Invalid session
+                        // Invalid session — `d: true` means resumable.
                         9 => {
-                            tracing::warn!("Discord: invalid session, re-identifying");
-                            let shutting_down = sleep_or_channel_shutdown(
-                                &shutdown,
-                                &shutdown_notify,
-                                Duration::from_secs(5),
-                            )
-                            .await;
-                            if shutting_down {
-                                break;
+                            let resumable = payload
+                                .d
+                                .as_ref()
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if !resumable {
+                                tracing::warn!(
+                                    "Discord: session invalidated, re-identifying fresh"
+                                );
+                                session_id = None;
+                                resume_gateway_url = None;
+                                sequence.store(0, Ordering::Relaxed);
+                            } else {
+                                tracing::info!("Discord: session invalid but resumable");
                             }
                             break;
                         }
@@ -746,17 +836,10 @@ impl Channel for DiscordChannel {
                     }
                 }
 
-                if !shutdown.load(Ordering::Relaxed) {
-                    tracing::info!("Discord: reconnecting in 5s...");
-                    if sleep_or_channel_shutdown(
-                        &shutdown,
-                        &shutdown_notify,
-                        Duration::from_secs(5),
-                    )
-                    .await
-                    {
-                        break;
-                    }
+                if !shutdown.load(Ordering::Relaxed)
+                    && sleep_backoff(&shutdown, &shutdown_notify, &mut reconnect_backoff).await
+                {
+                    break;
                 }
             }
         });
@@ -905,6 +988,18 @@ async fn sleep_or_channel_shutdown(
     }
 }
 
+/// Wait for the current reconnect backoff (shutdown-aware), then grow it toward
+/// [`MAX_RECONNECT_BACKOFF`]. Returns true if shutdown was signalled while waiting.
+async fn sleep_backoff(
+    shutdown: &Arc<AtomicBool>,
+    shutdown_notify: &Arc<Notify>,
+    backoff: &mut Duration,
+) -> bool {
+    let wait = *backoff;
+    *backoff = (*backoff * 2).min(MAX_RECONNECT_BACKOFF);
+    sleep_or_channel_shutdown(shutdown, shutdown_notify, wait).await
+}
+
 async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
     tokio::select! {
         result = &mut handle => {
@@ -984,6 +1079,77 @@ async fn download_discord_attachments(
     result
 }
 
+/// Clamp a Gateway-supplied `heartbeat_interval` into a sane range. A hostile
+/// or buggy Hello frame carrying `0` would otherwise panic `tokio::time::interval`.
+fn sanitize_heartbeat_interval(raw: u64) -> u64 {
+    if (1_000..=600_000).contains(&raw) {
+        raw
+    } else {
+        tracing::warn!(
+            raw,
+            "Discord: out-of-range heartbeat_interval, using default"
+        );
+        DEFAULT_HEARTBEAT_INTERVAL_MS
+    }
+}
+
+/// Discord Gateway close codes that will never succeed on retry — reconnecting
+/// on these just spins. See the Discord Gateway close-code table.
+fn is_fatal_close_code(code: u16) -> bool {
+    matches!(
+        code,
+        // authentication failed, invalid shard, sharding required,
+        // invalid API version, invalid intents, disallowed intents
+        4004 | 4010 | 4011 | 4012 | 4013 | 4014
+    )
+}
+
+/// Execute a Discord REST request, honoring 429 rate limits with bounded
+/// retries. `build` is invoked fresh per attempt so non-cloneable bodies work.
+async fn send_rest<F>(build: F) -> Result<reqwest::Response, ChannelError>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let mut attempt = 0u32;
+    loop {
+        let resp = build().send().await.map_err(|e| ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: format!("request: {e}"),
+        })?;
+
+        if resp.status().as_u16() == 429 && attempt < MAX_REST_RETRIES {
+            attempt += 1;
+            let retry_after = retry_after_secs(resp).await.clamp(0.0, 60.0);
+            tracing::warn!(
+                attempt,
+                retry_after_secs = retry_after,
+                "Discord: rate limited (429), backing off"
+            );
+            tokio::time::sleep(Duration::from_secs_f64(retry_after)).await;
+            continue;
+        }
+        return Ok(resp);
+    }
+}
+
+/// Extract the retry delay (seconds) from a Discord 429 response, preferring the
+/// `Retry-After` header and falling back to the JSON `retry_after` body.
+async fn retry_after_secs(resp: reqwest::Response) -> f64 {
+    if let Some(secs) = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        return secs;
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|b| b.get("retry_after").and_then(|v| v.as_f64()))
+        .unwrap_or(1.0)
+}
+
 /// Split a long message into chunks for Discord's 2000-char limit.
 fn split_message(text: &str) -> Vec<String> {
     if text.len() <= MAX_MESSAGE_LENGTH {
@@ -1038,6 +1204,33 @@ mod tests {
         let chunks = split_message(&text);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), 1900);
+    }
+
+    #[test]
+    fn fatal_close_codes_are_not_retried() {
+        // Auth failure and intent problems are terminal.
+        for code in [4004, 4010, 4011, 4012, 4013, 4014] {
+            assert!(is_fatal_close_code(code), "{code} should be fatal");
+        }
+        // Transient/normal closes should reconnect.
+        for code in [1000, 1001, 1006, 4000, 4001, 4002, 4008, 4009] {
+            assert!(!is_fatal_close_code(code), "{code} should reconnect");
+        }
+    }
+
+    #[test]
+    fn heartbeat_interval_is_sanitized() {
+        // Zero would panic tokio::time::interval; out-of-range falls back.
+        assert_eq!(
+            sanitize_heartbeat_interval(0),
+            DEFAULT_HEARTBEAT_INTERVAL_MS
+        );
+        assert_eq!(
+            sanitize_heartbeat_interval(u64::MAX),
+            DEFAULT_HEARTBEAT_INTERVAL_MS
+        );
+        // A normal value passes through unchanged.
+        assert_eq!(sanitize_heartbeat_interval(41_250), 41_250);
     }
 
     #[test]

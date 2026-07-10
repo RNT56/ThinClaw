@@ -790,9 +790,14 @@ impl GmailChannel {
     ) -> Result<(), ChannelError> {
         let token = self.state.access_token.read().await.clone();
 
-        // Build RFC 2822 message.
+        // Build RFC 2822 message. Every interpolated header value is stripped
+        // of CR/LF first so an agent- or tool-supplied recipient/subject cannot
+        // inject additional headers (e.g. a hidden `Bcc:`) into the message.
+        let to = sanitize_header_value(to);
+        let subject = sanitize_header_value(subject);
         let mut headers = format!("To: {}\r\nSubject: {}\r\n", to, subject);
         if let Some(reply_to) = in_reply_to {
+            let reply_to = sanitize_header_value(reply_to);
             headers.push_str(&format!(
                 "In-Reply-To: {}\r\nReferences: {}\r\n",
                 reply_to, reply_to
@@ -852,9 +857,13 @@ impl GmailChannel {
             .iter()
             .find_map(|h| {
                 if h.name.eq_ignore_ascii_case("from") {
-                    // Extract email from "Name <email>" format
-                    if let Some(start) = h.value.find('<')
-                        && let Some(end) = h.value.find('>')
+                    // Extract email from "Name <email>" format. Use the last
+                    // angle brackets and guard the range: a quoted display name
+                    // may legally contain '<' or '>' (e.g. `"a > b" <x@y>`),
+                    // and an unguarded slice on `start > end` panics.
+                    if let Some(start) = h.value.rfind('<')
+                        && let Some(end) = h.value.rfind('>')
+                        && start < end
                     {
                         return Some(h.value[start + 1..end].to_string());
                     }
@@ -958,6 +967,22 @@ impl GmailChannel {
 
     /// Convert a Gmail message to an IncomingMessage.
     fn to_incoming_message(&self, msg: &GmailMessage) -> Option<IncomingMessage> {
+        // Never process a message this account itself authored. The history
+        // feed surfaces the agent's own outbound replies as `messagesAdded`;
+        // without this guard a reply to an allowed sender re-enters the loop and
+        // the agent answers its own mail indefinitely.
+        if msg
+            .label_ids
+            .as_ref()
+            .is_some_and(|labels| labels.iter().any(|l| l == "SENT"))
+        {
+            tracing::debug!(
+                gmail_message_id = %msg.id,
+                "Gmail message is SENT by this account, skipping"
+            );
+            return None;
+        }
+
         let sender = Self::extract_sender(msg)?;
 
         // Check sender allowlist.
@@ -1587,6 +1612,72 @@ mod tests {
             GmailChannel::extract_sender(&msg),
             Some("Bob <bob@example.com".into())
         );
+    }
+
+    #[test]
+    fn test_extract_sender_display_name_with_gt_before_lt_does_not_panic() {
+        // RFC-legal quoted display name containing '>' before the real '<'.
+        // The old first-`<`/first-`>` slice panicked with `begin > end`.
+        let msg = GmailMessage {
+            id: "2b".into(),
+            thread_id: None,
+            snippet: None,
+            label_ids: None,
+            internal_date: None,
+            payload: Some(GmailPayload {
+                headers: Some(vec![GmailHeader {
+                    name: "From".into(),
+                    value: "\"Doe > John\" <evil@example.com>".into(),
+                }]),
+                body: None,
+                parts: None,
+                mime_type: None,
+            }),
+        };
+        assert_eq!(
+            GmailChannel::extract_sender(&msg),
+            Some("evil@example.com".into())
+        );
+    }
+
+    #[test]
+    fn test_to_incoming_message_skips_sent_label() {
+        // A message this account authored (SENT label) must never re-enter the
+        // agent loop, even from an allowed sender — otherwise the agent answers
+        // its own replies forever.
+        let channel = GmailChannel::new(GmailConfig {
+            allowed_senders: vec![],
+            ..test_config()
+        })
+        .unwrap();
+        let msg = GmailMessage {
+            id: "sent-1".into(),
+            thread_id: Some("t1".into()),
+            snippet: Some("a reply the agent just sent".into()),
+            label_ids: Some(vec!["SENT".into()]),
+            internal_date: None,
+            payload: Some(GmailPayload {
+                headers: Some(vec![GmailHeader {
+                    name: "From".into(),
+                    value: "agent@example.com".into(),
+                }]),
+                body: None,
+                parts: None,
+                mime_type: None,
+            }),
+        };
+        assert!(channel.to_incoming_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_send_reply_headers_are_crlf_sanitized() {
+        // Header injection: a recipient/subject carrying CR/LF must not be able
+        // to smuggle an extra header line.
+        assert_eq!(
+            sanitize_header_value("a@b.com\r\nBcc: victim@x.com"),
+            "a@b.com__Bcc: victim@x.com"
+        );
+        assert_eq!(sanitize_header_value("plain subject"), "plain subject");
     }
 
     #[test]

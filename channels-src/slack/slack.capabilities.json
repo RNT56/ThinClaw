@@ -46,6 +46,11 @@
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Slack-Signature",
+        "secret_name": "slack_signing_secret",
+        "secret_validation": "slack_v0_signature"
       }
     }
   },

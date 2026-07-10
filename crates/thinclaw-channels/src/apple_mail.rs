@@ -24,6 +24,8 @@ use thinclaw_channels_core::{
 };
 use thinclaw_types::error::ChannelError;
 
+use crate::util::{floor_char_boundary, output_with_timeout};
+
 /// Channel name constant.
 const NAME: &str = "apple_mail";
 
@@ -236,19 +238,39 @@ impl AppleMailChannel {
 
     /// Get the latest ROWID from the messages table.
     async fn get_latest_rowid(db_path: &std::path::Path) -> Result<i64, ChannelError> {
-        let output = tokio::process::Command::new("sqlite3")
-            .arg(db_path)
-            .arg("SELECT MAX(ROWID) FROM messages;")
-            .output()
+        let mut cmd = tokio::process::Command::new("sqlite3");
+        cmd.arg(db_path).arg("SELECT MAX(ROWID) FROM messages;");
+        let output = output_with_timeout(&mut cmd, "sqlite3 max-rowid")
             .await
-            .map_err(|e| ChannelError::StartupFailed {
+            .map_err(|reason| ChannelError::StartupFailed {
                 name: NAME.to_string(),
-                reason: format!("sqlite3 failed: {e}"),
+                reason,
             })?;
 
+        // A failed query must NOT silently become ROWID 0 — that resets the
+        // cursor and replays the account's entire unread backlog (each of which
+        // the agent would auto-reply to). Fail instead so start() can retry.
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ChannelError::StartupFailed {
+                name: NAME.to_string(),
+                reason: format!("sqlite3 max-rowid failed: {stderr}"),
+            });
+        }
+
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let rowid: i64 = stdout.trim().parse().unwrap_or(0);
-        Ok(rowid)
+        let trimmed = stdout.trim();
+        // An empty result means MAX(ROWID) was NULL — a genuinely empty mailbox,
+        // where starting from 0 is correct (there is nothing to replay).
+        if trimmed.is_empty() {
+            return Ok(0);
+        }
+        trimmed
+            .parse::<i64>()
+            .map_err(|e| ChannelError::StartupFailed {
+                name: NAME.to_string(),
+                reason: format!("sqlite3 max-rowid returned unparseable output: {e}"),
+            })
     }
 
     /// Poll for new messages since the given ROWID.
@@ -282,16 +304,13 @@ impl AppleMailChannel {
             read_filter
         );
 
-        let output = tokio::process::Command::new("sqlite3")
-            .arg("-separator")
-            .arg("|")
-            .arg(db_path)
-            .arg(&query)
-            .output()
+        let mut cmd = tokio::process::Command::new("sqlite3");
+        cmd.arg("-separator").arg("|").arg(db_path).arg(&query);
+        let output = output_with_timeout(&mut cmd, "sqlite3 poll")
             .await
-            .map_err(|e| ChannelError::Disconnected {
+            .map_err(|reason| ChannelError::Disconnected {
                 name: NAME.to_string(),
-                reason: format!("sqlite3 poll failed: {e}"),
+                reason,
             })?;
 
         if !output.status.success() {
@@ -320,7 +339,9 @@ impl AppleMailChannel {
             let body = {
                 let b = parts[3];
                 if b.len() > MAX_BODY_LENGTH {
-                    format!("{}... (truncated)", &b[..MAX_BODY_LENGTH])
+                    // Round down to a char boundary; slicing mid-codepoint panics.
+                    let end = floor_char_boundary(b, MAX_BODY_LENGTH);
+                    format!("{}... (truncated)", &b[..end])
                 } else {
                     b.to_string()
                 }
@@ -357,14 +378,13 @@ impl AppleMailChannel {
 end tell"#
         );
 
-        let output = tokio::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output()
+        let mut cmd = tokio::process::Command::new("osascript");
+        cmd.arg("-e").arg(&script);
+        let output = output_with_timeout(&mut cmd, "osascript mark-as-read")
             .await
-            .map_err(|e| ChannelError::SendFailed {
+            .map_err(|reason| ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("osascript mark-as-read failed: {e}"),
+                reason,
             })?;
 
         if !output.status.success() {
@@ -399,17 +419,18 @@ end tell"#
 end tell"#
         );
 
-        let output = tokio::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output()
+        let mut cmd = tokio::process::Command::new("osascript");
+        cmd.arg("-e").arg(&script);
+        let send_result = output_with_timeout(&mut cmd, "osascript send")
             .await
-            .map_err(|e| ChannelError::SendFailed {
+            .map_err(|reason| ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("osascript failed: {e}"),
-            })?;
+                reason,
+            });
 
+        // Clean up temp attachments regardless of send success/failure/timeout.
         cleanup_temp_attachments(&temp_files).await;
+        let output = send_result?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -446,17 +467,18 @@ end tell"#
 end tell"#
         );
 
-        let output = tokio::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output()
+        let mut cmd = tokio::process::Command::new("osascript");
+        cmd.arg("-e").arg(&script);
+        let send_result = output_with_timeout(&mut cmd, "osascript send")
             .await
-            .map_err(|e| ChannelError::SendFailed {
+            .map_err(|reason| ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("osascript failed: {e}"),
-            })?;
+                reason,
+            });
 
+        // Clean up temp attachments regardless of send success/failure/timeout.
         cleanup_temp_attachments(&temp_files).await;
+        let output = send_result?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -471,8 +493,11 @@ end tell"#
 
     /// Extract sender email from a "Name <email>" or bare "email" format.
     fn extract_email(sender: &str) -> &str {
-        if let Some(start) = sender.find('<')
-            && let Some(end) = sender.find('>')
+        // Use the last angle brackets and guard the range: a display name may
+        // contain '<'/'>' and an unguarded `start > end` slice panics.
+        if let Some(start) = sender.rfind('<')
+            && let Some(end) = sender.rfind('>')
+            && start < end
         {
             return &sender[start + 1..end];
         }
@@ -775,10 +800,9 @@ async fn cleanup_temp_attachments(paths: &[std::path::PathBuf]) {
 /// when their channels are active.
 pub async fn ensure_app_running(app_name: &str) -> bool {
     // Check if already running
-    let running = tokio::process::Command::new("pgrep")
-        .arg("-x")
-        .arg(app_name)
-        .output()
+    let mut pgrep = tokio::process::Command::new("pgrep");
+    pgrep.arg("-x").arg(app_name);
+    let running = output_with_timeout(&mut pgrep, "pgrep")
         .await
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -790,11 +814,11 @@ pub async fn ensure_app_running(app_name: &str) -> bool {
     tracing::info!("{app_name}.app is not running — launching it...");
 
     // Launch the app minimized (no window activation on headless)
-    let result = tokio::process::Command::new("osascript")
+    let mut launch = tokio::process::Command::new("osascript");
+    launch
         .arg("-e")
-        .arg(format!(r#"tell application "{app_name}" to launch"#))
-        .output()
-        .await;
+        .arg(format!(r#"tell application "{app_name}" to launch"#));
+    let result = output_with_timeout(&mut launch, "osascript launch").await;
 
     match result {
         Ok(output) if output.status.success() => {
@@ -851,6 +875,15 @@ mod tests {
     #[test]
     fn test_extract_email_empty() {
         assert_eq!(AppleMailChannel::extract_email("unknown"), "unknown");
+    }
+
+    #[test]
+    fn test_extract_email_gt_before_lt_does_not_panic() {
+        // Display name containing '>' before the real '<' must not panic.
+        assert_eq!(
+            AppleMailChannel::extract_email("\"a > b\" <x@y.com>"),
+            "x@y.com"
+        );
     }
 
     #[test]

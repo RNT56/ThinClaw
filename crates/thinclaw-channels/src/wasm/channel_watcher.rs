@@ -321,50 +321,65 @@ impl ChannelWatcher {
                             .unwrap_or(Duration::from_secs(999));
 
                         if since_last >= config.debounce {
-                            tracing::info!(channel = %name, "WASM channel modified, reloading...");
+                            tracing::info!(channel = %name, "WASM channel modified, validating new artifact...");
 
-                            // Remove old
-                            if let Err(e) = channel_manager.hot_remove(name).await {
-                                tracing::warn!(channel = %name, error = %e, "Error removing old channel during reload");
-                            }
-                            if let Some(router) = webhook_router {
-                                router.unregister(name).await;
-                            }
+                            // Validate the replacement BEFORE tearing down the
+                            // working channel — a corrupt, half-written, or
+                            // ABI-mismatched .wasm must not turn a healthy
+                            // channel into a dead one. invalidate() first so
+                            // prepare() compiles the new bytes (the running
+                            // channel keeps its own compiled Arc, so dropping the
+                            // cache entry does not affect it).
                             loader.invalidate(name).await;
+                            let wasm_path = dir.join(format!("{name}.wasm"));
+                            let cap_path = dir.join(format!("{name}.capabilities.json"));
+                            let cap_ref = cap_path.exists().then_some(cap_path.as_path());
+                            let reloaded = WatchedChannel {
+                                mtime: *mtime,
+                                last_reload: now,
+                            };
 
-                            // Load new
-                            match Self::load_and_add(
-                                dir,
-                                name,
-                                loader,
-                                channel_manager,
-                                webhook_router,
-                                secrets_store,
-                                user_id,
-                                host_config,
-                            )
-                            .await
-                            {
-                                Ok(()) => {
-                                    known_guard.insert(
-                                        name.clone(),
-                                        WatchedChannel {
-                                            mtime: *mtime,
-                                            last_reload: now,
-                                        },
-                                    );
-                                    tracing::info!(channel = %name, "WASM channel hot-reloaded successfully");
-                                }
+                            match loader.load_from_files(name, &wasm_path, cap_ref).await {
                                 Err(e) => {
-                                    tracing::error!(channel = %name, error = %e, "Failed to hot-reload WASM channel");
-                                    // Update mtime to avoid retry loop
-                                    known_guard.insert(
-                                        name.clone(),
-                                        WatchedChannel {
-                                            mtime: *mtime,
-                                            last_reload: now,
-                                        },
-                                    );
+                                    // Keep the previous version running. Record
+                                    // mtime so we don't spin retrying until the
+                                    // file changes again (e.g. a slow copy that
+                                    // is not yet complete finishes writing).
+                                    tracing::error!(channel = %name, error = %e, "New WASM artifact failed to load; keeping the previous version running");
+                                    known_guard.insert(name.clone(), reloaded);
+                                }
+                                Ok(_validated) => {
+                                    tracing::info!(channel = %name, "New WASM artifact validated, swapping in");
+                                    // Now safe to replace the old instance. The
+                                    // validated module is cached under `name`, so
+                                    // load_and_add reuses it (no re-invalidate).
+                                    if let Err(e) = channel_manager.hot_remove(name).await {
+                                        tracing::warn!(channel = %name, error = %e, "Error removing old channel during reload");
+                                    }
+                                    if let Some(router) = webhook_router {
+                                        router.unregister(name).await;
+                                    }
+                                    match Self::load_and_add(
+                                        dir,
+                                        name,
+                                        loader,
+                                        channel_manager,
+                                        webhook_router,
+                                        secrets_store,
+                                        user_id,
+                                        host_config,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            known_guard.insert(name.clone(), reloaded);
+                                            tracing::info!(channel = %name, "WASM channel hot-reloaded successfully");
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(channel = %name, error = %e, "Failed to hot-reload WASM channel after validation");
+                                            known_guard.insert(name.clone(), reloaded);
+                                        }
+                                    }
                                 }
                             }
                         }

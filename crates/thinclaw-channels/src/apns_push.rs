@@ -13,7 +13,8 @@
 //! two share one signed-request implementation.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use thinclaw_types::error::ChannelError;
@@ -136,16 +137,52 @@ pub enum ApnsSendOutcome {
     },
 }
 
+/// Apple expects an APNs provider (JWT) token to be reused for 20–60 minutes and
+/// returns `403 TooManyProviderTokenUpdates` if it is regenerated too often. We
+/// refresh well inside that window.
+const PROVIDER_TOKEN_TTL: Duration = Duration::from_secs(45 * 60);
+
+/// A cached, signed APNs provider token and when it was minted.
+struct CachedProviderToken {
+    token: String,
+    issued: Instant,
+}
+
 /// First-party APNs pusher over an injectable HTTP transport.
 pub struct ApnsPusher {
     config: ApnsNativeConfig,
     http: Arc<dyn NativeHttpClient>,
+    provider_token: Mutex<Option<CachedProviderToken>>,
 }
 
 impl ApnsPusher {
     /// Build a pusher over `config` and `http`.
     pub fn new(config: ApnsNativeConfig, http: Arc<dyn NativeHttpClient>) -> Self {
-        Self { config, http }
+        Self {
+            config,
+            http,
+            provider_token: Mutex::new(None),
+        }
+    }
+
+    /// Return a cached provider token, re-signing only when the cached one is
+    /// older than [`PROVIDER_TOKEN_TTL`]. The lock is never held across an await.
+    fn provider_token(&self) -> Result<String, ChannelError> {
+        let mut guard = self
+            .provider_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = guard.as_ref()
+            && cached.issued.elapsed() < PROVIDER_TOKEN_TTL
+        {
+            return Ok(cached.token.clone());
+        }
+        let token = apns_provider_token(&self.config)?;
+        *guard = Some(CachedProviderToken {
+            token: token.clone(),
+            issued: Instant::now(),
+        });
+        Ok(token)
     }
 
     fn host(&self) -> &'static str {
@@ -170,7 +207,7 @@ impl ApnsPusher {
         device_token: &str,
         spec: ApnsPushSpec,
     ) -> Result<ApnsSendOutcome, ChannelError> {
-        let token = apns_provider_token(&self.config)?;
+        let token = self.provider_token()?;
         let mut headers = HashMap::from([
             ("Authorization".to_string(), format!("bearer {token}")),
             ("Content-Type".to_string(), "application/json".to_string()),
