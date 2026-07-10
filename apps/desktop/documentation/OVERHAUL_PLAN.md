@@ -4,12 +4,15 @@
 > **Scope:** End-to-end overhaul of ThinClaw Desktop (`apps/desktop/`).
 > **Companion:** executable backlog in [`OVERHAUL_BACKLOG.md`](OVERHAUL_BACKLOG.md).
 >
-> **Progress (2026-06-29):** the first parity-closure batch has landed/is in-flight —
-> the dual-mode bridge contract (RouteMode/BridgeError/ROUTE_TABLE), real compaction,
-> checkpoints/rollback, session search, trajectory viewer, undo/redo, agent eval,
-> lifecycle events (compaction/advisor/self-repair → `UiEvent::AgentLifecycleEvent`),
-> and the channel-config framework. Several §5a "invisible agent internals" gaps and the
-> §5c channel-config gap are now addressed. See the completion-status table in
+> **Progress (verified 2026-07-10):** the first parity-closure batch is **merged to `main`**:
+> the dual-mode bridge contract (`RouteMode`/`BridgeError`/`ROUTE_TABLE` in
+> `apps/desktop/backend/src/thinclaw/bridge.rs`), real per-thread compaction
+> (`thinclaw_compact_session` in `rpc_extensions.rs`), checkpoints/rollback, session search,
+> trajectory viewer, undo/redo, agent eval, lifecycle events
+> (compaction/advisor/self-repair → `UiEvent::AgentLifecycleEvent`), and the channel-config
+> framework. The §5a "invisible agent internals" gaps and the §5c channel-config gap listed
+> below as landed are done; the rest of the roadmap (shared-services unification, packaging,
+> the remaining §5 breadth items) stays open. See the completion-status table in
 > [`OVERHAUL_BACKLOG.md`](OVERHAUL_BACKLOG.md) and
 > [`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md) for per-item state.
 
@@ -63,7 +66,7 @@ passes the contract suite and a dated entry in
 
 ### Engineering principles
 - **Code-grounded contracts.** Each capability = registered command in `apps/desktop/backend/src/setup/commands.rs` + a `lib/thinclaw.ts` (or generated `bindings.ts`) wrapper + a generated binding, verified by the contract test at `setup/commands.rs` (`generated_bindings_cover_phase_two_desktop_surfaces`). **No UI ships against a mock.**
-- **No new god-files** (repo `CLAUDE.md`): split `lib/thinclaw.ts` (2,534 LoC), `runtime_builder.rs` (1,441 LoC), `src/tauri_commands.rs` (1,325 LoC), and components >600 LoC as they're touched. Preserve public paths with `pub use` re-exports.
+- **No new god-files** (repo `CLAUDE.md`): split `lib/thinclaw.ts`, `runtime_builder.rs`, `src/tauri_commands.rs`, and the oversized `ThinClaw*` panel components as they're touched. Preserve public paths with `pub use` re-exports.
 - **Migrations mandatory** for any storage/settings/command rename — ship the migration + a test in the same PR.
 - **Feature-flag risky work** (engine swaps, autonomy, new runtime commands) so each phase build is always shippable.
 - **Parity = "wired AND honest."** A command that returns `unavailable` in local mode is acceptable only if the UI shows the reason; silent stubs are bugs.
@@ -71,7 +74,7 @@ passes the contract suite and a dated entry in
 
 ### Definition of Done — 1.0 release gates
 - Every cockpit panel maps to a real, non-stub command (or a clearly-labeled gated state).
-- Zero `ui-stub-not-wired` rows; the compaction stub is fixed.
+- Zero `ui-stub-not-wired` rows. (The manual-compaction stub is already fixed — see §3.)
 - Contract suite green; bindings regenerated from Rust; sanitizer tests pass.
 - macOS notarized DMG built in CI; auto-update channel live; crash/error telemetry wired.
 - Manual smoke checklist passes on a clean machine.
@@ -80,27 +83,27 @@ passes the contract suite and a dated entry in
 
 ## 3. Baseline debts (starting point)
 
-Verified from the bridge surface and per-feature audit (≈337 Tauri commands; ≈40
-cockpit panels genuinely IPC-wired via `lib/thinclaw.ts`; dual-mode runtime —
-embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridge.rs:81-96`).
+Verified from the bridge surface and per-feature audit. This table captures the
+**starting-point** debts; items resolved by the first parity batch (see the §Progress
+banner and [`OVERHAUL_BACKLOG.md`](OVERHAUL_BACKLOG.md)) have been struck from it. The
+runtime is dual-mode: embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridge.rs`.
 
 | Class | Items |
 |---|---|
-| **True stub** | `thinclaw_compact_session` returns estimate only (`thinclaw/commands/rpc_extensions.rs:1544`) |
 | **Remote-only in local mode** | `learning_evaluate_outcomes`, `experiments_gpu_validate`/`gpu_launch_test`, `job_restart`/`job_prompt` |
-| **Headless internals (no UI/telemetry)** | self-repair, checkpoints/`/rollback`, advisor auto-consult, undo, pre-compaction flush, context-pressure, config watcher, observability metrics |
-| **CLI-only (no command)** | eval framework (`crates/thinclaw-agent/src/env.rs`), SFT/DPO trajectory export (`src/cli/trajectory.rs`), tunnel/Tailscale, Claude-Code/Codex bridge job modes |
-| **Narrow coverage** | ~25 channels lack config UI; only cron routines creatable (not event); no `/personality`, profile-evolution, or external-memory UI |
+| **Headless internals (no UI/telemetry)** | advisor auto-consult, pre-compaction flush, context-pressure, config watcher, observability metrics (self-repair, checkpoints/rollback, undo, and trajectory now have commands + UI) |
+| **CLI-only (no command)** | SFT/DPO trajectory export (`src/cli/trajectory.rs`), tunnel, Claude-Code/Codex bridge job modes (the eval framework now has `thinclaw_experiments_run_eval`) |
+| **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); only cron routines creatable (not event); no `/personality`, profile-evolution, or external-memory UI |
 | **Partial flows** | Repo-projects, Fleet, Cloud-Brain config, inline `MemoryEditor`, `subscribe_session` |
 | **Duplication** | secrets, models, history, settings, theming exist twice (Workbench vs Cockpit) |
-| **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `tauri_commands.rs`, components 670–992 LoC |
+| **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `tauri_commands.rs`, and several `ThinClaw*` panel components |
 
 ---
 
 ## 4. Continuous workstreams
 
 ### WS-1 — Bridge & Command-Surface Normalization *(foundation; do first)*
-The bridge is three artifacts that can drift: 337 `#[tauri::command]`s, the 2,534-line
+The bridge is three artifacts that can drift: the `#[tauri::command]` surface, the
 hand-written `lib/thinclaw.ts`, and generated `bindings.ts`.
 
 - Adopt **one** calling convention: make generated `bindings.ts` (`commands.*`) the single source; reduce `lib/thinclaw.ts` to thin re-exports + types.
@@ -126,9 +129,9 @@ once both modes use the seam. Data-merging migrations modeled on `cloud/migratio
 
 ### WS-3 — Architecture Hygiene (god-file decomposition)
 Triggered on-touch, but schedule the worst offenders:
-- `frontend/src/lib/thinclaw.ts` (2,534) → `lib/api/{sessions,memory,routines,learning,experiments,mcp,…}.ts`.
-- `backend/src/thinclaw/runtime_builder.rs` (1,441) → provider/inference setup · sandbox/Docker orchestrator · background-task wiring · channel wiring · deps assembly.
-- Components: `ThinClawRepoProjects.tsx` (992), `ThinClawHooks.tsx` (962), `ThinClawAutomations.tsx` (884), `SubAgentPanel.tsx` (792), `ThinClawChannels.tsx` (719), `ThinClawSkills.tsx` (670) → extract sub-panels + hooks.
+- `frontend/src/lib/thinclaw.ts` → `lib/api/{sessions,memory,routines,learning,experiments,mcp,…}.ts`.
+- `backend/src/thinclaw/runtime_builder.rs` → provider/inference setup · sandbox/Docker orchestrator · background-task wiring · channel wiring · deps assembly.
+- Oversized panel components: `ThinClawRepoProjects.tsx`, `ThinClawHooks.tsx`, `ThinClawAutomations.tsx`, `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` → extract sub-panels + hooks.
 - Retire/shrink `src/tauri_commands.rs`.
 
 ### WS-4 — Test/QA & Observability
@@ -159,13 +162,13 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 ### 5a. Agent-loop internals → observable/controllable
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| Manual compaction is a stub | Implement local path: call core compaction (Summarize/Truncate/MoveToWorkspace) instead of returning estimate | `rpc_extensions.rs:1523-1558`, `ThinClawConfig.tsx` | M |
+| ~~Manual compaction is a stub~~ **DONE** | Local path drives the core `ContextCompactor` (Summarize) over each thread and mutates live thread state | `rpc_extensions.rs` (`thinclaw_compact_session`) | M |
 | No context-pressure signal | Add `ContextPressure` `UiEvent` + header indicator | `crates/thinclaw-agent/context_monitor`, `ui_types.rs` | M |
-| Self-repair invisible | `SelfRepairStatus` event + read-only panel row | `src/agent/self_repair.rs`, `ui_types.rs` | M |
-| Checkpoints/`/rollback` no UI | `thinclaw_checkpoints_list/diff/restore` + Rollback panel | `crates/thinclaw-agent/src/checkpoint.rs` | L |
-| Undo manager no UI | `thinclaw_undo` command + control | `src/agent/undo.rs` | S |
-| Advisor invisible | Emit advisor `UiEvent`; show in Event Inspector | `src/agent/dispatcher/advisor.rs` | S |
-| Trajectory viewer | `thinclaw_trajectory_list/get` + viewer | `crates/thinclaw-agent/src/trajectory.rs` | M |
+| ~~Self-repair invisible~~ **DONE** | `SelfRepairStarted`/`SelfRepairCompleted` → `AgentLifecycleEvent` | `src/agent/self_repair.rs`, `ui_types.rs` | M |
+| ~~Checkpoints/`/rollback` no UI~~ **DONE** | `thinclaw_checkpoints_list`/`checkpoint_diff`/`checkpoint_restore` + Rollback panel | `rpc_checkpoints.rs` | L |
+| ~~Undo manager no UI~~ **DONE** | `thinclaw_undo`/`thinclaw_redo` commands + control | `commands/sessions.rs` | S |
+| ~~Advisor invisible~~ **DONE** | `AdvisorConsultationStarted` → `AgentLifecycleEvent` in Event Inspector | `src/agent/dispatcher/advisor.rs` | S |
+| ~~Trajectory viewer~~ **DONE** | `thinclaw_trajectory_stats`/`thinclaw_trajectory_records` + viewer | `rpc_trajectory.rs` | M |
 
 ### 5b. Proactive / learning / experiments
 | Gap | Approach | Key files | Size |
@@ -173,14 +176,14 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | Event-triggered routines uncreatable | Extend `routine_create` to wire `Trigger::SystemEvent`; UI trigger-type selector | `rpc_routines.rs:326`, `ThinClawAutomations.tsx` | M |
 | `evaluate_outcomes` remote-only | Embedded evaluator OR honest gate w/ "needs gateway" CTA | `rpc_experiments_learning.rs:394` | M |
 | GPU validate/launch remote-only | Local credential path OR honest gate | `rpc_experiments_learning.rs:625-661` | M |
-| Eval framework CLI-only | `thinclaw_experiments_run_eval` (AgentLoopEnv/TerminalBench/SkillBench) + Benchmarks panel | `crates/thinclaw-agent/src/env.rs` | L |
+| ~~Eval framework CLI-only~~ **DONE** | `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` exposed (runtime smoke-test remains a manual QA step) | `rpc_experiments_learning.rs` | L |
 | SFT/DPO export CLI-only | `thinclaw_trajectory_export(format)` + export button | `src/cli/trajectory.rs` | M |
 | Profile-evolution no panel | Dedicated viewer + force-run | `src/profile_evolution.rs` | S |
 
 ### 5c. Channels (breadth) — largest item
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| ~25 channels lack config UI | **Schema-driven channel-config framework**: each native/WASM channel declares a config schema; UI renders generically (mirrors MCP/extension setup-schema). Ship framework + Signal/Discord/iMessage/Nostr first, then the long tail | `ThinClawChannels.tsx`, channel manifests, new `channel_config_schema` command | **XL** |
+| Many channels lack config UI (framework **DONE**, long tail pending) | **Schema-driven channel-config framework**: each native/WASM channel declares a config schema; UI renders generically (mirrors MCP/extension setup-schema). Framework + `thinclaw_channel_config_schema`/`_schemas`/`_submit` + Signal/Discord shipped; iMessage/Nostr and the long tail remain | `rpc_channel_config.rs`, `ThinClawChannelConfig` panel, channel manifests | **XL** |
 | Pairing/web-login parity | Reuse pairing UI for all paired channels | `ThinClawPairing.tsx` | S |
 
 ### 5d. Identity / memory / personality
@@ -194,7 +197,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
 | Repo-projects partial | Complete enroll→plan→merge-gate; surface readiness gates | `ThinClawRepoProjects.tsx` (split first), `rpc_repo_projects.rs` | L |
-| Fleet partial | Define fleet model (multi-agent A2A) → real status + broadcast | `thinclaw/fleet.rs`, `FleetCommandCenter.tsx` | L |
+| Fleet partial | Define fleet model (multi-agent A2A) → real status + broadcast | `thinclaw/fleet.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
 | Tunnel/Tailscale no UI | `thinclaw_tunnel_*` + Remote-access panel | `src/tunnel/` | M |
 | `subscribe_session` stub | Real subscription semantics | `thinclaw/commands/sessions.rs` | S |
 
@@ -269,10 +272,10 @@ panel wired or honestly gated; contract suite green.
 ---
 
 ## 11. Kickoff sequence (first concrete moves)
-1. WS-1 bridge linter + `RouteBehavior` enum — make the contract enforceable first.
+1. WS-1 bridge linter + `RouteMode` enum — make the contract enforceable first. (`RouteMode`/`BridgeError`/`ROUTE_TABLE` in `bridge.rs` and the linter test have landed.)
 2. Generate route-matrix & `UiEvent` union from code; start the `lib/thinclaw.ts` split.
-3. Fix the compaction stub (`rpc_extensions.rs:1544`) — smallest high-signal parity win.
-4. Channel-config schema framework spike — de-risk the largest parity item early.
+3. ~~Fix the compaction stub~~ **done**; `thinclaw_compact_session` now drives the core `ContextCompactor`.
+4. Channel-config schema framework spike — de-risk the largest parity item early. (Framework + Signal/Discord landed; long tail pending.)
 5. Split `runtime_builder.rs` + `lib/thinclaw.ts` as their first consumers are touched.
 6. Stand up fixture acceptance in CI so every subsequent PR is gated.
 

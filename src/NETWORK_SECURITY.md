@@ -2,7 +2,7 @@
 
 This document catalogs every network-facing surface in ThinClaw, its authentication mechanism, bind address, security controls, and known findings. Use this as the authoritative reference during code reviews that touch network-facing code.
 
-**Last updated:** 2026-02-18
+**Last updated:** 2026-07-10
 
 ---
 
@@ -52,7 +52,7 @@ ThinClaw operates across five trust boundaries:
 
 Configurable via `GATEWAY_HOST` (default `127.0.0.1`) and `GATEWAY_PORT` (default `3000`). The gateway is designed as a local-first, single-user service.
 
-**Reference:** `src/config.rs` — `gateway_host` default (`"127.0.0.1"`), `gateway_port` default (`3000`)
+**Reference:** `crates/thinclaw-settings/src/channels.rs` — `gateway_host` setting; `crates/thinclaw-config/src/channel_config.rs` — default resolution (`"127.0.0.1"`, port `3000`)
 
 ### Authentication
 
@@ -212,7 +212,7 @@ Configurable via `HTTP_HOST` (default `0.0.0.0`) and `HTTP_PORT` (default `8080`
 
 **WARNING:** The default bind address is `0.0.0.0`, meaning the webhook server listens on **all interfaces** by default. This is intentional (webhooks must be reachable from external services like Telegram/Slack), but operators should be aware of the exposure.
 
-**Reference:** `src/config.rs` — `http_host` default (`"0.0.0.0"`), `http_port` default (`8080`)
+**Reference:** `crates/thinclaw-settings/src/channels.rs` — `http_host` setting; `crates/thinclaw-config/src/channel_config.rs` — default resolution (`"0.0.0.0"`, port `8080`)
 
 ### Authentication
 
@@ -477,7 +477,7 @@ WASM tools execute HTTP requests through the host runtime, subject to:
 3. **Leak detection** — `LeakDetector` scans both outbound requests and inbound responses for secret patterns
    - Runs at two points: before sending and after receiving
    - Uses Aho-Corasick for fast multi-pattern matching
-   - **Reference:** `src/safety/leak_detector.rs`
+   - **Reference:** `crates/thinclaw-safety/src/leak_detector.rs`
 
 ### Built-in HTTP Tool
 
@@ -512,7 +512,7 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 1. A default set of domains (`src/sandbox/config.rs` — `default_allowlist()`)
 2. Additional domains from `SANDBOX_EXTRA_DOMAINS` env var (comma-separated)
 
-**Reference:** `src/config.rs` — sandbox allowlist assembly
+**Reference:** `crates/thinclaw-config/src/sandbox.rs` — sandbox allowlist assembly (`default_allowlist()` + `SANDBOX_EXTRA_DOMAINS`)
 
 ---
 
@@ -628,7 +628,7 @@ a write outside the confine root is rejected.
 #### F-4. ~~HTTP webhook server binds to `0.0.0.0` by default~~ (Mitigated)
 
 **Severity:** Low
-**Location:** `src/config.rs`, `src/main.rs`
+**Location:** `crates/thinclaw-config/src/channel_config.rs`, `src/async_main.rs`
 **Status:** Mitigated — a `tracing::warn!` is now emitted at startup when the webhook server binds to an unspecified address (`0.0.0.0` or `::`), advising operators to set `HTTP_HOST=127.0.0.1` to restrict to localhost. The default bind address remains `0.0.0.0`, so webhook exposure is still controlled by operator configuration and external network controls (firewalls, ingress rules).
 
 #### F-5. ~~Missing security headers on web gateway~~ (Mitigated)

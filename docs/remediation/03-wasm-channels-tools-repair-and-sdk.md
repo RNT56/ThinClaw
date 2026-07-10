@@ -1,10 +1,11 @@
 # WS-03 — WASM Channels & Tools Repair + Shared SDK
 
-> **Status:** Not started · **Priority:** P1 · **Risk:** medium · **Effort:** L
+> **Status:** ◑ Mostly landed (2026-06-23), commit `d1c447c8` (Wave 1B: WASM channel fixes). The three real defects shipped: **T1** (char-aware `split_message` in telegram/slack/discord + unicode tests), **T2** (Discord Ed25519 verification end-to-end), and **T5** (all 12 shim READMEs + `production_status`). **Still open:** the shared-helper extraction (**T3** `tools-src`, **T4** `channels-src`) was not done, so the duplicated helpers still live in each crate, and **T6**'s CI-matrix wiring is WS-13-owned. Do not re-run the completed tasks; the remaining work is the SDK-dedup and CI matrix only.
+> **Priority:** P1 · **Risk:** medium · **Effort:** L
 > **Depends on:** none · **Blocks:** none (coordinates with WS-12 doc-sync, WS-13 build/CI)
 > **Owns (symbols/files):**
 > - `channels-src/telegram/src/lib.rs`, `channels-src/slack/src/lib.rs`, `channels-src/discord/src/lib.rs`, `channels-src/whatsapp/src/lib.rs` (the four custom-WASM channel crates)
-> - `channels-src/shared_webhook_channel/src/impl.rs` and all 13 shim crates that `include!` it (`dingtalk`, `feishu_lark`, `google_chat`, `line`, `matrix`, `mattermost`, `ms_teams`, `qq`, `twilio_sms`, `twitch`, `wecom`, `weixin`)
+> - `channels-src/shared_webhook_channel/src/impl.rs` and all 12 shim crates that `include!` it (`dingtalk`, `feishu_lark`, `google_chat`, `line`, `matrix`, `mattermost`, `ms_teams`, `qq`, `twilio_sms`, `twitch`, `wecom`, `weixin`)
 > - `channels-src/discord/discord.capabilities.json`, `channels-src/discord/README.md` (README edit coordinated with WS-12)
 > - `tools-src/github/src/lib.rs`, `tools-src/notion/src/lib.rs` (`url_encode_path`, `validate_input_length` duplication)
 > - The new `WebhookSecretValidation::DiscordEd25519` variant and `verify_discord_ed25519_signature` helper in `crates/thinclaw-channels/src/wasm/{schema.rs,router.rs}`
@@ -22,50 +23,47 @@ The externally-packaged WASM channels are ThinClaw's reach into every messaging 
 - Port WhatsApp's char-aware `split_message` (`byte_index_for_char_limit` + the unicode-safe test) into telegram, slack, discord.
 - Implement real Discord interaction verification: a host-side `WebhookSecretValidation::DiscordEd25519` variant keyed on `discord_public_key`, a `channel.webhook` block in `discord.capabilities.json`, consume `req.secret_validated` (and the now-dead `require_signature_verification` flag) in the Discord WASM, and fix the false `README.md:106` claim.
 - Extract shared SDK code to dedupe `json_response` / `split_message` / `conversation_scope_id` / `external_conversation_key` (channels) and `url_encode_path` / `validate_input_length` (tools).
-- Audit/classify the 13 shim channels (all `include!`-based instances of `shared_webhook_channel`); finish or formally mark their production status in capabilities + a per-channel README.
+- Audit/classify the 12 shim channels (all `include!`-based instances of `shared_webhook_channel`); finish or formally mark their production status in capabilities + a per-channel README.
 
 **Out of scope (and which WS owns it):**
 - The native (non-WASM) channel transports and `wasm/wrapper.rs` 5701L god-file refactor — owned by the native-channels / god-file workstream, not WS-03.
 - The empty `gateway_auth_token` bypass and `extra_public_routes` security layering — owned by the gateway/security workstream.
 - Doc-tree sync beyond the single Discord README correctness fix — `CHANNEL_ARCHITECTURE.md` and broad inventory docs are **WS-12 doc-sync**; this WS only fixes the load-bearing false claim and writes the new per-shim READMEs.
-- The CI build matrix expansion to add a `wasm32-wasip2` compile gate for the 13 shims and `tools-src` to `build-all.sh` — **WS-13 build/CI** owns the workflow file; WS-03 supplies the requirement and the buildability fix.
+- The CI build matrix expansion to add a `wasm32-wasip2` compile gate for the 12 shims and `tools-src` to `build-all.sh` — **WS-13 build/CI** owns the workflow file; WS-03 supplies the requirement and the buildability fix.
 
 ## Current State (verified)
 
-**(1) `split_message` multibyte panic — wired but buggy in 3 of 4 channels:**
-- `channels-src/whatsapp/src/lib.rs:2096` is the **fixed reference**: it counts `chars()` not `len()`, and uses a nested `fn byte_index_for_char_limit` (`:2101`) to compute the slice boundary via `char_indices().nth(max_chars)`. Has `test_split_message_is_unicode_safe` at `:2300` (`"🙂".repeat(5000)`).
-- `channels-src/telegram/src/lib.rs:2174` — **buggy**: `if text.len() <= max_len` then `let search_area = &remaining[..max_len];` at `:2189`. Slicing at byte index `max_len` panics when it falls inside a multibyte char. The `.unwrap_or_else` fallback walks back to a char boundary, but the `&remaining[..max_len]` slice on the line above panics *first*. No unicode test.
-- `channels-src/slack/src/lib.rs:1044` — **buggy**, identical shape, slice at `:1058`. No unicode test.
-- `channels-src/discord/src/lib.rs:735` — **buggy**, identical shape, slice at `:750`. Tests at `:790–815` cover short/long/newline but **not** unicode.
+**(1) `split_message` multibyte panic — FIXED in all four channels:**
+- `channels-src/whatsapp/src/lib.rs` was the fixed reference (counts `chars()` not `len()`, nested `fn byte_index_for_char_limit`, `test_split_message_is_unicode_safe` over `"🙂".repeat(5000)`).
+- The identical char-aware fix has since been ported to the other three: telegram (`channels-src/telegram/src/dispatch.rs:117` `byte_index_for_char_limit`, slice at `:134`), slack (`channels-src/slack/src/lib.rs:1054`, slice at `:1070`, `test_split_message_is_unicode_safe` at `:1205`), and discord (`channels-src/discord/src/lib.rs:777`, slice at `:794`, `test_split_message_is_unicode_safe` at `:856`).
+- No `&remaining[..max_len]` byte-slice remains in any `split_message` (`rg 'remaining\[..max_len\]' channels-src/` → 0 hits). Note: the shared-source extraction (T4) did **not** land, so the fix currently lives in four copies rather than one included module.
 
-**(2) Discord Ed25519 verification — declared, never implemented:**
-- `channels-src/discord/src/lib.rs:147-149`: `require_signature_verification: bool` is parsed into `DiscordConfig` but carries `#[allow(dead_code)]` — never read.
-- `channels-src/discord/src/lib.rs:197` `on_http_request` parses and dispatches interactions but **never checks `req.secret_validated`** (contrast: `channels-src/whatsapp/src/lib.rs:571` and `:710`, and `channels-src/telegram/src/lib.rs:1640-1642`, both reject when `!req.secret_validated`).
-- `channels-src/discord/discord.capabilities.json` has `http_endpoints[].require_secret: true` set in code (`lib.rs:191`) but the capabilities file has **no `capabilities.channel.webhook` block**. So host resolution falls to defaults: `webhook_secret_validation()` → `Equals` (`crates/thinclaw-channels/src/wasm/schema.rs:135-141`) and `webhook_secret_name()` → `"discord_webhook_secret"` (`schema.rs:125-132`). Discord uses **Ed25519 over `X-Signature-Timestamp` + body**, verified against a hex **public key** (`discord_public_key`), not an HMAC shared secret — so the default `Equals` path can never validate a real Discord request.
-- The host validation match at `crates/thinclaw-channels/src/wasm/router.rs:622-645` supports `Equals`, `HmacSha256Body`, `HmacSha256Base64Body`, `TwitchEventsubHmacSha256`, `TwilioRequestSignature` — **no Ed25519 variant exists**. `WebhookSecretValidation` enum is at `crates/thinclaw-channels/src/wasm/schema.rs:519-531`.
-- WIT exposes `secret-validated: bool` to the WASM (`wit/channel.wit:247`), generated as `req.secret_validated`.
-- `channels-src/discord/README.md:105-108` claims: *"This validation happens on the host before reaching the WASM."* — **false**, no validation is wired.
+**(2) Discord Ed25519 verification — FIXED (implemented end-to-end):**
+- The `require_signature_verification` flag is now consumed; the Discord WASM rejects requests when `!req.secret_validated` (`channels-src/discord/src/lib.rs:196,220-222`).
+- `channels-src/discord/discord.capabilities.json` now carries a `capabilities.channel.webhook` block (`secret_header: X-Signature-Ed25519`, `secret_name: discord_public_key`, `secret_validation: discord_ed25519`).
+- The host validation path gained the missing variant: `WebhookSecretValidation::DiscordEd25519` (`crates/thinclaw-channels/src/wasm/schema.rs:556`, serde `discord_ed25519`) and `fn verify_discord_ed25519_signature` (`crates/thinclaw-channels/src/wasm/router.rs:316`), dispatched at `router.rs:700-701`. It reads `X-Signature-Timestamp`, reconstructs `timestamp ++ body`, and verifies the `X-Signature-Ed25519` signature against the hex `discord_public_key` verifying key.
+- `channels-src/discord/README.md` now accurately describes the Ed25519 flow instead of claiming validation that did not exist.
 
-**(3) Cross-crate duplication — byte-for-byte, already bit us:**
+**(3) Cross-crate duplication — STILL PRESENT (T3/T4 shared-helper extraction not done):**
 - `fn json_response`: discord, telegram, slack, whatsapp, shared_webhook_channel (5 copies).
-- `fn split_message`: discord, telegram, slack, whatsapp (4 copies; the WhatsApp fix never propagated — this is the audit's "fix landed in 1 of N" exemplar).
-- `fn conversation_scope_id` / `fn external_conversation_key`: telegram (`:427`, `:491`) + whatsapp (2 copies each).
+- `fn split_message`: discord, telegram, slack, whatsapp (4 copies). The unicode-safe fix has now been ported into all four (T1), but they remain four separate copies — the SDK extraction (T4) that would collapse them to one source has not landed.
+- `fn conversation_scope_id` / `fn external_conversation_key`: telegram (`channels-src/telegram/src/sessions.rs:13`, `:81`) + whatsapp (2 copies each).
 - `fn url_encode_path` / `fn validate_input_length`: `tools-src/github/src/lib.rs` + `tools-src/notion/src/lib.rs` (2 copies each).
 - **Structural constraint:** every channel/tool crate is a *standalone Cargo workspace* (each `Cargo.toml` ends with a bare `[workspace]` table) and is listed in the root `Cargo.toml` `exclude` (`Cargo.toml:3-20`). They share one WIT world via `wit_bindgen::generate!({ world: "sandboxed-channel", path: "../../wit/channel.wit" })` (`discord/src/lib.rs:21-24`).
 
-**(4) The "13 thin shims" — wired config-driven instances, NOT scaffolds:**
+**(4) The "12 thin shims" — wired config-driven instances, NOT scaffolds:**
 - Each shim's `src/lib.rs` is **8 lines**: `wit_bindgen::generate!`, `include!("../../shared_webhook_channel/src/impl.rs")`, `export!(GenericWebhookChannel)` (verified `dingtalk/src/lib.rs`; identical shape for all 12 `include!`-based shims; `twitch`/`twilio_sms` also use the shared impl).
 - The engine is `channels-src/shared_webhook_channel/src/impl.rs` (731 LoC) — a complete generic webhook channel driven by capabilities `config` (mapping, challenge, response, template values).
 - All 10 China/enterprise shims have **complete config**: `mapping.text`, `response.url`, a `channel.webhook` block, and `required_secrets` (verified by parsing each capabilities.json). `feishu_lark`/`wecom`/`weixin` add `challenge` blocks.
 - **The real gap is signature correctness, not missing code:** `dingtalk`, `google_chat`, `matrix`, `mattermost`, `ms_teams`, `qq`, `wecom`, `weixin`, `feishu_lark` all declare `secret_validation: "equals"` with a generic `X-Webhook-Secret` header. The actual platforms (DingTalk HMAC-SHA256 over timestamp, Feishu AES/token, QQ Ed25519, WeChat-Work/WeChat msg signature) do **not** send a plaintext shared secret in `X-Webhook-Secret`, so inbound auth is effectively `equals`-against-a-shared-secret only if the operator configures the platform to send one. `line` correctly uses `hmac_sha256_base64_body`; `twitch` uses `twitch_eventsub_hmac_sha256`; `twilio_sms` uses `twilio_request_signature` — those three are genuinely production-grade.
-- **No shim has a README** (verified: 0 of 12 have `README.md`). The CI `channel-crates` matrix (`.github/workflows/ci.yml:725-751`) builds/tests only telegram/slack/discord/whatsapp — the 13 shims are **never compiled in CI**, so a broken `include!` or capabilities drift would not be caught.
+- **Shim READMEs + status — FIXED (T5):** all 12 `include!`-based shims now have a `README.md` and their `*.capabilities.json` carry a `production_status` field (16 capabilities files carry it in total). **Still open (T6, WS-13-owned):** the CI `channel-crates` matrix (`.github/workflows/ci.yml`) still builds/tests only telegram/slack/discord/whatsapp — the shims are not yet compiled in CI, so a broken `include!` or capabilities drift would still go uncaught until the matrix is expanded.
 
 ## Decision Points
 
 1. **Shared SDK crate vs. shared-source `include!` (build-vs-build).**
    - *Option A — new path-dependency crates* `channels-src/thinclaw-channel-sdk` and `tools-src/thinclaw-tool-sdk`, each its own standalone workspace, depended on via `path = "../thinclaw-channel-sdk"`. Cargo path deps resolve across workspace boundaries, so this works, but every consumer crate must add the dep + bump its checked-in `Cargo.lock`, and each crate re-generates WIT bindings independently (the SDK can't reference `exports::near::...` types unless it also generates them or takes them as generics).
    - *Option B — shared-source `include!`* mirroring the existing, proven `shared_webhook_channel` pattern: put `json_response`/`split_message`/`conversation_scope_id`/`external_conversation_key` in `channels-src/shared_channel_helpers/src/helpers.rs` and `include!("../../shared_channel_helpers/src/helpers.rs")` in each channel. WIT types are already in scope at the include site, no Cargo.toml/lock churn, no cross-workspace dep wiring. Same for `tools-src/shared_tool_helpers/`.
-   - **Recommendation: Option B (shared `include!` module).** It is the pattern the repo already uses for the 13 shims (`include!("../../shared_webhook_channel/src/impl.rs")`), needs no `Cargo.lock` edits across 16+ standalone workspaces, and avoids the WIT-binding-duplication trap. The audit's structural goal ("one source of truth so the fix can't land in 1 of N") is fully met by a single included `.rs`. Reserve a true SDK *crate* only if a future consumer needs the helpers outside an `include!` context. (`split_message` is pure string logic with no WIT dependency, so it could alternatively live in a tiny real crate — but keeping all four helpers in one included module is simpler and consistent.)
+   - **Recommendation: Option B (shared `include!` module).** It is the pattern the repo already uses for the 12 shims (`include!("../../shared_webhook_channel/src/impl.rs")`), needs no `Cargo.lock` edits across 16+ standalone workspaces, and avoids the WIT-binding-duplication trap. The audit's structural goal ("one source of truth so the fix can't land in 1 of N") is fully met by a single included `.rs`. Reserve a true SDK *crate* only if a future consumer needs the helpers outside an `include!` context. (`split_message` is pure string logic with no WIT dependency, so it could alternatively live in a tiny real crate — but keeping all four helpers in one included module is simpler and consistent.)
 
 2. **Discord Ed25519: WIRE vs. feature-gate vs. ERASE the flag.**
    - The audit rates this **High** (a shipped channel advertising a security control it does not perform). The infrastructure (`WebhookSecretValidation` enum + router match + `secret-validated` WIT field + `ed25519-dalek` already a workspace dep at `Cargo.toml:171`, used in `src/extensions/signing.rs`) is all present.
@@ -77,14 +75,14 @@ The externally-packaged WASM channels are ThinClaw's reach into every messaging 
 
 ## Tasks
 
-- [ ] **T1: Port char-aware `split_message` to telegram/slack/discord (and unicode test).**
+- [x] **T1: Port char-aware `split_message` to telegram/slack/discord (and unicode test).**
   - **Files:** `channels-src/telegram/src/lib.rs` (replace `:2174-` body, slice bug at `:2189`), `channels-src/slack/src/lib.rs` (`:1044-`, bug at `:1058`), `channels-src/discord/src/lib.rs` (`:735-`, bug at `:750`).
   - **Change:** Replace each body with the WhatsApp implementation (`whatsapp/src/lib.rs:2096-2143`): guard on `text.chars().count()`, add nested `fn byte_index_for_char_limit`, slice via `byte_index_for_char_limit(remaining, max_len)` instead of `&remaining[..max_len]`. Add `test_split_message_is_unicode_safe` (the `"🙂".repeat(5000)` test from `whatsapp/src/lib.rs:2300`) to each `mod tests`, adjusting the expected chunk count to each channel's limit constant (`TELEGRAM_MAX_MESSAGE_LENGTH`, slack's `max_len`, `DISCORD_MAX_MESSAGE_LENGTH`). *(If T4's shared-helper extraction lands first, this collapses into editing the single included file + per-channel test — see T4.)*
   - **Acceptance:** Each of the three `cargo test --manifest-path channels-src/<c>/Cargo.toml` passes including the new unicode test; no `&str[..n]` byte-slice remains in any `split_message`.
   - **Effort:** S
   - **Verification:** `cargo test --manifest-path channels-src/telegram/Cargo.toml && cargo test --manifest-path channels-src/slack/Cargo.toml && cargo test --manifest-path channels-src/discord/Cargo.toml`
 
-- [ ] **T2: Implement Discord Ed25519 interaction verification end-to-end.**
+- [x] **T2: Implement Discord Ed25519 interaction verification end-to-end.**
   - **Files (host):** `crates/thinclaw-channels/src/wasm/schema.rs:519-531` (add `DiscordEd25519` enum variant, `#[serde(rename = "discord_ed25519")]`), `crates/thinclaw-channels/src/wasm/router.rs:622-645` (add the match arm + helper) — add `ed25519-dalek` to `crates/thinclaw-channels/Cargo.toml` (workspace dep already at root `Cargo.toml:171`). **Files (package):** `channels-src/discord/discord.capabilities.json` (add `capabilities.channel.webhook`), `channels-src/discord/src/lib.rs:197` (consume `req.secret_validated`), `channels-src/discord/src/lib.rs:147-149` (drop `#[allow(dead_code)]`, use the flag), `channels-src/discord/README.md:105-108` (fix false claim — coordinate with WS-12).
   - **Change:**
     1. New variant `DiscordEd25519` in `WebhookSecretValidation`.
@@ -110,7 +108,7 @@ The externally-packaged WASM channels are ThinClaw's reach into every messaging 
   - **Effort:** M
   - **Verification:** `for c in discord telegram slack whatsapp; do cargo test --manifest-path channels-src/$c/Cargo.toml || break; done`
 
-- [ ] **T5: Classify the 13 shim channels and record production status.**
+- [x] **T5: Classify the 12 shim channels and record production status.**
   - **Files:** each shim's `*.capabilities.json` (`description` + new `"production_status"` field), new `channels-src/<shim>/README.md` (12 + reuse for twitch/twilio_sms), and a summary table appended by **WS-12** to `docs/CHANNEL_ARCHITECTURE.md` (WS-03 provides the table content; WS-12 owns the doc edit).
   - **Change:** Mark `line`, `twitch`, `twilio_sms`, `discord` (post-T2) as **production** (real signature validation). Mark the 9 `equals`-only shims (`dingtalk`, `feishu_lark`, `google_chat`, `matrix`, `mattermost`, `ms_teams`, `qq`, `wecom`, `weixin`) as **beta** with an explicit caveat: "inbound webhook auth is shared-secret `equals` only; platform-native signature verification is not yet implemented." Add a short README per shim documenting required secrets, the webhook path, and the auth caveat. **Stretch:** implement `qq` Ed25519 by reusing the T2 `verify_discord_ed25519_signature` helper generalized to a `Ed25519TimestampBody` variant.
   - **Acceptance:** Every shim capabilities.json carries an honest `production_status`; every shim has a README; the classification table exists for WS-12 to consume. No shim claims signature verification it does not perform.
@@ -119,7 +117,7 @@ The externally-packaged WASM channels are ThinClaw's reach into every messaging 
 
 - [ ] **T6: Supply WS-13 the buildability requirement for shims + tools-src.**
   - **Files:** none owned by WS-03 in `.github/workflows/ci.yml` or `scripts/build-all.sh` (those belong to WS-13). WS-03 deliverable: a verified list of crates that must compile to `wasm32-wasip2`.
-  - **Change:** Confirm each of the 13 shims and `tools-src/*` builds to `wasm32-wasip2` locally (catches `include!` drift the current CI matrix at `ci.yml:725-751` misses, since it only covers 4 channels and runs native `cargo test`). Hand WS-13 the matrix entries to add and the `build-all.sh` gap (it iterates `channels-src/*/` but never builds `tools-src` — verified `scripts/build-all.sh:80-83`).
+  - **Change:** Confirm each of the 12 shims and `tools-src/*` builds to `wasm32-wasip2` locally (catches `include!` drift the current CI matrix at `ci.yml:725-751` misses, since it only covers 4 channels and runs native `cargo test`). Hand WS-13 the matrix entries to add and the `build-all.sh` gap (it iterates `channels-src/*/` but never builds `tools-src` — verified `scripts/build-all.sh:80-83`).
   - **Acceptance:** A documented, locally-verified list of all WASM crates and their `wasm32-wasip2` build status, delivered to WS-13. Any crate that fails to build is fixed here (it's WS-03-owned source) even though the CI wiring is WS-13.
   - **Effort:** S
   - **Verification:** `rustup target add wasm32-wasip2; for d in channels-src/*/ tools-src/*/; do [ -f "$d/Cargo.toml" ] && (cargo build --release --target wasm32-wasip2 --manifest-path "$d/Cargo.toml" || echo "FAIL $d"); done`
@@ -166,11 +164,11 @@ The externally-packaged WASM channels are ThinClaw's reach into every messaging 
 
 ## Definition of Done
 
-- [ ] `split_message` is char-aware in telegram, slack, discord; each has a passing `test_split_message_is_unicode_safe`; exactly one `split_message` source remains after T4.
-- [ ] Discord interactions are Ed25519-verified host-side: `DiscordEd25519` variant + `verify_discord_ed25519_signature` helper land in `thinclaw-channels`, `discord.capabilities.json` has a `channel.webhook` block keyed on `discord_public_key`, the WASM rejects `!secret_validated`, and `require_signature_verification` is consumed (no `#[allow(dead_code)]`). Host unit test covers valid + tampered signatures.
-- [ ] `discord/README.md` no longer claims verification that didn't exist; it accurately describes the Ed25519 flow (coordinated into WS-12 doc-sync).
-- [ ] `json_response`/`split_message`/`conversation_scope_id`/`external_conversation_key` (channels) and `url_encode_path`/`validate_input_length` (tools) exist in exactly one source file each; all consumer crates compile and test green.
-- [ ] All 13 shims classified (production vs. beta) with an honest `production_status` + caveat in capabilities and a per-shim README; classification table delivered to WS-12.
-- [ ] All `channels-src/*` and `tools-src/*` crates compile to `wasm32-wasip2`; the buildability list + `build-all.sh`/CI-matrix gaps are delivered to WS-13.
-- [ ] Verification gate green: `cargo fmt`, `clippy --all-targets -D warnings` (host), per-crate `cargo test`, capabilities JSON parse, fleet `wasm32-wasip2` build.
-- [ ] Decision 1 (SDK vs. `include!`) resolved and recorded in the implementing PR; Decisions 2 (WIRE Discord) and 3 (classify shims) executed.
+- [x] `split_message` is char-aware in telegram, slack, discord; each has a passing `test_split_message_is_unicode_safe`. (The "exactly one source after T4" clause is **not** met — T4 shared-helper extraction did not land, so four copies remain.)
+- [x] Discord interactions are Ed25519-verified host-side: `DiscordEd25519` variant + `verify_discord_ed25519_signature` helper land in `thinclaw-channels`, `discord.capabilities.json` has a `channel.webhook` block keyed on `discord_public_key`, the WASM rejects `!secret_validated`, and `require_signature_verification` is consumed (no `#[allow(dead_code)]`). Host unit test covers valid + tampered signatures.
+- [x] `discord/README.md` no longer claims verification that didn't exist; it accurately describes the Ed25519 flow (coordinated into WS-12 doc-sync).
+- [ ] `json_response`/`split_message`/`conversation_scope_id`/`external_conversation_key` (channels) and `url_encode_path`/`validate_input_length` (tools) exist in exactly one source file each; all consumer crates compile and test green. **Open (T3/T4 not landed).**
+- [x] All 12 shims classified (production vs. beta) with an honest `production_status` + caveat in capabilities and a per-shim README; classification table delivered to WS-12.
+- [ ] All `channels-src/*` and `tools-src/*` crates compile to `wasm32-wasip2`; the buildability list + `build-all.sh`/CI-matrix gaps are delivered to WS-13. **Open (T6, WS-13-owned).**
+- [ ] Verification gate green: `cargo fmt`, `clippy --all-targets -D warnings` (host), per-crate `cargo test`, capabilities JSON parse, fleet `wasm32-wasip2` build. **Partial:** the shipped tasks (T1/T2/T5) pass their gates; the SDK-extraction gate (T3/T4) is not yet run.
+- [x] Decisions 2 (WIRE Discord) and 3 (classify shims) executed. Decision 1 (SDK vs. `include!`) remains **unresolved** — the shared-helper extraction it governs (T3/T4) has not landed.

@@ -16,11 +16,14 @@ ThinClaw keeps authority and provenance separate on purpose:
 Skills are discovered in deterministic precedence order:
 
 1. workspace skills
-2. user skills
-3. installed skills
-4. external read-only skill directories
+2. bundled trusted skills
+3. user skills
+4. installed skills
+5. external read-only skill directories
 
-Earlier layers win on name collisions.
+Earlier layers win on name collisions. Note that bundled trusted runtime
+skills (layer 2, described in the next section) sit **above** user and installed
+skills: a bundled skill overrides a user or installed skill of the same name.
 
 ## Bundled Runtime Skills
 

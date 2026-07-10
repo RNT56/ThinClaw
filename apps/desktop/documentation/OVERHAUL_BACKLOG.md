@@ -2,27 +2,27 @@
 
 > **Status:** draft v1 · **Created:** 2026-06-27 · Companion to [`OVERHAUL_PLAN.md`](OVERHAUL_PLAN.md).
 
-## Completion status (updated 2026-06-29)
+## Completion status (verified 2026-07-10)
 
-First parity batch landed/in-flight. ✅ = merged to `main`; 🟡 = implemented + verified,
-in-flight PR (auto-merge armed). Item-level state is tracked in the PRs, not per-row below.
+First parity batch is **merged to `main`**. Every row below is verified present in the
+tree. ✅ = merged to `main`.
 
-| TDO | Item | State | PR |
+| TDO | Item | State | Verified in code |
 |---|---|---|---|
-| TDO-001 | `RouteMode` enum + typed `BridgeError` + `gated()` helper | 🟡 | bridge foundation |
-| TDO-002 | Bridge linter (`ROUTE_TABLE` + `all_gated_commands_are_classified`) | 🟡 | #110 |
-| TDO-100 | Real per-thread compaction (`thinclaw_compact_session`) | ✅ | merged |
-| TDO-101/102 | Lifecycle events: compaction (#118) + advisor + self-repair → `UiEvent::AgentLifecycleEvent` | 🟡 | #118, #121 |
-| TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | #105/#108 |
-| TDO-104 | Undo/redo: `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons | 🟡 | #116, #120 |
-| TDO-105 | Session search command + Session Search panel | ✅ | #105/#108 |
-| TDO-106 | Trajectory: `stats`/`records` commands + Trajectory panel | ✅ | #105/#108 |
-| TDO-113 | Agent eval: `experiments_list_envs` + `experiments_run_eval` | 🟡 | #117 |
-| TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | 🟡 | #119, #122, #123 |
+| TDO-001 | `RouteMode` enum + typed `BridgeError` + `gated()` helper | ✅ | `bridge.rs` (`RouteMode`:22, `BridgeError`:35) |
+| TDO-002 | Bridge linter (`ROUTE_TABLE` + `all_gated_commands_are_classified`) | ✅ | `bridge.rs` (`ROUTE_TABLE`:116 + linter tests) |
+| TDO-100 | Real per-thread compaction (`thinclaw_compact_session`) | ✅ | `rpc_extensions.rs` (drives core `ContextCompactor`) |
+| TDO-101/102 | Lifecycle events: compaction + advisor + self-repair → `UiEvent::AgentLifecycleEvent` | ✅ | `event_mapping.rs`, `tool_execution.rs`, `agent_loop` |
+| TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | `rpc_checkpoints.rs`:40/52/65 |
+| TDO-104 | Undo/redo: `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons | ✅ | `commands/sessions.rs`:105/147 |
+| TDO-105 | Session search command + Session Search panel | ✅ | `rpc_session_search.rs` |
+| TDO-106 | Trajectory: `stats`/`records` commands + Trajectory panel | ✅ | `rpc_trajectory.rs`:45/58 |
+| TDO-113 | Agent eval: `experiments_list_envs` + `experiments_run_eval` | ✅ | `rpc_experiments_learning.rs`:683/719 |
+| TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | ✅ | `rpc_channel_config.rs`:19/37/61 |
 
-**Deferred / cross-lane:** channel-config submit *form* is delivered as a new Lane-B panel (#123);
-remote-mode submit and live-reload for native channels remain future work; the eval runtime
-smoke-test needs a running engine. See [`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md).
+**Deferred / cross-lane (still open):** remote-mode channel-config submit and live-reload for
+native channels remain future work; the eval runtime smoke-test needs a running engine. See
+[`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md).
 
 ---
 
@@ -96,12 +96,12 @@ still green; legacy aliases migrated; duplicate store deleted.
 
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
-| TDO-020 | Split `lib/thinclaw.ts` (2,534) → `lib/api/{domain}.ts` | L | ∞ | TDO-004 | `lib/thinclaw.ts` |
-| TDO-021 | Split `runtime_builder.rs` (1,441) → inference/sandbox/bg-tasks/channels/deps modules | L | ∞ | — | `thinclaw/runtime_builder.rs` |
-| TDO-022 | Split `ThinClawRepoProjects.tsx` (992) into sub-panels + hooks | M | P1 | — | component |
-| TDO-023 | Split `ThinClawHooks.tsx` (962) | M | ∞ | — | component |
-| TDO-024 | Split `ThinClawAutomations.tsx` (884) | M | P1 | — | component |
-| TDO-025 | Split `SubAgentPanel.tsx` (792), `ThinClawChannels.tsx` (719), `ThinClawSkills.tsx` (670) | M | ∞ | — | components |
+| TDO-020 | Split `lib/thinclaw.ts` → `lib/api/{domain}.ts` | L | ∞ | TDO-004 | `lib/thinclaw.ts` |
+| TDO-021 | Split `runtime_builder.rs` → inference/sandbox/bg-tasks/channels/deps modules | L | ∞ | — | `thinclaw/runtime_builder.rs` |
+| TDO-022 | Split `ThinClawRepoProjects.tsx` into sub-panels + hooks | M | P1 | — | component |
+| TDO-023 | Split `ThinClawHooks.tsx` | M | ∞ | — | component |
+| TDO-024 | Split `ThinClawAutomations.tsx` | M | P1 | — | component |
+| TDO-025 | Split `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` | M | ∞ | — | components |
 
 **Split acceptance:** public import paths preserved via `pub use` / barrel re-exports;
 characterization test added before the split; no behavior change.
@@ -147,13 +147,13 @@ characterization test added before the split; no behavior change.
 ### Agent-loop internals
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
-| TDO-100 | **Fix compaction stub** → call real core compaction (Summarize/Truncate/MoveToWorkspace) | M | TDO-001 | `rpc_extensions.rs:1523-1558`, `ThinClawConfig.tsx` |
+| TDO-100 ✅ | **Compaction** → drives the real core `ContextCompactor` (Summarize) | M | TDO-001 | `rpc_extensions.rs` (`thinclaw_compact_session`) |
 | TDO-101 | Context-pressure `UiEvent` + header indicator | M | TDO-005 | `context_monitor`, `ui_types.rs` |
-| TDO-102 | Self-repair status event + panel row | M | TDO-033 | `self_repair.rs` |
-| TDO-103 | Checkpoints UI: `thinclaw_checkpoints_list/diff/restore` + Rollback panel | L | TDO-001 | `checkpoint.rs` |
-| TDO-104 | Undo command + control | S | TDO-001 | `agent/undo.rs` |
-| TDO-105 | Advisor consultation `UiEvent` in Event Inspector | S | TDO-005 | `dispatcher/advisor.rs` |
-| TDO-106 | Trajectory viewer: `thinclaw_trajectory_list/get` + UI | M | TDO-001 | `trajectory.rs` |
+| TDO-102 ✅ | Self-repair status event + panel row | M | TDO-033 | `self_repair.rs` |
+| TDO-103 ✅ | Checkpoints UI: `thinclaw_checkpoints_list`/`checkpoint_diff`/`checkpoint_restore` + Rollback panel | L | TDO-001 | `rpc_checkpoints.rs` |
+| TDO-104 ✅ | Undo/redo commands + control | S | TDO-001 | `commands/sessions.rs` |
+| TDO-105 ✅ | Advisor consultation `UiEvent` in Event Inspector | S | TDO-005 | `dispatcher/advisor.rs` |
+| TDO-106 ✅ | Trajectory viewer: `thinclaw_trajectory_stats`/`thinclaw_trajectory_records` + UI | M | TDO-001 | `rpc_trajectory.rs` |
 
 ### Proactive / learning / experiments
 | ID | Title | Size | Depends | Files |
@@ -161,15 +161,15 @@ characterization test added before the split; no behavior change.
 | TDO-110 | Event-triggered routine creation (`Trigger::SystemEvent`) + UI | M | TDO-024 | `rpc_routines.rs:326`, `ThinClawAutomations.tsx` |
 | TDO-111 | `evaluate_outcomes`: embedded evaluator OR honest gate + CTA | M | TDO-001 | `rpc_experiments_learning.rs:394` |
 | TDO-112 | GPU validate/launch: local path OR honest gate | M | TDO-001 | `rpc_experiments_learning.rs:625-661` |
-| TDO-113 | Eval framework command `thinclaw_experiments_run_eval` + Benchmarks panel | L | TDO-001 | `crates/thinclaw-agent/src/env.rs` |
+| TDO-113 ✅ | Eval framework commands `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` (runtime smoke-test is manual QA) | L | TDO-001 | `rpc_experiments_learning.rs` |
 | TDO-114 | `thinclaw_trajectory_export(format)` (SFT/DPO) + export button | M | TDO-106 | `src/cli/trajectory.rs` |
 | TDO-115 | Profile-evolution viewer + force-run | S | TDO-001 | `profile_evolution.rs` |
 
 ### Channels (largest item)
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
-| TDO-120 | **Channel-config schema framework** (`channel_config_schema` command + generic renderer) | XL | TDO-001 | `ThinClawChannels.tsx`, channel manifests |
-| TDO-121 | First channels on framework: Signal, Discord, iMessage, Nostr | L | TDO-120 | channel adapters |
+| TDO-120 ✅ | **Channel-config schema framework** (`thinclaw_channel_config_schema`/`_schemas`/`_submit` commands + generic renderer in the `ThinClawChannelConfig` panel) | XL | TDO-001 | `rpc_channel_config.rs`, channel manifests |
+| TDO-121 | First channels on framework: Signal + Discord done; iMessage, Nostr remain | L | TDO-120 | channel adapters |
 | TDO-122 | Long-tail channel configs (Matrix, Teams, LINE, SMS, BlueBubbles, Apple Mail, …) | L | TDO-120 | channel adapters |
 | TDO-123 | Pairing/web-login parity across paired channels | S | TDO-120 | `ThinClawPairing.tsx` |
 
@@ -184,7 +184,7 @@ characterization test added before the split; no behavior change.
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
 | TDO-140 | Complete repo-projects enroll→plan→merge-gate + readiness gates | L | TDO-022 | `rpc_repo_projects.rs`, component |
-| TDO-141 | Define fleet model (multi-agent A2A) → real status + broadcast | L | TDO-001 | `fleet.rs`, `FleetCommandCenter.tsx` |
+| TDO-141 | Define fleet model (multi-agent A2A) → real status + broadcast | L | TDO-001 | `fleet.rs`, `fleet/FleetCommandCenter.tsx` |
 | TDO-142 | Tunnel/Tailscale commands + Remote-access panel | M | TDO-001 | `src/tunnel/` |
 | TDO-143 | Replace `subscribe_session` stub with real subscription | S | TDO-001 | `sessions.rs` |
 
@@ -218,6 +218,7 @@ characterization test added before the split; no behavior change.
 ---
 
 ## Suggested first sprint (de-risk + prove the loop)
-`TDO-001` → `TDO-002` → `TDO-100` (compaction fix, smallest high-signal win) →
-`TDO-120` spike (largest parity item) → `TDO-021`/`TDO-020` (split god-files on touch) →
-`TDO-030` (CI fixture acceptance gate).
+
+This sprint has largely executed: `TDO-001` → `TDO-002` → `TDO-100` (compaction) →
+`TDO-120` (channel-config framework) all landed. Remaining from the original ordering:
+`TDO-021`/`TDO-020` (split god-files on touch) → `TDO-030` (CI fixture acceptance gate).

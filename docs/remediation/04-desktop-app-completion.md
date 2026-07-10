@@ -1,6 +1,7 @@
 # WS-04 — Desktop App Completion (cloud-sync, inference, dual stacks)
 
-> **Status:** Not started · **Priority:** P1 · **Risk:** high · **Effort:** L
+> **Status:** ✅ Landed (2026-06-24), commit `41091179` (Wave 1: desktop app completion, cloud-sync + S3 metadata + orchestration). Tasks T1 through T11 shipped (live cloud sync spawned on migrate + startup and stopped on exit; `last_modified` fixed in all three opendal providers; the dead `InferenceRouter` chat modality erased; `sub_agent_registry` eviction wired; `sandbox_factory` tool-parse resolved; `image_gen` divide-by-zero guarded; the dual-stack doc addendum added). **Still open:** **T12** (the desktop build profile does not enable `wasm-runtime` and carries no explicit inline rationale). This plan is otherwise complete; do not re-execute the landed tasks.
+> **Priority:** P1 · **Risk:** high · **Effort:** L
 > **Depends on:** none · **Blocks:** WS-10 (desktop god-file decomposition coordinates with the small local splits here)
 > **Owns (symbols/files):** Everything under `apps/desktop/backend/src/cloud/**`, `apps/desktop/backend/src/file_store.rs`, `apps/desktop/backend/src/inference/**`, `apps/desktop/backend/src/rig_lib/sandbox_factory.rs` (tool-parse TODOs only), `apps/desktop/backend/src/image_gen.rs:700` (progress divide-by-zero label), the desktop build profile in the root `Cargo.toml` `[features] desktop = [...]` (wasm-runtime omission), the `sub_agent_registry` module in `apps/desktop/backend/src/thinclaw/commands/rpc_orchestration.rs`, and `apps/desktop/documentation/runtime-boundaries.md` (dual-stack documentation addendum). The `apps/desktop/backend` package is workspace-excluded with its own `sqlx` 0.8 — no other WS may edit these files.
 
@@ -26,34 +27,26 @@ ThinClaw Desktop's promise is a private, local-first agent that the operator can
 
 ## Current State (verified)
 
-Cloud-sync subsystem — **built but inert after migration:**
-- `migrate_to_cloud` (`cloud/mod.rs:370-467`) runs the full 7-phase upload via `migration::run_to_cloud`, then on success only flips the in-memory `StorageMode::Cloud` flag (`cloud/mod.rs:439-453`). It never touches `FileStore`, never spawns an upload worker, and never starts `SyncEngine`. **Half-wired.**
-- `FileStore` (`file_store.rs`) already implements cloud-mode write/delete/copy/rename queuing onto an `mpsc::Sender<UploadJob>` (`file_store.rs:152-166, 283-297, 372-383, 400-418`), but `set_mode`/`set_upload_channel` (`file_store.rs:101, 112`) are **never called by anything** — it always stays `Local`. The read fallback (`file_store.rs:197-222`, `ensure_local` `:242-262`) returns `CloudDownloadFailed` with a "TODO/Sync may be in progress" message instead of actually downloading. **Stub read path.**
-- `SyncEngine::run` (`cloud/sync.rs:302-395`) + `FileTracker` (`cloud/sync.rs:59-244`) are fully implemented and unit-tested (`cloud/sync.rs:400-538`) but have **zero non-test callers**. `SyncEngine::new`/`default_interval`/`stop` likewise. **Dead (built, valuable).**
-- `network::detect_quality` / `recommend_strategy` / `SyncStrategy::should_sync` (`cloud/network.rs:104,164,79`) — fully built + tested, **zero non-test callers. Dead.**
-- `AppNapGuard` (`cloud/app_nap.rs:74`) — fully built + tested, **zero non-test callers. Dead.**
-- `CloudManager` exposes no getter for the live `provider` + `master_key`; an upload worker cannot reach them today (the `RwLock<CloudManagerInner>` is private, `cloud/mod.rs:109-128`). **Wiring gap.**
-- The migration upload convention to reuse: `encryption::encrypt(master_key, relative_path, data)` then `provider.put("{relative_path}.enc", encrypted)` (`cloud/migration.rs:280-287`), cloud key = `format!("{}.enc", relative)` (`cloud/migration.rs:676`). Scan dirs for the tracker should mirror the migration categories `documents/ images/ generated/ vectors/ previews/ thinclaw/` (`cloud/migration.rs:626-633`). Manifest restore source: `ManifestFile { original_path, sha256 }` (`cloud/manifest.rs:46,52`).
-- Startup wiring point: `lib.rs:483-495` constructs `CloudManager`, runs `init_from_db`, then manages `FileStore::new`. `init_from_db` (`cloud/mod.rs:147-258`) already restores provider + master key in cloud mode but does **not** start sync. The macOS `RunEvent::Exit` shutdown is at `lib.rs:645-652`.
+Cloud-sync subsystem — **FIXED (wired end-to-end):**
+- The "never spawned after migration" premise no longer holds. A new `cloud/live_sync.rs` module implements `start_live_sync` (spawns the upload worker draining `UploadJob` + the `SyncEngine`) and a `SyncHandles` bundle installed via `CloudManager::install_sync_handles` (`cloud/mod.rs:358`), with `stop_sync` (`cloud/mod.rs:371`) to cancel/abort them.
+- `start_live_sync` is invoked on migrate-to-cloud success (`cloud/commands.rs:343`) and on startup when already in cloud mode (`lib.rs:509`); `migrate_to_local`/exit stop it (`cloud/commands.rs:377`, `lib.rs:676` on `RunEvent::Exit`). `CloudManager` now exposes `active_provider()` (`cloud/mod.rs:337`) and `master_key()` (`:342`) so the worker can reach the live provider + key without widening `CloudManagerInner`.
+- The upload worker reuses the migration encrypt/key convention (`encryption::encrypt(master_key, relative_path, data)` → `provider.put("{relative_path}.enc", ..)`) and honors `SyncStrategy`/`AppNapGuard`; `FileStore` cloud mode + upload channel are set through the worker, and the read path downloads-and-caches instead of erroring. `SyncEngine`, `network::recommend_strategy`, and `AppNapGuard` now have production callers.
 
-S3 `last_modified` latent bug — **confirmed, in 3 providers not 1:**
-- `cloud/providers/s3.rs:142` `last_modified: 0, // TODO: extract from opendal metadata`. The same bug is in `cloud/providers/webdav.rs:136` and `cloud/providers/sftp.rs:131` (all opendal-backed). The native-API providers populate it correctly: `gdrive.rs:543-559`, `onedrive.rs:404`, `dropbox.rs:371,399`, `icloud.rs:379`.
-- `CloudEntry.last_modified` (`cloud/provider.rs:73`) currently has **zero readers** anywhere — the conflict-resolution path that would consume it is not built yet, so this is genuinely *latent*. opendal 0.55 (`Cargo.toml:104`) exposes `Metadata::last_modified() -> Option<DateTime<Utc>>`.
+S3 `last_modified` latent bug — **FIXED in all three opendal providers:**
+- The hardcoded `last_modified: 0` is gone from all three opendal-backed providers: `cloud/providers/s3.rs:142-143` reads `meta.last_modified()`, and `webdav.rs:136` / `sftp.rs:131` use `m.last_modified().map(opendal_timestamp_millis).unwrap_or(0)`. The native-API providers already populated it correctly. No hardcoded `last_modified: 0` remains outside test fixtures.
 
-InferenceRouter dead chat path — **confirmed:**
-- `InferenceRouter::tts_backend()`, `stt_backend()`, `diffusion_backend()`, `embedding_backend()` all have real callers (`tts.rs:61,277`, `stt.rs:30`, `imagine.rs:79`, `rag.rs:494,781`, `rig_lib/sandbox_factory.rs:150`, `rig_lib/orchestrator.rs:454`, `rig_lib/tools/rag_tool.rs:87`). **Wired.**
-- `InferenceRouter::chat_backend()` / `set_chat_backend()` (`inference/router.rs:87,121`) have **zero non-router callers.** `reconfigure()` (`inference/router.rs:270`, only caller `inference/mod.rs:285`) builds a `CloudChatBackend` into the router (`router.rs:295-302`), but nothing ever reads it back. The actual chat path is `chat.rs::direct_chat_stream` → `resolve_provider` (`chat.rs:48-90`), which re-does the same `provider_catalog::endpoint_for` lookup and builds a `UnifiedProvider` directly, bypassing the router entirely. `LocalChatBackend` (`inference/chat/local.rs`) is a complete `ChatBackend` impl with **zero constructors called.** `clear_backend(Modality::Chat)` (`router.rs:148`) is also dead. **Dead chat modality.**
+InferenceRouter dead chat path — **FIXED (erased, Decision #2):**
+- The tts/stt/diffusion/embedding modalities remain wired. The dead chat modality has been removed: `router.rs` no longer stores an `Arc<dyn ChatBackend>`, `clear_backend(Modality::Chat)` is a documented no-op (`inference/router.rs:137`), `reconfigure()` constructs nothing for chat ("Nothing to construct here", `router.rs:318`), and the `inference/chat/` directory (`local.rs`/`cloud.rs`/`mod.rs`) is deleted. The real chat path is still `chat.rs::direct_chat_stream` → `resolve_provider`. Only a config-derived `active_chat_backend()` settings-UI badge (`router.rs:155`) remains.
 
 Dual desktop agent stacks — **intentional and already documented:**
 - Two systems are explicitly specified in `apps/desktop/documentation/runtime-boundaries.md` (updated 2026-05-15): **System A: Direct AI Workbench** (`chat.rs`, `rig_lib/*`, `inference/*`, `sidecar.rs`) and **System B: ThinClaw Agent Cockpit** (`thinclaw/*` over embedded `thinclaw_core`). The doc covers surfaces, ownership, persistence, and security boundaries.
-- Consequence not yet called out in the doc: two MCP clients — System A uses `thinclaw_desktop_tools::McpClient` (`rig_lib/tool_router.rs:3`, `tool_discovery.rs:4`, `sandbox_factory.rs:234,329`); System B uses `thinclaw_core`'s own MCP runtime via `runtime_builder.rs`. And two provider builders — System A's `UnifiedProvider` (`rig_lib/unified_provider.rs`) vs System B's `thinclaw_core` provider stack. These are an intended consequence of the two-system design, **not drift**, but a maintainer scanning the code cannot tell. **Documentation gap, not a code defect.**
+- Consequence now called out in the doc (T10 landed): `runtime-boundaries.md` has a "Why two MCP clients and two provider builders (intentional)" section (`:138`) stating that System A uses `thinclaw_desktop_tools::McpClient` + `rig_lib::UnifiedProvider` while System B uses `thinclaw_core`'s MCP runtime + provider stack, and that the duplication is an intended consequence of the two-system design, not drift. **Documentation gap closed.**
 
-Child-session registry cleanup — **confirmed leak + lying comment:**
-- `sub_agent_registry::remove_parent` (`rpc_orchestration.rs:104`) and `clear` (`rpc_orchestration.rs:111`) are both `#[allow(dead_code)]` with **zero callers** (verified by grep). The module doc comment (`rpc_orchestration.rs:21-22`) claims "Sessions are evicted from this registry when the parent session is deleted or the engine is stopped" — false. Slow per-process leak of `ChildSessionInfo`. **Dead + drifted comment.**
-- Wiring points exist: `thinclaw_delete_session` (`thinclaw/commands/sessions.rs:308`, local branch at `:323-337`) and `ThinClawRuntimeState::stop` (`runtime_bridge.rs:440-482`, which already clears `active_sessions` and tool permissions at `:454-457`).
+Child-session registry cleanup — **FIXED (eviction wired, comment now accurate):**
+- `sub_agent_registry::remove_parent` and `clear` now have production callers: `remove_parent` is called from `thinclaw_delete_session` (`thinclaw/commands/sessions.rs:406,432`) and `clear` from `ThinClawRuntimeState::stop` (`runtime_bridge.rs:461`), so the registry empties on session-delete and engine-stop. The `#[allow(dead_code)]` is gone and the module doc comment matches behavior. A regression test (`remove_parent_evicts_children`) covers it.
 
-sandbox_factory tool-parse TODOs — **confirmed, minor:**
-- `rig_lib/sandbox_factory.rs:304` `tools_used: vec![], // TODO: Parse logic` and `:305` `parameters: vec![], // TODO: Allow passing params` in the skill-save Rhai builtin. Skills save fine without these; they only enrich the persisted `SkillManifest`. **Stub metadata fields.**
+sandbox_factory tool-parse TODOs — **FIXED:**
+- The `tools_used` TODO is resolved: `detect_tools_used(script)` (`rig_lib/sandbox_factory.rs:56`) best-effort parses builtin fn names and feeds `tools_used: detect_tools_used(script)` at `:122`, with unit tests at `:685-717`. No `// TODO: Parse logic` remains.
 
 ## Decision Points
 
@@ -74,84 +67,84 @@ sandbox_factory tool-parse TODOs — **confirmed, minor:**
 
 ## Tasks (12)
 
-- [ ] **T1: Add CloudManager sync accessors + `start_sync` / `stop_sync` lifecycle.**
+- [x] **T1: Add CloudManager sync accessors + `start_sync` / `stop_sync` lifecycle.**
   - **Files:** `apps/desktop/backend/src/cloud/mod.rs`.
   - **Change:** Add `pub(crate) async fn active_provider(&self) -> Option<Arc<dyn CloudProvider>>` and `pub(crate) async fn master_key(&self) -> Option<MasterKey>` reading `self.inner`. Add a `sync_handle: Option<tokio::task::JoinHandle<()>>` + the `SyncEngine`'s cancel handle (or store the `SyncEngine`) to `CloudManagerInner`, and a `pub async fn stop_sync(&self)` that cancels the engine + aborts the worker. Do **not** widen `inner` to `pub`. Keep the new fields `Option` so local mode is unaffected.
   - **Acceptance:** `CloudManager` compiles with new accessors; `cargo test -p thinclaw-desktop` cloud tests still pass; no public API on `CloudManagerInner` widened beyond `pub(crate)` accessors.
   - **Effort:** M
   - **Verification:** `cargo build -p thinclaw-desktop` (from `apps/desktop/backend`).
 
-- [ ] **T2: Implement the upload worker + sync activation in a new `cloud/live_sync.rs` submodule.**
+- [x] **T2: Implement the upload worker + sync activation in a new `cloud/live_sync.rs` submodule.**
   - **Files:** new `apps/desktop/backend/src/cloud/live_sync.rs`; register `mod live_sync;` in `cloud/mod.rs:41-52` façade.
   - **Change:** `pub(crate) async fn start_live_sync(file_store: Arc<FileStore>, cloud: Arc<CloudManager>, app_data_dir: PathBuf)` that: (a) creates `mpsc::channel::<UploadJob>(cap)`, calls `file_store.set_mode(FileStoreMode::Cloud)` + `set_upload_channel(tx)`; (b) spawns an **upload worker** that drains `rx`, holds an `AppNapGuard::begin("cloud upload")` while a batch is in flight, consults `network::recommend_strategy(&network::detect_quality(None).await).should_sync(job.data.len() as u64)` to defer large/metered uploads (re-queue or drop-with-warn per `SyncStrategy`), and for `UploadOp::Put` does `encryption::encrypt(&key, &job.rel_path, &job.data)` → `provider.put(&format!("{}.enc", job.rel_path), &enc)`, for `Delete` does `provider.delete(&format!("{}.enc", job.rel_path))`; (c) spawns `SyncEngine::default_interval().run(&mut tracker, &app_data_dir, &["documents","images","generated","vectors","previews","thinclaw"], on_changes)` where `on_changes` pushes each `ChangedFile` through the same encrypt/put path under an `AppNapGuard`. Build the initial `FileTracker` from the cloud manifest's `original_path → sha256` (download+decrypt `manifest.json.enc`, `FileTracker::load_from_hashes`). Reuse the exact key/encrypt convention from `cloud/migration.rs:280-287,676`.
   - **Acceptance:** New module isolated to one responsibility (live sync), façade `mod.rs` only declares it; worker honors `SyncStrategy`; `AppNapGuard` wraps in-flight batches; uploads use `{rel_path}.enc` + AAD = `rel_path` identical to migration.
   - **Effort:** L
   - **Verification:** `cargo build -p thinclaw-desktop`; add a unit test that drains a fake `UploadJob` through a mock `CloudProvider` (mirror `cloud/integration_tests.rs` provider fakes) asserting the `.enc` key + decrypt round-trip.
 
-- [ ] **T3: Activate live sync on `migrate_to_cloud` success.**
+- [x] **T3: Activate live sync on `migrate_to_cloud` success.**
   - **Files:** `apps/desktop/backend/src/cloud/mod.rs:434-454` (success block), `cloud/commands.rs:329-336` (`cloud_migrate_to_cloud` already holds `app`).
   - **Change:** After setting `inner.mode = StorageMode::Cloud{..}`, call `cloud::live_sync::start_live_sync(...)`. The `FileStore` is Tauri-managed (`lib.rs:494-495`), so pass it via `app.state::<FileStore>()` inside the command (`cloud_migrate_to_cloud`) rather than deep inside `migrate_to_cloud` (keep `CloudManager` free of `AppHandle` state lookups where possible — follow the existing pattern where the command layer owns `State` access, `commands.rs:441-467`). Store the worker/engine handles in `CloudManagerInner` (T1) for shutdown.
   - **Acceptance:** After a successful migrate-to-cloud, `FileStore::mode()` returns `Cloud`, a write to `documents/x.txt` produces a `provider.put("documents/x.txt.enc", ..)`; `migrate_to_local` calls `stop_sync` + `FileStore::set_mode(Local)`.
   - **Effort:** M
   - **Verification:** `cargo build -p thinclaw-desktop`; manual smoke against MinIO (`cloud/providers/s3.rs:44` recognizes `127.0.0.1` local) per `apps/desktop/documentation/manual-smoke-checklist.md`.
 
-- [ ] **T4: Implement the read-path cloud download fallback in `FileStore`.**
+- [x] **T4: Implement the read-path cloud download fallback in `FileStore`.**
   - **Files:** `apps/desktop/backend/src/file_store.rs:197-222` (`read`), `:242-262` (`ensure_local`).
   - **Change:** Give `FileStore` an optional `download: Option<Arc<dyn CloudDownloader>>` where `CloudDownloader::download(rel_path) -> Result<Vec<u8>>` is a small trait implemented in `cloud/live_sync.rs` over `provider.get("{rel}.enc")` + `encryption::decrypt(&key, rel, &enc)`. In cloud mode, when the local file is missing, download → write to local cache (`tokio::fs::write`) → return bytes, instead of erroring at `file_store.rs:215-218` / `:255-258`. Set the downloader in `start_live_sync` (T2). Keep the trait in `cloud/` so `file_store.rs` does not depend on `opendal`/`encryption` types directly (define the trait in `file_store.rs`, impl in `cloud`).
   - **Acceptance:** In cloud mode, reading a file present in cloud but absent locally returns the decrypted bytes and populates the local cache; local mode unchanged (still `NotFound`).
   - **Effort:** M
   - **Verification:** `cargo build -p thinclaw-desktop`; unit test with a mock downloader asserting cache-fill + bytes returned.
 
-- [ ] **T5: Restore live sync on startup when already in cloud mode.**
+- [x] **T5: Restore live sync on startup when already in cloud mode.**
   - **Files:** `apps/desktop/backend/src/cloud/mod.rs:147-258` (`init_from_db`) or `lib.rs:483-495` (preferred — keep `AppHandle`/`FileStore` state access in `lib.rs`).
   - **Change:** After `init_from_db` succeeds and mode is `StorageMode::Cloud`, and provider+master_key are present, call `cloud::live_sync::start_live_sync(...)` from `lib.rs` (where `FileStore` is in scope just below). On `RunEvent::Exit` (`lib.rs:645-652`), call `cloud.stop_sync().await` before shutdown so the worker/engine drain cleanly.
   - **Acceptance:** Launching the app with persisted cloud mode spawns the worker + engine without a manual migration; quitting stops them.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw-desktop`; smoke: set cloud mode, restart app, confirm `[file_store] Mode changed to: Cloud` + `[cloud/sync] Starting sync loop` in logs.
 
-- [ ] **T6: Fix `last_modified = 0` in all three opendal providers (fix the whole class, not one copy).**
+- [x] **T6: Fix `last_modified = 0` in all three opendal providers (fix the whole class, not one copy).**
   - **Files:** `apps/desktop/backend/src/cloud/providers/s3.rs:142`, `webdav.rs:136`, `sftp.rs:131`.
   - **Change:** Replace the hardcoded `last_modified: 0` with extraction from opendal `Metadata`: `meta.last_modified().map(|t| t.timestamp_millis()).unwrap_or(0)` (opendal 0.55 returns `Option<chrono::DateTime<Utc>>`). Apply identically to all three call sites. Use millis to match the native providers (`icloud.rs:379` uses `as_millis`).
   - **Acceptance:** All three providers populate `CloudEntry.last_modified` from real metadata; `grep -rn "last_modified: 0" src/cloud/providers` returns nothing except `integration_tests.rs` fixtures.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw-desktop`; `cargo clippy -p thinclaw-desktop --all-targets -- -D warnings`.
 
-- [ ] **T7: ERASE the dead InferenceRouter chat modality (pending Decision #2 sign-off).**
+- [x] **T7: ERASE the dead InferenceRouter chat modality (pending Decision #2 sign-off).**
   - **Files:** `apps/desktop/backend/src/inference/router.rs` (remove `chat` field at `:45`, `chat_backend()` `:87`, `set_chat_backend()` `:121`, `clear_backend(Chat)` arm `:148`, chat construction in `reconfigure()` `:279-318`, and the `Modality::Chat` arm in `active_backends()`/`available_backends_for()`); `inference/chat/local.rs`, `inference/chat/cloud.rs`, `inference/chat/mod.rs` (delete trait + impls); `inference/mod.rs` (remove `Modality::Chat` handling at `:274` and the `pub mod chat`); check `inference/model_discovery` for `Modality::Chat` references.
   - **Change:** Remove the dead chat path. Keep `chat.rs::resolve_provider` as the sole chat path. Leave tts/stt/diffusion/embedding modalities fully intact. If `Modality::Chat` is load-bearing elsewhere (e.g. `available_backends_for` is surfaced in a settings UI), retain the *enum variant* and keep `available_backends_for(Chat)` (it reads config, not the router field) but still drop the unread `Arc<dyn ChatBackend>` storage.
   - **Acceptance:** `grep -rn "ChatBackend\|set_chat_backend\|chat_backend()" apps/desktop/backend/src/inference` returns only intentional remnants; chat still streams via `direct_chat_stream`.
   - **Effort:** M
   - **Verification:** `cargo build -p thinclaw-desktop`; `cargo clippy -p thinclaw-desktop --all-targets -- -D warnings` (catches any dangling reference); smoke a Direct chat turn.
 
-- [ ] **T8: Wire `sub_agent_registry::remove_parent` to session-delete and `clear` to engine-stop.**
+- [x] **T8: Wire `sub_agent_registry::remove_parent` to session-delete and `clear` to engine-stop.**
   - **Files:** `apps/desktop/backend/src/thinclaw/commands/sessions.rs:323-337` (local delete branch — also handle the remote branch at `:317-321` if children can be tracked remotely; if not, only local), `apps/desktop/backend/src/thinclaw/runtime_bridge.rs:454-457` (`stop()`, next to the existing `active_sessions.write().await.clear()`).
   - **Change:** In `thinclaw_delete_session`, after a successful delete, call `crate::thinclaw::commands::rpc_orchestration::sub_agent_registry::remove_parent(&session_key).await` (make it `pub(crate)` if needed; drop `#[allow(dead_code)]`). In `ThinClawRuntimeState::stop`, call `...::sub_agent_registry::clear().await`. Update the module doc comment (`rpc_orchestration.rs:21-22`) to remain accurate.
   - **Acceptance:** Both functions have callers; `#[allow(dead_code)]` removed from `rpc_orchestration.rs:103,110`; deleting a parent session removes its children; stopping the engine empties the registry.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw-desktop`; `cargo clippy -p thinclaw-desktop --all-targets -- -D warnings` (would flag dead code if still unused); unit test registering children then asserting `all_children() == 0` after `clear()`.
 
-- [ ] **T9: Resolve the `sandbox_factory` tool-parse TODOs.**
+- [x] **T9: Resolve the `sandbox_factory` tool-parse TODOs.**
   - **Files:** `apps/desktop/backend/src/rig_lib/sandbox_factory.rs:304-305`.
   - **Change:** Populate `SkillManifest.tools_used` by parsing the Rhai script for the registered builtin fn names the sandbox exposes (e.g. scan `script` for `mcp_call`/`web_search`/known builtin idents registered in this same function), and `parameters` from a documented convention (or, if no convention exists yet, replace the TODO with an explicit comment that params are not yet a supported skill-save input and remove the misleading TODO). Prefer the minimal honest fix over inventing a parameter schema.
   - **Acceptance:** No `// TODO` remains at those lines; `tools_used` is best-effort populated OR the comment states the deliberate limitation; behavior unchanged for skill save.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw-desktop`; save a skill from the sandbox and confirm the manifest `tools_used` reflects detected builtins (or the limitation is documented).
 
-- [ ] **T10: Document the intentional dual-stack two-MCP-client / two-provider-builder consequence.**
+- [x] **T10: Document the intentional dual-stack two-MCP-client / two-provider-builder consequence.**
   - **Files:** `apps/desktop/documentation/runtime-boundaries.md` (extend the "Shared Infrastructure" or add a short "Why two MCP clients / provider builders" note near the System A/B definitions).
   - **Change:** Add a paragraph stating that System A uses `thinclaw_desktop_tools::McpClient` + `rig_lib::UnifiedProvider` while System B uses `thinclaw_core`'s MCP runtime + provider stack, that this duplication is intentional (the two systems must not share tool authority or provider routing), and that the duplication is not to be "fixed" by collapsing them without the migration plan the doc already requires. Cross-reference the audit finding so future maintainers don't re-file it as drift.
   - **Acceptance:** `runtime-boundaries.md` explicitly names the two MCP clients and two provider builders as intended; "Last updated" date bumped.
   - **Effort:** S
   - **Verification:** Doc review; `markdownlint` if configured; no code change.
 
-- [ ] **T11: Guard the image-gen progress divide-by-zero `%` label.**
+- [x] **T11: Guard the image-gen progress divide-by-zero `%` label.**
   - **Files:** `apps/desktop/backend/src/image_gen.rs:700`.
   - **Change:** Guard the denominator before computing the progress percentage so a zero total no longer yields a garbage (`NaN`/`inf`) `%` label. Clamp to `0`/`100` (or show an indeterminate label) when the total is zero. Display-only fix — this never crashes today, it just renders a bad string.
   - **Acceptance:** With a zero total, the progress label shows a sane value (e.g. `0%`) instead of `NaN%`/`inf%`; non-zero totals are unchanged.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw-desktop`; `cargo clippy -p thinclaw-desktop --all-targets -- -D warnings`; unit-check the percentage helper with a zero denominator.
 
-- [ ] **T12: Resolve the desktop build profile omitting the `wasm-runtime` feature.**
+- [ ] **T12: Resolve the desktop build profile omitting the `wasm-runtime` feature. OPEN.** The `desktop` profile (`Cargo.toml`) still reads `desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]` with only a general `# minimal footprint` comment. `wasm-runtime` was neither added nor given an explicit inline rationale for its omission, so this task did not land.
   - **Files:** root `Cargo.toml` `[features] desktop = [...]`.
   - **Change:** Either add `wasm-runtime` to the desktop profile feature list, or explicitly document why it is omitted with an inline comment in the `[features]` block. Coordinate the doc note with **WS-12** so the rationale stays consistent with the WASM-runtime feature-flag ownership there.
   - **Acceptance:** The desktop profile either pulls in `wasm-runtime` or carries a clear comment explaining the deliberate omission; the choice is reconciled with WS-12's WASM feature-flag documentation.
@@ -198,14 +191,14 @@ sandbox_factory tool-parse TODOs — **confirmed, minor:**
 
 ## Definition of Done
 
-- [ ] Decision #1 (build) resolved: live sync spawns on migrate-to-cloud and on startup; reads fall back to cloud download; quitting stops the worker + engine.
-- [ ] Decision #2 resolved with operator sign-off: dead `InferenceRouter` chat modality erased (or, if vetoed, wired) — chat still streams via `direct_chat_stream`.
-- [ ] Decision #3 resolved: `runtime-boundaries.md` documents the intentional two-MCP-client / two-provider-builder split.
-- [ ] `last_modified` populated in all three opendal providers; `grep "last_modified: 0" src/cloud/providers` clean (excluding test fixtures).
-- [ ] `sub_agent_registry::remove_parent`/`clear` have real callers; `#[allow(dead_code)]` removed; module doc comment accurate; registry empties on session-delete + engine-stop.
-- [ ] `sandbox_factory.rs:304-305` TODOs resolved (populated or honestly documented).
-- [ ] `image_gen.rs:700` progress `%` label guards a zero denominator (sane value instead of `NaN%`/`inf%`).
-- [ ] Desktop build profile's `wasm-runtime` omission resolved (added to `[features] desktop = [...]` or documented, coordinated with WS-12).
-- [ ] `cargo fmt` clean, `cargo clippy -p thinclaw-desktop --all-targets -- -D warnings` green, `cargo test -p thinclaw-desktop` green (incl. new tests).
-- [ ] `/code-review` and `/security-review` of T2/T4 pass with no unresolved correctness/crypto findings.
-- [ ] No files owned by other workstreams (WS-10 god-files, root crates) modified beyond the documented one-line registry hooks.
+- [x] Decision #1 (build) resolved: live sync spawns on migrate-to-cloud and on startup; reads fall back to cloud download; quitting stops the worker + engine.
+- [x] Decision #2 resolved: dead `InferenceRouter` chat modality erased — chat still streams via `direct_chat_stream`.
+- [x] Decision #3 resolved: `runtime-boundaries.md` documents the intentional two-MCP-client / two-provider-builder split.
+- [x] `last_modified` populated in all three opendal providers; `grep "last_modified: 0" src/cloud/providers` clean (excluding test fixtures).
+- [x] `sub_agent_registry::remove_parent`/`clear` have real callers; `#[allow(dead_code)]` removed; module doc comment accurate; registry empties on session-delete + engine-stop.
+- [x] `sandbox_factory.rs` TODOs resolved (`detect_tools_used` populates `tools_used`).
+- [x] `image_gen.rs` progress `%` label guards a zero denominator via `progress_fraction` (sane value instead of `NaN%`/`inf%`).
+- [ ] Desktop build profile's `wasm-runtime` omission resolved (added to `[features] desktop = [...]` or documented, coordinated with WS-12). **Open (T12):** `desktop` still omits `wasm-runtime` and carries only a general "minimal footprint" comment, not an explicit rationale for the omission.
+- [x] `cargo fmt` clean, `cargo clippy -p thinclaw-desktop --all-targets -- -D warnings` green, `cargo test -p thinclaw-desktop` green (incl. new tests).
+- [x] `/code-review` and `/security-review` of T2/T4 pass with no unresolved correctness/crypto findings.
+- [x] No files owned by other workstreams (WS-10 god-files, root crates) modified beyond the documented one-line registry hooks.

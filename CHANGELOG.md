@@ -13,12 +13,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native Swift iOS + watchOS surface (`apps/ios`): device pairing (QR + scoped tokens, TLS listener), streaming chat, push-pull approvals, LAN discovery, APNs push, home-screen widgets with Live Activity run tracking, and a watchOS companion with companion tokens/relay and wrist approvals.
+- Typed Rust client SDK (`crates/thinclaw-client`) wrapping the gateway HTTP+SSE surface (send/stream/history/threads/approvals) with an OpenAI-compatible fast path and tokens redacted from `Debug`.
+- Prometheus observability backend with `GET /metrics`.
+- Real `GET /api/health` readiness probe: 200 only when the database is reachable, an LLM provider is configured, and an inbound channel is wired; otherwise 503.
+- Plan mode (`/plan`): propose actions and approve before running.
+- Unified `/rewind` command: restores both conversation (to turn N) and files via turn-tagged shadow-git checkpoints, with a non-destructive list/dry-run.
+- Argument-scoped tool permission rules.
+- Zero-config `web_search` built-in tool (keyless DuckDuckGo, SSRF-guarded, size-capped).
+- MCP health monitor that populates `McpRuntimeHealth` and auto-reconnects crashed stdio servers with per-server exponential backoff.
+- Loop-hardening observability: 8 new `thinclaw_loop_*` metric series covering loop and phase starts, stops, iterations, retries, and timing.
+- `ExtensionKind::NativePlugin`: signature-gated native plugin loading, default-off.
+- Discord Ed25519 webhook signature verification (host-side).
+- Repo-project supervisor: GitHub App-backed automation with a live pipeline and connector, plus an autoplanner behind the `REPO_PROJECTS_AUTOPLAN` env gate (default-off).
+- Opt-in gateway RBAC with role-scoped capability gating.
+- Opt-in host-direct filesystem confinement (seatbelt/bwrap).
+- First-party push: `ApnsPusher`, device push registration, and a content-free notifier.
+- Whole-agent encrypted backup: `thinclaw backup` export/import.
+- Desktop cockpit panels for session search, trajectory archive, rollback/checkpoints, and channel config, plus an undo/redo chat toolbar and advisor/self-repair/context-compaction lifecycle events.
+- Rolling daily file log sink.
+
 ### Changed
 
+- Landed a 13-workstream audit-driven remediation across security, DB correctness, WASM channels, self-repair, desktop, experiments, LLM routing, docs, and test/CI infrastructure.
+- Decomposed 10 historical god-files into focused directory modules, and added a CI god-file size guard (`MAX_LINES=2000`).
+- Consolidated history/store onto `thinclaw-db`.
+- Completed the `thinclaw-media` crate migration, slimming `src/media` to a facade.
+- Marked `StatusUpdate` `#[non_exhaustive]` with fallback match arms.
+- `ROUTE_TABLE` now classifies all 346 desktop bridge commands, enforced by a total-coverage CI test.
+- Migrated gated desktop commands to a typed `BridgeError`.
+- Hardened the agentic loop end to end: retry policy, compaction summary reuse, and failure backoff.
+- Gated sub-agents by the shared `CostGuard` with an optional per-principal concurrency cap (`SUBAGENT_MAX_PER_PRINCIPAL`).
+- Migrated the desktop frontend to Tailwind CSS v4, consolidated cargo/npm dependency bumps, and added a `[workspace.dependencies]` table for shared deps.
+- Marked ThinClaw Desktop as experimental.
 - Refreshed channel, APNs/browser-push, ComfyUI media-generation, setup, CLI, tool/skill, parity, and dependency documentation to match the current native lifecycle, built-in sidecar, and WASM channel architecture, while keeping real-provider smoke requirements clearly marked as credential-gated validation.
 - Removed stale audit-planning closure documents from the current docs tree.
 
 ### Fixed
+
+- Closed the empty `gateway_auth_token` auth bypass at both layers by filtering empty/whitespace tokens.
+- OAuth state is now generated and constant-time-validated end to end (CSRF).
+- Added DNS-rebinding protection via host pinning and fixed the trusted-proxy CIDR check.
+- Sanitized libSQL FTS5 `MATCH` injection.
+- Confined sandbox proxy credentials behind a store-backed resolver.
+- Enforced WASM table/instance resource limits.
+- Fixed the multibyte-UTF-8 `split_message` panic in the telegram, slack, and discord channels.
+- Added routine run-lease zombie reaping.
+- Fixed streaming `finish_reason` for tool calls.
+- Guarded the `image_gen` progress divide-by-zero.
+- Replaced hot-path `expect`/parse panics with typed errors and moved `OnceLock` hot-path regexes/selectors off the hot path.
+- Removed blocking syscalls from async functions.
+- Added Gmail unattended OAuth token refresh (proactive + on-401) so long-running deployments don't silently stop.
+- Restored cross-turn tool-result continuity: `Thread::messages()` reconstructs prior turns' tool calls and results.
+- Invalidated the learning ready-provider cache on bulk settings import.
+- Resolved an RBAC route-coverage gap and a pre-auth KDF/zip DoS.
+
+### Removed
+
+- Erased roughly 7K lines of verified-dead code, including 14 `src/safety` orphans, 3 unwired CLI modules, the `self_message` anti-loop module, the `qr_pairing` scaffold, the tailscale identity module, the standalone heartbeat runner, the `SmartRoutingProvider` decorator, and the `InferenceRouter` chat modality.
+- Removed the orphaned `DangerousToolTracker`.
+- Removed dead desktop frontend code, dead web-search probe commands, and the dead WhatsApp QR login.
+
+### Security
+
+- Constant-time OAuth-state comparison via `subtle::ConstantTimeEq`.
+- `subtle`-based constant-time comparisons in `thinclaw-tools` for pairing secrets, webhook secrets, and device tokens.
+- Added desktop backend advisory scanning in CI (`cargo deny check advisories`) with a desktop-scoped `deny.toml`.
+- Zero cargo-deny advisory ignores (`deny.toml` `[advisories] ignore = []`).
+- Patched RUSTSEC-2026-0187 (pdf-extract/lopdf), RUSTSEC-2026-0188 (wasmtime-wasi), and RUSTSEC-2026-0190 (anyhow) at the source.
+- Hardened the injection regex, audited in-memory secret access, and warn on token-in-URL.
 
 ## [0.14.0](https://github.com/RNT56/ThinClaw/releases/tag/v0.14.0) - 2026-05-14
 

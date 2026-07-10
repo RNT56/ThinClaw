@@ -5,7 +5,14 @@
 
 ## Outcome
 
-**The entire 13-workstream remediation is complete.** Every confirmed bug fixed, every security hole closed, every "half-wired/aspirational" vision feature wired end-to-end, ~14K lines of dead/duplicate code removed (operator-approved, evidence-reviewed), the dual persistence layer consolidated to one, and the WS-10 architecture overhaul finished: **10 god-files decomposed** (`wasm/wrapper.rs`, `api/experiments.rs`, `agent/thread_ops.rs`, `llm/runtime_manager.rs`, `extensions/manager.rs`, `workspace_core.rs`, the 3 onboarding files, and the 3 desktop files) plus the `thinclaw-media` crate migration finished. Every commit verified green before landing.
+**All 13 workstreams landed and the remediation is closed.** Every confirmed bug fixed, every security hole closed, every "half-wired/aspirational" vision feature wired end-to-end, ~7K lines of verified-dead code erased in the Wave-4 sweep (operator-approved, evidence-reviewed), the dual persistence layer consolidated to one, and the WS-10 architecture overhaul finished: **10 god-files decomposed** (`wasm/wrapper.rs`, `api/experiments.rs`, `agent/thread_ops.rs`, `llm/runtime_manager.rs`, `extensions/manager.rs`, `workspace_core.rs`, the 3 onboarding files, and the 3 desktop files) plus the `thinclaw-media` crate migration finished. Every commit verified green before landing.
+
+Six individual tasks were **superseded, deferred, or are not verifiable from the working tree**
+rather than delivered as originally specified: WS-01 T11 (filesystem cwd-containment, superseded by
+a warned unrestricted trusted-operator mode), WS-03 T3/T4/T6 (shared helper SDK extraction), WS-04
+T12 (`wasm-runtime` in the desktop profile), and WS-13 T2 (a GitHub tracking issue). They are
+enumerated with evidence under [Residual open items](./README.md#residual-open-items). Do not read
+"closed" as "100% of tasks delivered."
 
 ## Commits
 
@@ -20,7 +27,7 @@
 | `41091179` | **WS-04** Desktop: cloud-sync built + S3 metadata + orchestration |
 | `c5c27e56` | **WS-07** Experiments + **WS-08** LLM routing consolidation |
 | `1ed26495` | **WS-12** Docs drift sync + **WS-13** Test/CI infrastructure |
-| `4f26f5f4` | **Wave 4** Erase ~8K lines of verified-dead code (10 dossier items) |
+| `4f26f5f4` | **Wave 4** Erase ~7K lines of verified-dead code (WS-11 + D-01..D-06) |
 | `43460933` | **WS-10** history/store consolidation + **WS-11** wire voice_wake |
 | `d0328176` | **WS-10** decompose `wasm/wrapper.rs` (5701L → 6 modules) |
 | `8222b581` | **WS-10** decompose `api/experiments.rs` (5919L → 9 modules) |
@@ -56,7 +63,7 @@
 - **Experiments** — artifact-retention reaper + durable `ArtifactStore` + cost-basis surfacing.
 - **LLM routing** — RoutePlanner canonical, CheapSplit cascade wired, finish_reason fixed.
 
-## Dead code erased (Wave 4, ~8K lines, operator sign-off + per-item dossier)
+## Dead code erased (Wave 4, ~7K lines, WS-11 + D-01..D-06, operator sign-off + per-item dossier)
 
 `src/safety/*` orphans · dead CLI stubs · InferenceRouter chat modality · `SmartRoutingProvider` decorator · `self_message` · `qr_pairing` · `tailscale` discovery · `RepairTask` · standalone heartbeat runner · leaky `Reasoning.safety`/`SpawnSubagentTool.executor` fields · dead HTTPS cred mappings + misc helpers. Each had a verified live replacement — see [DELETION-DOSSIER.md](./DELETION-DOSSIER.md).
 
@@ -80,4 +87,4 @@ The biggest remaining file (`channels-src/telegram/src/lib.rs`, a packaged WASM 
 
 ## Deferred (tracked, non-blocking)
 
-See [FOLLOWUPS.md](./FOLLOWUPS.md) (F-01…F-19): e.g. the experiments-backend credential path, the MCP-client DNS pin, the shared channel/tool SDK, observability per-event emission, voice CI ALSA + STT-capture-on-wake glue. None is a regression; each is a residual to fully close its area.
+The `F-01…F-19` residuals were then closed in the follow-up pass (see [FOLLOWUPS.md](./FOLLOWUPS.md), 2026-06-26 resolution table): the experiments-backend credential path (F-01), MCP-client DNS pin (F-02), observability per-event emission (F-11), and voice STT-capture-on-wake glue (F-18) all landed. **Two genuine residuals remain:** `F-13` (opendal/S3 object-store `ArtifactStore` backend — deferred to avoid a heavy `opendal` dependency without a dedicated `cargo deny`/license review) and `F-09` (full shared-`include!` SDK extraction — partial; the byte-identical drift-guard test is in place). Neither is a regression.

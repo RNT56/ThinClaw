@@ -23,6 +23,8 @@ Use this page to pick the right path for your role instead of relying on whichev
 - Configuring CLI, TUI, and WebUI skins: go to [TERMINAL_SKINS.md](TERMINAL_SKINS.md)
 - Choosing or configuring providers: go to [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - Understanding channels: go to [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md)
+- Understanding the mobile/iOS surface contract: go to [MOBILE_APP.md](MOBILE_APP.md)
+- Understanding the mobile security model: go to [MOBILE_SECURITY.md](MOBILE_SECURITY.md)
 - Understanding extensions and tools: go to [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md)
 - Understanding repository layout and app/runtime placement: go to [REPOSITORY_LAYOUT.md](REPOSITORY_LAYOUT.md)
 - Understanding crate ownership and thin-shell boundaries: go to [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md)
@@ -71,6 +73,8 @@ Use this page to pick the right path for your role instead of relying on whichev
 
 - [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md)
 - [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md)
+- [MOBILE_APP.md](MOBILE_APP.md)
+- [MOBILE_SECURITY.md](MOBILE_SECURITY.md)
 - [REPOSITORY_LAYOUT.md](REPOSITORY_LAYOUT.md)
 - [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md)
 - [BUILD_PROFILES.md](BUILD_PROFILES.md)
@@ -97,6 +101,8 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Platform-specific deploy runbooks | [deploy/](deploy/) |
 | Remote gateway and tunnel access | [deploy/remote-access.md](deploy/remote-access.md) |
 | Channel architecture | [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md) |
+| Mobile/iOS surface contract | [MOBILE_APP.md](MOBILE_APP.md) |
+| Mobile security model | [MOBILE_SECURITY.md](MOBILE_SECURITY.md) |
 | Security and trust | [SECURITY.md](SECURITY.md) |
 | Extension architecture | [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md) |
 | Repository layout and app/runtime placement | [REPOSITORY_LAYOUT.md](REPOSITORY_LAYOUT.md) |

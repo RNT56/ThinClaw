@@ -326,6 +326,13 @@ scripts/generate-api.sh   # vendors the spec, runs swift-openapi-generator
 Generated sources are committed; `scripts/check-generated-drift.sh` gates CI.
 Never hand-edit generated code or the vendored spec.
 
+A few device-scoped `jobs:read` GET routes are **not** in the snapshot and are
+decoded by hand instead of generated: `GET /api/jobs/{id}/events` (the polled
+job event log, whose `ThinClawCore.JobEvent` is a hand-rolled decode target),
+`GET /api/jobs/{id}/files/list`, and `GET /api/jobs/{id}/files/read`. Their Rust
+handlers lack `#[utoipa::path]`, so the snapshot and its drift gate don't cover
+them. See `docs/MOBILE_APP.md` → API contract for the full list.
+
 ## TestFlight (fastlane-free archive)
 
 TestFlight builds use raw `xcodebuild archive` + `-exportArchive` +

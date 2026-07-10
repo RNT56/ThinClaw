@@ -73,7 +73,7 @@ command to `ROUTE_TABLE`, then update [`remote-gateway-route-matrix.md`](remote-
 - Generated TS type: `apps/desktop/frontend/src/lib/bindings.ts`
 - Local conversion: `apps/desktop/backend/src/thinclaw/event_mapping.rs`
 - Local transport: `apps/desktop/backend/src/thinclaw/tauri_channel.rs`
-- Remote transport: `apps/desktop/backend/src/thinclaw/remote_proxy.rs`
+- Remote transport: `apps/desktop/backend/src/thinclaw/remote_proxy/`
 
 Every current ThinClaw `StatusUpdate` variant must be either mapped to `UiEvent` or explicitly documented as intentionally ignored. As of this checkpoint, Desktop maps chat, plan, usage, cost, lifecycle, approval, auth, canvas, job, subagent, agent-message, and routine events. Unknown remote gateway SSE events are forwarded as `UiEvent::GatewayEvent` instead of being silently dropped.
 

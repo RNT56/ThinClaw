@@ -47,6 +47,14 @@ standard). All series are prefixed `thinclaw_`.
 | `thinclaw_agent_errors_total` | counter | component | component errors |
 | `thinclaw_channel_messages_total` | counter | channel, direction | channel traffic |
 | `thinclaw_heartbeat_ticks_total` | counter | — | heartbeat ticks |
+| `thinclaw_loop_starts_total` | counter | loop_kind | loop start events by loop kind |
+| `thinclaw_loop_stops_total` | counter | loop_kind, stop_reason, failed | loop stop events |
+| `thinclaw_loop_iterations_total` | counter | loop_kind, stop_reason, failed | iterations reported at loop stop |
+| `thinclaw_loop_retries_total` | counter | loop_kind, stop_reason, failed | retries reported at loop stop |
+| `thinclaw_loop_phase_runs_total` | counter | loop_kind, phase, stop_reason, failed | loop phase completions |
+| `thinclaw_loop_phase_seconds` | histogram | loop_kind, phase, stop_reason, failed | loop phase duration |
+| `thinclaw_loop_phase_iterations_total` | counter | loop_kind, phase, stop_reason, failed | iterations per loop phase |
+| `thinclaw_loop_phase_retries_total` | counter | loop_kind, phase, stop_reason, failed | retries/errors per loop phase |
 | `thinclaw_tokens_used_total` | counter | — | cumulative model tokens |
 | `thinclaw_request_latency_seconds` | histogram | — | generic request latency |
 | `thinclaw_active_jobs` | gauge | — | active jobs |

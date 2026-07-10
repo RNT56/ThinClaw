@@ -1,6 +1,7 @@
 # WS-02 — Database Correctness & Backend Parity
 
-> **Status:** Not started · **Priority:** P0 · **Risk:** medium · **Effort:** M
+> **Status:** ✅ Landed (2026-06-23), commit `4f88c43e` (Wave 0: security & CI hardening + DB correctness). All tasks shipped. This plan is complete; do not re-execute it.
+> **Priority:** P0 · **Risk:** medium · **Effort:** M
 > **Depends on:** none · **Blocks:** WS-13 (test-infra dual-backend CI gating consumes the assertions this WS adds)
 > **Owns (symbols/files):**
 > - `crates/thinclaw-db/src/libsql/conversations.rs` — `LibSqlBackend::search_conversation_messages` (FTS5 fix)
@@ -36,7 +37,7 @@ ThinClaw ships two first-class database backends (Postgres for servers, libSQL f
 - **WIRED (correct, reference pattern):** `crates/thinclaw-db/src/libsql/workspace.rs:677-693` — `hybrid_search` sanitizes the FTS5 query by splitting on non-`[alphanumeric_]` chars and quoting each token (`"time" "sensitive" "notes"`), or OR-joining quoted morphological keywords from `expand_query_keywords`. Its comment explicitly names "hyphens, colons, etc." This is the pattern to reuse. The `MATCH` is at line 706 and only ever receives the sanitized string.
 - **WIRED (correct, no fix needed):** `crates/thinclaw-db/src/postgres_store/conversation_queries.rs:459-510` — Postgres `search_conversation_messages` uses `websearch_to_tsquery('simple', $2)` (lines 492, 498), which is the punctuation-tolerant Postgres parser. Raw user input is fine here.
 - **WIRED (correct, no fix needed):** `crates/thinclaw-db/src/postgres_workspace.rs:532-559` — Postgres workspace `fts_search` uses `plainto_tsquery('english', $3)` (lines 545, 550); `plainto_tsquery` also tolerates punctuation. The expanded query is OR-joined with `|` upstream at line 465 but Postgres parses it safely.
-- **DRIFTED / BUGGY (the target):** `crates/thinclaw-db/src/libsql/conversations.rs:811-868` — `LibSqlBackend::search_conversation_messages` binds the **trimmed-but-otherwise-raw** `query` directly to `conversation_messages_fts MATCH ?1` (line 846, bound at line 854). No sanitization. A query like `foo:bar`, `"unterminated`, or `re-enable` is interpreted as FTS5 syntax and throws `DatabaseError::Query`. Postgres tolerates all three. This is the **sole** unsanitized raw-input → FTS5 `MATCH` site in the codebase.
+- **FIXED (was the target):** `crates/thinclaw-db/src/libsql/conversations/mod.rs` — `LibSqlBackend::search_conversation_messages` previously bound the trimmed-but-otherwise-raw `query` directly to `conversation_messages_fts MATCH ?1`, so `foo:bar`, `"unterminated`, or `re-enable` threw `DatabaseError::Query` where Postgres tolerated them. Now it computes `let match_query = super::fts::sanitize_fts5_match(query);` (`conversations/mod.rs:574`) and binds the sanitized value. This was the sole unsanitized raw-input → FTS5 `MATCH` site; it is closed. (The file also moved from `libsql/conversations.rs` to `libsql/conversations/mod.rs` during the god-file decomposition.)
 - **PARITY AUDIT RESULT (item 2 — complete):** grep of both backends for `MATCH` / `tsquery` / `LIKE` text-search construction yields exactly four query sites plus one LIKE:
   - `libsql/conversations.rs:846` → **unsanitized FTS5 MATCH (the bug).**
   - `libsql/workspace.rs:706` → sanitized FTS5 MATCH (correct).
@@ -44,8 +45,8 @@ ThinClaw ships two first-class database backends (Postgres for servers, libSQL f
   - `postgres_workspace.rs:545,550` → `plainto_tsquery` (correct).
   - `libsql/workspace.rs:273` → `path LIKE ?3` is a **parameterized** `LIKE` over a path, not FTS5 `MATCH`; it cannot throw on punctuation and is not a divergence. No action.
   - **Conclusion: no sibling FTS5-MATCH divergence. The fix lands in exactly one place.** (This directly avoids the "fix landing in only one of N copies" trap — there is genuinely only one copy to fix, now confirmed.)
-- **HALF-WIRED (item 3 — schema_divergence):** `tests/schema_divergence.rs:30-97` compares only **column-name sets** per table (`SchemaSnapshot.tables: BTreeMap<String, BTreeSet<String>>` at line 24-27). It ignores types, nullability, and indexes. It **skips** (returns Ok early) when `DATABASE_URL` is absent (lines 35-38) and on every connect/migrate failure (lines 41-72), so a missing DB silently passes.
-- **ALREADY PARAMETERIZED OVER BACKENDS (item 4 — partial):** `tests/db_contract/support.rs:22-40` selects the backend from `DATABASE_BACKEND` env (defaults to libsql if compiled with the feature, else postgres) and returns a single `Arc<dyn Database>`. CI runs the suite **twice** — `db-contract-libsql` (`ci.yml:640-654`) and `db-contract-postgres` (`ci.yml:656-689`) — each setting `DATABASE_BACKEND`. So the *suite* already runs on both backends; what is missing is a **search assertion that exercises punctuation** (the existing `conversation_message_flow_contract` at `tests/db_contract/conversations.rs:103-108` only searches the bare word `"contract"`, which never hits the FTS5 special-char path). The `db_contract.rs:51` etc. tests **`return` (skip)** when no DB is available — same fail-vs-skip weakness as schema_divergence, but item 3 only asks us to flip schema_divergence.
+- **FIXED (item 3 — schema_divergence):** `tests/schema_divergence.rs` previously compared only column-name sets per table and skipped (returned Ok) when `DATABASE_URL` was absent, so a missing DB silently passed. Now the snapshot model is `columns: BTreeMap<String, ColumnInfo { normalized_type, not_null }>` plus `indexes: BTreeSet<IndexInfo { columns, unique }>` (`schema_divergence.rs:43-71`), comparing normalized types, nullability, and indexes; and `DATABASE_URL` is read via `.expect(...)` (`:126`) so a missing URL panics (hard failure) rather than skipping. The `SchemaAllowlist` carries `ignore_types`/`ignore_nullability`/`ignore_indexes`/`allowed_exact` so intended backend differences stay green.
+- **ALREADY PARAMETERIZED OVER BACKENDS (item 4 — partial):** `tests/db_contract/support.rs:22-40` selects the backend from `DATABASE_BACKEND` env (defaults to libsql if compiled with the feature, else postgres) and returns a single `Arc<dyn Database>`. CI runs the suite **twice** — `db-contract-libsql` (`ci.yml:640-654`) and `db-contract-postgres` (`ci.yml:656-689`) — each setting `DATABASE_BACKEND`. So the *suite* already runs on both backends; the missing **search assertion that exercises punctuation** has since been added — `conversation_search_tolerates_punctuation_contract` (`tests/db_contract/conversations.rs:129`) now runs on both backends via the per-`DATABASE_BACKEND` jobs. The `db_contract` tests still **`return` (skip)** when no DB is available — same fail-vs-skip shape as the old schema_divergence, but item 3 deliberately only flipped schema_divergence (Decision 4).
 
 ## Decision Points
 
@@ -68,7 +69,7 @@ ThinClaw ships two first-class database backends (Postgres for servers, libSQL f
 
 ## Tasks
 
-- [ ] **T1: Extract a shared libSQL FTS5 sanitizer and apply it to transcript search.**
+- [x] **T1: Extract a shared libSQL FTS5 sanitizer and apply it to transcript search.**
   - **Files:** create `crates/thinclaw-db/src/libsql/fts.rs`; edit `crates/thinclaw-db/src/libsql/mod.rs` (add `mod fts;` to the submodule list, lines 9-19); edit `crates/thinclaw-db/src/libsql/conversations.rs` (`search_conversation_messages`, ~line 820-854); edit `crates/thinclaw-db/src/libsql/workspace.rs` (refactor inline sanitizer at 677-693 to call the shared fn).
   - **Change:**
     - New `fts.rs` with `pub(super) fn sanitize_fts5_match(query: &str) -> String` that reproduces the quote-each-token branch from `workspace.rs:680-686`: split on `|c: char| !c.is_alphanumeric() && c != '_'`, drop empties, wrap each token in double quotes, join with a space. Returns `String::new()` when no tokens survive. Add a module doc comment naming the hazard (FTS5 treats `-`, `:`, `"`, `*`, `^`, `(`, `)`, `AND/OR/NOT` as operators). Add `#[cfg(test)] mod tests` with unit cases: `foo:bar` → `"foo" "bar"`, `re-enable` → `"re" "enable"`, `"unterminated` → `"unterminated"`, empty/whitespace → `""`, `hello_world` → `"hello_world"`.
@@ -78,14 +79,14 @@ ThinClaw ships two first-class database backends (Postgres for servers, libSQL f
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw-db --no-default-features --features libsql fts` (unit tests); `cargo clippy -p thinclaw-db --no-default-features --features libsql --all-targets -- -D warnings`.
 
-- [ ] **T2: Add a punctuation-query regression test to the db_contract conversation suite.**
+- [x] **T2: Add a punctuation-query regression test to the db_contract conversation suite.**
   - **Files:** `tests/db_contract/conversations.rs` (new `#[tokio::test]`, alongside `conversation_message_flow_contract` at line 49).
   - **Change:** add `async fn conversation_search_tolerates_punctuation_contract()` that: skips via `contract_db_or_skip()` (matching the existing pattern at line 51); creates a conversation; inserts messages whose content contains tokens that would be FTS5-hostile if searched raw (e.g. body `"re-enable the time:sensitive feature"`); then calls `search_conversation_messages(&user, q, ..)` for each of these queries: `"re-enable"`, `"time:sensitive"`, `"\"quoted"`, `"foo AND bar"`. For each, assert the call returns `Ok` (does **not** error) — i.e. `.expect("punctuation query must not error")`. At least the `re-enable`/`time:sensitive` cases should also return ≥1 hit (the tokens exist in the body). This test runs on **both** backends because CI invokes the suite once per `DATABASE_BACKEND` (libsql + postgres jobs at `ci.yml:640-689`), satisfying item (4) for the search path. Before T1, the libsql run of this test fails (proving the bug); after T1 it passes; the postgres run passes throughout (proving parity).
   - **Acceptance:** new test exists; on a libSQL DB it fails pre-T1 and passes post-T1; on Postgres it passes both pre and post. The four punctuation queries each return `Ok`.
   - **Effort:** S
   - **Verification (libSQL, no external DB needed):** `DATABASE_BACKEND=libsql cargo test --test db_contract --no-default-features --features libsql conversation_search_tolerates_punctuation -- --nocapture`. **Verification (Postgres, needs DB):** `DATABASE_BACKEND=postgres DATABASE_URL=postgres://thinclaw:thinclaw@localhost:5432/thinclaw_test cargo test --test db_contract --no-default-features --features postgres conversation_search_tolerates_punctuation -- --nocapture --test-threads=1` (requires a local `pgvector/pgvector:pg17` Postgres with migrations applied — see CLAUDE.md local-dev Postgres note).
 
-- [ ] **T3: Strengthen schema_divergence to compare types, nullability, and indexes.**
+- [x] **T3: Strengthen schema_divergence to compare types, nullability, and indexes.**
   - **Files:** `tests/schema_divergence.rs`; `tests/schema_divergence_allowlist.json` (extend schema as needed).
   - **Change:**
     - Replace `SchemaSnapshot { tables: BTreeMap<String, BTreeSet<String>> }` (lines 24-27) with a richer column model, e.g. `BTreeMap<String /*table*/, BTreeMap<String /*column*/, ColumnInfo>>` where `ColumnInfo { normalized_type: String, not_null: bool }`, plus a per-table `BTreeSet<IndexInfo>` (`{ columns: Vec<String>, unique: bool }`).
@@ -98,14 +99,14 @@ ThinClaw ships two first-class database backends (Postgres for servers, libSQL f
   - **Effort:** L
   - **Verification:** `DATABASE_URL=postgres://thinclaw:thinclaw@localhost:5432/thinclaw_test cargo test --test schema_divergence --no-default-features --features "postgres libsql" -- --nocapture --test-threads=1` (needs live Postgres + migrations). Also `cargo clippy --test schema_divergence --no-default-features --features "postgres libsql" --all-targets -- -D warnings`.
 
-- [ ] **T4: Make schema_divergence FAIL (not skip) when DATABASE_URL is absent.**
+- [x] **T4: Make schema_divergence FAIL (not skip) when DATABASE_URL is absent.**
   - **Files:** `tests/schema_divergence.rs` (lines 35-38, and the connect/migrate `eprintln!+return` arms at 41-72).
   - **Change:** replace the `let Some(base_url) = std::env::var("DATABASE_URL").ok() else { eprintln!(...); return; }` skip (lines 35-38) with `let base_url = std::env::var("DATABASE_URL").expect("schema_divergence requires DATABASE_URL; this test is gated behind the postgres+libsql features and only runs in the schema-divergence CI job, which always provisions Postgres");`. Convert the schema-create / url-build / connect / migrate `eprintln!("skipping...") + return` arms (41-72) into `.expect(...)`/`panic!` so an unreachable/broken DB is a hard failure, not a silent pass. Keep the `#![cfg(all(feature = "postgres", feature = "libsql"))]` gate (line 1) — that is what stops it from breaking single-feature local builds.
   - **Acceptance:** running the test with `DATABASE_URL` unset (but with both features) panics with a clear message instead of returning Ok; running it with a healthy DB still passes.
   - **Effort:** S
   - **Verification:** `cargo test --test schema_divergence --no-default-features --features "postgres libsql"` with `DATABASE_URL` **unset** → expect a test FAILURE (panic). Then set `DATABASE_URL` to a live DB → expect PASS.
 
-- [ ] **T5: Record the dual-backend CI-gating requirement for WS-13 (no ci.yml edits here).**
+- [x] **T5: Record the dual-backend CI-gating requirement for WS-13 (no ci.yml edits here).**
   - **Files:** none in this WS (do not edit `.github/workflows/ci.yml`). Capture as a hand-off note in the WS-13 doc / execution playbook.
   - **Change:** document for WS-13: (a) `schema-divergence` job (`ci.yml:691-723`) must keep `DATABASE_URL` always set — T4 makes a missing URL a hard failure, which is now the desired gate; (b) the `db-contract-libsql` and `db-contract-postgres` jobs (`ci.yml:640-689`) already cover the new punctuation regression test from T2 because they invoke the whole `db_contract` target per backend — no new job needed, but WS-13 should confirm both jobs stay required-for-merge so the parity assertion can't be bypassed.
   - **Acceptance:** WS-13 acknowledges the gating note; no `ci.yml` change is attributed to WS-02.
@@ -157,13 +158,13 @@ ThinClaw ships two first-class database backends (Postgres for servers, libSQL f
 
 ## Definition of Done
 
-- [ ] `crates/thinclaw-db/src/libsql/fts.rs` exists with `pub(super) fn sanitize_fts5_match` + unit tests; declared in `mod.rs`.
-- [ ] `libsql/conversations.rs::search_conversation_messages` binds the sanitized match string, never raw user input, and early-returns `Ok(vec![])` on empty-after-sanitize.
-- [ ] `libsql/workspace.rs` non-keyword path now calls the shared sanitizer; its output is unchanged for that path; no duplicated quoting logic remains.
-- [ ] `tests/db_contract/conversations.rs` has a punctuation-tolerance test that fails on libSQL pre-fix and passes post-fix, and passes on Postgres throughout (proving parity); it runs on both backends via the existing per-`DATABASE_BACKEND` CI jobs.
-- [ ] Parity audit conclusion recorded: the single FTS5-MATCH divergence is fixed; no sibling site exists (Postgres uses tolerant `*_tsquery`, libSQL workspace already sanitized, the lone libSQL `LIKE` is parameterized).
-- [ ] `tests/schema_divergence.rs` compares column names **+ normalized types + nullability + indexes**; allowlist extended and seeded so it passes on current `main`; an injected mismatch is detected.
-- [ ] `tests/schema_divergence.rs` **panics (fails)** when `DATABASE_URL` is absent under the dual-feature build, instead of silently returning Ok.
-- [ ] Verification gate green: `cargo fmt`, both `clippy --all-targets -D warnings` invocations, libSQL unit + contract tests, and (with a live DB) the Postgres contract + schema_divergence tests.
-- [ ] No `.github/workflows/ci.yml` edits attributed to WS-02; dual-backend gating requirement handed to WS-13 (T5).
-- [ ] Decision Points 1-4 resolved as recommended (extract sanitizer; quote-only no keyword expansion; schema_divergence fail-not-skip; db_contract stays skip).
+- [x] `crates/thinclaw-db/src/libsql/fts.rs` exists with `pub(super) fn sanitize_fts5_match` + unit tests; declared in `mod.rs`.
+- [x] `libsql/conversations.rs::search_conversation_messages` binds the sanitized match string, never raw user input, and early-returns `Ok(vec![])` on empty-after-sanitize.
+- [x] `libsql/workspace.rs` non-keyword path now calls the shared sanitizer; its output is unchanged for that path; no duplicated quoting logic remains.
+- [x] `tests/db_contract/conversations.rs` has a punctuation-tolerance test that fails on libSQL pre-fix and passes post-fix, and passes on Postgres throughout (proving parity); it runs on both backends via the existing per-`DATABASE_BACKEND` CI jobs.
+- [x] Parity audit conclusion recorded: the single FTS5-MATCH divergence is fixed; no sibling site exists (Postgres uses tolerant `*_tsquery`, libSQL workspace already sanitized, the lone libSQL `LIKE` is parameterized).
+- [x] `tests/schema_divergence.rs` compares column names **+ normalized types + nullability + indexes**; allowlist extended and seeded so it passes on current `main`; an injected mismatch is detected.
+- [x] `tests/schema_divergence.rs` **panics (fails)** when `DATABASE_URL` is absent under the dual-feature build, instead of silently returning Ok.
+- [x] Verification gate green: `cargo fmt`, both `clippy --all-targets -D warnings` invocations, libSQL unit + contract tests, and (with a live DB) the Postgres contract + schema_divergence tests.
+- [x] No `.github/workflows/ci.yml` edits attributed to WS-02; dual-backend gating requirement handed to WS-13 (T5).
+- [x] Decision Points 1-4 resolved as recommended (extract sanitizer; quote-only no keyword expansion; schema_divergence fail-not-skip; db_contract stays skip).

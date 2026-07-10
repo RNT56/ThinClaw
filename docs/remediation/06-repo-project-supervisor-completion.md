@@ -1,6 +1,9 @@
 # WS-06 — Repo-Project Supervisor Completion
 
-> **Status:** Not started · **Priority:** P2 · **Risk:** medium · **Effort:** L
+> **✅ STATUS: DONE. Landed in commit `dd7b7cdb` (repo-project supervisor + routines/heartbeat), merged to `main` via the audit-hardening stack (`1fb29984`, HEAD `bda7a61f`).**
+> This plan is complete; do not execute it. It is retained as an implementation record. All five gaps closed: the `RepoTaskPlanner` port + `SubagentRepoTaskPlanner` decompose `NeedsPlanning` projects (`src/repo_projects/planner.rs`, `subagent_planner.rs`, wired via `with_planner` behind the `REPO_PROJECTS_AUTOPLAN` gate); concurrency is enforced via `with_limits` (`src/repo_projects/supervisor.rs`); merge retry is bounded by `max_merge_attempts` (default 3, `src/repo_projects/pipeline.rs:61,77,522`) with per-SHA reset; `installation_id` is persisted at create/enroll and backfilled from webhooks (`match_and_backfill_repo`, `src/channels/web/handlers/github_webhook.rs:326`); and the WebUI SSE consumer is present. The "Current State (verified)" section below describes the *pre-remediation* state.
+
+> **Status:** Done (landed) · **Priority:** P2 · **Risk:** medium · **Effort:** L
 > **Depends on:** none · **Blocks:** none (coordinates with WS-12 doc inventory; coordinates the SSE pattern with the gateway but owns no gateway files)
 > **Owns (symbols/files):**
 > - `src/repo_projects/supervisor.rs` (`RepoSupervisorDecision::NeedsPlanning` handling, concurrency gating in `dispatch_next_task`, restart recovery)
@@ -32,6 +35,8 @@ The repo-project supervisor is ThinClaw's autonomous "ship code against real Git
 - Sandbox/secret-confinement hardening (`src/sandbox/proxy/*`) — security workstream.
 
 ## Current State (verified)
+
+> **Historical (pre-remediation) snapshot.** The "Half-wired / stub", "Drifted / unbounded", and "Persistence gap" items below were all closed by the landed WS-06 work. Kept for context. Path anchors here predate the WS-10 decompositions: `src/agent/agent_loop.rs` is now `src/agent/agent_loop/mod.rs` and `src/api/repo_projects.rs` is now the `src/api/repo_projects/` directory (`mod.rs`); `src/repo_projects/planner.rs` now exists.
 
 **Wired (working):**
 - The bounded reconcile loop is real and spawned when `repo_projects.enabled` is true: `run_project_supervisor_loop` (`src/repo_projects/supervisor.rs:598`), wired from the agent loop at `src/agent/agent_loop.rs:967-1069` with executor, pipeline, SSE, and a 128-deep wake channel. Watchdog + webhook + manual wakes all route through `reconcile_once`.
@@ -68,56 +73,56 @@ The repo-project supervisor is ThinClaw's autonomous "ship code against real Git
 
 ## Tasks
 
-- [ ] **T1: Bound the approved-merge retry loop in the GitHub pipeline.**
+- [x] **T1: Bound the approved-merge retry loop in the GitHub pipeline.**
   - **Files:** `src/repo_projects/pipeline.rs` (the `PipelineConfig` struct `:52-74`; `perform_merge` `:481-559`; helper region near `reset_empty_ci_polls` `:248`).
   - **Change:** Add `pub max_merge_attempts: u32` to `PipelineConfig` (default 3 in its `Default`). In `perform_merge`, before attempting the merge, read `metadata_u64(&task.metadata, "merge_attempts")`; if it `>= max_merge_attempts`, call `self.block_task(repo, task, &format!("Merge gate approved but #{number} failed to merge after {attempts} attempt(s); human intervention required."))` and return `Ok(PipelineOutcome::AwaitingHuman { reason: ... })`. In both non-success arms (`Ok(response)` non-merged `:532` and `Err(error)` `:545`), increment and persist `merge_attempts` (`merge_metadata` + `persist_task`) before returning. On a successful merge, and whenever the head SHA changes during `advance_waiting_review` (reset alongside the existing per-SHA logic), zero `merge_attempts`. Wire `max_merge_attempts` from an env override in the agent-loop `PipelineConfig` construction (`src/agent/agent_loop.rs:1009-1031`, e.g. `REPO_PROJECTS_MAX_MERGE_ATTEMPTS`), defaulting to 3.
   - **Acceptance:** A unit test in `pipeline_tests.rs` (`#[cfg(all(test, feature = "libsql"))]`, mirror the existing fake-GitHub + libSQL harness) drives a PR whose merge call repeatedly returns non-merged; after `max_merge_attempts` ticks the task ends in `Blocked` with a `MergeDenied`/blocked event and the outcome is `AwaitingHuman`, and no further merge API calls are issued. A SHA change resets the counter.
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw --features libsql repo_projects::pipeline` (or the workspace root crate that owns `src/repo_projects`); `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T2: Persist webhook-carried `installation_id` onto the matched repo row.**
+- [x] **T2: Persist webhook-carried `installation_id` onto the matched repo row.**
   - **Files:** `src/channels/web/handlers/github_webhook.rs` (`find_project_id_for_repo` `:212-242`, called from the handler `:120-126`).
   - **Change:** Extend the repo-matching loop so that when a repo matches and `envelope.installation_id` is `Some` and differs from `repo.installation_id`, set `repo.installation_id = Some(id)`, bump `updated_at`, and `store.upsert_repo_project_repo(&repo)`. Convert `i64 → u64` defensively (`u64::try_from`). Return the matched `project_id` as before. Keep this best-effort: log on upsert error, do not fail the webhook (the deduper has already accepted it).
   - **Acceptance:** Unit/integration test (libSQL) seeds a project with one repo (`installation_id: None`), feeds a signed `pull_request` webhook envelope carrying an installation id, and asserts the repo row now has `installation_id == Some(id)`. Re-delivery does not double-write (idempotent via the existing dedup path).
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw --features libsql github_webhook` ; `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T3: Persist `installation_id` at enroll-time when discoverable.**
+- [x] **T3: Persist `installation_id` at enroll-time when discoverable.**
   - **Files:** `src/api/repo_projects.rs` — repo construction in `create_project` (`:300-315`, `installation_id: None` at `:306`), `enroll_repo` (`:994-1014`, `:1000`), and the discovery helper `list_connectable_repos_with_provider` (`:1105-1147`).
   - **Change:** When the active credential mode is GitHub App and a default installation id is configured/discoverable, set the new repo's `installation_id` to that resolved id instead of `None`. Where feasible, reuse the connector discovery result (`list_installation_repositories` already returns the installation's repos) to map the enrolled `owner/repo` to its installation id; otherwise fall back to the configured `github_app.installation_id`. Leave `None` for the personal-access-token path.
   - **Acceptance:** Creating/enrolling a repo under a configured GitHub App stores a non-`None` `installation_id`; PAT mode still stores `None`. Existing `create_project`/`enroll_repo` tests updated; add a test asserting the App-mode path.
   - **Effort:** M
   - **Verification:** `cargo test -p thinclaw repo_projects` ; `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T4: Enforce per-project task concurrency in `dispatch_next_task`.**
+- [x] **T4: Enforce per-project task concurrency in `dispatch_next_task`.**
   - **Files:** `src/repo_projects/supervisor.rs` (`DatabaseRepoSupervisorStore` builders `:72-98`; project loop `:133-213`; `dispatch_next_task` `:362-441`); wiring in `src/agent/agent_loop.rs:967-1069`.
   - **Change:** Add a `with_limits(max_concurrent_projects: usize, max_concurrent_tasks_per_project: usize)` builder storing both on the store (default to the `RepoProjectsConfig` values, passed from the agent loop). In `dispatch_next_task`, compute `running = tasks.iter().filter(|t| t.state == RepoProjectTaskState::Running).count()` and an effective cap `cap = (project.policy.max_parallel_tasks as usize).min(self.max_concurrent_tasks_per_project).max(1)`; dispatch tasks while `running < cap` and a `Queued`/`Ready` task exists (loop, not single-shot), pushing one `DispatchTask` decision per dispatch. In the project-selection loop, stop advancing dispatch for additional projects once `max_concurrent_projects` projects have dispatched this reconcile. Thread `repo_projects_config` (already resolved at `agent_loop.rs:972`) into `with_limits`.
   - **Acceptance:** Unit test with a fake store/executor: a project with `max_parallel_tasks = 2` and 5 `Queued` tasks dispatches exactly 2 (and no more while 2 are `Running`); with `= 1` it dispatches 1. A second test asserts `max_concurrent_projects` caps cross-project dispatch.
   - **Effort:** M
   - **Verification:** `cargo test -p thinclaw repo_projects::supervisor` ; `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T5: Define the `RepoTaskPlanner` port and the no-planner status fallback (Decision 1).**
+- [x] **T5: Define the `RepoTaskPlanner` port and the no-planner status fallback (Decision 1).**
   - **Files:** new `src/repo_projects/planner.rs` (declare in `src/repo_projects/mod.rs:7-15`); `src/repo_projects/supervisor.rs` (`NeedsPlanning` handling at `:149-154`/`:205-207`, new `with_planner` builder, `reconcile_once` `:637-647`).
   - **Change:** Define `#[async_trait] pub trait RepoTaskPlanner: Send + Sync { async fn plan(&self, project: &RepoProject, repos: &[RepoProjectRepo]) -> Result<Vec<PlannedTask>, String>; }` plus a `PlannedTask { title, body, repo_id }` DTO, in `planner.rs`. Add `with_planner(Option<Arc<dyn RepoTaskPlanner>>)` to `DatabaseRepoSupervisorStore`. Replace the bare `NeedsPlanning` push with: if a planner is present, call it, persist each `PlannedTask` as a `Queued` `RepoProjectTask` (build identically to `enqueue_task`, `api/repo_projects.rs:539-572` — extract a shared `build_queued_task(project, repo, title, body)` helper used by both the API and the planner to avoid drift), transition the project to `Active`, append `TaskCreated` events, emit SSE; if no planner, transition the project to `AwaitingHuman`, append a `ProjectStateChanged` event ("plan required — add tasks to proceed"), emit `RepoProjectUpdated`. Keep `NeedsPlanning` as the returned decision for logging.
   - **Acceptance:** With a fake planner returning 3 tasks, a `Planning`+empty project ends `Active` with 3 `Queued` tasks and 3 `TaskCreated` events. With no planner, the project ends `AwaitingHuman` with a status event + SSE. No duplicate tasks on a second reconcile (idempotent: only plan when tasks are still empty).
   - **Effort:** L
   - **Verification:** `cargo test -p thinclaw repo_projects::supervisor repo_projects::planner` ; `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T6: Implement the LLM-backed planner adapter and wire it into the agent loop.**
+- [x] **T6: Implement the LLM-backed planner adapter and wire it into the agent loop.**
   - **Files:** new adapter (root-owned, where the LLM/subagent stack is assembled — alongside the supervisor wiring in `src/agent/agent_loop.rs:967-1069`, or a small `src/repo_projects/` adapter that takes an injected `Arc<SubagentExecutor>`); reuse `src/agent/subagent_executor.rs::spawn` (`:298`) and `src/repo_projects/prompts.rs` for prompt shaping.
   - **Change:** Implement `RepoTaskPlanner` by spawning a one-shot planning subagent (read-only tools / no merge authority) that is given the project goal + enrolled-repo summaries and returns a structured task list (title + body per repo). Parse its structured output into `Vec<PlannedTask>`. Wire `with_planner(Some(...))` into the supervisor store construction only when an LLM/subagent stack is available (guard like the existing `if let Some(secrets) = ...` pipeline guard, `agent_loop.rs:993`). Add an env opt-out (`REPO_PROJECTS_AUTOPLAN`, default on when the LLM stack is present) so operators can force the human-plan fallback.
   - **Acceptance:** With the LLM stack present and `REPO_PROJECTS_AUTOPLAN` unset, a freshly-created project that is started decomposes into ≥1 task without human intervention (covered by an integration test using a stub subagent that returns canned structured output, not a live model). With the opt-out set, the T5 `AwaitingHuman` fallback fires.
   - **Effort:** L
   - **Verification:** `cargo test -p thinclaw repo_projects` ; `cargo clippy --all-targets -- -D warnings` ; manual smoke via `RUST_LOG=thinclaw=debug cargo run` with `REPO_PROJECTS_ENABLED=true`.
 
-- [ ] **T7: Consume the repo-project SSE in the WebUI (coordinate with gateway pattern).**
+- [x] **T7: Consume the repo-project SSE in the WebUI (coordinate with gateway pattern).**
   - **Files:** `crates/thinclaw-gateway/src/web/static/app.js` — add a new consumer block in `connectSSE()` near the existing experiments group (`:974-978`) and a `queueRepoProjectsRefresh()` helper modeled on `queueResearchRefresh()` (`:805-811`).
   - **Change:** Register `['repo_project_updated','repo_task_updated','repo_project_event','repo_merge_gate_updated'].forEach((evtType) => eventSource.addEventListener(evtType, () => queueRepoProjectsRefresh()))`. Implement `queueRepoProjectsRefresh()` with a debounce timer that calls `loadRepoProjectsDashboard()` only when `currentTab === 'repo-projects'` (mirroring the research refresh, and `app.js:2992` which already lazy-loads on tab switch). Do **not** add new `SseEvent` variants or touch backend routing — the four events already flow over `/api/chat/events` (`types.rs:1536-1540`).
   - **Acceptance:** With the Repo Projects tab open, a backend-emitted task/merge-gate/project event refreshes the dashboard within the debounce window without a manual click; with the tab inactive, no fetch is issued. No regression to existing SSE handlers (chat/jobs/experiments).
   - **Effort:** S
   - **Verification:** `./scripts/build-all.sh` is **not** required (static asset). Manual: `cargo run` with `REPO_PROJECTS_ENABLED=true`, open the Repo Projects tab, trigger a webhook/manual wake, observe live refresh. Confirm via the `add-sse-event` skill conventions (consumer side only).
 
-- [ ] **T8: Regression + restart-recovery coverage for concurrency and merge bounds.**
+- [x] **T8: Regression + restart-recovery coverage for concurrency and merge bounds.**
   - **Files:** `src/repo_projects/pipeline_tests.rs`, `src/repo_projects/supervisor.rs` `#[cfg(test)]` module (`:688-721`).
   - **Change:** Add tests proving: (a) concurrency cap honored across consecutive reconciles (not just one tick); (b) merge-attempt counter survives `recover()` (metadata is persisted, so a restart mid-loop does not reset the bound); (c) planner idempotency under repeated `NeedsPlanning`.
   - **Acceptance:** All new tests green; no flakiness across 3 local runs.
@@ -166,11 +171,11 @@ The repo-project supervisor is ThinClaw's autonomous "ship code against real Git
 
 ## Definition of Done
 
-- [ ] `RepoSupervisorDecision::NeedsPlanning` is acted on: with a planner wired, `Planning`/`Draft`-empty projects decompose into `Queued` tasks and go `Active`; with no planner, they transition to `AwaitingHuman` with a status event + SSE. No project can silently stall in `Planning`.
-- [ ] `ProjectPolicy.max_parallel_tasks` (clamped by `max_concurrent_tasks_per_project`) and `max_concurrent_projects` actually limit dispatch, proven by multi-tick tests.
-- [ ] `perform_merge` is bounded by `max_merge_attempts` in **both** non-success arms, escalates to `AwaitingHuman`/`Blocked` on exhaustion, resets on head-SHA change, and the bound survives `recover()`.
-- [ ] `installation_id` is persisted on the repo row from the webhook path, and at enroll/create when in GitHub App mode (PAT mode stays `None`).
-- [ ] The WebUI live-refreshes the Repo Projects dashboard from the four existing SSE events when the tab is active, debounced, with no new `SseEvent` variant.
-- [ ] `cargo fmt`, `clippy --all-targets -D warnings`, and the repo-projects test suites are green; `/ship` passes.
-- [ ] Decision Points 1–4 are resolved in the merged code (planner-with-fallback, policy-clamped-by-config, counter→AwaitingHuman, installation_id both paths).
-- [ ] Behavior-change docs handed to **WS-12** (inventory rows for the subsystem are WS-12's; this WS only flags that the planner/concurrency/merge-bound behavior is new so WS-12 can update `FEATURE_PARITY.md` and add the missing `thinclaw-repo-projects` row to `CRATE_OWNERSHIP.md`).
+- [x] `RepoSupervisorDecision::NeedsPlanning` is acted on: with a planner wired, `Planning`/`Draft`-empty projects decompose into `Queued` tasks and go `Active`; with no planner, they transition to `AwaitingHuman` with a status event + SSE. No project can silently stall in `Planning`.
+- [x] `ProjectPolicy.max_parallel_tasks` (clamped by `max_concurrent_tasks_per_project`) and `max_concurrent_projects` actually limit dispatch, proven by multi-tick tests.
+- [x] `perform_merge` is bounded by `max_merge_attempts` in **both** non-success arms, escalates to `AwaitingHuman`/`Blocked` on exhaustion, resets on head-SHA change, and the bound survives `recover()`.
+- [x] `installation_id` is persisted on the repo row from the webhook path, and at enroll/create when in GitHub App mode (PAT mode stays `None`).
+- [x] The WebUI live-refreshes the Repo Projects dashboard from the four existing SSE events when the tab is active, debounced, with no new `SseEvent` variant.
+- [x] `cargo fmt`, `clippy --all-targets -D warnings`, and the repo-projects test suites are green; `/ship` passes.
+- [x] Decision Points 1–4 are resolved in the merged code (planner-with-fallback, policy-clamped-by-config, counter→AwaitingHuman, installation_id both paths).
+- [x] Behavior-change docs handed to **WS-12** (inventory rows for the subsystem are WS-12's; this WS only flags that the planner/concurrency/merge-bound behavior is new so WS-12 can update `FEATURE_PARITY.md` and add the missing `thinclaw-repo-projects` row to `CRATE_OWNERSHIP.md`).

@@ -1,6 +1,20 @@
 # ThinClaw — Deletion & WIRE Dossier
 > One honest entry per candidate so the operator can decide keep / wire / erase. Date 2026-06-25.
 
+> **✅ RESOLVED (decisions applied).** This dossier's recommendations have been executed. The **10
+> ERASE** candidates were deleted in the Wave 4 deletion batch (commit `4f26f5f4`, 2026-06-25): the
+> `src/safety/*` orphans, InferenceRouter chat modality, `SmartRoutingProvider`, `RepairTask`, the
+> heartbeat runner (`spawn_heartbeat`/`HeartbeatRunner::run`), the dead `Reasoning.safety` /
+> `SpawnSubagentTool.executor` fields, the CLI stubs (`nodes`/`subagent_spawn`/`session_export`),
+> `self_message`, `qr_pairing`, `tailscale`, and the misc helper group + HTTPS cred mappings. The
+> **1 WIRE** candidate (`src/history/store/`) was consolidated onto `thinclaw-db` (commit `43460933`).
+> The **1 DECIDE** candidate (`voice_wake`) was **WIRED, not erased** (operator chose "build the wake
+> word"): `VoiceWakeRuntime::new` is now constructed in `AppBuilder` (`src/app.rs`) and its events are
+> consumed in `src/async_main.rs`, behind the opt-in `voice` feature. The per-candidate "current state
+> / compiles-unused / zero-callers" snapshots below are therefore **historical**: they describe the
+> pre-deletion tree of 2026-06-25, not the current code. See `DEFERRED-DELETIONS.md` and
+> `EXECUTION-SUMMARY.md`.
+
 ## Summary table
 
 | Candidate | ~Lines | Current state | Alternative exists? | Recommendation | Confidence | One-line |
@@ -264,6 +278,16 @@ Because `mod.rs` never declares `mod auth_profiles;` etc., none of the 14 files 
 **Recommendation: WIRE.** Stalled crate-extraction duplicate: `thinclaw-db/postgres_store` is canonical (live via `PgBackend`/`dyn Database`, with extra experiments+repo_projects), but `src/history/store` is still compiled and called by 6 concrete sites (3 CLI, 3 setup wizard). Redirect those onto `thinclaw-db`, port the analytics methods, keep a `pub use` façade, then delete. The highest-value structural cleanup in this dossier.
 
 ### voice_wake module + the `voice` cargo feature + optional `cpal` dependency
+
+> **OUTCOME: WIRED, not erased.** The operator chose "build the wake word", so the ERASE reasoning in
+> this entry did **not** apply. `VoiceWakeRuntime::new` is now a live production constructor in
+> `AppBuilder` (`src/app.rs:1681`, stored on the runtime as `src/app.rs:119` `voice_wake:
+> Option<VoiceWakeRuntime>`) and its `VoiceWakeEvent`s are consumed by the `voice_wake_forwarder` task
+> in `src/async_main.rs` (`:1094` takes the runtime, `:1111` handles `WakeWordDetected`, `:1141`
+> handles `Error`), routing wake-word utterances into the dispatcher. It remains behind the opt-in
+> `voice` feature (still not in any default profile). The "zero callers / compiles-unused / safe to
+> delete / Recommendation: DECIDE" text below is the pre-decision 2026-06-25 snapshot and no longer
+> describes the code.
 
 **What it is.** A headless/remote-mode wake-word detection runtime. `VoiceWakeRuntime` spawns a background tokio task plus a dedicated OS thread for cpal audio capture (`cpal::Stream` is `!Send`), computes RMS energy frames, and emits `VoiceWakeEvent` values over an mpsc channel with a watch-based status flag. Two backends: `EnergyDetector` (fully implemented RMS voice-activity detection — detects that *someone is speaking*, **not** the phrase "hey molty") and `SherpaOnnx` (a real but unproven integration that shells out to an external `sherpa-onnx-keyword-spotter` binary over stdin/stdout for offline keyword spotting, falling back to energy when the binary/model/keywords.txt are absent). Without the `voice` feature the detection loop is a no-op that sleeps. Real plumbing, but the only word-level detection path depends on an external binary + ONNX model the repo does not ship.
 
