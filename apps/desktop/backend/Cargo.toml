@@ -93,7 +93,7 @@ tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 tungstenite = "0.26"
 futures-util = "0.3"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }
-pkcs8 = { version = "0.10.2", features = ["std", "pem"] }
+pkcs8 = { version = "0.11.0", features = ["std", "pem"] }
 regex = "1.12.3"
 thinclaw-desktop-tools = { path = "scrappy-mcp-tools" }
 rhai = { version = "1", features = ["sync", "serde"] }
