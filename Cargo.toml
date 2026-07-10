@@ -226,7 +226,7 @@ chrono-tz = "0.10"
 iana-time-zone = "0.1"
 
 # PostgreSQL TLS (feature gated, pulled in by postgres feature)
-tokio-postgres-rustls = { version = "0.13", optional = true }
+tokio-postgres-rustls = { version = "0.14", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
 rustls-native-certs = { version = "0.8", optional = true }
 
