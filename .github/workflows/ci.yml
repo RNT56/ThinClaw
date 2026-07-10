@@ -37,6 +37,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check MSRV and toolchain synchronization
+        run: scripts/ci/check-msrv-sync.py
       - name: Check crate boundaries
         run: |
           set -euo pipefail

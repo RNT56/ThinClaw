@@ -548,6 +548,180 @@ async fn outcome_contract_claims_are_idempotent_under_parallel_workers() {
 }
 
 #[tokio::test]
+async fn outcome_claim_leases_recover_after_restart_and_reject_stale_owners() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+    let user = fixtures::user("outcome_lease_recovery_user");
+    let now = chrono::Utc::now();
+    let mut contract = fixtures::outcome_contract(&user);
+    contract.due_at = now - chrono::Duration::seconds(1);
+    contract.expires_at = now + chrono::Duration::hours(72);
+    let contract_id = ctx
+        .db
+        .insert_outcome_contract(&contract)
+        .await
+        .expect("outcome contract should be inserted");
+
+    let first = ctx
+        .db
+        .claim_due_outcome_contracts_for_user_with_lease(&user, "worker-a", 1, now, 60)
+        .await
+        .expect("first lease claim should succeed")
+        .into_iter()
+        .next()
+        .expect("due contract should be claimed");
+    assert_eq!(first.id, contract_id);
+    assert_eq!(first.claimed_by.as_deref(), Some("worker-a"));
+    assert_eq!(first.attempt_count, 1);
+    assert!(first.lease_expires_at.is_some_and(|value| value > now));
+
+    let blocked = ctx
+        .db
+        .claim_due_outcome_contracts_for_user_with_lease(
+            &user,
+            "worker-b",
+            1,
+            now + chrono::Duration::seconds(1),
+            60,
+        )
+        .await
+        .expect("second lease query should succeed");
+    assert!(blocked.is_empty(), "an unexpired lease must be exclusive");
+    let active_lease_users = ctx
+        .db
+        .list_users_with_pending_outcome_work(now + chrono::Duration::seconds(1))
+        .await
+        .expect("active lease scheduler query should succeed");
+    assert!(
+        active_lease_users.iter().all(|entry| entry.user_id != user),
+        "an actively leased contract must not reschedule its user"
+    );
+
+    let stale_lease_users = ctx
+        .db
+        .list_users_with_pending_outcome_work(now + chrono::Duration::seconds(61))
+        .await
+        .expect("stale lease scheduler query should succeed");
+    assert!(
+        stale_lease_users.iter().any(|entry| entry.user_id == user),
+        "an expired lease must make its user schedulable for recovery"
+    );
+
+    let mut recovered = ctx
+        .db
+        .claim_due_outcome_contracts_for_user_with_lease(
+            &user,
+            "worker-b",
+            1,
+            now + chrono::Duration::seconds(61),
+            60,
+        )
+        .await
+        .expect("expired lease should be recoverable")
+        .into_iter()
+        .next()
+        .expect("stale evaluating contract should be reclaimed");
+    assert_eq!(recovered.id, contract_id);
+    assert_eq!(recovered.claimed_by.as_deref(), Some("worker-b"));
+    assert_eq!(recovered.attempt_count, 2);
+
+    let mut stale_completion = first;
+    stale_completion.status = "evaluated".to_string();
+    stale_completion.claimed_at = None;
+    stale_completion.claimed_by = None;
+    stale_completion.lease_expires_at = None;
+    stale_completion.evaluated_at = Some(now + chrono::Duration::seconds(62));
+    assert!(
+        !ctx.db
+            .update_claimed_outcome_contract(&stale_completion, "worker-a")
+            .await
+            .expect("stale owner update should be checked"),
+        "a worker that lost its lease must not overwrite the new owner"
+    );
+
+    recovered.status = "open".to_string();
+    recovered.claimed_at = None;
+    recovered.claimed_by = None;
+    recovered.lease_expires_at = None;
+    recovered.next_attempt_at = Some(now + chrono::Duration::seconds(180));
+    recovered.updated_at = now + chrono::Duration::seconds(62);
+    assert!(
+        ctx.db
+            .update_claimed_outcome_contract(&recovered, "worker-b")
+            .await
+            .expect("current owner should release with retry visibility")
+    );
+
+    let hidden = ctx
+        .db
+        .claim_due_outcome_contracts_for_user_with_lease(
+            &user,
+            "worker-c",
+            1,
+            now + chrono::Duration::seconds(120),
+            60,
+        )
+        .await
+        .expect("retry visibility query should succeed");
+    assert!(
+        hidden.is_empty(),
+        "retry backoff must survive in the database"
+    );
+
+    let visible = ctx
+        .db
+        .claim_due_outcome_contracts_for_user_with_lease(
+            &user,
+            "worker-c",
+            1,
+            now + chrono::Duration::seconds(181),
+            60,
+        )
+        .await
+        .expect("retry should become visible after backoff");
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, contract_id);
+    assert_eq!(visible[0].attempt_count, 3);
+
+    let legacy_user = fixtures::user("outcome_legacy_evaluating_user");
+    let mut legacy_contract = fixtures::outcome_contract(&legacy_user);
+    legacy_contract.due_at = now - chrono::Duration::seconds(1);
+    legacy_contract.expires_at = now + chrono::Duration::hours(72);
+    let legacy_contract_id = ctx
+        .db
+        .insert_outcome_contract(&legacy_contract)
+        .await
+        .expect("legacy contract should be inserted");
+    legacy_contract.status = "evaluating".to_string();
+    legacy_contract.claimed_at = None;
+    legacy_contract.claimed_by = None;
+    legacy_contract.lease_expires_at = None;
+    legacy_contract.updated_at = now;
+    ctx.db
+        .update_outcome_contract(&legacy_contract)
+        .await
+        .expect("legacy pre-lease evaluating state should be persisted");
+
+    let legacy_recovered = ctx
+        .db
+        .claim_due_outcome_contracts_for_user_with_lease(
+            &legacy_user,
+            "worker-legacy-recovery",
+            1,
+            now,
+            60,
+        )
+        .await
+        .expect("legacy evaluating state should be claimable")
+        .into_iter()
+        .next()
+        .expect("legacy evaluating contract should be recovered");
+    assert_eq!(legacy_recovered.id, legacy_contract_id);
+    assert_eq!(legacy_recovered.attempt_count, 1);
+}
+
+#[tokio::test]
 async fn manual_outcome_review_reuses_learning_event_in_ledger() {
     let Some(ctx) = contract_db_or_skip().await else {
         return;

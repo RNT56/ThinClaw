@@ -63,7 +63,7 @@ impl SubmissionParser {
 
             if let Some(system_command) = spec.system_command {
                 return Submission::SystemCommand {
-                    command: system_command.to_string(),
+                    command: system_command.as_str().to_string(),
                     args,
                 };
             }

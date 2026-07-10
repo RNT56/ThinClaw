@@ -876,6 +876,7 @@ pub trait RoutineStorePort: Send + Sync {
     async fn release_routine_event(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError>;
     async fn list_pending_routine_events(
@@ -946,6 +947,7 @@ pub trait RoutineStorePort: Send + Sync {
     async fn release_routine_trigger(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError>;
     async fn complete_routine_trigger(

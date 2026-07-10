@@ -401,6 +401,10 @@ harness = false
 name = "safety_pipeline"
 harness = false
 
+[[bench]]
+name = "loop_control"
+harness = false
+
 # Normal source release builds should produce a runnable binary without keeping
 # symbol tables in the installed artifact. Cargo's release profile already
 # disables debug info and incremental compilation by default.

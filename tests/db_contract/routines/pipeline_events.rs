@@ -6,7 +6,10 @@ use std::time::Duration;
 use chrono::Utc;
 use reqwest::StatusCode;
 use serde_json::json;
-use thinclaw::agent::routine::{RoutineEvent, RoutineEventStatus, RunStatus, content_hash};
+use thinclaw::agent::routine::{
+    RoutineEvent, RoutineEventStatus, RoutineTrigger, RoutineTriggerKind, RoutineTriggerStatus,
+    RunStatus, content_hash,
+};
 use thinclaw::agent::routine_engine::spawn_cron_ticker;
 use uuid::Uuid;
 
@@ -14,6 +17,212 @@ use crate::db_contract::fixtures;
 use crate::db_contract::support::contract_db_or_skip;
 
 use super::*;
+
+#[tokio::test]
+async fn routine_trigger_release_merges_retry_diagnostics() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+
+    let user = fixtures::user("routine_trigger_diagnostics_user");
+    let actor = fixtures::actor_name("routine_trigger_diagnostics");
+    let owner_ctx = routine_test_context(&user, &actor);
+    let (engine, _notify_rx) = build_routine_engine(
+        Arc::clone(&ctx.db),
+        &user,
+        Arc::new(TestLlm::reply("unused")),
+    );
+    let registry = build_registry(Arc::clone(&ctx.db), engine);
+    let created = execute_routine_tool(
+        &registry,
+        "routine_create",
+        json!({
+            "name": format!("trigger-diagnostics-{}", Uuid::new_v4().simple()),
+            "description": "Preserve independent durable retry counters",
+            "trigger_type": "manual",
+            "prompt": "unused"
+        }),
+        &owner_ctx,
+    )
+    .await;
+    let routine_id = parse_uuid(&created, "id");
+    let now = Utc::now();
+    let trigger = RoutineTrigger {
+        id: Uuid::new_v4(),
+        routine_id,
+        trigger_kind: RoutineTriggerKind::Cron,
+        trigger_label: None,
+        due_at: now,
+        status: RoutineTriggerStatus::Pending,
+        decision: None,
+        active_key: Some(format!("diagnostics:{}", Uuid::new_v4())),
+        idempotency_key: format!("diagnostics:{}", Uuid::new_v4()),
+        claimed_by: None,
+        claimed_at: None,
+        lease_expires_at: None,
+        processed_at: None,
+        error_message: None,
+        diagnostics: json!({"baseline": "preserve"}),
+        coalesced_count: 0,
+        backlog_collapsed: false,
+        routine_config_version: 1,
+        created_at: now,
+    };
+    ctx.db
+        .enqueue_routine_trigger(&trigger)
+        .await
+        .expect("trigger should enqueue");
+
+    let claimed = ctx
+        .db
+        .claim_routine_triggers("diagnostics-worker", now - chrono::Duration::minutes(5), 1)
+        .await
+        .expect("trigger should be claimable");
+    assert_eq!(claimed.len(), 1);
+    ctx.db
+        .release_routine_trigger(
+            trigger.id,
+            now - chrono::Duration::seconds(1),
+            &json!({"defer_attempt_count": 2}),
+        )
+        .await
+        .expect("deferred trigger should release");
+
+    let claimed = ctx
+        .db
+        .claim_routine_triggers("diagnostics-worker", now - chrono::Duration::minutes(5), 1)
+        .await
+        .expect("released trigger should be claimable again");
+    assert_eq!(claimed.len(), 1);
+    ctx.db
+        .release_routine_trigger(
+            trigger.id,
+            now + chrono::Duration::minutes(1),
+            &json!({"failure_attempt_count": 1}),
+        )
+        .await
+        .expect("failed trigger should release");
+
+    let persisted = ctx
+        .db
+        .list_routine_triggers(routine_id, 10)
+        .await
+        .expect("trigger should remain queryable")
+        .into_iter()
+        .find(|candidate| candidate.id == trigger.id)
+        .expect("released trigger should remain durable");
+    assert_eq!(persisted.diagnostics["baseline"], json!("preserve"));
+    assert_eq!(persisted.diagnostics["defer_attempt_count"], json!(2));
+    assert_eq!(persisted.diagnostics["failure_attempt_count"], json!(1));
+}
+
+#[tokio::test]
+async fn routine_trigger_claims_are_exclusive_under_parallel_workers() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+
+    let user = fixtures::user("routine_trigger_parallel_user");
+    let actor = fixtures::actor_name("routine_trigger_parallel");
+    let owner_ctx = routine_test_context(&user, &actor);
+    let (engine, _notify_rx) = build_routine_engine(
+        Arc::clone(&ctx.db),
+        &user,
+        Arc::new(TestLlm::reply("unused")),
+    );
+    let registry = build_registry(Arc::clone(&ctx.db), engine);
+    let created = execute_routine_tool(
+        &registry,
+        "routine_create",
+        json!({
+            "name": format!("parallel-trigger-{}", Uuid::new_v4().simple()),
+            "description": "Exercise exclusive durable trigger claims",
+            "trigger_type": "manual",
+            "prompt": "unused"
+        }),
+        &owner_ctx,
+    )
+    .await;
+    let routine_id = parse_uuid(&created, "id");
+    let now = Utc::now();
+    let mut inserted_ids = std::collections::BTreeSet::new();
+    for sequence in 0..6 {
+        let trigger_id = Uuid::new_v4();
+        let trigger = RoutineTrigger {
+            id: trigger_id,
+            routine_id,
+            trigger_kind: RoutineTriggerKind::Cron,
+            trigger_label: Some(format!("parallel-{sequence}")),
+            due_at: now,
+            status: RoutineTriggerStatus::Pending,
+            decision: None,
+            active_key: Some(format!("parallel:{routine_id}:{sequence}")),
+            idempotency_key: format!("parallel:{routine_id}:{sequence}"),
+            claimed_by: None,
+            claimed_at: None,
+            lease_expires_at: None,
+            processed_at: None,
+            error_message: None,
+            diagnostics: json!({}),
+            coalesced_count: 0,
+            backlog_collapsed: false,
+            routine_config_version: 1,
+            created_at: now,
+        };
+        ctx.db
+            .enqueue_routine_trigger(&trigger)
+            .await
+            .expect("trigger should enqueue");
+        inserted_ids.insert(trigger_id);
+    }
+
+    let mut workers = Vec::new();
+    for index in 0..4 {
+        let db = Arc::clone(&ctx.db);
+        workers.push(tokio::spawn(async move {
+            db.claim_routine_triggers(
+                &format!("parallel-trigger-worker-{index}"),
+                Utc::now() - chrono::Duration::minutes(5),
+                3,
+            )
+            .await
+            .expect("parallel trigger claim should succeed")
+        }));
+    }
+
+    let mut claimed_ids = Vec::new();
+    for worker in workers {
+        claimed_ids.extend(
+            worker
+                .await
+                .expect("parallel trigger claim task should join")
+                .into_iter()
+                .map(|trigger| trigger.id),
+        );
+    }
+    let raced_unique: std::collections::BTreeSet<_> = claimed_ids.iter().copied().collect();
+    assert_eq!(
+        raced_unique.len(),
+        claimed_ids.len(),
+        "parallel workers must not claim the same trigger twice"
+    );
+
+    let follow_up = ctx
+        .db
+        .claim_routine_triggers(
+            "parallel-trigger-follow-up",
+            Utc::now() - chrono::Duration::minutes(5),
+            10,
+        )
+        .await
+        .expect("follow-up trigger claim should succeed");
+    claimed_ids.extend(follow_up.into_iter().map(|trigger| trigger.id));
+    let all_unique: std::collections::BTreeSet<_> = claimed_ids.into_iter().collect();
+    assert_eq!(
+        all_unique, inserted_ids,
+        "parallel plus follow-up claims should drain every due trigger exactly once"
+    );
+}
 
 #[tokio::test]
 async fn event_routines_are_scoped_to_the_message_owner() {
@@ -752,4 +961,86 @@ async fn pending_routine_events_prioritize_fresh_events_before_retries() {
         fresh_idx < old_idx,
         "fresh attempt_count=0 event should be listed before older retries"
     );
+}
+
+#[tokio::test]
+async fn released_routine_event_respects_durable_retry_visibility() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+
+    let user = fixtures::user("routine_event_retry_visibility_user");
+    let actor = fixtures::actor_name("routine_event_retry_visibility");
+    let now = Utc::now();
+    let event = RoutineEvent {
+        id: Uuid::new_v4(),
+        principal_id: user.clone(),
+        actor_id: actor.clone(),
+        channel: "slack".to_string(),
+        event_type: "message".to_string(),
+        raw_sender_id: actor,
+        conversation_scope_id: Uuid::new_v4().to_string(),
+        stable_external_conversation_key: format!("test://slack/{user}/retry-visibility"),
+        content: "retry later".to_string(),
+        content_hash: content_hash("retry later").to_string(),
+        metadata: json!({"source": "retry_visibility_contract"}),
+        idempotency_key: format!("retry-visibility-{}", Uuid::new_v4()),
+        status: RoutineEventStatus::Pending,
+        diagnostics: json!({}),
+        claimed_by: None,
+        claimed_at: None,
+        lease_expires_at: None,
+        processed_at: None,
+        error_message: None,
+        matched_routines: 0,
+        fired_routines: 0,
+        attempt_count: 0,
+        created_at: now,
+    };
+    ctx.db
+        .create_routine_event(&event)
+        .await
+        .expect("event should be inserted");
+    ctx.db
+        .claim_routine_event(
+            event.id,
+            "retry-visibility-worker",
+            now - chrono::Duration::minutes(1),
+        )
+        .await
+        .expect("event claim should succeed")
+        .expect("event should be claimable");
+
+    ctx.db
+        .release_routine_event(
+            event.id,
+            now + chrono::Duration::minutes(1),
+            &json!({"deferred": true}),
+        )
+        .await
+        .expect("event release should succeed");
+    let hidden = ctx
+        .db
+        .list_pending_routine_events(now - chrono::Duration::hours(1), 100)
+        .await
+        .expect("pending events should be queryable");
+    assert!(
+        hidden.iter().all(|candidate| candidate.id != event.id),
+        "a deferred event must not be reclaimed before next_attempt_at"
+    );
+
+    ctx.db
+        .release_routine_event(
+            event.id,
+            now - chrono::Duration::seconds(1),
+            &json!({"deferred": false}),
+        )
+        .await
+        .expect("event visibility update should succeed");
+    let visible = ctx
+        .db
+        .list_pending_routine_events(now - chrono::Duration::hours(1), 100)
+        .await
+        .expect("pending events should be queryable");
+    assert!(visible.iter().any(|candidate| candidate.id == event.id));
 }

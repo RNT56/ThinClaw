@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum LoopKind {
     AgentDispatcher,
+    ConversationWorker,
     Worker,
     Subagent,
     RoutineCron,
@@ -33,6 +34,7 @@ impl LoopKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AgentDispatcher => "agent_dispatcher",
+            Self::ConversationWorker => "conversation_worker",
             Self::Worker => "worker",
             Self::Subagent => "subagent",
             Self::RoutineCron => "routine_cron",
@@ -137,7 +139,10 @@ impl LoopBudget {
         default_value: usize,
         hard_cap: usize,
     ) -> usize {
-        (requested.unwrap_or(default_value as u64) as usize).min(hard_cap)
+        requested
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+            .unwrap_or(default_value)
+            .min(hard_cap)
     }
 
     pub fn iteration_stop_reason(self, iteration: usize) -> Option<LoopStopReason> {
@@ -199,6 +204,82 @@ pub struct LoopRunSummary {
     pub retries: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct LoopRunContext {
+    kind: LoopKind,
+    budget: LoopBudget,
+    started_at: Instant,
+    last_activity_at: Instant,
+    iterations: usize,
+    retries: u32,
+}
+
+impl LoopRunContext {
+    pub fn new(kind: LoopKind, budget: LoopBudget) -> Self {
+        let now = Instant::now();
+        Self {
+            kind,
+            budget,
+            started_at: now,
+            last_activity_at: now,
+            iterations: 0,
+            retries: 0,
+        }
+    }
+
+    pub fn begin_iteration(&mut self) -> Result<usize, LoopStopReason> {
+        self.check_time_budget()?;
+        let next = self.iterations.saturating_add(1);
+        if let Some(reason) = self.budget.iteration_stop_reason(next) {
+            return Err(reason);
+        }
+        self.iterations = next;
+        self.last_activity_at = Instant::now();
+        Ok(next)
+    }
+
+    pub fn record_retry(&mut self) -> Result<u32, LoopStopReason> {
+        self.check_time_budget()?;
+        let next = self.retries.saturating_add(1);
+        if let Some(reason) = self.budget.retry_stop_reason(next) {
+            return Err(reason);
+        }
+        self.retries = next;
+        self.last_activity_at = Instant::now();
+        Ok(next)
+    }
+
+    pub fn record_activity(&mut self) {
+        self.last_activity_at = Instant::now();
+    }
+
+    pub fn check_time_budget(&self) -> Result<(), LoopStopReason> {
+        if let Some(reason) = self.budget.wall_time_stop_reason(self.started_at) {
+            return Err(reason);
+        }
+        if let Some(reason) = self.budget.idle_stop_reason(self.last_activity_at) {
+            return Err(reason);
+        }
+        Ok(())
+    }
+
+    pub fn iterations(&self) -> usize {
+        self.iterations
+    }
+
+    pub fn retries(&self) -> u32 {
+        self.retries
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    pub fn summary(&self, stop_reason: LoopStopReason) -> LoopRunSummary {
+        LoopRunSummary::new(self.kind, stop_reason, self.iterations, self.retries)
+    }
+}
+
 impl LoopRunSummary {
     pub fn new(
         kind: LoopKind,
@@ -230,6 +311,7 @@ mod tests {
     fn budget_caps_iterations_and_reports_stop_reason() {
         let max = LoopBudget::capped_iterations(Some(1_000), 50, 500);
         assert_eq!(max, 500);
+        assert_eq!(LoopBudget::capped_iterations(Some(u64::MAX), 50, 500), 500);
 
         let budget = LoopBudget::iterations(3);
         assert_eq!(budget.iteration_stop_reason(3), None);
@@ -270,5 +352,38 @@ mod tests {
         );
         assert!(!summary.stop_reason.is_failure());
         assert!(LoopStopReason::FatalError.is_failure());
+    }
+
+    #[test]
+    fn run_context_enforces_iteration_and_retry_budgets() {
+        let mut context = LoopRunContext::new(
+            LoopKind::Worker,
+            LoopBudget::iterations(2).with_max_retries(1),
+        );
+        assert_eq!(context.begin_iteration(), Ok(1));
+        assert_eq!(context.begin_iteration(), Ok(2));
+        assert_eq!(
+            context.begin_iteration(),
+            Err(LoopStopReason::IterationBudgetExceeded)
+        );
+        assert_eq!(context.record_retry(), Ok(1));
+        assert_eq!(
+            context.record_retry(),
+            Err(LoopStopReason::RetryBudgetExceeded)
+        );
+        assert_eq!(context.iterations(), 2);
+        assert_eq!(context.retries(), 1);
+    }
+
+    #[test]
+    fn run_context_builds_final_summary() {
+        let mut context = LoopRunContext::new(LoopKind::OutcomeService, LoopBudget::UNBOUNDED);
+        context.begin_iteration().unwrap();
+        context.record_retry().unwrap();
+        let summary = context.summary(LoopStopReason::ExternalShutdown);
+        assert_eq!(summary.kind, LoopKind::OutcomeService);
+        assert_eq!(summary.iterations, 1);
+        assert_eq!(summary.retries, 1);
+        assert_eq!(summary.stop_reason, LoopStopReason::ExternalShutdown);
     }
 }

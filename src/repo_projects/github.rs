@@ -12,6 +12,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod transport;
+pub use transport::GitHubApiResilience;
+use transport::{GitHubRequestPolicy, github_http_client};
+
 type HmacSha256 = Hmac<Sha256>;
 
 const GITHUB_SIGNATURE_PREFIX: &str = "sha256=";
@@ -81,6 +85,9 @@ pub enum GitHubApiError {
         body: String,
         source: serde_json::Error,
     },
+    CircuitOpen {
+        retry_after: Duration,
+    },
 }
 
 impl std::fmt::Display for GitHubApiError {
@@ -126,6 +133,11 @@ impl std::fmt::Display for GitHubApiError {
                 f,
                 "failed to decode GitHub API response for {method} {url} ({status}): {source}"
             ),
+            Self::CircuitOpen { retry_after } => write!(
+                f,
+                "GitHub API circuit is open; retry after {} ms",
+                retry_after.as_millis()
+            ),
         }
     }
 }
@@ -136,7 +148,7 @@ impl std::error::Error for GitHubApiError {
             Self::Auth(error) => Some(error),
             Self::Http { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
-            Self::InvalidHeader(_) | Self::Api { .. } => None,
+            Self::InvalidHeader(_) | Self::Api { .. } | Self::CircuitOpen { .. } => None,
         }
     }
 }
@@ -201,7 +213,7 @@ impl GitHubAppTokenCache {
     pub fn new(config: GitHubAppConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: github_http_client(),
             tokens: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -297,6 +309,8 @@ pub struct GitHubApiClient {
     api_base_url: String,
     client: reqwest::Client,
     auth: GitHubApiAuth,
+    request_policy: GitHubRequestPolicy,
+    resilience: GitHubApiResilience,
 }
 
 impl std::fmt::Debug for GitHubApiClient {
@@ -319,7 +333,7 @@ impl GitHubApiClient {
     ) -> Self {
         Self::with_client_and_auth(
             api_base_url,
-            reqwest::Client::new(),
+            github_http_client(),
             GitHubApiAuth::BearerToken(token.into()),
         )
     }
@@ -331,7 +345,7 @@ impl GitHubApiClient {
         let api_base_url = token_cache.config.api_base_url.clone();
         Self::with_client_and_auth(
             api_base_url,
-            reqwest::Client::new(),
+            github_http_client(),
             GitHubApiAuth::Installation {
                 installation_id,
                 token_cache,
@@ -353,7 +367,14 @@ impl GitHubApiClient {
             api_base_url: api_base_url.into(),
             client,
             auth,
+            request_policy: GitHubRequestPolicy::default(),
+            resilience: GitHubApiResilience::default(),
         }
+    }
+
+    pub fn with_resilience(mut self, resilience: GitHubApiResilience) -> Self {
+        self.resilience = resilience;
+        self
     }
 
     pub async fn get_repository(
@@ -763,7 +784,7 @@ impl GitHubApiClient {
     async fn get_query<T, Q>(&self, path: String, query: &Q) -> Result<T, GitHubApiError>
     where
         T: DeserializeOwned,
-        Q: Serialize + ?Sized,
+        Q: Serialize + Sync + ?Sized,
     {
         self.request::<T, Q, ()>(Method::GET, path, Some(query), None)
             .await
@@ -772,7 +793,7 @@ impl GitHubApiClient {
     async fn post<T, B>(&self, path: String, body: &B) -> Result<T, GitHubApiError>
     where
         T: DeserializeOwned,
-        B: Serialize + ?Sized,
+        B: Serialize + Sync + ?Sized,
     {
         self.request::<T, (), B>(Method::POST, path, None, Some(body))
             .await
@@ -781,7 +802,7 @@ impl GitHubApiClient {
     async fn patch<T, B>(&self, path: String, body: &B) -> Result<T, GitHubApiError>
     where
         T: DeserializeOwned,
-        B: Serialize + ?Sized,
+        B: Serialize + Sync + ?Sized,
     {
         self.request::<T, (), B>(Method::PATCH, path, None, Some(body))
             .await
@@ -790,7 +811,7 @@ impl GitHubApiClient {
     async fn put<T, B>(&self, path: String, body: &B) -> Result<T, GitHubApiError>
     where
         T: DeserializeOwned,
-        B: Serialize + ?Sized,
+        B: Serialize + Sync + ?Sized,
     {
         self.request::<T, (), B>(Method::PUT, path, None, Some(body))
             .await
@@ -800,16 +821,10 @@ impl GitHubApiClient {
         let method = Method::DELETE;
         let url = self.api_url(&path);
         let response = self
-            .client
-            .request(method.clone(), &url)
-            .headers(self.github_api_headers().await?)
-            .send()
-            .await
-            .map_err(|source| GitHubApiError::Http {
-                method: method.to_string(),
-                url: url.clone(),
-                source,
-            })?;
+            .send_with_retry(&method, &url, |headers| {
+                self.client.request(method.clone(), &url).headers(headers)
+            })
+            .await?;
         let status = response.status();
         if status.is_success() {
             return Ok(());
@@ -829,16 +844,10 @@ impl GitHubApiClient {
         let method = Method::GET;
         let url = self.api_url(&path);
         let response = self
-            .client
-            .request(method.clone(), &url)
-            .headers(self.github_api_headers().await?)
-            .send()
-            .await
-            .map_err(|source| GitHubApiError::Http {
-                method: method.to_string(),
-                url: url.clone(),
-                source,
-            })?;
+            .send_with_retry(&method, &url, |headers| {
+                self.client.request(method.clone(), &url).headers(headers)
+            })
+            .await?;
         decode_bytes_response(method.as_str(), &url, response).await
     }
 
@@ -851,28 +860,22 @@ impl GitHubApiClient {
     ) -> Result<T, GitHubApiError>
     where
         T: DeserializeOwned,
-        Q: Serialize + ?Sized,
-        B: Serialize + ?Sized,
+        Q: Serialize + Sync + ?Sized,
+        B: Serialize + Sync + ?Sized,
     {
         let url = self.api_url(&path);
-        let mut request = self
-            .client
-            .request(method.clone(), &url)
-            .headers(self.github_api_headers().await?);
-        if let Some(query) = query {
-            request = request.query(query);
-        }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|source| GitHubApiError::Http {
-                method: method.to_string(),
-                url: url.clone(),
-                source,
-            })?;
+        let response = self
+            .send_with_retry(&method, &url, |headers| {
+                let mut request = self.client.request(method.clone(), &url).headers(headers);
+                if let Some(query) = query {
+                    request = request.query(query);
+                }
+                if let Some(body) = body {
+                    request = request.json(body);
+                }
+                request
+            })
+            .await?;
         decode_json_response(method.as_str(), &url, response).await
     }
 

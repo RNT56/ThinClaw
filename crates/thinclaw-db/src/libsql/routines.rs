@@ -658,7 +658,7 @@ impl RoutineStore for LibSqlBackend {
                         "SELECT {} FROM routine_event_inbox
                          WHERE id = ?1
                            AND (
-                             status = 'pending'
+                             (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?2))
                              OR (
                                status = 'processing'
                                AND (
@@ -727,6 +727,7 @@ impl RoutineStore for LibSqlBackend {
     async fn release_routine_event(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
@@ -738,10 +739,15 @@ impl RoutineStore for LibSqlBackend {
                     claimed_by = NULL,
                     claimed_at = NULL,
                     lease_expires_at = NULL,
+                    next_attempt_at = ?3,
                     processed_at = NULL
                 WHERE id = ?1
             "#,
-            params![id.to_string(), diagnostics.to_string()],
+            params![
+                id.to_string(),
+                diagnostics.to_string(),
+                fmt_ts(&next_attempt_at)
+            ],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -759,7 +765,7 @@ impl RoutineStore for LibSqlBackend {
             .query(
                 &format!(
                     "SELECT {} FROM routine_event_inbox
-                     WHERE status = 'pending'
+                     WHERE (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
                         OR (
                             status = 'processing'
                             AND (
@@ -807,6 +813,7 @@ impl RoutineStore for LibSqlBackend {
                     claimed_by = NULL,
                     claimed_at = NULL,
                     lease_expires_at = NULL,
+                    next_attempt_at = NULL,
                     error_message = NULL
                 WHERE id = ?1
             "#,
@@ -838,6 +845,7 @@ impl RoutineStore for LibSqlBackend {
                     claimed_by = NULL,
                     claimed_at = NULL,
                     lease_expires_at = NULL,
+                    next_attempt_at = NULL,
                     error_message = ?3
                 WHERE id = ?1
             "#,
@@ -864,6 +872,7 @@ impl RoutineStore for LibSqlBackend {
                     claimed_by = NULL,
                     claimed_at = NULL,
                     lease_expires_at = NULL,
+                    next_attempt_at = NULL,
                     error_message = ?3,
                     diagnostics = ?4
                 WHERE id = ?1
@@ -897,6 +906,7 @@ impl RoutineStore for LibSqlBackend {
                         claimed_by = NULL,
                         claimed_at = NULL,
                         lease_expires_at = NULL,
+                        next_attempt_at = NULL,
                         processed_at = NULL,
                         error_message = NULL,
                         matched_routines = 0,
@@ -1140,7 +1150,7 @@ impl RoutineStore for LibSqlBackend {
                         WHEN excluded.due_at > routine_trigger_queue.due_at THEN excluded.due_at
                         ELSE routine_trigger_queue.due_at
                     END,
-                    diagnostics = excluded.diagnostics,
+                    diagnostics = json_patch(routine_trigger_queue.diagnostics, excluded.diagnostics),
                     coalesced_count = routine_trigger_queue.coalesced_count + 1,
                     backlog_collapsed = CASE
                         WHEN excluded.backlog_collapsed != 0 OR routine_trigger_queue.backlog_collapsed != 0 THEN 1
@@ -1195,7 +1205,7 @@ impl RoutineStore for LibSqlBackend {
                 .query(
                     &format!(
                         "SELECT {} FROM routine_trigger_queue
-                         WHERE status = 'pending'
+                         WHERE (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
                             OR (
                                 status = 'processing'
                                 AND (
@@ -1203,7 +1213,10 @@ impl RoutineStore for LibSqlBackend {
                                     OR (claimed_at IS NOT NULL AND claimed_at < ?2)
                                 )
                             )
-                         ORDER BY due_at ASC, created_at ASC
+                         ORDER BY
+                            CASE WHEN status = 'pending' AND next_attempt_at IS NULL THEN 0 ELSE 1 END ASC,
+                            due_at ASC,
+                            created_at ASC
                          LIMIT ?3",
                         ROUTINE_TRIGGER_COLUMNS
                     ),
@@ -1269,6 +1282,7 @@ impl RoutineStore for LibSqlBackend {
     async fn release_routine_trigger(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
@@ -1276,15 +1290,20 @@ impl RoutineStore for LibSqlBackend {
             r#"
                 UPDATE routine_trigger_queue
                 SET status = 'pending',
-                    diagnostics = ?2,
+                    diagnostics = json_patch(diagnostics, ?2),
                     claimed_by = NULL,
                     claimed_at = NULL,
                     lease_expires_at = NULL,
+                    next_attempt_at = ?3,
                     processed_at = NULL,
                     error_message = NULL
                 WHERE id = ?1
             "#,
-            params![id.to_string(), diagnostics.to_string()],
+            params![
+                id.to_string(),
+                diagnostics.to_string(),
+                fmt_ts(&next_attempt_at)
+            ],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1310,6 +1329,7 @@ impl RoutineStore for LibSqlBackend {
                     claimed_by = NULL,
                     claimed_at = NULL,
                     lease_expires_at = NULL,
+                    next_attempt_at = NULL,
                     error_message = NULL
                 WHERE id = ?1
             "#,
@@ -1341,6 +1361,7 @@ impl RoutineStore for LibSqlBackend {
                     claimed_by = NULL,
                     claimed_at = NULL,
                     lease_expires_at = NULL,
+                    next_attempt_at = NULL,
                     error_message = ?3
                 WHERE id = ?1
             "#,

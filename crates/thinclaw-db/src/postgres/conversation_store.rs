@@ -418,11 +418,52 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn claim_due_outcome_contracts_with_lease(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+        lease_secs: i64,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.store
+            .claim_due_outcome_contracts_with_lease(None, worker_id, limit, now, lease_secs)
+            .await
+    }
+
+    async fn claim_due_outcome_contracts_for_user_with_lease(
+        &self,
+        user_id: &str,
+        worker_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+        lease_secs: i64,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.store
+            .claim_due_outcome_contracts_with_lease(
+                Some(user_id),
+                worker_id,
+                limit,
+                now,
+                lease_secs,
+            )
+            .await
+    }
+
     async fn update_outcome_contract(
         &self,
         contract: &OutcomeContract,
     ) -> Result<(), DatabaseError> {
         self.store.update_outcome_contract(contract).await
+    }
+
+    async fn update_claimed_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+        worker_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .update_claimed_outcome_contract(contract, worker_id)
+            .await
     }
 
     async fn outcome_summary_stats(

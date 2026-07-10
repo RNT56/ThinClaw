@@ -146,9 +146,12 @@ impl RoutineStore for PgBackend {
     async fn release_routine_event(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.store.release_routine_event(id, diagnostics).await
+        self.store
+            .release_routine_event(id, next_attempt_at, diagnostics)
+            .await
     }
 
     async fn list_pending_routine_events(
@@ -291,9 +294,12 @@ impl RoutineStore for PgBackend {
     async fn release_routine_trigger(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.store.release_routine_trigger(id, diagnostics).await
+        self.store
+            .release_routine_trigger(id, next_attempt_at, diagnostics)
+            .await
     }
 
     async fn complete_routine_trigger(

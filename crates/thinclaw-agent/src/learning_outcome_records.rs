@@ -77,6 +77,15 @@ pub fn outcome_contract_from_record(record: &OutcomeContractRecord) -> OutcomeCo
             format!("{}:{}:{}", record.source_kind, record.source_id, record.id)
         }),
         claimed_at: datetime_field(&record.payload, "claimed_at"),
+        claimed_by: optional_string_field(&record.payload, "claimed_by"),
+        lease_expires_at: datetime_field(&record.payload, "lease_expires_at"),
+        attempt_count: record
+            .payload
+            .get("attempt_count")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| u32::try_from(value).unwrap_or(u32::MAX))
+            .unwrap_or_default(),
+        next_attempt_at: datetime_field(&record.payload, "next_attempt_at"),
         evaluated_at: datetime_field(&record.payload, "evaluated_at"),
         created_at: record.created_at,
         updated_at: record.updated_at,
@@ -93,6 +102,10 @@ pub fn outcome_contract_to_record(contract: OutcomeContract) -> OutcomeContractR
         "evaluation_details": contract.evaluation_details,
         "dedupe_key": contract.dedupe_key,
         "claimed_at": contract.claimed_at,
+        "claimed_by": contract.claimed_by,
+        "lease_expires_at": contract.lease_expires_at,
+        "attempt_count": contract.attempt_count,
+        "next_attempt_at": contract.next_attempt_at,
         "evaluated_at": contract.evaluated_at,
     });
 

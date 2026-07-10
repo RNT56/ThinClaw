@@ -16,6 +16,43 @@ impl Agent {
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
     ) -> Result<AgenticLoopResult, Error> {
+        let mut loop_metrics =
+            LoopMetricGuard::start(Arc::clone(self.observer()), LoopKind::AgentDispatcher);
+        match tokio::time::timeout(
+            self.config.job_timeout,
+            self.run_agentic_loop_inner(
+                message,
+                session,
+                thread_id,
+                initial_messages,
+                &mut loop_metrics,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                loop_metrics.stop_with(LoopStopReason::WallTimeBudgetExceeded);
+                Err(crate::error::JobError::ContextError {
+                    id: thread_id,
+                    reason: format!(
+                        "Agentic loop exceeded its {} second wall-time budget",
+                        self.config.job_timeout.as_secs()
+                    ),
+                }
+                .into())
+            }
+        }
+    }
+
+    async fn run_agentic_loop_inner(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        initial_messages: Vec<ChatMessage>,
+        loop_metrics: &mut LoopMetricGuard,
+    ) -> Result<AgenticLoopResult, Error> {
         let PreparedPromptContext {
             identity,
             routed_agent,
@@ -147,9 +184,6 @@ impl Agent {
         let max_tool_iterations = self.config.max_tool_iterations;
         let iteration_policy = IterationLimitPolicy::new(max_tool_iterations);
         let mut iteration = 0;
-        let mut loop_metrics =
-            LoopMetricGuard::start(Arc::clone(self.observer()), LoopKind::AgentDispatcher);
-
         // Store the original LLM so we can restore it when the override is reset.
         let original_llm = reasoning.current_llm();
 
@@ -840,8 +874,7 @@ impl Agent {
                                     .with_generated_attachments(&turn.generated_attachments));
                             }
                             ToolPhaseTextOutcome::PrimaryNeedsFinalization => {
-                                loop_metrics.stop_with(LoopStopReason::Completed);
-                                return Ok(self
+                                let result = self
                                     .finalize_primary_text_only(
                                         &mut reasoning,
                                         &mut turn.context_messages,
@@ -855,8 +888,11 @@ impl Agent {
                                             FinalizationFailureKind::ToolPhase,
                                         ),
                                     )
-                                    .await?
-                                    .with_generated_attachments(&turn.generated_attachments));
+                                    .await?;
+                                loop_metrics.stop_with(LoopStopReason::Completed);
+                                return Ok(
+                                    result.with_generated_attachments(&turn.generated_attachments)
+                                );
                             }
                         }
                     }
@@ -942,8 +978,7 @@ impl Agent {
                             turn.context_messages
                                 .push(ChatMessage::system(STUCK_LOOP_FINALIZATION_PROMPT));
 
-                            loop_metrics.stop_with(LoopStopReason::Completed);
-                            return Ok(self
+                            let result = self
                                 .finalize_primary_text_only(
                                     &mut reasoning,
                                     &mut turn.context_messages,
@@ -957,8 +992,11 @@ impl Agent {
                                         FinalizationFailureKind::StuckLoop,
                                     ),
                                 )
-                                .await?
-                                .with_generated_attachments(&turn.generated_attachments));
+                                .await?;
+                            loop_metrics.stop_with(LoopStopReason::Completed);
+                            return Ok(
+                                result.with_generated_attachments(&turn.generated_attachments)
+                            );
                         }
                         StuckLoopDecision::Warn => {
                             tracing::info!(

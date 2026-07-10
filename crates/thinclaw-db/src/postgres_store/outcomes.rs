@@ -21,12 +21,14 @@ impl Store {
                     id, user_id, actor_id, channel, thread_id, source_kind, source_id,
                     contract_type, status, summary, due_at, expires_at, final_verdict,
                     final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
                     evaluated_at, created_at, updated_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7,
                     $8, $9, $10, $11, $12, $13,
                     $14, $15::jsonb, $16::jsonb, $17, $18,
-                    $19, $20, $21
+                    $19, $20, $21, $22,
+                    $23, $24, $25
                 )
                 ON CONFLICT (dedupe_key) DO UPDATE
                     SET updated_at = outcome_contracts.updated_at
@@ -51,6 +53,10 @@ impl Store {
                     &contract.metadata,
                     &contract.dedupe_key,
                     &contract.claimed_at,
+                    &contract.claimed_by,
+                    &contract.lease_expires_at,
+                    &i32::try_from(contract.attempt_count).unwrap_or(i32::MAX),
+                    &contract.next_attempt_at,
                     &contract.evaluated_at,
                     &contract.created_at,
                     &contract.updated_at,
@@ -74,6 +80,7 @@ impl Store {
                     id, user_id, actor_id, channel, thread_id, source_kind, source_id,
                     contract_type, status, summary, due_at, expires_at, final_verdict,
                     final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
                     evaluated_at, created_at, updated_at
                 FROM outcome_contracts
                 WHERE id = $1 AND user_id = $2
@@ -100,6 +107,7 @@ impl Store {
                     id, user_id, actor_id, channel, thread_id, source_kind, source_id,
                     contract_type, status, summary, due_at, expires_at, final_verdict,
                     final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
                     evaluated_at, created_at, updated_at
                 FROM outcome_contracts
                 WHERE user_id = $1
@@ -133,7 +141,7 @@ impl Store {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomeContract>, DatabaseError> {
-        self.claim_due_outcome_contracts_for_user(None, limit, now)
+        self.claim_due_outcome_contracts_with_lease(None, "legacy", limit, now, 300)
             .await
     }
 
@@ -144,16 +152,35 @@ impl Store {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.claim_due_outcome_contracts_with_lease(user_id, "legacy", limit, now, 300)
+            .await
+    }
+
+    pub async fn claim_due_outcome_contracts_with_lease(
+        &self,
+        user_id: Option<&str>,
+        worker_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+        lease_secs: i64,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
         if limit <= 0 {
             return Ok(Vec::new());
         }
         let conn = self.conn().await?;
+        let lease_secs = lease_secs.max(1);
+        let lease_expires_at = now + chrono::Duration::seconds(lease_secs);
+        let stale_before = now - chrono::Duration::seconds(lease_secs);
         match user_id {
             Some(user_id) => {
                 conn.execute(
                     r#"
                     UPDATE outcome_contracts
                     SET status = 'expired',
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL,
+                        next_attempt_at = NULL,
                         updated_at = $1
                     WHERE user_id = $2
                       AND status IN ('open', 'evaluating')
@@ -169,6 +196,10 @@ impl Store {
                     r#"
                     UPDATE outcome_contracts
                     SET status = 'expired',
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        lease_expires_at = NULL,
+                        next_attempt_at = NULL,
                         updated_at = $1
                     WHERE status IN ('open', 'evaluating')
                       AND evaluated_at IS NULL
@@ -188,9 +219,15 @@ impl Store {
                         SELECT id
                         FROM outcome_contracts
                         WHERE user_id = $3
-                          AND status = 'open'
-                          AND due_at <= $2
-                          AND expires_at > $2
+                          AND (
+                            (status = 'open' AND due_at <= $2 AND expires_at > $2
+                             AND (next_attempt_at IS NULL OR next_attempt_at <= $2))
+                            OR
+                            (status = 'evaluating' AND expires_at > $2
+                             AND ((lease_expires_at IS NOT NULL AND lease_expires_at <= $2)
+                                  OR (lease_expires_at IS NULL
+                                      AND (claimed_at IS NULL OR claimed_at <= $6))))
+                          )
                         ORDER BY due_at ASC, created_at ASC
                         LIMIT $1
                         FOR UPDATE SKIP LOCKED
@@ -198,17 +235,24 @@ impl Store {
                     UPDATE outcome_contracts oc
                     SET status = 'evaluating',
                         claimed_at = $2,
+                        claimed_by = $4,
+                        lease_expires_at = $5,
+                        attempt_count = attempt_count + 1,
+                        next_attempt_at = NULL,
                         updated_at = $2
                     FROM due
                     WHERE oc.id = due.id
                     RETURNING
-                        oc.id, oc.user_id, oc.actor_id, oc.channel, oc.thread_id, oc.source_kind,
-                        oc.source_id, oc.contract_type, oc.status, oc.summary, oc.due_at,
-                        oc.expires_at, oc.final_verdict, oc.final_score, oc.evaluation_details,
-                        oc.metadata, oc.dedupe_key, oc.claimed_at, oc.evaluated_at,
-                        oc.created_at, oc.updated_at
+                        oc.*
                     "#,
-                    &[&limit, &now, &user_id],
+                    &[
+                        &limit,
+                        &now,
+                        &user_id,
+                        &worker_id,
+                        &lease_expires_at,
+                        &stale_before,
+                    ],
                 )
                 .await?
             }
@@ -218,9 +262,15 @@ impl Store {
                     WITH due AS (
                         SELECT id
                         FROM outcome_contracts
-                        WHERE status = 'open'
-                          AND due_at <= $2
-                          AND expires_at > $2
+                        WHERE (
+                            (status = 'open' AND due_at <= $2 AND expires_at > $2
+                             AND (next_attempt_at IS NULL OR next_attempt_at <= $2))
+                            OR
+                            (status = 'evaluating' AND expires_at > $2
+                             AND ((lease_expires_at IS NOT NULL AND lease_expires_at <= $2)
+                                  OR (lease_expires_at IS NULL
+                                      AND (claimed_at IS NULL OR claimed_at <= $5))))
+                        )
                         ORDER BY due_at ASC, created_at ASC
                         LIMIT $1
                         FOR UPDATE SKIP LOCKED
@@ -228,17 +278,17 @@ impl Store {
                     UPDATE outcome_contracts oc
                     SET status = 'evaluating',
                         claimed_at = $2,
+                        claimed_by = $3,
+                        lease_expires_at = $4,
+                        attempt_count = attempt_count + 1,
+                        next_attempt_at = NULL,
                         updated_at = $2
                     FROM due
                     WHERE oc.id = due.id
                     RETURNING
-                        oc.id, oc.user_id, oc.actor_id, oc.channel, oc.thread_id, oc.source_kind,
-                        oc.source_id, oc.contract_type, oc.status, oc.summary, oc.due_at,
-                        oc.expires_at, oc.final_verdict, oc.final_score, oc.evaluation_details,
-                        oc.metadata, oc.dedupe_key, oc.claimed_at, oc.evaluated_at,
-                        oc.created_at, oc.updated_at
+                        oc.*
                     "#,
-                    &[&limit, &now],
+                    &[&limit, &now, &worker_id, &lease_expires_at, &stale_before],
                 )
                 .await?
             }
@@ -272,9 +322,13 @@ impl Store {
                 metadata = $16::jsonb,
                 dedupe_key = $17,
                 claimed_at = $18,
-                evaluated_at = $19,
-                created_at = $20,
-                updated_at = $21
+                claimed_by = $19,
+                lease_expires_at = $20,
+                attempt_count = $21,
+                next_attempt_at = $22,
+                evaluated_at = $23,
+                created_at = $24,
+                updated_at = $25
             WHERE id = $1
             "#,
             &[
@@ -296,6 +350,10 @@ impl Store {
                 &contract.metadata,
                 &contract.dedupe_key,
                 &contract.claimed_at,
+                &contract.claimed_by,
+                &contract.lease_expires_at,
+                &i32::try_from(contract.attempt_count).unwrap_or(i32::MAX),
+                &contract.next_attempt_at,
                 &contract.evaluated_at,
                 &contract.created_at,
                 &contract.updated_at,
@@ -303,6 +361,77 @@ impl Store {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn update_claimed_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+        worker_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let affected = conn
+            .execute(
+                r#"
+                UPDATE outcome_contracts
+                SET user_id = $2,
+                    actor_id = $3,
+                    channel = $4,
+                    thread_id = $5,
+                    source_kind = $6,
+                    source_id = $7,
+                    contract_type = $8,
+                    status = $9,
+                    summary = $10,
+                    due_at = $11,
+                    expires_at = $12,
+                    final_verdict = $13,
+                    final_score = $14,
+                    evaluation_details = $15::jsonb,
+                    metadata = $16::jsonb,
+                    dedupe_key = $17,
+                    claimed_at = $18,
+                    claimed_by = $19,
+                    lease_expires_at = $20,
+                    attempt_count = $21,
+                    next_attempt_at = $22,
+                    evaluated_at = $23,
+                    created_at = $24,
+                    updated_at = $25
+                WHERE id = $1
+                  AND status = 'evaluating'
+                  AND claimed_by = $26
+                "#,
+                &[
+                    &contract.id,
+                    &contract.user_id,
+                    &contract.actor_id,
+                    &contract.channel,
+                    &contract.thread_id,
+                    &contract.source_kind,
+                    &contract.source_id,
+                    &contract.contract_type,
+                    &contract.status,
+                    &contract.summary,
+                    &contract.due_at,
+                    &contract.expires_at,
+                    &contract.final_verdict,
+                    &contract.final_score,
+                    &contract.evaluation_details,
+                    &contract.metadata,
+                    &contract.dedupe_key,
+                    &contract.claimed_at,
+                    &contract.claimed_by,
+                    &contract.lease_expires_at,
+                    &i32::try_from(contract.attempt_count).unwrap_or(i32::MAX),
+                    &contract.next_attempt_at,
+                    &contract.evaluated_at,
+                    &contract.created_at,
+                    &contract.updated_at,
+                    &worker_id,
+                ],
+            )
+            .await?;
+        Ok(affected > 0)
     }
 
     /// Aggregate outcome counts for Learning Ledger status cards.
@@ -359,17 +488,24 @@ impl Store {
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomePendingUser>, DatabaseError> {
         let conn = self.conn().await?;
+        let legacy_stale_before = now - chrono::Duration::seconds(300);
         let rows = conn
             .query(
                 r#"
                 SELECT DISTINCT user_id
                 FROM outcome_contracts
-                WHERE status = 'open'
-                  AND due_at <= $1
-                  AND expires_at > $1
+                WHERE ((status = 'open'
+                        AND due_at <= $1
+                        AND expires_at > $1
+                        AND (next_attempt_at IS NULL OR next_attempt_at <= $1))
+                       OR (status = 'evaluating'
+                           AND expires_at > $1
+                           AND ((lease_expires_at IS NOT NULL AND lease_expires_at <= $1)
+                                OR (lease_expires_at IS NULL
+                                    AND (claimed_at IS NULL OR claimed_at <= $2)))))
                 ORDER BY user_id ASC
                 "#,
-                &[&now],
+                &[&now, &legacy_stale_before],
             )
             .await?;
         Ok(rows

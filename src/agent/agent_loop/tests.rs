@@ -1,4 +1,5 @@
-use super::truncate_for_preview;
+use super::{shutdown::drain_conversation_tasks, truncate_for_preview};
+use thinclaw_agent::loop_control::LoopStopReason;
 use thinclaw_agent::startup_hooks::{
     heartbeat_gateway_fallback_identity_from_diagnostics,
     heartbeat_routine_owner_from_gateway_defaults, telegram_startup_thread_id,
@@ -130,4 +131,36 @@ fn test_heartbeat_routine_owner_preserves_distinct_gateway_actor() {
 
     assert_eq!(user_id, "household-user");
     assert_eq!(actor_id, "desk-actor");
+}
+
+#[tokio::test]
+async fn conversation_task_drain_completes_finished_workers() {
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async {});
+
+    let reason = drain_conversation_tasks(
+        &mut tasks,
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(reason, LoopStopReason::Completed);
+    assert!(tasks.is_empty());
+}
+
+#[tokio::test]
+async fn conversation_task_drain_aborts_workers_after_grace_period() {
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(std::future::pending::<()>());
+
+    let reason = drain_conversation_tasks(
+        &mut tasks,
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(reason, LoopStopReason::Cancelled);
+    assert!(tasks.is_empty());
 }

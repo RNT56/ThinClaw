@@ -213,6 +213,7 @@ pub enum RepoWorkerRunState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RepoProjectEventKind {
     ProjectCreated,
     ProjectStateChanged,
@@ -231,6 +232,9 @@ pub enum RepoProjectEventKind {
     MergeDenied,
     SecurityFindingRecorded,
     SecretsFindingRecorded,
+    SupervisorError,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -995,5 +999,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(legacy_policy.write_mode, RepoWriteMode::ForkPr);
+
+        let error_kind = serde_json::to_string(&RepoProjectEventKind::SupervisorError).unwrap();
+        assert_eq!(error_kind, "\"supervisor_error\"");
+        assert_eq!(
+            serde_json::from_str::<RepoProjectEventKind>(&error_kind).unwrap(),
+            RepoProjectEventKind::SupervisorError
+        );
+        assert_eq!(
+            serde_json::from_str::<RepoProjectEventKind>("\"future_event\"").unwrap(),
+            RepoProjectEventKind::Unknown
+        );
     }
 }

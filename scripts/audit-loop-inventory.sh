@@ -18,8 +18,11 @@ for path in \
   "src/agent/subagent_executor/mod.rs" \
   "src/agent/routine_engine.rs" \
   "src/agent/outcomes.rs" \
+  "src/agent/self_repair.rs" \
+  "src/agent/job_monitor.rs" \
   "src/agent/agent_loop/mod.rs" \
   "src/repo_projects/supervisor.rs" \
+  "src/repo_projects/github/transport.rs" \
   "crates/thinclaw-agent/src/worker_runtime.rs" \
   "crates/thinclaw-agent/src/dispatcher_policy.rs" \
   "crates/thinclaw-agent/src/subagent.rs" \
@@ -40,4 +43,10 @@ rg -n "loop \\{|while let Some|while let Ok|tokio::time::interval|recv\\(\\)\\.a
 
 echo
 echo "## Shared loop-control usage"
-rg -n "LoopBudget|LoopKind|LoopRunSummary|LoopStopReason|LoopRetryPolicy" src crates --glob '*.rs'
+rg -n "LoopBudget|LoopKind|LoopRunContext|LoopRunSummary|LoopStopReason|LoopRetryPolicy" \
+  src crates --glob '*.rs'
+
+echo
+echo "## Shutdown and cancellation ownership"
+rg -n "shutdown_rx|shutdown_tx|abort_all|drain_or_abort|JoinSet::|\.shutdown\(\)" \
+  src/agent src/repo_projects crates/thinclaw-agent --glob '*.rs'

@@ -29,6 +29,8 @@ pub trait RepairContextPort: Send + Sync {
     -> Result<StuckJobContextSnapshot, String>;
 
     async fn attempt_recovery(&self, job_id: Uuid) -> Result<(), String>;
+
+    async fn mark_manual_required(&self, job_id: Uuid, reason: &str) -> Result<(), String>;
 }
 
 #[async_trait]
@@ -36,6 +38,8 @@ pub trait BrokenToolStorePort: Send + Sync {
     async fn get_broken_tools(&self, threshold: i32) -> Result<Vec<BrokenTool>, String>;
 
     async fn mark_tool_repaired(&self, tool_name: &str) -> Result<(), String>;
+
+    async fn quarantine_tool_failure(&self, tool_name: &str) -> Result<(), String>;
 
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), String>;
 
@@ -92,8 +96,8 @@ pub trait SelfRepair: Send + Sync {
     /// Attempt to repair a broken tool.
     async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError>;
 
-    /// Dismiss a broken tool by resetting its failure counter.
-    async fn dismiss_broken_tool(&self, tool_name: &str);
+    /// Quarantine a terminal repair incident until a new failure reopens it.
+    async fn quarantine_broken_tool(&self, tool_name: &str);
 }
 
 /// Default self-repair implementation.
@@ -189,12 +193,19 @@ impl SelfRepair for DefaultSelfRepair {
 
     async fn repair_stuck_job(&self, job: &StuckJob) -> Result<RepairResult, RepairError> {
         if job.repair_attempts >= self.max_repair_attempts {
-            return Ok(RepairResult::ManualRequired {
-                message: format!(
-                    "Job {} has exceeded maximum repair attempts ({})",
-                    job.job_id, self.max_repair_attempts
-                ),
-            });
+            let reason = format!(
+                "Job {} exceeded maximum repair attempts ({})",
+                job.job_id, self.max_repair_attempts
+            );
+            self.context
+                .mark_manual_required(job.job_id, &reason)
+                .await
+                .map_err(|error| RepairError::Failed {
+                    target_type: "job".to_string(),
+                    target_id: job.job_id,
+                    reason: format!("failed to persist manual-required state: {error}"),
+                })?;
+            return Ok(RepairResult::ManualRequired { message: reason });
         }
 
         match self.context.attempt_recovery(job.job_id).await {
@@ -401,11 +412,11 @@ impl SelfRepair for DefaultSelfRepair {
         }
     }
 
-    async fn dismiss_broken_tool(&self, tool_name: &str) {
+    async fn quarantine_broken_tool(&self, tool_name: &str) {
         if let Some(ref store) = self.store
-            && let Err(e) = store.mark_tool_repaired(tool_name).await
+            && let Err(e) = store.quarantine_tool_failure(tool_name).await
         {
-            tracing::warn!("Failed to dismiss broken tool '{}': {}", tool_name, e);
+            tracing::warn!("Failed to quarantine broken tool '{}': {}", tool_name, e);
         }
     }
 }
@@ -495,6 +506,9 @@ mod tests {
         async fn attempt_recovery(&self, _job_id: Uuid) -> Result<(), String> {
             Ok(())
         }
+        async fn mark_manual_required(&self, _job_id: Uuid, _reason: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     /// Records repair-attempt increments so we can assert the loop is bounded.
@@ -510,6 +524,9 @@ mod tests {
             Ok(vec![])
         }
         async fn mark_tool_repaired(&self, _tool_name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn quarantine_tool_failure(&self, _tool_name: &str) -> Result<(), String> {
             Ok(())
         }
         async fn increment_repair_attempts(&self, _tool_name: &str) -> Result<(), String> {

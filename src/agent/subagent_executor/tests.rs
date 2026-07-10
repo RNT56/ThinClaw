@@ -421,3 +421,102 @@ async fn completed_subagent_is_marked_completed_and_not_running() {
         .expect("spawned agent should stay listed");
     assert_eq!(info.status, SubagentStatus::Completed);
 }
+
+#[tokio::test]
+async fn wait_for_subagent_is_bounded_when_completion_status_delivery_hangs() {
+    use crate::channels::Channel;
+    use futures::future;
+    use futures::stream;
+
+    struct BlockingCompletionChannel;
+
+    #[async_trait::async_trait]
+    impl Channel for BlockingCompletionChannel {
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        async fn start(
+            &self,
+        ) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &crate::channels::IncomingMessage,
+            _response: crate::channels::OutgoingResponse,
+        ) -> Result<(), crate::error::ChannelError> {
+            Ok(())
+        }
+
+        async fn send_status(
+            &self,
+            status: StatusUpdate,
+            _metadata: &serde_json::Value,
+        ) -> Result<(), crate::error::ChannelError> {
+            if matches!(status, StatusUpdate::SubagentCompleted { .. }) {
+                future::pending::<()>().await;
+            }
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
+            Ok(())
+        }
+    }
+
+    let llm = Arc::new(StubLlm::new("done"));
+    let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+        max_output_length: 100_000,
+        injection_check_enabled: false,
+        redact_pii_in_prompts: true,
+        smart_approval_mode: "off".to_string(),
+        external_scanner_mode: "off".to_string(),
+        external_scanner_path: None,
+        external_scanner_require_verified: false,
+    }));
+    let channels = Arc::new(ChannelManager::new());
+    channels.add(Box::new(BlockingCompletionChannel)).await;
+    let (executor, _result_rx) = SubagentExecutor::new(
+        llm,
+        safety,
+        Arc::new(ToolRegistry::new()),
+        channels,
+        SubagentConfig::default(),
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        executor.spawn(
+            SubagentSpawnRequest {
+                name: "bounded-finalizer".to_string(),
+                task: "finish immediately".to_string(),
+                system_prompt: None,
+                model: None,
+                task_packet: None,
+                memory_mode: None,
+                tool_mode: None,
+                skill_mode: None,
+                tool_profile: None,
+                allowed_tools: None,
+                allowed_skills: None,
+                principal_id: None,
+                actor_id: None,
+                agent_workspace_id: None,
+                timeout_secs: Some(1),
+                wait: true,
+            },
+            "blocking",
+            &serde_json::json!({"thread_id": "agent:main"}),
+            "default",
+            None,
+            Some("agent:main"),
+        ),
+    )
+    .await
+    .expect("post-loop finalization must remain bounded")
+    .expect("sub-agent should return its completed result");
+
+    assert!(result.success);
+}

@@ -60,7 +60,7 @@ impl JobState {
 
     /// Check if the job is active (not terminal).
     pub fn is_active(&self) -> bool {
-        !self.is_terminal()
+        !self.is_terminal() && *self != Self::Stuck
     }
 }
 

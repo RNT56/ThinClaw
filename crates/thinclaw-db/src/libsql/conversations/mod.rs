@@ -691,6 +691,7 @@ impl ConversationStore for LibSqlBackend {
                 id, user_id, actor_id, channel, thread_id, conversation_id,
                 message_id, job_id, event_type, source, payload, metadata, created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(id) DO NOTHING
             "#,
             params![
                 id.to_string(),
@@ -787,6 +788,7 @@ impl ConversationStore for LibSqlBackend {
             INSERT INTO learning_evaluations (
                 id, learning_event_id, user_id, evaluator, status, score, details, created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(id) DO NOTHING
             "#,
             params![
                 id.to_string(),
@@ -853,6 +855,7 @@ impl ConversationStore for LibSqlBackend {
                 id, learning_event_id, user_id, candidate_type, risk_tier, confidence,
                 target_type, target_name, summary, proposal, created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(id) DO NOTHING
             "#,
             params![
                 id.to_string(),
@@ -1309,12 +1312,14 @@ impl ConversationStore for LibSqlBackend {
                     id, user_id, actor_id, channel, thread_id, source_kind, source_id,
                     contract_type, status, summary, due_at, expires_at, final_verdict,
                     final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
                     evaluated_at, created_at, updated_at
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11, ?12, ?13,
                     ?14, ?15, ?16, ?17, ?18,
-                    ?19, ?20, ?21
+                    ?19, ?20, ?21, ?22,
+                    ?23, ?24, ?25
                 )
                 "#,
                 params![
@@ -1336,6 +1341,10 @@ impl ConversationStore for LibSqlBackend {
                     contract.metadata.to_string(),
                     contract.dedupe_key.as_str(),
                     contract.claimed_at.as_ref().map(fmt_ts),
+                    contract.claimed_by.as_deref(),
+                    contract.lease_expires_at.as_ref().map(fmt_ts),
+                    contract.attempt_count as i64,
+                    contract.next_attempt_at.as_ref().map(fmt_ts),
                     contract.evaluated_at.as_ref().map(fmt_ts),
                     fmt_ts(&contract.created_at),
                     fmt_ts(&contract.updated_at),
@@ -1379,6 +1388,7 @@ impl ConversationStore for LibSqlBackend {
                     id, user_id, actor_id, channel, thread_id, source_kind, source_id,
                     contract_type, status, summary, due_at, expires_at, final_verdict,
                     final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
                     evaluated_at, created_at, updated_at
                 FROM outcome_contracts
                 WHERE id = ?1 AND user_id = ?2
@@ -1413,6 +1423,7 @@ impl ConversationStore for LibSqlBackend {
                     id, user_id, actor_id, channel, thread_id, source_kind, source_id,
                     contract_type, status, summary, due_at, expires_at, final_verdict,
                     final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
                     evaluated_at, created_at, updated_at
                 FROM outcome_contracts
                 WHERE user_id = ?1
@@ -1454,7 +1465,7 @@ impl ConversationStore for LibSqlBackend {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomeContract>, DatabaseError> {
-        self.claim_due_outcome_contracts_for_user("", limit, now)
+        self.claim_due_outcome_contracts_with_lease("legacy", limit, now, 300)
             .await
     }
 
@@ -1464,113 +1475,31 @@ impl ConversationStore for LibSqlBackend {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomeContract>, DatabaseError> {
-        if limit <= 0 {
-            return Ok(Vec::new());
-        }
-        let conn = self.connect().await?;
-        let now_ts = fmt_ts(&now);
-        let scoped = !user_id.is_empty();
-        if scoped {
-            conn.execute(
-                r#"
-                UPDATE outcome_contracts
-                SET status = 'expired',
-                    updated_at = ?1
-                WHERE user_id = ?2
-                  AND status IN ('open', 'evaluating')
-                  AND evaluated_at IS NULL
-                  AND expires_at <= ?1
-                "#,
-                params![now_ts.clone(), user_id],
-            )
+        self.claim_due_outcome_contracts_for_user_with_lease(user_id, "legacy", limit, now, 300)
             .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        } else {
-            conn.execute(
-                r#"
-                UPDATE outcome_contracts
-                SET status = 'expired',
-                    updated_at = ?1
-                WHERE status IN ('open', 'evaluating')
-                  AND evaluated_at IS NULL
-                  AND expires_at <= ?1
-                "#,
-                params![now_ts.clone()],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        }
+    }
 
-        let mut rows = if scoped {
-            conn.query(
-                r#"
-                SELECT
-                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
-                    contract_type, status, summary, due_at, expires_at, final_verdict,
-                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
-                    evaluated_at, created_at, updated_at
-                FROM outcome_contracts
-                WHERE user_id = ?2
-                  AND status = 'open'
-                  AND due_at <= ?1
-                  AND expires_at > ?1
-                ORDER BY due_at ASC, created_at ASC
-                LIMIT ?3
-                "#,
-                params![now_ts.clone(), user_id, limit],
-            )
+    async fn claim_due_outcome_contracts_with_lease(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+        lease_secs: i64,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.claim_due_outcome_contracts_for_user_with_lease("", worker_id, limit, now, lease_secs)
             .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        } else {
-            conn.query(
-                r#"
-                SELECT
-                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
-                    contract_type, status, summary, due_at, expires_at, final_verdict,
-                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
-                    evaluated_at, created_at, updated_at
-                FROM outcome_contracts
-                WHERE status = 'open'
-                  AND due_at <= ?1
-                  AND expires_at > ?1
-                ORDER BY due_at ASC, created_at ASC
-                LIMIT ?2
-                "#,
-                params![now_ts.clone(), limit],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        };
+    }
 
-        let mut claimed = Vec::new();
-        while let Some(row) = rows
-            .next()
+    async fn claim_due_outcome_contracts_for_user_with_lease(
+        &self,
+        user_id: &str,
+        worker_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+        lease_secs: i64,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        outcomes::claim_due_for_user_with_lease(self, user_id, worker_id, limit, now, lease_secs)
             .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        {
-            let mut contract = outcome_contract_from_row(&row);
-            let affected = conn
-                .execute(
-                    r#"
-                    UPDATE outcome_contracts
-                    SET status = 'evaluating',
-                        claimed_at = ?2,
-                        updated_at = ?2
-                    WHERE id = ?1
-                      AND status = 'open'
-                "#,
-                    params![contract.id.to_string(), now_ts.clone()],
-                )
-                .await
-                .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            if affected > 0 {
-                contract.status = "evaluating".to_string();
-                contract.claimed_at = Some(now);
-                contract.updated_at = now;
-                claimed.push(contract);
-            }
-        }
-        Ok(claimed)
     }
 
     async fn update_outcome_contract(
@@ -1598,9 +1527,13 @@ impl ConversationStore for LibSqlBackend {
                 metadata = ?16,
                 dedupe_key = ?17,
                 claimed_at = ?18,
-                evaluated_at = ?19,
-                created_at = ?20,
-                updated_at = ?21
+                claimed_by = ?19,
+                lease_expires_at = ?20,
+                attempt_count = ?21,
+                next_attempt_at = ?22,
+                evaluated_at = ?23,
+                created_at = ?24,
+                updated_at = ?25
             WHERE id = ?1
             "#,
             params![
@@ -1622,6 +1555,10 @@ impl ConversationStore for LibSqlBackend {
                 contract.metadata.to_string(),
                 contract.dedupe_key.as_str(),
                 contract.claimed_at.as_ref().map(fmt_ts),
+                contract.claimed_by.as_deref(),
+                contract.lease_expires_at.as_ref().map(fmt_ts),
+                contract.attempt_count as i64,
+                contract.next_attempt_at.as_ref().map(fmt_ts),
                 contract.evaluated_at.as_ref().map(fmt_ts),
                 fmt_ts(&contract.created_at),
                 fmt_ts(&contract.updated_at),
@@ -1630,6 +1567,78 @@ impl ConversationStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn update_claimed_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+        worker_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let affected = conn
+            .execute(
+                r#"
+                UPDATE outcome_contracts
+                SET user_id = ?2,
+                    actor_id = ?3,
+                    channel = ?4,
+                    thread_id = ?5,
+                    source_kind = ?6,
+                    source_id = ?7,
+                    contract_type = ?8,
+                    status = ?9,
+                    summary = ?10,
+                    due_at = ?11,
+                    expires_at = ?12,
+                    final_verdict = ?13,
+                    final_score = ?14,
+                    evaluation_details = ?15,
+                    metadata = ?16,
+                    dedupe_key = ?17,
+                    claimed_at = ?18,
+                    claimed_by = ?19,
+                    lease_expires_at = ?20,
+                    attempt_count = ?21,
+                    next_attempt_at = ?22,
+                    evaluated_at = ?23,
+                    created_at = ?24,
+                    updated_at = ?25
+                WHERE id = ?1
+                  AND status = 'evaluating'
+                  AND claimed_by = ?26
+                "#,
+                params![
+                    contract.id.to_string(),
+                    contract.user_id.as_str(),
+                    contract.actor_id.as_deref(),
+                    contract.channel.as_deref(),
+                    contract.thread_id.as_deref(),
+                    contract.source_kind.as_str(),
+                    contract.source_id.as_str(),
+                    contract.contract_type.as_str(),
+                    contract.status.as_str(),
+                    contract.summary.as_deref(),
+                    fmt_ts(&contract.due_at),
+                    fmt_ts(&contract.expires_at),
+                    contract.final_verdict.as_deref(),
+                    contract.final_score,
+                    contract.evaluation_details.to_string(),
+                    contract.metadata.to_string(),
+                    contract.dedupe_key.as_str(),
+                    contract.claimed_at.as_ref().map(fmt_ts),
+                    contract.claimed_by.as_deref(),
+                    contract.lease_expires_at.as_ref().map(fmt_ts),
+                    contract.attempt_count as i64,
+                    contract.next_attempt_at.as_ref().map(fmt_ts),
+                    contract.evaluated_at.as_ref().map(fmt_ts),
+                    fmt_ts(&contract.created_at),
+                    fmt_ts(&contract.updated_at),
+                    worker_id,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(affected > 0)
     }
 
     async fn outcome_summary_stats(
@@ -1688,17 +1697,24 @@ impl ConversationStore for LibSqlBackend {
     ) -> Result<Vec<OutcomePendingUser>, DatabaseError> {
         let conn = self.connect().await?;
         let now_ts = fmt_ts(&now);
+        let legacy_stale_before = fmt_ts(&(now - chrono::Duration::seconds(300)));
         let mut rows = conn
             .query(
                 r#"
                 SELECT DISTINCT user_id
                 FROM outcome_contracts
-                WHERE status = 'open'
-                  AND due_at <= ?1
-                  AND expires_at > ?1
+                WHERE ((status = 'open'
+                        AND due_at <= ?1
+                        AND expires_at > ?1
+                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
+                       OR (status = 'evaluating'
+                           AND expires_at > ?1
+                           AND ((lease_expires_at IS NOT NULL AND lease_expires_at <= ?1)
+                                OR (lease_expires_at IS NULL
+                                    AND (claimed_at IS NULL OR claimed_at <= ?2)))))
                 ORDER BY user_id ASC
                 "#,
-                params![now_ts],
+                params![now_ts, legacy_stale_before],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1938,6 +1954,7 @@ impl ConversationStore for LibSqlBackend {
     }
 }
 
+mod outcomes;
 mod rows;
 
 pub(crate) use rows::*;

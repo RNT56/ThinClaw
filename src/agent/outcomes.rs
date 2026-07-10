@@ -1,16 +1,19 @@
 //! Outcome-backed learning helpers and evaluator.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use thinclaw_agent::loop_control::{LoopKind, LoopStopReason};
 use thinclaw_agent::outcomes::BuildOutcomeCandidateInput;
 use thinclaw_agent::outcomes::{
     self as outcome_policy, CONTRACT_ROUTINE, CONTRACT_TOOL, CONTRACT_TURN,
     DEFAULT_EVALUATION_INTERVAL_SECS, EVALUATOR_MANUAL_REVIEW, EVALUATOR_OUTCOME,
-    OutcomeCandidateSupplementKind, OutcomeRuntimeSettings, OutcomeScore, SOURCE_ARTIFACT_VERSION,
-    SOURCE_CODE_PROPOSAL, SOURCE_LEARNING_EVENT, SOURCE_ROUTINE_RUN, STATUS_EVALUATED, STATUS_OPEN,
+    OUTCOME_CLAIM_LEASE_SECS, OUTCOME_EVALUATION_TIMEOUT_SECS, OutcomeCandidateSupplementKind,
+    OutcomeRuntimeSettings, OutcomeScore, SOURCE_ARTIFACT_VERSION, SOURCE_CODE_PROPOSAL,
+    SOURCE_LEARNING_EVENT, SOURCE_ROUTINE_RUN, STATUS_EVALUATED, STATUS_OPEN, STATUS_QUARANTINED,
     VERDICT_NEGATIVE,
 };
 #[cfg(test)]
@@ -30,6 +33,7 @@ use crate::history::{
     OutcomeObservation,
 };
 use crate::llm::{LlmProvider, Reasoning};
+use crate::observability::{LoopPhaseRun, NoopObserver, Observer, ObserverMetric};
 use crate::settings::LearningSettings;
 use crate::skills::SkillRegistry;
 use crate::workspace::Workspace;
@@ -47,6 +51,38 @@ pub struct OutcomeService {
     /// service processing a batch used to construct a fresh
     /// `LearningOrchestrator` (and `MemoryProviderManager`) per candidate.
     learning_orchestrator: Arc<LearningOrchestrator>,
+    worker_id: String,
+    active_users: Arc<Mutex<HashSet<String>>>,
+    observer: Arc<dyn Observer>,
+}
+
+struct ActiveOutcomeUserGuard {
+    active_users: Arc<Mutex<HashSet<String>>>,
+    user_id: String,
+}
+
+impl ActiveOutcomeUserGuard {
+    fn acquire(active_users: &Arc<Mutex<HashSet<String>>>, user_id: &str) -> Option<Self> {
+        let mut users = active_users
+            .lock()
+            .expect("active outcome users mutex poisoned");
+        if !users.insert(user_id.to_string()) {
+            return None;
+        }
+        Some(Self {
+            active_users: Arc::clone(active_users),
+            user_id: user_id.to_string(),
+        })
+    }
+}
+
+impl Drop for ActiveOutcomeUserGuard {
+    fn drop(&mut self) {
+        self.active_users
+            .lock()
+            .expect("active outcome users mutex poisoned")
+            .remove(&self.user_id);
+    }
 }
 
 impl OutcomeService {
@@ -60,7 +96,15 @@ impl OutcomeService {
             skill_registry: None,
             routine_engine: None,
             learning_orchestrator,
+            worker_id: Uuid::new_v4().to_string(),
+            active_users: Arc::new(Mutex::new(HashSet::new())),
+            observer: Arc::new(NoopObserver),
         }
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = observer;
+        self
     }
 
     pub fn with_learning_context(
@@ -97,21 +141,82 @@ impl OutcomeService {
     }
 
     pub async fn run_once_for_user(&self, user_id: &str) -> Result<usize, String> {
+        let Some(_active_user_guard) = ActiveOutcomeUserGuard::acquire(&self.active_users, user_id)
+        else {
+            tracing::debug!(user_id, "Outcome evaluation already active for user");
+            return Ok(0);
+        };
+        self.run_once_for_user_inner(user_id).await
+    }
+
+    async fn run_once_for_user_inner(&self, user_id: &str) -> Result<usize, String> {
+        let started = Instant::now();
+        match self.run_once_for_user_batch(user_id).await {
+            Ok((processed, attempted)) => {
+                self.observer
+                    .record_metric(&ObserverMetric::LoopPhaseRun(LoopPhaseRun::new(
+                        LoopKind::OutcomeService,
+                        "evaluate_user",
+                        if attempted == 0 {
+                            LoopStopReason::NoWork
+                        } else {
+                            LoopStopReason::Completed
+                        },
+                        started.elapsed(),
+                        attempted,
+                        attempted.saturating_sub(processed) as u32,
+                    )));
+                Ok(processed)
+            }
+            Err(error) => {
+                self.observer
+                    .record_metric(&ObserverMetric::LoopPhaseRun(LoopPhaseRun::new(
+                        LoopKind::OutcomeService,
+                        "evaluate_user",
+                        LoopStopReason::FatalError,
+                        started.elapsed(),
+                        0,
+                        1,
+                    )));
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_once_for_user_batch(&self, user_id: &str) -> Result<(usize, usize), String> {
         let settings = load_learning_settings(&*self.store, user_id).await;
         let runtime_settings = outcome_runtime_settings(&settings);
         if !outcome_policy::outcomes_enabled(&runtime_settings) {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let now = Utc::now();
         let limit = outcome_policy::max_due_per_tick(&runtime_settings);
         let contracts = self
             .store
-            .claim_due_outcome_contracts_for_user(user_id, limit, now)
+            .claim_due_outcome_contracts_for_user_with_lease(
+                user_id,
+                &self.worker_id,
+                limit,
+                now,
+                OUTCOME_CLAIM_LEASE_SECS,
+            )
             .await
             .map_err(|err| err.to_string())?;
+        let attempted = contracts.len();
         let mut processed = 0usize;
         for contract in contracts {
-            match self.evaluate_contract(contract.clone()).await {
+            let evaluation = tokio::time::timeout(
+                Duration::from_secs(OUTCOME_EVALUATION_TIMEOUT_SECS),
+                self.evaluate_contract(contract.clone()),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "outcome evaluation exceeded {} second wall-time budget",
+                    OUTCOME_EVALUATION_TIMEOUT_SECS
+                ))
+            });
+            match evaluation {
                 Ok(()) => {
                     processed += 1;
                 }
@@ -133,7 +238,7 @@ impl OutcomeService {
                 }
             }
         }
-        Ok(processed)
+        Ok((processed, attempted))
     }
 
     async fn scheduler_plan(
@@ -181,20 +286,11 @@ impl OutcomeService {
         let evaluation_plan =
             outcome_policy::evaluated_contract_plan(&score, EVALUATOR_OUTCOME, Utc::now());
         outcome_policy::apply_evaluated_contract_plan(&mut contract, &evaluation_plan);
-        self.store
-            .update_outcome_contract(&contract)
-            .await
-            .map_err(|err| err.to_string())?;
 
         let learning_event_id = self
             .persist_learning_evaluation(&contract, &score, &observations)
             .await?;
         outcome_policy::annotate_contract_with_ledger_event_id(&mut contract, learning_event_id);
-        contract.updated_at = Utc::now();
-        self.store
-            .update_outcome_contract(&contract)
-            .await
-            .map_err(|err| err.to_string())?;
         if let Some(candidate) = self
             .maybe_generate_candidate(&contract, &score, &observations, learning_event_id)
             .await?
@@ -208,6 +304,15 @@ impl OutcomeService {
                 error = %err,
                 "Outcome candidate routing audit failed"
             );
+        }
+        contract.updated_at = Utc::now();
+        let updated = self
+            .store
+            .update_claimed_outcome_contract(&contract, &self.worker_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        if !updated {
+            return Err("outcome evaluator lost its claim before finalization".to_string());
         }
         Ok(())
     }
@@ -230,10 +335,22 @@ impl OutcomeService {
             return Ok(());
         };
         outcome_policy::apply_failed_contract_requeue_plan(&mut current, &plan);
-        self.store
-            .update_outcome_contract(&current)
+        let updated = self
+            .store
+            .update_claimed_outcome_contract(&current, &self.worker_id)
             .await
             .map_err(|err| err.to_string())?;
+        if !updated {
+            return Err("outcome evaluator lost its claim before requeue".to_string());
+        }
+        if current.status == STATUS_QUARANTINED {
+            tracing::warn!(
+                contract_id = %current.id,
+                user_id = %current.user_id,
+                attempts = current.attempt_count,
+                "Outcome contract quarantined after exhausting its retry budget"
+            );
+        }
         Ok(())
     }
 
@@ -263,7 +380,8 @@ impl OutcomeService {
         let evaluation_event_id = if contract.source_kind == SOURCE_LEARNING_EVENT {
             Uuid::parse_str(&contract.source_id).map_err(|err| err.to_string())?
         } else {
-            let event = outcome_policy::synthetic_learning_event(contract, score, observations);
+            let mut event = outcome_policy::synthetic_learning_event(contract, score, observations);
+            event.id = outcome_effect_id(contract.id, "learning-event");
             let event_id = self
                 .store
                 .insert_learning_event(&event)
@@ -277,7 +395,7 @@ impl OutcomeService {
         };
 
         let evaluation = outcome_policy::build_learning_evaluation_record(
-            Uuid::new_v4(),
+            outcome_effect_id(contract.id, "learning-evaluation"),
             evaluation_event_id,
             contract,
             score,
@@ -357,7 +475,7 @@ impl OutcomeService {
             None
         };
         let Some(candidate) = outcome_policy::build_outcome_candidate(BuildOutcomeCandidateInput {
-            id: Uuid::new_v4(),
+            id: outcome_effect_id(contract.id, "learning-candidate"),
             learning_event_id,
             contract,
             score,
@@ -425,15 +543,6 @@ impl OutcomeService {
             candidate.id,
             &record,
         );
-        if let Err(err) = self.store.update_outcome_contract(contract).await {
-            tracing::warn!(
-                contract_id = %contract.id,
-                candidate_id = %candidate.id,
-                error = %err,
-                "Failed to persist outcome contract routing audit"
-            );
-            persist_errors.push(format!("contract routing audit update failed: {err}"));
-        }
 
         if persist_errors.is_empty() {
             Ok(())
@@ -496,6 +605,13 @@ impl OutcomeService {
             "prompt_patch": patch,
         })))
     }
+}
+
+fn outcome_effect_id(contract_id: Uuid, effect: &str) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("thinclaw:outcome:{contract_id}:{effect}").as_bytes(),
+    )
 }
 
 pub async fn persist_manual_review_to_learning_ledger(
@@ -566,7 +682,15 @@ pub fn spawn_outcome_service_with_shutdown(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let plan = match service.scheduler_plan(Utc::now()).await {
+            let scheduler_plan = tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    tracing::info!("outcome service shutting down during scheduler planning");
+                    return;
+                }
+                plan = service.scheduler_plan(Utc::now()) => plan,
+            };
+            let plan = match scheduler_plan {
                 Ok(plan) => plan,
                 Err(err) => {
                     tracing::debug!(error = %err, "Outcome service scheduler plan failed");
@@ -588,12 +712,21 @@ pub fn spawn_outcome_service_with_shutdown(
             }
 
             for user_id in plan.user_ids {
-                if let Err(err) = service.run_once_for_user(&user_id).await {
-                    tracing::debug!(
-                        user_id = %user_id,
-                        error = %err,
-                        "Outcome service tick failed"
-                    );
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        tracing::info!(user_id = %user_id, "outcome service shutting down during evaluation");
+                        return;
+                    }
+                    result = service.run_once_for_user(&user_id) => {
+                        if let Err(err) = result {
+                            tracing::debug!(
+                                user_id = %user_id,
+                                error = %err,
+                                "Outcome service tick failed"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1122,6 +1255,17 @@ async fn resolve_learning_event_for_manual_review(
 mod tests {
     use super::*;
 
+    #[test]
+    fn active_user_guard_releases_ownership_when_cancelled_or_dropped() {
+        let users = Arc::new(Mutex::new(HashSet::new()));
+        let guard = ActiveOutcomeUserGuard::acquire(&users, "user-1")
+            .expect("first processor should acquire the user");
+        assert!(ActiveOutcomeUserGuard::acquire(&users, "user-1").is_none());
+
+        drop(guard);
+        assert!(ActiveOutcomeUserGuard::acquire(&users, "user-1").is_some());
+    }
+
     fn observation(kind: &str, polarity: &str, weight: f64) -> OutcomeObservation {
         OutcomeObservation {
             id: Uuid::new_v4(),
@@ -1157,6 +1301,10 @@ mod tests {
             metadata: json!({}),
             dedupe_key: "dedupe".to_string(),
             claimed_at: None,
+            claimed_by: None,
+            lease_expires_at: None,
+            attempt_count: 0,
+            next_attempt_at: None,
             evaluated_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -1416,5 +1564,99 @@ mod tests {
         assert!(content.contains("## Preferences"));
         assert!(content.contains("## Outcome-Backed Guidance"));
         assert!(content.contains("finish the requested work before concluding"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn stale_outcome_claim_replays_effects_idempotently_before_terminal_commit() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let user_id = "outcome-restart-replay-user";
+        let now = Utc::now();
+        let service = OutcomeService::new(Arc::clone(&db), None);
+        let mut pending = contract();
+        pending.user_id = user_id.to_string();
+        pending.source_kind = SOURCE_ARTIFACT_VERSION.to_string();
+        pending.source_id = Uuid::new_v4().to_string();
+        pending.contract_type = CONTRACT_TOOL.to_string();
+        pending.due_at = now - chrono::Duration::seconds(10);
+        pending.expires_at = now + chrono::Duration::hours(1);
+        pending.dedupe_key = format!("restart-replay-{}", pending.id);
+        pending.metadata = json!({
+            "pattern_key": format!("artifact:{}", pending.id),
+            "artifact_type": "memory",
+            "artifact_name": "MEMORY.md",
+        });
+        db.insert_outcome_contract(&pending)
+            .await
+            .expect("contract should be inserted");
+
+        let claimed = db
+            .claim_due_outcome_contracts_for_user_with_lease(
+                user_id,
+                &service.worker_id,
+                1,
+                now - chrono::Duration::seconds(2),
+                1,
+            )
+            .await
+            .expect("simulated prior worker should claim")
+            .into_iter()
+            .next()
+            .expect("contract should be due");
+
+        let observations = Vec::new();
+        let score = outcome_policy::deterministic_score(&claimed, &observations);
+        let mut effect_contract = claimed.clone();
+        let evaluation_plan =
+            outcome_policy::evaluated_contract_plan(&score, EVALUATOR_OUTCOME, now);
+        outcome_policy::apply_evaluated_contract_plan(&mut effect_contract, &evaluation_plan);
+        let mut event =
+            outcome_policy::synthetic_learning_event(&effect_contract, &score, &observations);
+        event.id = outcome_effect_id(effect_contract.id, "learning-event");
+        db.insert_learning_event(&event)
+            .await
+            .expect("simulated pre-crash event effect should persist");
+        let evaluation = outcome_policy::build_learning_evaluation_record(
+            outcome_effect_id(effect_contract.id, "learning-evaluation"),
+            event.id,
+            &effect_contract,
+            &score,
+            &observations,
+            EVALUATOR_OUTCOME,
+            now,
+        );
+        db.insert_learning_evaluation(&evaluation)
+            .await
+            .expect("simulated pre-crash evaluation effect should persist");
+
+        assert_eq!(
+            service
+                .run_once_for_user(user_id)
+                .await
+                .expect("stale claim should recover"),
+            1
+        );
+        let finalized = db
+            .get_outcome_contract(user_id, pending.id)
+            .await
+            .expect("contract query should succeed")
+            .expect("contract should exist");
+        assert_eq!(finalized.status, STATUS_EVALUATED);
+        assert_eq!(finalized.attempt_count, 2);
+        assert!(finalized.claimed_by.is_none());
+        assert!(finalized.lease_expires_at.is_none());
+
+        let evaluations = db
+            .list_learning_evaluations(user_id, 10)
+            .await
+            .expect("learning evaluations should be queryable");
+        assert_eq!(
+            evaluations
+                .iter()
+                .filter(|entry| entry.id == evaluation.id)
+                .count(),
+            1,
+            "restart replay must not duplicate already-persisted effects"
+        );
     }
 }

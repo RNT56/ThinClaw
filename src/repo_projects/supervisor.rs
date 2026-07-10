@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use thinclaw_agent::loop_control::{LoopKind, LoopRunSummary, LoopStopReason};
+use thinclaw_agent::loop_control::{
+    LoopBudget, LoopKind, LoopRunContext, LoopRunSummary, LoopStopReason,
+};
 use thinclaw_repo_projects::{
     RepoProject, RepoProjectEvent, RepoProjectEventKind, RepoProjectRepo, RepoProjectRunState,
     RepoProjectState, RepoProjectTask, RepoProjectTaskState, validate_project_state_transition,
@@ -107,6 +109,8 @@ pub trait RepoSupervisorStore: Send + Sync {
 /// when the store is constructed without explicit limits (e.g. in tests).
 const DEFAULT_MAX_CONCURRENT_PROJECTS: usize = 1;
 const DEFAULT_MAX_CONCURRENT_TASKS_PER_PROJECT: usize = 1;
+const PROJECT_RECONCILE_DEADLINE: Duration = Duration::from_secs(120);
+const SUPERVISOR_RECOVERY_DEADLINE: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct DatabaseRepoSupervisorStore {
@@ -213,111 +217,164 @@ impl RepoSupervisorStore for DatabaseRepoSupervisorStore {
         // slot; a project that dispatches a task or plans does.
         let mut projects_advanced = 0usize;
         for mut project in projects {
+            let project_id = project.id;
             let decisions_before = decisions.len();
-            if let Some(executor) = self.executor.as_ref() {
-                executor.sync_worker_runs(project.id).await?;
-            }
-            let mut tasks = self
-                .db
-                .list_repo_project_tasks(project.id)
-                .await
-                .map_err(|error| error.to_string())?;
-            let repos = self
-                .db
-                .list_repo_project_repos(project.id)
-                .await
-                .map_err(|error| error.to_string())?;
-            // Once the per-reconcile project budget is spent, stop advancing
-            // dispatch/planning for additional projects; pipeline advancement of
-            // already-in-flight tasks below is unaffected for the projects that
-            // did get a slot.
-            let dispatch_budget_available = projects_advanced < self.max_concurrent_projects;
-            match project.state {
-                RepoProjectState::Draft | RepoProjectState::Planning if tasks.is_empty() => {
-                    decisions.push(RepoSupervisorDecision::NeedsPlanning {
-                        project_id: project.id,
-                    });
-                    if dispatch_budget_available {
-                        projects_advanced += 1;
-                        self.plan_or_await_human(&mut project, &repos, &mut decisions)
-                            .await?;
-                    }
+            let project_result = tokio::time::timeout(PROJECT_RECONCILE_DEADLINE, async {
+                if let Some(executor) = self.executor.as_ref() {
+                    executor.sync_worker_runs(project.id).await?;
                 }
-                RepoProjectState::Active | RepoProjectState::Planning => {
-                    // 1. Advance GitHub-driven tasks (PR/CI/review/merge). These
-                    //    may transition WaitingCi -> Running (repair), -> Done
-                    //    (merged), or -> Blocked.
-                    for task in tasks.iter_mut() {
-                        if matches!(
-                            task.state,
-                            RepoProjectTaskState::WaitingCi | RepoProjectTaskState::WaitingReview
-                        ) {
-                            self.advance_pipeline_task(&project, &repos, task, &mut decisions)
+                let mut tasks = self
+                    .db
+                    .list_repo_project_tasks(project.id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let repos = self
+                    .db
+                    .list_repo_project_repos(project.id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                // Once the per-reconcile project budget is spent, stop advancing
+                // dispatch/planning for additional projects; pipeline advancement of
+                // already-in-flight tasks below is unaffected for the projects that
+                // did get a slot.
+                let dispatch_budget_available = projects_advanced < self.max_concurrent_projects;
+                match project.state {
+                    RepoProjectState::Draft | RepoProjectState::Planning if tasks.is_empty() => {
+                        decisions.push(RepoSupervisorDecision::NeedsPlanning {
+                            project_id: project.id,
+                        });
+                        if dispatch_budget_available {
+                            projects_advanced += 1;
+                            self.plan_or_await_human(&mut project, &repos, &mut decisions)
                                 .await?;
                         }
                     }
+                    RepoProjectState::Active | RepoProjectState::Planning => {
+                        // 1. Advance GitHub-driven tasks (PR/CI/review/merge). These
+                        //    may transition WaitingCi -> Running (repair), -> Done
+                        //    (merged), or -> Blocked.
+                        for task in tasks.iter_mut() {
+                            if matches!(
+                                task.state,
+                                RepoProjectTaskState::WaitingCi
+                                    | RepoProjectTaskState::WaitingReview
+                            ) {
+                                self.advance_pipeline_task(&project, &repos, task, &mut decisions)
+                                    .await?;
+                            }
+                        }
 
-                    // 2. Dispatch queued/ready tasks into sandbox workers, up to
-                    //    the effective per-project concurrency cap, respecting
-                    //    the per-reconcile project budget.
-                    let has_dispatchable = tasks.iter().any(|task| {
-                        matches!(
-                            task.state,
-                            RepoProjectTaskState::Queued | RepoProjectTaskState::Ready
-                        )
-                    });
-                    if has_dispatchable && dispatch_budget_available {
-                        projects_advanced += 1;
-                        self.dispatch_next_task(&mut project, &repos, &mut tasks, &mut decisions)
+                        // 2. Dispatch queued/ready tasks into sandbox workers, up to
+                        //    the effective per-project concurrency cap, respecting
+                        //    the per-reconcile project budget.
+                        let has_dispatchable = tasks.iter().any(|task| {
+                            matches!(
+                                task.state,
+                                RepoProjectTaskState::Queued | RepoProjectTaskState::Ready
+                            )
+                        });
+                        if has_dispatchable && dispatch_budget_available {
+                            projects_advanced += 1;
+                            self.dispatch_next_task(
+                                &mut project,
+                                &repos,
+                                &mut tasks,
+                                &mut decisions,
+                            )
                             .await?;
-                    } else if !has_dispatchable
-                        && !tasks.is_empty()
-                        && tasks
-                            .iter()
-                            .all(|task| task.state == RepoProjectTaskState::Done)
-                    {
-                        // 3. Every task merged/done — complete the project.
-                        self.complete_project(&mut project, &tasks).await?;
-                        decisions.push(RepoSupervisorDecision::Completed {
+                        } else if !has_dispatchable
+                            && !tasks.is_empty()
+                            && tasks
+                                .iter()
+                                .all(|task| task.state == RepoProjectTaskState::Done)
+                        {
+                            // 3. Every task merged/done — complete the project.
+                            self.complete_project(&mut project, &tasks).await?;
+                            decisions.push(RepoSupervisorDecision::Completed {
+                                project_id: project.id,
+                            });
+                        }
+                    }
+                    RepoProjectState::Blocked | RepoProjectState::AwaitingHuman => {
+                        decisions.push(RepoSupervisorDecision::Blocked {
                             project_id: project.id,
+                            reason: format!(
+                                "project is {} after {:?}",
+                                state_label(project.state),
+                                reason
+                            ),
                         });
                     }
-                }
-                RepoProjectState::Blocked | RepoProjectState::AwaitingHuman => {
-                    decisions.push(RepoSupervisorDecision::Blocked {
-                        project_id: project.id,
-                        reason: format!(
-                            "project is {} after {:?}",
-                            state_label(project.state),
-                            reason
-                        ),
-                    });
-                }
-                RepoProjectState::Paused
-                | RepoProjectState::Completed
-                | RepoProjectState::Failed
-                | RepoProjectState::Cancelled => decisions.push(RepoSupervisorDecision::Idle),
-                // Draft with a non-empty backlog (the empty case is handled by
-                // the guarded arm above): normalize to Planning so the next
-                // reconcile dispatches the existing tasks.
-                RepoProjectState::Draft => {
-                    decisions.push(RepoSupervisorDecision::NeedsPlanning {
-                        project_id: project.id,
-                    });
-                    if dispatch_budget_available {
-                        projects_advanced += 1;
-                        self.transition_project_state(
-                            &mut project,
-                            RepoProjectState::Active,
-                            "Repository project activated",
-                        )
-                        .await?;
+                    RepoProjectState::Paused
+                    | RepoProjectState::Completed
+                    | RepoProjectState::Failed
+                    | RepoProjectState::Cancelled => decisions.push(RepoSupervisorDecision::Idle),
+                    // Draft with a non-empty backlog (the empty case is handled by
+                    // the guarded arm above): normalize to Planning so the next
+                    // reconcile dispatches the existing tasks.
+                    RepoProjectState::Draft => {
+                        decisions.push(RepoSupervisorDecision::NeedsPlanning {
+                            project_id: project.id,
+                        });
+                        if dispatch_budget_available {
+                            projects_advanced += 1;
+                            self.transition_project_state(
+                                &mut project,
+                                RepoProjectState::Active,
+                                "Repository project activated",
+                            )
+                            .await?;
+                        }
                     }
                 }
-            }
+                Ok::<(), String>(())
+            })
+            .await;
 
-            if decisions.len() == decisions_before {
-                decisions.push(RepoSupervisorDecision::Idle);
+            match project_result {
+                Ok(Ok(())) if decisions.len() == decisions_before => {
+                    decisions.push(RepoSupervisorDecision::Idle);
+                }
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    decisions.truncate(decisions_before);
+                    tracing::warn!(project_id = %project_id, error = %error, "repo project reconcile isolated a project failure");
+                    decisions.push(RepoSupervisorDecision::Blocked {
+                        project_id,
+                        reason: format!("reconcile failed: {error}"),
+                    });
+                    let _ = append_supervisor_event(
+                        self.db.as_ref(),
+                        project_id,
+                        None,
+                        None,
+                        RepoProjectEventKind::SupervisorError,
+                        "Repository project reconcile failed",
+                        serde_json::json!({ "error": error }),
+                    )
+                    .await;
+                }
+                Err(_) => {
+                    decisions.truncate(decisions_before);
+                    tracing::warn!(project_id = %project_id, deadline_secs = PROJECT_RECONCILE_DEADLINE.as_secs(), "repo project reconcile exceeded its deadline");
+                    decisions.push(RepoSupervisorDecision::Blocked {
+                        project_id,
+                        reason: "reconcile exceeded its wall-time budget".to_string(),
+                    });
+                    let _ = append_supervisor_event(
+                        self.db.as_ref(),
+                        project_id,
+                        None,
+                        None,
+                        RepoProjectEventKind::SupervisorError,
+                        "Repository project reconcile timed out",
+                        serde_json::json!({
+                            "stop_reason": LoopStopReason::WallTimeBudgetExceeded.as_str(),
+                            "deadline_seconds": PROJECT_RECONCILE_DEADLINE.as_secs(),
+                        }),
+                    )
+                    .await;
+                }
             }
         }
 
@@ -615,8 +672,10 @@ impl DatabaseRepoSupervisorStore {
 
     /// Act on a `NeedsPlanning` project. With a planner wired, decompose the
     /// project goal into `Queued` tasks and move the project to `Active`. Without
-    /// a planner (or when planning yields nothing / errors), transition the
+    /// a planner, or when planning genuinely yields nothing, transition the
     /// project to `AwaitingHuman` so it never silently stalls in `Planning`.
+    /// Planner failures remain retryable reconciliation errors and retain their
+    /// original evidence for the operator-visible supervisor event.
     ///
     /// Idempotent: the caller only invokes this while the project has no tasks,
     /// and we re-check, so a burst of wakes cannot duplicate tasks.
@@ -647,14 +706,12 @@ impl DatabaseRepoSupervisorStore {
             .await?;
         }
 
+        let planner_configured = self.planner.is_some();
         let planned = match self.planner.as_ref() {
-            Some(planner) => match planner.plan(project, repos).await {
-                Ok(planned) => planned,
-                Err(error) => {
-                    tracing::warn!(project_id = %project.id, error = %error, "repo task planner failed");
-                    Vec::new()
-                }
-            },
+            Some(planner) => planner
+                .plan(project, repos)
+                .await
+                .map_err(|error| format!("task planner failed: {error}"))?,
             None => Vec::new(),
         };
 
@@ -669,7 +726,11 @@ impl DatabaseRepoSupervisorStore {
             .await?;
             decisions.push(RepoSupervisorDecision::AwaitingHuman {
                 project_id: project.id,
-                reason: "no planner configured; awaiting human-provided tasks".to_string(),
+                reason: if planner_configured {
+                    "planner returned no tasks; awaiting human-provided tasks".to_string()
+                } else {
+                    "no planner configured; awaiting human-provided tasks".to_string()
+                },
             });
             return Ok(());
         }
@@ -950,10 +1011,19 @@ impl ProjectSupervisor {
         project_id: Option<Uuid>,
         reason: RepoSupervisorWakeReason,
     ) -> Result<(), String> {
-        self.wake_tx
-            .send(RepoSupervisorWake { project_id, reason })
-            .await
-            .map_err(|error| format!("repo project supervisor is not running: {error}"))
+        match self
+            .wake_tx
+            .try_send(RepoSupervisorWake { project_id, reason })
+        {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(wake)) => {
+                tracing::debug!(project_id = ?wake.project_id, reason = ?wake.reason, "repo project supervisor wake coalesced because a reconcile is already queued");
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err("repo project supervisor is not running".to_string())
+            }
+        }
     }
 
     pub fn store(&self) -> &Arc<dyn RepoSupervisorStore> {
@@ -975,67 +1045,111 @@ pub async fn run_project_supervisor_loop(
     // surface orphaned in-flight tasks before steady-state reconciliation.
     trace_supervisor_phase_start(RepoSupervisorPhase::Recovery, None, None);
     let recovery_started = Instant::now();
-    if let Err(error) = store.recover().await {
-        trace_supervisor_phase_stop(
-            RepoSupervisorPhase::Recovery,
-            LoopStopReason::FatalError,
-            recovery_started.elapsed(),
-            RepoSupervisorDecisionCounts::default(),
-            1,
-            observer.as_ref(),
-        );
-        tracing::warn!(error = %error, "repo project supervisor recovery failed");
-    } else {
-        trace_supervisor_phase_stop(
-            RepoSupervisorPhase::Recovery,
-            LoopStopReason::Completed,
-            recovery_started.elapsed(),
-            RepoSupervisorDecisionCounts::default(),
-            0,
-            observer.as_ref(),
-        );
+    tokio::select! {
+        biased;
+        _ = &mut shutdown_rx => {
+            trace_supervisor_phase_stop(
+                RepoSupervisorPhase::Recovery,
+                LoopStopReason::ExternalShutdown,
+                recovery_started.elapsed(),
+                RepoSupervisorDecisionCounts::default(),
+                0,
+                observer.as_ref(),
+            );
+            let run = LoopRunContext::new(LoopKind::RepoProjectSupervisor, LoopBudget::UNBOUNDED);
+            trace_supervisor_loop_stop(&run, LoopStopReason::ExternalShutdown);
+            return;
+        }
+        recovery = tokio::time::timeout(SUPERVISOR_RECOVERY_DEADLINE, store.recover()) => {
+            match recovery {
+                Ok(Ok(())) => trace_supervisor_phase_stop(
+                    RepoSupervisorPhase::Recovery,
+                    LoopStopReason::Completed,
+                    recovery_started.elapsed(),
+                    RepoSupervisorDecisionCounts::default(),
+                    0,
+                    observer.as_ref(),
+                ),
+                Ok(Err(error)) => {
+                    trace_supervisor_phase_stop(
+                        RepoSupervisorPhase::Recovery,
+                        LoopStopReason::FatalError,
+                        recovery_started.elapsed(),
+                        RepoSupervisorDecisionCounts::default(),
+                        1,
+                        observer.as_ref(),
+                    );
+                    tracing::warn!(error = %error, "repo project supervisor recovery failed");
+                }
+                Err(_) => {
+                    trace_supervisor_phase_stop(
+                        RepoSupervisorPhase::Recovery,
+                        LoopStopReason::WallTimeBudgetExceeded,
+                        recovery_started.elapsed(),
+                        RepoSupervisorDecisionCounts::default(),
+                        1,
+                        observer.as_ref(),
+                    );
+                    tracing::warn!(deadline_secs = SUPERVISOR_RECOVERY_DEADLINE.as_secs(), "repo project supervisor recovery timed out");
+                }
+            }
+        }
     }
 
-    let mut reconciles = 0usize;
-    let mut errors = 0u32;
+    let mut run = LoopRunContext::new(LoopKind::RepoProjectSupervisor, LoopBudget::UNBOUNDED);
 
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
-                trace_supervisor_loop_stop(LoopStopReason::ExternalShutdown, reconciles, errors);
+                trace_supervisor_loop_stop(&run, LoopStopReason::ExternalShutdown);
                 tracing::info!("repo project supervisor shutting down");
                 return;
             }
             _ = watchdog.tick() => {
-                reconciles += 1;
-                if let Err(error) = reconcile_once(&store, None, RepoSupervisorWakeReason::Watchdog, observer.as_ref()).await {
-                    errors += 1;
-                    tracing::warn!(error = %error, "repo project watchdog reconcile failed");
+                let _ = run.begin_iteration();
+                let reconcile = reconcile_once(&store, None, RepoSupervisorWakeReason::Watchdog, observer.as_ref());
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        trace_supervisor_loop_stop(&run, LoopStopReason::ExternalShutdown);
+                        return;
+                    }
+                    result = reconcile => {
+                        if let Err(error) = result {
+                            let _ = run.record_retry();
+                            tracing::warn!(error = %error, "repo project watchdog reconcile failed");
+                        }
+                    }
                 }
             }
             maybe_wake = wake_rx.recv() => {
                 let Some(wake) = maybe_wake else {
-                    trace_supervisor_loop_stop(LoopStopReason::ChannelClosed, reconciles, errors);
+                    trace_supervisor_loop_stop(&run, LoopStopReason::ChannelClosed);
                     tracing::info!("repo project supervisor wake channel closed");
                     return;
                 };
-                reconciles += 1;
-                if let Err(error) = reconcile_once(&store, wake.project_id, wake.reason, observer.as_ref()).await {
-                    errors += 1;
-                    tracing::warn!(error = %error, "repo project reconcile failed");
+                let _ = run.begin_iteration();
+                let reconcile = reconcile_once(&store, wake.project_id, wake.reason, observer.as_ref());
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        trace_supervisor_loop_stop(&run, LoopStopReason::ExternalShutdown);
+                        return;
+                    }
+                    result = reconcile => {
+                        if let Err(error) = result {
+                            let _ = run.record_retry();
+                            tracing::warn!(error = %error, "repo project reconcile failed");
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-fn trace_supervisor_loop_stop(stop_reason: LoopStopReason, reconciles: usize, errors: u32) {
-    let summary = LoopRunSummary::new(
-        LoopKind::RepoProjectSupervisor,
-        stop_reason,
-        reconciles,
-        errors,
-    );
+fn trace_supervisor_loop_stop(run: &LoopRunContext, stop_reason: LoopStopReason) {
+    let summary: LoopRunSummary = run.summary(stop_reason);
     tracing::info!(
         loop_kind = summary.kind.as_str(),
         stop_reason = summary.stop_reason.as_str(),
@@ -1269,6 +1383,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_coalesces_wakes_when_queue_is_full() {
+        let store = Arc::new(TestStore::default());
+        let (supervisor, mut rx) = ProjectSupervisor::new(store, 1);
+        supervisor
+            .wake(None, RepoSupervisorWakeReason::Manual)
+            .await
+            .unwrap();
+        supervisor
+            .wake(None, RepoSupervisorWakeReason::RoutineTick)
+            .await
+            .expect("a full wake queue should coalesce instead of blocking");
+
+        assert_eq!(
+            rx.recv()
+                .await
+                .expect("first wake should remain queued")
+                .reason,
+            RepoSupervisorWakeReason::Manual
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
     async fn supervisor_loop_exits_when_wake_channel_closes() {
         let store = Arc::new(TestStore::default());
         let store_trait: Arc<dyn RepoSupervisorStore> = store.clone();
@@ -1315,7 +1455,51 @@ mod tests {
         .await
         .expect("supervisor loop should exit after shutdown signal");
 
-        assert_eq!(*store.recoveries.lock().unwrap(), 1);
+        assert_eq!(*store.recoveries.lock().unwrap(), 0);
+    }
+
+    struct HangingReconcileStore {
+        started: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl RepoSupervisorStore for HangingReconcileStore {
+        async fn reconcile_project(
+            &self,
+            _project_id: Option<Uuid>,
+            _reason: RepoSupervisorWakeReason,
+        ) -> Result<Vec<RepoSupervisorDecision>, String> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_an_in_flight_reconcile() {
+        let store = Arc::new(HangingReconcileStore {
+            started: tokio::sync::Notify::new(),
+        });
+        let store_trait: Arc<dyn RepoSupervisorStore> = store.clone();
+        let (_wake_tx, wake_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(run_project_supervisor_loop(
+            store_trait,
+            wake_rx,
+            Duration::from_secs(60),
+            shutdown_rx,
+            None,
+        ));
+
+        tokio::time::timeout(Duration::from_millis(250), store.started.notified())
+            .await
+            .expect("watchdog reconcile should start");
+        shutdown_tx
+            .send(())
+            .expect("supervisor should still be running");
+        tokio::time::timeout(Duration::from_millis(250), handle)
+            .await
+            .expect("shutdown should cancel the reconcile without waiting for it")
+            .expect("supervisor task should not panic");
     }
 
     #[test]

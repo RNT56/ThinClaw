@@ -35,6 +35,10 @@ fn contract() -> OutcomeContract {
         metadata: json!({}),
         dedupe_key: "dedupe".to_string(),
         claimed_at: None,
+        claimed_by: None,
+        lease_expires_at: None,
+        attempt_count: 0,
+        next_attempt_at: None,
         evaluated_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -86,6 +90,9 @@ fn scheduler_plan_filters_disabled_users_and_uses_shortest_interval() {
 fn evaluation_plan_sets_status_and_evaluator_metadata() {
     let mut contract = contract();
     let now = Utc::now();
+    contract.claimed_at = Some(now);
+    contract.claimed_by = Some("worker-a".to_string());
+    contract.lease_expires_at = Some(now + chrono::Duration::minutes(5));
     let score = OutcomeScore {
         verdict: VERDICT_NEGATIVE.to_string(),
         score: -0.8,
@@ -98,6 +105,9 @@ fn evaluation_plan_sets_status_and_evaluator_metadata() {
     assert_eq!(contract.final_verdict.as_deref(), Some(VERDICT_NEGATIVE));
     assert_eq!(contract.final_score, Some(-0.8));
     assert_eq!(contract.evaluated_at, Some(now));
+    assert!(contract.claimed_at.is_none());
+    assert!(contract.claimed_by.is_none());
+    assert!(contract.lease_expires_at.is_none());
     assert_eq!(
         contract_last_evaluator(&contract).as_deref(),
         Some(EVALUATOR_OUTCOME)
@@ -109,6 +119,9 @@ fn requeue_plan_only_applies_to_unfinished_claimed_contracts() {
     let mut contract = contract();
     contract.status = STATUS_EVALUATING.to_string();
     contract.claimed_at = Some(Utc::now());
+    contract.claimed_by = Some("worker-a".to_string());
+    contract.lease_expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+    contract.attempt_count = 1;
     let now = Utc::now();
     let plan =
         failed_contract_requeue_plan(&contract, "temporary failure", now).expect("requeue plan");
@@ -116,6 +129,9 @@ fn requeue_plan_only_applies_to_unfinished_claimed_contracts() {
 
     assert_eq!(contract.status, STATUS_OPEN);
     assert!(contract.claimed_at.is_none());
+    assert!(contract.claimed_by.is_none());
+    assert!(contract.lease_expires_at.is_none());
+    assert!(contract.next_attempt_at.is_some_and(|value| value > now));
     assert_eq!(contract.updated_at, now);
     assert_eq!(
         contract
@@ -128,6 +144,30 @@ fn requeue_plan_only_applies_to_unfinished_claimed_contracts() {
     contract.status = STATUS_EVALUATED.to_string();
     contract.evaluated_at = Some(now);
     assert!(failed_contract_requeue_plan(&contract, "late failure", now).is_none());
+}
+
+#[test]
+fn requeue_plan_quarantines_after_bounded_attempts() {
+    let mut contract = contract();
+    contract.status = STATUS_EVALUATING.to_string();
+    contract.claimed_at = Some(Utc::now());
+    contract.claimed_by = Some("worker-a".to_string());
+    contract.attempt_count = OUTCOME_MAX_ATTEMPTS;
+    let now = Utc::now();
+
+    let plan = failed_contract_requeue_plan(&contract, "poison contract", now)
+        .expect("unfinished claimed contract should produce a terminal plan");
+    apply_failed_contract_requeue_plan(&mut contract, &plan);
+
+    assert_eq!(contract.status, STATUS_QUARANTINED);
+    assert!(contract.next_attempt_at.is_none());
+    assert_eq!(
+        contract
+            .evaluation_details
+            .get("quarantine_reason")
+            .and_then(serde_json::Value::as_str),
+        Some("retry budget exhausted after 5 attempts")
+    );
 }
 
 #[test]

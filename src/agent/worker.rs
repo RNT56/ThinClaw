@@ -9,8 +9,7 @@ use chrono::Utc;
 use thinclaw_agent::loop_control::{LoopKind, LoopStopReason};
 use thinclaw_agent::worker_runtime::{
     DEFAULT_WORKER_ITERATIONS, RoutineFinalizationOutcome, WORKER_COMPLETE_JOB_TOOL_NAME,
-    WORKER_DIRECT_LOOP_DELAY_MS, WORKER_TASK_FAILED_DURING_EXECUTION_REASON,
-    WORKER_TOOL_KEEPALIVE_SECS, WorkerActivityKeepalive, WorkerLoopMetadata,
+    WORKER_DIRECT_LOOP_DELAY_MS, WORKER_TASK_FAILED_DURING_EXECUTION_REASON, WorkerLoopMetadata,
     build_worker_system_prompt, compact_post_plan, complete_job_tool_definition,
     heartbeat_completion_critique, heartbeat_iteration_exhausted_critique,
     heartbeat_iteration_exhausted_summary, heartbeat_iteration_exhausted_user_message,
@@ -369,9 +368,9 @@ impl Worker {
                 identity_block.as_deref(),
             )));
 
-        // Main execution loop with a resettable inactivity timeout. This
-        // keeps legitimately active work alive, including long-running tools
-        // that emit periodic keepalives from inside the worker.
+        // Bound both inactivity and total wall time. Activity is emitted only
+        // by real progress; a hung provider or tool must not renew its own
+        // deadline with synthetic keepalives.
         let (activity_tx, mut activity_rx) = watch::channel(std::time::Instant::now());
         let mut loop_metrics =
             LoopMetricGuard::start(Arc::clone(&self.deps.observer), LoopKind::Worker);
@@ -379,6 +378,8 @@ impl Worker {
         tokio::pin!(execution);
         let inactivity_sleep = tokio::time::sleep(self.timeout());
         tokio::pin!(inactivity_sleep);
+        let wall_time_sleep = tokio::time::sleep(self.timeout());
+        tokio::pin!(wall_time_sleep);
 
         let result = loop {
             tokio::select! {
@@ -391,7 +392,8 @@ impl Worker {
                         .as_mut()
                         .reset(tokio::time::Instant::now() + self.timeout());
                 }
-                _ = &mut inactivity_sleep => break Err(()),
+                _ = &mut inactivity_sleep => break Err(LoopStopReason::IdleTimeout),
+                _ = &mut wall_time_sleep => break Err(LoopStopReason::WallTimeBudgetExceeded),
             }
         };
 
@@ -419,10 +421,18 @@ impl Worker {
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
                 self.mark_failed(&e.to_string()).await?;
             }
-            Err(()) => {
-                loop_metrics.stop_with(LoopStopReason::IdleTimeout);
-                tracing::warn!("Worker for job {} timed out", self.job_id);
-                self.mark_stuck("Execution timeout").await?;
+            Err(stop_reason) => {
+                loop_metrics.stop_with(stop_reason);
+                tracing::warn!(
+                    reason = stop_reason.as_str(),
+                    "Worker for job {} timed out",
+                    self.job_id
+                );
+                self.mark_stuck(match stop_reason {
+                    LoopStopReason::IdleTimeout => "Execution inactivity timeout",
+                    _ => "Execution wall-time budget exceeded",
+                })
+                .await?;
             }
         }
 
@@ -551,15 +561,22 @@ impl Worker {
         // If we have a plan, execute it — but fall through to direct
         // selection if the plan didn't finish the job.
         if let Some(ref plan) = plan {
-            self.execute_plan(
-                &routine_lease_renewed_at,
-                rx,
-                reasoning,
-                reason_ctx,
-                plan,
-                activity_tx,
-            )
-            .await?;
+            if let Some(stop_reason) = self
+                .execute_plan(
+                    &routine_lease_renewed_at,
+                    rx,
+                    reasoning,
+                    reason_ctx,
+                    plan,
+                    activity_tx,
+                    &mut iteration,
+                    max_iterations,
+                    is_heartbeat,
+                )
+                .await?
+            {
+                return Ok(WorkerLoopOutcome::new(stop_reason, iteration));
+            }
 
             // Check whether the job reached a terminal state.
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
@@ -626,33 +643,8 @@ impl Worker {
             touch_worker_activity(activity_tx);
             self.renew_routine_lease(&routine_lease_renewed_at).await;
             if worker_iteration_exceeded(iteration, max_iterations) {
-                if is_heartbeat {
-                    let stuck_reason = heartbeat_iteration_exhausted_summary(max_iterations);
-
-                    // Set last_output so the notification includes useful context.
-                    // This flows through finalize_routine_run → send_notification
-                    // with on_failure: true, so the user sees this message.
-                    self.set_last_output(&heartbeat_iteration_exhausted_user_message(
-                        max_iterations,
-                    ));
-
-                    // Write self-critique so the next heartbeat knows what
-                    // happened and can try to finish the work.
-                    if let Some(store) = self.store() {
-                        let critique =
-                            heartbeat_iteration_exhausted_critique(self.job_id, max_iterations);
-                        if let Err(e) = store
-                            .set_setting("system", "heartbeat.last_critique", &critique)
-                            .await
-                        {
-                            tracing::warn!("Failed to persist heartbeat stuck critique: {}", e);
-                        }
-                    }
-
-                    self.mark_stuck(&stuck_reason).await?;
-                } else {
-                    self.mark_stuck("Maximum iterations exceeded").await?;
-                }
+                self.mark_iteration_budget_exhausted(is_heartbeat, max_iterations)
+                    .await?;
                 return Ok(WorkerLoopOutcome::new(
                     LoopStopReason::IterationBudgetExceeded,
                     iteration,
@@ -916,10 +908,6 @@ impl Worker {
             return results;
         }
 
-        let keepalive = WorkerActivityKeepalive::spawn(
-            activity_tx.clone(),
-            Duration::from_secs(WORKER_TOOL_KEEPALIVE_SECS),
-        );
         let mut join_set = JoinSet::new();
 
         for (idx, selection) in selections.iter().enumerate() {
@@ -978,7 +966,6 @@ impl Worker {
             },
         })
         .collect();
-        drop(keepalive);
         touch_worker_activity(activity_tx);
         ordered
     }
@@ -1309,7 +1296,10 @@ impl Worker {
         reason_ctx: &mut ReasoningContext,
         plan: &ActionPlan,
         activity_tx: &watch::Sender<std::time::Instant>,
-    ) -> Result<(), Error> {
+        iteration: &mut usize,
+        max_iterations: usize,
+        is_heartbeat: bool,
+    ) -> Result<Option<LoopStopReason>, Error> {
         for (i, action) in plan.actions.iter().enumerate() {
             // Check for stop signal
             if let Ok(msg) = rx.try_recv() {
@@ -1319,7 +1309,7 @@ impl Worker {
                             "Worker for job {} received stop signal during plan execution",
                             self.job_id
                         );
-                        return Ok(());
+                        return Ok(Some(LoopStopReason::ExternalShutdown));
                     }
                     WorkerMessage::Ping => {
                         touch_worker_activity(activity_tx);
@@ -1327,6 +1317,13 @@ impl Worker {
                     }
                     WorkerMessage::Start => {}
                 }
+            }
+
+            *iteration += 1;
+            if worker_iteration_exceeded(*iteration, max_iterations) {
+                self.mark_iteration_budget_exhausted(is_heartbeat, max_iterations)
+                    .await?;
+                return Ok(Some(LoopStopReason::IterationBudgetExceeded));
             }
 
             touch_worker_activity(activity_tx);
@@ -1399,7 +1396,7 @@ impl Worker {
             touch_worker_activity(activity_tx);
 
             if completed {
-                return Ok(());
+                return Ok(None);
             }
 
             // Small delay between actions
@@ -1428,7 +1425,7 @@ impl Worker {
             );
         }
 
-        Ok(())
+        Ok(None)
     }
 
     async fn execute_tool(
@@ -1438,14 +1435,32 @@ impl Worker {
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<String, Error> {
         touch_worker_activity(activity_tx);
-        let keepalive = WorkerActivityKeepalive::spawn(
-            activity_tx.clone(),
-            Duration::from_secs(WORKER_TOOL_KEEPALIVE_SECS),
-        );
         let result = Self::execute_tool_inner(&self.deps, self.job_id, tool_name, params).await;
-        drop(keepalive);
         touch_worker_activity(activity_tx);
         result
+    }
+
+    async fn mark_iteration_budget_exhausted(
+        &self,
+        is_heartbeat: bool,
+        max_iterations: usize,
+    ) -> Result<(), Error> {
+        if !is_heartbeat {
+            return self.mark_stuck("Maximum iterations exceeded").await;
+        }
+
+        let stuck_reason = heartbeat_iteration_exhausted_summary(max_iterations);
+        self.set_last_output(&heartbeat_iteration_exhausted_user_message(max_iterations));
+        if let Some(store) = self.store() {
+            let critique = heartbeat_iteration_exhausted_critique(self.job_id, max_iterations);
+            if let Err(error) = store
+                .set_setting("system", "heartbeat.last_critique", &critique)
+                .await
+            {
+                tracing::warn!("Failed to persist heartbeat stuck critique: {}", error);
+            }
+        }
+        self.mark_stuck(&stuck_reason).await
     }
 
     /// Single finalization point for routine run records.

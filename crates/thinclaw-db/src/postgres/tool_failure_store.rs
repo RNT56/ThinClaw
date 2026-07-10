@@ -22,6 +22,10 @@ impl ToolFailureStore for PgBackend {
         self.store.mark_tool_repaired(tool_name).await
     }
 
+    async fn quarantine_tool_failure(&self, tool_name: &str) -> Result<(), DatabaseError> {
+        self.store.quarantine_tool_failure(tool_name).await
+    }
+
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), DatabaseError> {
         self.store.increment_repair_attempts(tool_name).await
     }

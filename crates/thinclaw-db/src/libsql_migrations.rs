@@ -271,6 +271,10 @@ CREATE TABLE IF NOT EXISTS outcome_contracts (
     metadata TEXT NOT NULL DEFAULT '{}',
     dedupe_key TEXT NOT NULL,
     claimed_at TEXT,
+    claimed_by TEXT,
+    lease_expires_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
     evaluated_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -280,6 +284,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_contracts_dedupe_key
     ON outcome_contracts(dedupe_key);
 CREATE INDEX IF NOT EXISTS idx_outcome_contracts_status_due
     ON outcome_contracts(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_outcome_contracts_status_retry
+    ON outcome_contracts(status, next_attempt_at, lease_expires_at, due_at);
 CREATE INDEX IF NOT EXISTS idx_outcome_contracts_user_actor_thread_status
     ON outcome_contracts(user_id, actor_id, thread_id, status);
 CREATE INDEX IF NOT EXISTS idx_outcome_contracts_source
@@ -923,6 +929,7 @@ CREATE TABLE IF NOT EXISTS tool_failures (
     last_failure TEXT DEFAULT (datetime('now')),
     last_build_result TEXT,
     repaired_at TEXT,
+    quarantined_at TEXT,
     repair_attempts INTEGER DEFAULT 0
 );
 
@@ -1136,11 +1143,14 @@ CREATE TABLE IF NOT EXISTS routine_event_inbox (
     matched_routines INTEGER NOT NULL DEFAULT 0,
     fired_routines INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_routine_event_inbox_status_created
     ON routine_event_inbox(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_routine_event_inbox_status_next_attempt
+    ON routine_event_inbox(status, next_attempt_at, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_routine_event_inbox_claimed_at
     ON routine_event_inbox(claimed_at);
 CREATE INDEX IF NOT EXISTS idx_routine_event_inbox_actor_created
@@ -1186,6 +1196,7 @@ CREATE TABLE IF NOT EXISTS routine_trigger_queue (
     coalesced_count INTEGER NOT NULL DEFAULT 0,
     backlog_collapsed INTEGER NOT NULL DEFAULT 0,
     routine_config_version INTEGER NOT NULL DEFAULT 1,
+    next_attempt_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -1195,6 +1206,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_trigger_queue_idempotency
     ON routine_trigger_queue(idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_status_due
     ON routine_trigger_queue(status, due_at ASC);
+CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_status_next_attempt
+    ON routine_trigger_queue(status, next_attempt_at, due_at ASC);
 CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_routine_created
     ON routine_trigger_queue(routine_id, created_at DESC);
 
@@ -1799,6 +1812,62 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         version: 28,
         description: "Index subagent_runs routine_run_id",
         sql: "CREATE INDEX IF NOT EXISTS idx_subagent_runs_routine_run ON subagent_runs(routine_run_id)",
+    },
+    // -- V29: durable queue retry visibility --------------------------------
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Add routine event retry visibility timestamp",
+        sql: "ALTER TABLE routine_event_inbox ADD COLUMN next_attempt_at TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Index routine event retry visibility",
+        sql: "CREATE INDEX IF NOT EXISTS idx_routine_event_inbox_status_next_attempt ON routine_event_inbox(status, next_attempt_at, created_at ASC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Add routine trigger retry visibility timestamp",
+        sql: "ALTER TABLE routine_trigger_queue ADD COLUMN next_attempt_at TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Index routine trigger retry visibility",
+        sql: "CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_status_next_attempt ON routine_trigger_queue(status, next_attempt_at, due_at ASC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Add outcome evaluator claim owner",
+        sql: "ALTER TABLE outcome_contracts ADD COLUMN claimed_by TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Add outcome evaluator lease expiry",
+        sql: "ALTER TABLE outcome_contracts ADD COLUMN lease_expires_at TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Add outcome evaluator attempt count",
+        sql: "ALTER TABLE outcome_contracts ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Add outcome evaluator retry visibility",
+        sql: "ALTER TABLE outcome_contracts ADD COLUMN next_attempt_at TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Index outcome evaluator retry and lease state",
+        sql: "CREATE INDEX IF NOT EXISTS idx_outcome_contracts_status_retry ON outcome_contracts(status, next_attempt_at, lease_expires_at, due_at)",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Add tool failure quarantine timestamp",
+        sql: "ALTER TABLE tool_failures ADD COLUMN quarantined_at TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 29,
+        description: "Index active tool failure incidents",
+        sql: "CREATE INDEX IF NOT EXISTS idx_tool_failures_active_incident ON tool_failures(tool_name) WHERE repaired_at IS NULL AND quarantined_at IS NULL",
     },
 ];
 

@@ -10,6 +10,8 @@ use rust_decimal::Decimal;
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
+#[cfg(feature = "libsql")]
+use crate::agent::routine::RoutineTriggerStatus;
 use crate::agent::routine::{
     NotifyConfig, RoutineEventDecision, RoutineEventStatus, RunStatus, content_hash,
 };
@@ -24,6 +26,23 @@ use crate::llm::{
 use crate::testing::StubLlm;
 #[cfg(feature = "libsql")]
 use crate::testing::test_db;
+
+#[test]
+fn trigger_retry_attempts_are_persisted_and_saturating() {
+    let diagnostics = serde_json::json!({
+        "defer_attempt_count": 2,
+        "failure_attempt_count": u64::MAX,
+    });
+    assert_eq!(
+        next_trigger_retry_attempt(&diagnostics, "defer_attempt_count"),
+        3
+    );
+    assert_eq!(
+        next_trigger_retry_attempt(&diagnostics, "failure_attempt_count"),
+        u32::MAX
+    );
+    assert_eq!(next_trigger_retry_attempt(&diagnostics, "missing"), 1);
+}
 
 #[cfg(feature = "libsql")]
 struct BlockingLlm {
@@ -264,6 +283,50 @@ async fn system_event_does_not_advance_runtime_when_enqueue_fails() {
     db.create_routine(&routine).await.unwrap();
 
     engine.check_cron_triggers().await;
+    let first_attempt = db
+        .list_routine_triggers(routine.id, 10)
+        .await
+        .expect("routine triggers should be queryable")
+        .into_iter()
+        .next()
+        .expect("failed system event should remain durably queued");
+    assert_eq!(first_attempt.status, RoutineTriggerStatus::Pending);
+    assert_eq!(
+        first_attempt.diagnostics["failure_attempt_count"],
+        serde_json::json!(1)
+    );
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    engine.check_cron_triggers().await;
+    let second_attempt = db
+        .list_routine_triggers(routine.id, 10)
+        .await
+        .expect("routine triggers should be queryable")
+        .into_iter()
+        .find(|trigger| trigger.id == first_attempt.id)
+        .expect("the same active trigger should be retried");
+    assert_eq!(second_attempt.status, RoutineTriggerStatus::Pending);
+    assert_eq!(
+        second_attempt.diagnostics["failure_attempt_count"],
+        serde_json::json!(2)
+    );
+
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    engine.check_cron_triggers().await;
+    let terminal_attempt = db
+        .list_routine_triggers(routine.id, 10)
+        .await
+        .expect("routine triggers should be queryable")
+        .into_iter()
+        .find(|trigger| trigger.id == first_attempt.id)
+        .expect("terminal trigger evidence should remain queryable");
+    assert_eq!(terminal_attempt.status, RoutineTriggerStatus::Failed);
+    assert!(
+        terminal_attempt
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("retry budget exhausted after 3 attempts"))
+    );
 
     let refreshed = db.get_routine(routine.id).await.unwrap().unwrap();
     assert_eq!(refreshed.run_count, 0);

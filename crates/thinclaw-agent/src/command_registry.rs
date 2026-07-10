@@ -25,6 +25,71 @@ pub enum ArgStyle {
     ExactOrSpaceDelimitedArgs,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemCommandRoute {
+    Help,
+    Status,
+    Context,
+    Model,
+    Rollback,
+    Rewind,
+    Plan,
+    Version,
+    Tools,
+    Debug,
+    Ping,
+    Identity,
+    Personality,
+    Skin,
+    Memory,
+    Skills,
+}
+
+impl SystemCommandRoute {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Help => "help",
+            Self::Status => "status",
+            Self::Context => "context",
+            Self::Model => "model",
+            Self::Rollback => "rollback",
+            Self::Rewind => "rewind",
+            Self::Plan => "plan",
+            Self::Version => "version",
+            Self::Tools => "tools",
+            Self::Debug => "debug",
+            Self::Ping => "ping",
+            Self::Identity => "identity",
+            Self::Personality => "personality",
+            Self::Skin => "skin",
+            Self::Memory => "memory",
+            Self::Skills => "skills",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "help" => Self::Help,
+            "status" => Self::Status,
+            "context" => Self::Context,
+            "model" => Self::Model,
+            "rollback" => Self::Rollback,
+            "rewind" => Self::Rewind,
+            "plan" => Self::Plan,
+            "version" => Self::Version,
+            "tools" => Self::Tools,
+            "debug" => Self::Debug,
+            "ping" => Self::Ping,
+            "identity" => Self::Identity,
+            "personality" | "vibe" => Self::Personality,
+            "skin" => Self::Skin,
+            "memory" => Self::Memory,
+            "skills" => Self::Skills,
+            _ => return None,
+        })
+    }
+}
+
 /// A single slash command's cross-surface metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
@@ -36,7 +101,7 @@ pub struct CommandSpec {
     /// The `SystemCommand` name emitted by the submission parser, if this
     /// command maps to one. `None` for commands that map to a dedicated
     /// `Submission` variant instead (e.g. `/undo` -> `Submission::Undo`).
-    pub system_command: Option<&'static str>,
+    pub system_command: Option<SystemCommandRoute>,
     /// How arguments are parsed for this command.
     pub arg_style: ArgStyle,
     /// Whether this command is listed in the shared help text.
@@ -76,7 +141,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/help",
         aliases: &["/?"],
-        system_command: Some("help"),
+        system_command: Some(SystemCommandRoute::Help),
         arg_style: ArgStyle::ExactOnly,
         in_help: true,
         tui_forwarded: false,
@@ -86,7 +151,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/status",
         aliases: &[],
-        system_command: Some("status"),
+        system_command: Some(SystemCommandRoute::Status),
         arg_style: ArgStyle::ExactOnly,
         in_help: true,
         tui_forwarded: false,
@@ -96,7 +161,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/context",
         aliases: &[],
-        system_command: Some("context"),
+        system_command: Some(SystemCommandRoute::Context),
         // `/context` has bespoke sub-command parsing in the submission
         // parser (`/context` and `/context list` both mean "list", and
         // `/context detail` means "detail"; anything else falls through to
@@ -113,7 +178,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/model",
         aliases: &["/models"],
-        system_command: Some("model"),
+        system_command: Some(SystemCommandRoute::Model),
         arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
         in_help: true,
         tui_forwarded: true,
@@ -123,7 +188,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/rollback",
         aliases: &[],
-        system_command: Some("rollback"),
+        system_command: Some(SystemCommandRoute::Rollback),
         arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
         in_help: true,
         tui_forwarded: true,
@@ -133,7 +198,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/rewind",
         aliases: &[],
-        system_command: Some("rewind"),
+        system_command: Some(SystemCommandRoute::Rewind),
         arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
         in_help: true,
         tui_forwarded: true,
@@ -143,7 +208,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/plan",
         aliases: &[],
-        system_command: Some("plan"),
+        system_command: Some(SystemCommandRoute::Plan),
         arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
         in_help: true,
         tui_forwarded: true,
@@ -153,7 +218,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/version",
         aliases: &[],
-        system_command: Some("version"),
+        system_command: Some(SystemCommandRoute::Version),
         arg_style: ArgStyle::ExactOnly,
         in_help: true,
         tui_forwarded: true,
@@ -163,7 +228,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/tools",
         aliases: &[],
-        system_command: Some("tools"),
+        system_command: Some(SystemCommandRoute::Tools),
         arg_style: ArgStyle::ExactOnly,
         in_help: true,
         tui_forwarded: true,
@@ -173,7 +238,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/debug",
         aliases: &[],
-        system_command: Some("debug"),
+        system_command: Some(SystemCommandRoute::Debug),
         arg_style: ArgStyle::ExactOnly,
         in_help: true,
         tui_forwarded: false,
@@ -183,7 +248,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/ping",
         aliases: &[],
-        system_command: Some("ping"),
+        system_command: Some(SystemCommandRoute::Ping),
         arg_style: ArgStyle::ExactOnly,
         in_help: true,
         tui_forwarded: true,
@@ -283,7 +348,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/identity",
         aliases: &[],
-        system_command: Some("identity"),
+        system_command: Some(SystemCommandRoute::Identity),
         arg_style: ArgStyle::ExactOnly,
         in_help: true,
         tui_forwarded: true,
@@ -293,7 +358,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/personality",
         aliases: &["/vibe"],
-        system_command: Some("personality"),
+        system_command: Some(SystemCommandRoute::Personality),
         arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
         in_help: true,
         tui_forwarded: true,
@@ -303,7 +368,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/skin",
         aliases: &[],
-        system_command: Some("skin"),
+        system_command: Some(SystemCommandRoute::Skin),
         arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
         in_help: true,
         tui_forwarded: true,
@@ -313,7 +378,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/memory",
         aliases: &[],
-        system_command: Some("memory"),
+        system_command: Some(SystemCommandRoute::Memory),
         arg_style: ArgStyle::ExactOnly,
         in_help: true,
         tui_forwarded: true,
@@ -353,7 +418,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     CommandSpec {
         name: "/skills",
         aliases: &[],
-        system_command: Some("skills"),
+        system_command: Some(SystemCommandRoute::Skills),
         arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
         in_help: true,
         tui_forwarded: true,
@@ -496,5 +561,14 @@ mod tests {
         assert_eq!(by_token("/compact").unwrap().name, "/compress");
         assert_eq!(by_token("/vibe").unwrap().name, "/personality");
         assert!(by_token("/nonexistent").is_none());
+    }
+
+    #[test]
+    fn every_system_command_has_a_typed_execution_route() {
+        for spec in COMMAND_REGISTRY {
+            if let Some(route) = spec.system_command {
+                assert_eq!(SystemCommandRoute::from_name(route.as_str()), Some(route));
+            }
+        }
     }
 }

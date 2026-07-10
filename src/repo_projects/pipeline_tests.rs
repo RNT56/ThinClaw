@@ -783,6 +783,10 @@ struct FakePlanner {
     tasks: Vec<(String, Option<String>)>,
 }
 
+struct SelectiveFailurePlanner {
+    failing_project_id: Uuid,
+}
+
 #[async_trait::async_trait]
 impl RepoTaskPlanner for FakePlanner {
     async fn plan(
@@ -796,6 +800,21 @@ impl RepoTaskPlanner for FakePlanner {
             .iter()
             .map(|(title, body)| PlannedTask::new(repo_id, title.clone(), body.clone()))
             .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl RepoTaskPlanner for SelectiveFailurePlanner {
+    async fn plan(
+        &self,
+        project: &RepoProject,
+        repos: &[RepoProjectRepo],
+    ) -> Result<Vec<PlannedTask>, String> {
+        if project.id == self.failing_project_id {
+            return Err("injected planner failure".to_string());
+        }
+        let repo_id = repos.first().map(|repo| repo.id).ok_or("no repos")?;
+        Ok(vec![PlannedTask::new(repo_id, "Continue", None)])
     }
 }
 
@@ -859,6 +878,54 @@ async fn planner_decomposes_planning_project_into_queued_tasks() {
         tasks_again.len(),
         3,
         "no duplicate planning on re-reconcile"
+    );
+}
+
+#[tokio::test]
+async fn multi_project_reconcile_isolates_one_project_failure() {
+    let (db, _guard) = test_db().await;
+    let (failed_project, _failed_repo) = seed_planning_project(&db).await;
+    let mut healthy_project = sample_project(false);
+    healthy_project.slug = format!("healthy-{}", &healthy_project.id.to_string()[..8]);
+    healthy_project.name = "Healthy project".to_string();
+    healthy_project.state = RepoProjectState::Planning;
+    let healthy_repo = sample_repo(healthy_project.id);
+    db.create_repo_project(&healthy_project).await.unwrap();
+    db.upsert_repo_project_repo(&healthy_repo).await.unwrap();
+
+    let planner: Arc<dyn RepoTaskPlanner> = Arc::new(SelectiveFailurePlanner {
+        failing_project_id: failed_project.id,
+    });
+    let store = DatabaseRepoSupervisorStore::new(Arc::clone(&db))
+        .with_limits(2, 1)
+        .with_planner(Some(planner));
+
+    let decisions = store
+        .reconcile_project(None, RepoSupervisorWakeReason::Watchdog)
+        .await
+        .expect("one project failure must not fail the watchdog pass");
+
+    assert!(decisions.iter().any(|decision| matches!(
+        decision,
+        RepoSupervisorDecision::Blocked { project_id, reason }
+            if *project_id == failed_project.id && reason.contains("injected planner failure")
+    )));
+    assert_eq!(
+        db.list_repo_project_tasks(healthy_project.id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the healthy project should still be planned"
+    );
+    let failed_events = db
+        .list_repo_project_events(failed_project.id, 20)
+        .await
+        .unwrap();
+    assert!(
+        failed_events
+            .iter()
+            .any(|event| event.kind == RepoProjectEventKind::SupervisorError)
     );
 }
 

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use thinclaw_repo_projects::{GitHubAuthMode, RepoProjectRepo};
 
-use super::github::{GitHubApiClient, GitHubAppConfig, GitHubAppTokenCache};
+use super::github::{GitHubApiClient, GitHubApiResilience, GitHubAppConfig, GitHubAppTokenCache};
 
 /// Mints an authenticated [`GitHubApiClient`] for a given enrolled repository.
 #[async_trait]
@@ -42,6 +42,9 @@ pub struct SecretsRepoGitHubClientProvider {
     default_installation_id: Option<i64>,
     /// Name of the PAT secret used for the non-App fallback path.
     fallback_token_secret: String,
+    /// Shared across short-lived clients so retries from consecutive
+    /// reconciles participate in one circuit breaker.
+    resilience: GitHubApiResilience,
 }
 
 impl SecretsRepoGitHubClientProvider {
@@ -117,6 +120,7 @@ impl SecretsRepoGitHubClientProvider {
             app_token_cache,
             default_installation_id,
             fallback_token_secret: fallback_token_secret.into(),
+            resilience: GitHubApiResilience::default(),
         }
     }
 
@@ -139,10 +143,10 @@ impl RepoGitHubClientProvider for SecretsRepoGitHubClientProvider {
             && let Some(cache) = self.app_token_cache.as_ref()
             && let Some(installation_id) = self.installation_for(repo)
         {
-            return Ok(GitHubApiClient::with_app_installation(
-                Arc::clone(cache),
-                installation_id,
-            ));
+            return Ok(
+                GitHubApiClient::with_app_installation(Arc::clone(cache), installation_id)
+                    .with_resilience(self.resilience.clone()),
+            );
         }
 
         // Fallback: short-lived bearer token from the secrets store.
@@ -165,10 +169,10 @@ impl RepoGitHubClientProvider for SecretsRepoGitHubClientProvider {
                 self.fallback_token_secret
             ));
         }
-        Ok(GitHubApiClient::with_base_url_and_token(
-            self.api_base_url.clone(),
-            token,
-        ))
+        Ok(
+            GitHubApiClient::with_base_url_and_token(self.api_base_url.clone(), token)
+                .with_resilience(self.resilience.clone()),
+        )
     }
 
     async fn discovery_client(&self) -> Result<(GitHubApiClient, GitHubAuthMode), String> {
@@ -179,7 +183,8 @@ impl RepoGitHubClientProvider for SecretsRepoGitHubClientProvider {
             && let Some(installation_id) = self.default_installation_id
         {
             return Ok((
-                GitHubApiClient::with_app_installation(Arc::clone(cache), installation_id),
+                GitHubApiClient::with_app_installation(Arc::clone(cache), installation_id)
+                    .with_resilience(self.resilience.clone()),
                 GitHubAuthMode::GitHubApp,
             ));
         }
@@ -201,7 +206,8 @@ impl RepoGitHubClientProvider for SecretsRepoGitHubClientProvider {
             ));
         }
         Ok((
-            GitHubApiClient::with_base_url_and_token(self.api_base_url.clone(), token),
+            GitHubApiClient::with_base_url_and_token(self.api_base_url.clone(), token)
+                .with_resilience(self.resilience.clone()),
             GitHubAuthMode::UserToken,
         ))
     }
@@ -231,6 +237,7 @@ async fn resolve_secret(
 pub struct FixedTokenGitHubClientProvider {
     api_base_url: String,
     token: String,
+    resilience: GitHubApiResilience,
 }
 
 impl FixedTokenGitHubClientProvider {
@@ -238,6 +245,7 @@ impl FixedTokenGitHubClientProvider {
         Self {
             api_base_url: api_base_url.into(),
             token: token.into(),
+            resilience: GitHubApiResilience::default(),
         }
     }
 }
@@ -245,17 +253,18 @@ impl FixedTokenGitHubClientProvider {
 #[async_trait]
 impl RepoGitHubClientProvider for FixedTokenGitHubClientProvider {
     async fn client_for(&self, _repo: &RepoProjectRepo) -> Result<GitHubApiClient, String> {
-        Ok(GitHubApiClient::with_base_url_and_token(
-            self.api_base_url.clone(),
-            self.token.clone(),
-        ))
+        Ok(
+            GitHubApiClient::with_base_url_and_token(self.api_base_url.clone(), self.token.clone())
+                .with_resilience(self.resilience.clone()),
+        )
     }
 
     async fn discovery_client(&self) -> Result<(GitHubApiClient, GitHubAuthMode), String> {
         // Tests drive the App-installation discovery path against the fake
         // server, so report GitHubApp mode here.
         Ok((
-            GitHubApiClient::with_base_url_and_token(self.api_base_url.clone(), self.token.clone()),
+            GitHubApiClient::with_base_url_and_token(self.api_base_url.clone(), self.token.clone())
+                .with_resilience(self.resilience.clone()),
             GitHubAuthMode::GitHubApp,
         ))
     }

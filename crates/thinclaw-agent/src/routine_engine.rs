@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use thinclaw_channels_core::IncomingMessage;
@@ -9,6 +10,7 @@ use thinclaw_llm_core::{ChatMessage, FinishReason};
 use thinclaw_types::{ToolProfile, error::RoutineError};
 use uuid::Uuid;
 
+use crate::loop_control::LoopRetryPolicy;
 use crate::routine::{
     NotifyConfig, Routine, RoutineCatchUpMode, RoutineEvent, RoutineEventDecision,
     RoutineEventStatus, RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind,
@@ -498,8 +500,23 @@ pub fn compare_event_cache_routines(left: &Routine, right: &Routine) -> Ordering
         .then_with(|| left.id.cmp(&right.id))
 }
 
-pub fn should_continue_queue_drain(batch_len: usize, batch_limit: usize) -> bool {
-    batch_limit > 0 && batch_len >= batch_limit
+pub fn should_continue_queue_drain(
+    batch_len: usize,
+    batch_limit: usize,
+    batches_processed: usize,
+    max_batches: usize,
+) -> bool {
+    batch_limit > 0
+        && max_batches > 0
+        && batch_len >= batch_limit
+        && batches_processed < max_batches
+}
+
+pub fn routine_queue_retry_delay(attempt_count: u32) -> Duration {
+    let retry_index = attempt_count.saturating_sub(1);
+    LoopRetryPolicy::bounded(u32::MAX, Duration::from_secs(1), Duration::from_secs(30))
+        .delay_for_retry(retry_index)
+        .unwrap_or(Duration::from_secs(30))
 }
 
 pub fn routine_event_attempts_exhausted(attempt_count: u32, max_attempts: u32) -> bool {
@@ -1559,9 +1576,18 @@ mod tests {
 
     #[test]
     fn queue_drain_policy_continues_only_on_full_batches() {
-        assert!(should_continue_queue_drain(64, 64));
-        assert!(!should_continue_queue_drain(63, 64));
-        assert!(!should_continue_queue_drain(0, 0));
+        assert!(should_continue_queue_drain(64, 64, 1, 4));
+        assert!(!should_continue_queue_drain(64, 64, 4, 4));
+        assert!(!should_continue_queue_drain(63, 64, 1, 4));
+        assert!(!should_continue_queue_drain(0, 0, 0, 4));
+    }
+
+    #[test]
+    fn routine_queue_retry_delay_is_exponential_and_capped() {
+        assert_eq!(routine_queue_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(routine_queue_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(routine_queue_retry_delay(5), Duration::from_secs(16));
+        assert_eq!(routine_queue_retry_delay(32), Duration::from_secs(30));
     }
 
     #[test]
@@ -1618,6 +1644,26 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(contents, vec!["a-0", "b-3", "c-4", "a-1", "b-5", "a-2"]);
+    }
+
+    #[test]
+    fn routine_event_fairness_throughput_smoke() {
+        let events = (0..10_000)
+            .map(|sequence| {
+                let mut event = test_event();
+                event.id = Uuid::from_u128(sequence as u128 + 1);
+                event.stable_external_conversation_key = format!("source://{}", sequence % 256);
+                event
+            })
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let ordered = fair_interleave_routine_events(events);
+
+        assert_eq!(ordered.len(), 10_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "fair queue interleave exceeded the debug-build timing budget"
+        );
     }
 
     #[test]

@@ -28,9 +28,10 @@ use thinclaw_agent::routine_engine::{
     heartbeat_job_metadata, increment_decision_count, lightweight_routine_messages,
     render_trigger_payload_block, routine_cooldown_allows, routine_event_attempts_exhausted,
     routine_event_evaluation_details, routine_event_fairness_key, routine_event_owner_matches,
-    routine_requests_desktop_capabilities, routine_runtime_update_for_run, sanitize_routine_name,
-    scheduled_run_trigger_key, should_continue_queue_drain, should_jitter_trigger_type,
-    should_refresh_event_cache, summarize_runtime_capabilities, truncate,
+    routine_queue_retry_delay, routine_requests_desktop_capabilities,
+    routine_runtime_update_for_run, sanitize_routine_name, scheduled_run_trigger_key,
+    should_continue_queue_drain, should_jitter_trigger_type, should_refresh_event_cache,
+    summarize_runtime_capabilities, truncate,
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
@@ -98,7 +99,25 @@ pub struct RoutineEngine {
 
 const EVENT_QUEUE_BATCH_LIMIT: i64 = 64;
 const TRIGGER_QUEUE_BATCH_LIMIT: i64 = 64;
+const QUEUE_MAX_BATCHES_PER_TICK: usize = 4;
 const ROUTINE_EVENT_MAX_ATTEMPTS: u32 = 3;
+const ROUTINE_TRIGGER_MAX_FAILURE_ATTEMPTS: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimedTriggerOutcome {
+    Fired,
+    Completed,
+    Released,
+}
+
+fn next_trigger_retry_attempt(diagnostics: &serde_json::Value, field: &str) -> u32 {
+    diagnostics
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| u32::try_from(value).unwrap_or(u32::MAX))
+        .unwrap_or(0)
+        .saturating_add(1)
+}
 
 /// Initial DB lease window (seconds) set on a routine run at spawn time,
 /// before the worker/subagent (or lightweight inline execution) has had a
@@ -453,6 +472,8 @@ impl RoutineEngine {
             LoopMetricGuard::start(Arc::clone(&self.observer), LoopKind::RoutineTriggerQueue);
         let mut total_fired = 0usize;
         let mut processed_triggers = 0usize;
+        let mut batches_processed = 0usize;
+        let mut retried_triggers = 0u32;
         let mut saw_work = false;
         let mut stop_reason = None;
 
@@ -479,23 +500,58 @@ impl RoutineEngine {
             }
 
             saw_work = true;
+            batches_processed += 1;
             let batch_len = claimed.len();
             for trigger in claimed {
                 processed_triggers += 1;
-                match self.process_claimed_trigger(trigger).await {
-                    Ok(fired) => total_fired += usize::from(fired),
+                match self.process_claimed_trigger(trigger.clone()).await {
+                    Ok(ClaimedTriggerOutcome::Fired) => total_fired += 1,
+                    Ok(ClaimedTriggerOutcome::Released) => retried_triggers += 1,
+                    Ok(ClaimedTriggerOutcome::Completed) => {}
                     Err(error) => {
+                        match self.record_routine_trigger_failure(&trigger, &error).await {
+                            Ok(terminal) => {
+                                if terminal {
+                                    stop_reason = Some(LoopStopReason::RetryBudgetExceeded);
+                                } else {
+                                    retried_triggers += 1;
+                                    if stop_reason.is_none() {
+                                        stop_reason = Some(LoopStopReason::FatalError);
+                                    }
+                                }
+                            }
+                            Err(store_error) => {
+                                stop_reason = Some(LoopStopReason::FatalError);
+                                tracing::error!(
+                                    trigger_id = %trigger.id,
+                                    error = %store_error,
+                                    "Failed to persist scheduled routine trigger failure"
+                                );
+                            }
+                        }
                         tracing::error!("Failed to process scheduled routine trigger: {}", error);
                     }
                 }
             }
 
-            if !should_continue_queue_drain(batch_len, TRIGGER_QUEUE_BATCH_LIMIT as usize) {
+            if !should_continue_queue_drain(
+                batch_len,
+                TRIGGER_QUEUE_BATCH_LIMIT as usize,
+                batches_processed,
+                QUEUE_MAX_BATCHES_PER_TICK,
+            ) {
+                if batch_len >= TRIGGER_QUEUE_BATCH_LIMIT as usize
+                    && batches_processed >= QUEUE_MAX_BATCHES_PER_TICK
+                    && stop_reason.is_none()
+                {
+                    stop_reason = Some(LoopStopReason::IterationBudgetExceeded);
+                }
                 break;
             }
         }
 
         loop_metrics.set_iterations(processed_triggers);
+        loop_metrics.set_retries(retried_triggers);
         loop_metrics.stop_with(stop_reason.unwrap_or(if saw_work {
             LoopStopReason::Completed
         } else {
@@ -505,7 +561,10 @@ impl RoutineEngine {
         total_fired
     }
 
-    async fn process_claimed_trigger(&self, trigger: RoutineTrigger) -> Result<bool, RoutineError> {
+    async fn process_claimed_trigger(
+        &self,
+        trigger: RoutineTrigger,
+    ) -> Result<ClaimedTriggerOutcome, RoutineError> {
         let Some(routine) = self
             .store
             .get_routine(trigger.routine_id)
@@ -526,7 +585,7 @@ impl RoutineEngine {
                 .map_err(|error| RoutineError::Database {
                     reason: error.to_string(),
                 })?;
-            return Ok(false);
+            return Ok(ClaimedTriggerOutcome::Completed);
         };
 
         let trigger_key = scheduled_run_trigger_key(&trigger);
@@ -593,22 +652,30 @@ impl RoutineEngine {
                     .map_err(|error| RoutineError::Database {
                         reason: error.to_string(),
                     })?;
-                return Ok(false);
+                return Ok(ClaimedTriggerOutcome::Completed);
             }
             ScheduledTriggerAction::Release => {
+                let defer_attempt =
+                    next_trigger_retry_attempt(&trigger.diagnostics, "defer_attempt_count");
+                let retry_delay = routine_queue_retry_delay(defer_attempt);
+                let next_attempt_at = Utc::now()
+                    + ChronoDuration::from_std(retry_delay)
+                        .unwrap_or_else(|_| ChronoDuration::seconds(1));
                 let diagnostics = serde_json::json!({
                     "decision": plan.decision.to_string(),
                     "reason": plan.reason,
                     "claimed_by": self.worker_id,
                     "due_at": trigger.due_at.to_rfc3339(),
+                    "defer_attempt_count": defer_attempt,
+                    "next_attempt_at": next_attempt_at.to_rfc3339(),
                 });
                 self.store
-                    .release_routine_trigger(trigger.id, &diagnostics)
+                    .release_routine_trigger(trigger.id, next_attempt_at, &diagnostics)
                     .await
                     .map_err(|error| RoutineError::Database {
                         reason: error.to_string(),
                     })?;
-                return Ok(false);
+                return Ok(ClaimedTriggerOutcome::Released);
             }
             ScheduledTriggerAction::Dispatch => {}
             ScheduledTriggerAction::Complete => {}
@@ -647,27 +714,11 @@ impl RoutineEngine {
                     .map_err(|error| RoutineError::Database {
                         reason: error.to_string(),
                     })?;
-                Ok(true)
+                Ok(ClaimedTriggerOutcome::Fired)
             }
             RoutineTriggerKind::SystemEvent => {
-                if let Err(error) = self
-                    .dispatch_system_event(&routine, &trigger, &trigger_key)
-                    .await
-                {
-                    let diagnostics = serde_json::json!({
-                        "decision": RoutineTriggerDecision::DeferredGlobalCapacity.to_string(),
-                        "claimed_by": self.worker_id,
-                        "reason": error.to_string(),
-                        "due_at": trigger.due_at.to_rfc3339(),
-                    });
-                    self.store
-                        .release_routine_trigger(trigger.id, &diagnostics)
-                        .await
-                        .map_err(|store_error| RoutineError::Database {
-                            reason: store_error.to_string(),
-                        })?;
-                    return Ok(false);
-                }
+                self.dispatch_system_event(&routine, &trigger, &trigger_key)
+                    .await?;
                 let diagnostics = serde_json::json!({
                     "decision": RoutineTriggerDecision::Fired.to_string(),
                     "claimed_by": self.worker_id,
@@ -685,9 +736,49 @@ impl RoutineEngine {
                     .map_err(|error| RoutineError::Database {
                         reason: error.to_string(),
                     })?;
-                Ok(true)
+                Ok(ClaimedTriggerOutcome::Fired)
             }
         }
+    }
+
+    async fn record_routine_trigger_failure(
+        &self,
+        trigger: &RoutineTrigger,
+        error: &RoutineError,
+    ) -> Result<bool, RoutineError> {
+        let attempt_count =
+            next_trigger_retry_attempt(&trigger.diagnostics, "failure_attempt_count");
+        let error_message = error.to_string();
+        if routine_event_attempts_exhausted(attempt_count, ROUTINE_TRIGGER_MAX_FAILURE_ATTEMPTS) {
+            let terminal_error =
+                format!("retry budget exhausted after {attempt_count} attempts: {error_message}");
+            self.store
+                .fail_routine_trigger(trigger.id, Utc::now(), &terminal_error)
+                .await
+                .map_err(|store_error| RoutineError::Database {
+                    reason: store_error.to_string(),
+                })?;
+            return Ok(true);
+        }
+
+        let retry_delay = routine_queue_retry_delay(attempt_count);
+        let next_attempt_at = Utc::now()
+            + ChronoDuration::from_std(retry_delay).unwrap_or_else(|_| ChronoDuration::seconds(1));
+        let diagnostics = serde_json::json!({
+            "decision": "retry_processing_error",
+            "claimed_by": self.worker_id,
+            "reason": error_message,
+            "due_at": trigger.due_at.to_rfc3339(),
+            "failure_attempt_count": attempt_count,
+            "next_attempt_at": next_attempt_at.to_rfc3339(),
+        });
+        self.store
+            .release_routine_trigger(trigger.id, next_attempt_at, &diagnostics)
+            .await
+            .map_err(|store_error| RoutineError::Database {
+                reason: store_error.to_string(),
+            })?;
+        Ok(false)
     }
 
     async fn dispatch_system_event(
@@ -793,7 +884,9 @@ impl RoutineEngine {
             "claimed_by": self.worker_id,
             "attempt_count": event.attempt_count,
             "max_attempts": ROUTINE_EVENT_MAX_ATTEMPTS,
-            "last_error": error_message,
+            "last_error": error_message.clone(),
+            "dispatch_error": error_message.clone(),
+            "dispatch_errors": [error_message.clone()],
             "dead_lettered": terminal,
         });
 
@@ -802,8 +895,12 @@ impl RoutineEngine {
                 .dead_letter_routine_event(event.id, Utc::now(), &error_message, &diagnostics)
                 .await
         } else {
+            let retry_delay = routine_queue_retry_delay(event.attempt_count);
+            let next_attempt_at = Utc::now()
+                + ChronoDuration::from_std(retry_delay)
+                    .unwrap_or_else(|_| ChronoDuration::seconds(1));
             self.store
-                .release_routine_event(event.id, &diagnostics)
+                .release_routine_event(event.id, next_attempt_at, &diagnostics)
                 .await
         };
 
@@ -838,6 +935,7 @@ impl RoutineEngine {
         self.ensure_event_cache_loaded().await;
         let mut total_fired = 0usize;
         let mut processed_events = 0usize;
+        let mut batches_processed = 0usize;
         let mut retried_events = 0u32;
         let mut saw_work = false;
         let mut stop_reason = None;
@@ -861,6 +959,7 @@ impl RoutineEngine {
             }
 
             saw_work = true;
+            batches_processed += 1;
             let batch_len = pending.len();
             let batch_source_count = routine_event_batch_source_count(&pending);
             let pending = fair_interleave_routine_events(pending);
@@ -888,6 +987,9 @@ impl RoutineEngine {
                     Ok(Some(fired)) => total_fired += fired,
                     Ok(None) => {}
                     Err(error) => {
+                        if stop_reason.is_none() {
+                            stop_reason = Some(LoopStopReason::FatalError);
+                        }
                         tracing::error!(
                             event_id = %event.id,
                             "Failed to drain pending routine event: {}",
@@ -897,7 +999,17 @@ impl RoutineEngine {
                 }
             }
 
-            if !should_continue_queue_drain(batch_len, EVENT_QUEUE_BATCH_LIMIT as usize) {
+            if !should_continue_queue_drain(
+                batch_len,
+                EVENT_QUEUE_BATCH_LIMIT as usize,
+                batches_processed,
+                QUEUE_MAX_BATCHES_PER_TICK,
+            ) {
+                if batch_len >= EVENT_QUEUE_BATCH_LIMIT as usize
+                    && batches_processed >= QUEUE_MAX_BATCHES_PER_TICK
+                {
+                    stop_reason = Some(LoopStopReason::IterationBudgetExceeded);
+                }
                 break;
             }
         }
@@ -916,7 +1028,7 @@ impl RoutineEngine {
     async fn process_claimed_event(&self, event: RoutineEvent) -> Result<usize, RoutineError> {
         self.ensure_event_cache_loaded().await;
 
-        let cache = self.event_cache.read().await;
+        let cache = self.event_cache.read().await.clone();
         let total_event_routines = cache.len() as u32;
         let global_running =
             self.store
@@ -935,7 +1047,7 @@ impl RoutineEngine {
         let mut plans = Vec::new();
         let mut has_deferred = false;
 
-        for cached in cache.iter() {
+        for cached in &cache {
             let routine = &cached.routine;
             if !routine_event_owner_matches(routine, &event) {
                 continue;
@@ -1065,8 +1177,6 @@ impl RoutineEngine {
                 trigger_key,
             });
         }
-        drop(cache);
-
         for plan in &plans {
             let evaluation = RoutineEventEvaluation {
                 id: Uuid::new_v4(),
@@ -1114,12 +1224,21 @@ impl RoutineEngine {
                     error
                 );
                 dispatch_errors.push(format!("{}: {}", plan.routine.name, error));
-                has_deferred = true;
             }
         }
 
-        // Preserve the legacy singular `dispatch_error` key (first error) for any
-        // existing diagnostics consumers while also exposing the full list.
+        if !dispatch_errors.is_empty() {
+            return Err(RoutineError::ExecutionFailed {
+                reason: format!(
+                    "{} routine event dispatch(es) failed: {}",
+                    dispatch_errors.len(),
+                    dispatch_errors.join("; ")
+                ),
+            });
+        }
+
+        // Keep the legacy dispatch-error keys in successful diagnostics. Actual
+        // errors are routed through the bounded failure/dead-letter path above.
         let dispatch_error = dispatch_errors.first().cloned();
         let diagnostics = serde_json::json!({
             "channel": event.channel,
@@ -1138,8 +1257,12 @@ impl RoutineEngine {
         });
 
         if has_deferred {
+            let retry_delay = routine_queue_retry_delay(event.attempt_count);
+            let next_attempt_at = Utc::now()
+                + ChronoDuration::from_std(retry_delay)
+                    .unwrap_or_else(|_| ChronoDuration::seconds(1));
             self.store
-                .release_routine_event(event.id, &diagnostics)
+                .release_routine_event(event.id, next_attempt_at, &diagnostics)
                 .await
                 .map_err(|error| RoutineError::Database {
                     reason: error.to_string(),
@@ -1240,8 +1363,7 @@ impl RoutineEngine {
                 tokio::time::sleep(cron_jitter).await;
             }
             execute_routine(engine, routine, run_for_task).await;
-        })
-        .map_err(|reason| RoutineError::ExecutionFailed { reason })?;
+        });
 
         Ok(run_id)
     }
@@ -1249,9 +1371,11 @@ impl RoutineEngine {
     /// IC-018: Abort all running routine tasks. Called on engine shutdown.
     pub async fn abort_all(&self) {
         // std::sync::Mutex — lock is sync, no await inside the guard scope.
-        if let Ok(mut guard) = self.active_tasks.lock() {
-            guard.abort_all();
-        }
+        let mut guard = self.active_tasks.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Recovering poisoned routine task registry during shutdown");
+            poisoned.into_inner()
+        });
+        guard.abort_all();
         tracing::info!("Aborted all running routine tasks");
     }
 
@@ -1300,16 +1424,17 @@ impl RoutineEngine {
         }
     }
 
-    fn spawn_tracked_task<F>(&self, routine_name: &str, task: F) -> Result<(), String>
+    fn spawn_tracked_task<F>(&self, routine_name: &str, task: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let mut guard = self.active_tasks.lock().map_err(|_| {
-            format!(
-                "active_tasks mutex poisoned — routine '{}' not spawned",
-                routine_name
-            )
-        })?;
+        let mut guard = self.active_tasks.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                routine = routine_name,
+                "Recovering poisoned routine task registry before spawning"
+            );
+            poisoned.into_inner()
+        });
         // Drain finished entries first: a JoinSet retains completed-task
         // slots until joined, so an always-on engine would otherwise
         // accumulate one entry per run for the process lifetime. Joining is
@@ -1331,7 +1456,6 @@ impl RoutineEngine {
             }
         }
         guard.spawn(task);
-        Ok(())
     }
 }
 
