@@ -23,6 +23,7 @@ impl Store {
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13
             )
+            ON CONFLICT (id) DO NOTHING
             "#,
             &[
                 &id,
@@ -111,6 +112,7 @@ impl Store {
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7::jsonb, $8
             )
+            ON CONFLICT (id) DO NOTHING
             "#,
             &[
                 &id,
@@ -172,6 +174,7 @@ impl Store {
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9, $10::jsonb, $11
             )
+            ON CONFLICT (id) DO NOTHING
             "#,
             &[
                 &id,

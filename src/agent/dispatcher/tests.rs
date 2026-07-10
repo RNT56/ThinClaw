@@ -13,6 +13,36 @@ use crate::tools::{ApprovalRequirement, ToolRegistry};
 
 use super::test_support::*;
 
+#[tokio::test]
+async fn dispatcher_wall_time_budget_cancels_a_hung_provider_call() {
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let llm = Arc::new(BlockingLlm::new("blocking-model", dropped_tx));
+    let tools = Arc::new(ToolRegistry::new());
+    let (mut agent, _channel) =
+        make_test_agent(llm, None, tools, None, StreamMode::None, false, 10).await;
+    agent.config.job_timeout = std::time::Duration::from_millis(25);
+    let (session, thread_id) = make_session_and_thread().await;
+    let message = IncomingMessage::new("test", "user-1", "hang");
+
+    let result = agent
+        .run_agentic_loop(
+            &message,
+            session,
+            thread_id,
+            vec![ChatMessage::user("hang")],
+        )
+        .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("hung provider call should hit the wall-time budget"),
+    };
+    assert!(error.to_string().contains("wall-time budget"));
+    tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+        .await
+        .expect("provider future should be dropped when the budget expires")
+        .expect("drop signal should be delivered");
+}
+
 #[test]
 fn tool_phase_requires_cheap_split_with_real_cheap_model() {
     let status = runtime_status(RoutingMode::CheapSplit, Some("openai/gpt-5.4-mini"), true);

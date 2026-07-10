@@ -1,6 +1,6 @@
 //! Worker runtime lifecycle helpers.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use thinclaw_llm_core::{ChatMessage, Role, ToolDefinition};
 use thinclaw_types::JobState;
@@ -12,38 +12,6 @@ use crate::routine::RunStatus;
 
 pub fn touch_worker_activity(activity_tx: &watch::Sender<Instant>) {
     let _ = activity_tx.send(Instant::now());
-}
-
-pub struct WorkerActivityKeepalive {
-    cancel_tx: watch::Sender<bool>,
-    join_handle: tokio::task::JoinHandle<()>,
-}
-
-impl WorkerActivityKeepalive {
-    pub fn spawn(activity_tx: watch::Sender<Instant>, interval: Duration) -> Self {
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
-        let join_handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_rx.changed() => break,
-                    _ = tokio::time::sleep(interval) => {
-                        touch_worker_activity(&activity_tx);
-                    }
-                }
-            }
-        });
-        Self {
-            cancel_tx,
-            join_handle,
-        }
-    }
-}
-
-impl Drop for WorkerActivityKeepalive {
-    fn drop(&mut self) {
-        let _ = self.cancel_tx.send(true);
-        self.join_handle.abort();
-    }
 }
 
 /// Compact context messages after plan execution to prevent orphaned tool
@@ -95,7 +63,6 @@ pub const DEFAULT_WORKER_ITERATIONS: usize = 50;
 pub const WORKER_STUCK_NUDGE_AFTER_ITERATION: usize = 8;
 pub const WORKER_STUCK_NUDGE_EVERY: usize = 10;
 pub const WORKER_DIRECT_LOOP_DELAY_MS: u64 = 100;
-pub const WORKER_TOOL_KEEPALIVE_SECS: u64 = 15;
 pub const WORKER_TASK_FAILED_DURING_EXECUTION_REASON: &str = "Task failed during execution";
 
 pub fn capped_worker_iterations(requested: Option<u64>, default_value: usize) -> usize {
@@ -465,13 +432,6 @@ mod tests {
         rx.changed().await.unwrap();
 
         assert!(*rx.borrow() >= before);
-    }
-
-    #[tokio::test]
-    async fn keepalive_can_be_dropped_without_waiting() {
-        let (tx, _rx) = watch::channel(Instant::now());
-        let keepalive = WorkerActivityKeepalive::spawn(tx, Duration::from_millis(1));
-        drop(keepalive);
     }
 
     #[test]

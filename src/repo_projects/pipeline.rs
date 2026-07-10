@@ -1504,5 +1504,8 @@ fn event_kind_label(kind: RepoProjectEventKind) -> &'static str {
         RepoProjectEventKind::MergeDenied => "merge_denied",
         RepoProjectEventKind::SecurityFindingRecorded => "security_finding_recorded",
         RepoProjectEventKind::SecretsFindingRecorded => "secrets_finding_recorded",
+        RepoProjectEventKind::SupervisorError => "supervisor_error",
+        RepoProjectEventKind::Unknown => "unknown",
+        _ => "unknown",
     }
 }

@@ -233,13 +233,29 @@ pub(crate) fn outcome_contract_from_row(row: &libsql::Row) -> OutcomeContract {
                 .ok()
                 .map(|ts| ts.with_timezone(&Utc))
         }),
-        evaluated_at: get_opt_text(row, 18).and_then(|value| {
+        claimed_by: get_opt_text(row, 18),
+        lease_expires_at: get_opt_text(row, 19).and_then(|value| {
             DateTime::parse_from_rfc3339(&value)
                 .ok()
                 .map(|ts| ts.with_timezone(&Utc))
         }),
-        created_at: get_ts(row, 19),
-        updated_at: get_ts(row, 20),
+        attempt_count: row
+            .get::<i64>(20)
+            .ok()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or_default(),
+        next_attempt_at: get_opt_text(row, 21).and_then(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .ok()
+                .map(|ts| ts.with_timezone(&Utc))
+        }),
+        evaluated_at: get_opt_text(row, 22).and_then(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .ok()
+                .map(|ts| ts.with_timezone(&Utc))
+        }),
+        created_at: get_ts(row, 23),
+        updated_at: get_ts(row, 24),
     }
 }
 

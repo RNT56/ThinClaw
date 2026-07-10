@@ -681,6 +681,13 @@ pub struct LearningOutcomeContractItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<String>,
+    pub attempt_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub evaluated_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -768,6 +775,10 @@ pub fn learning_outcome_contract_item_from_record(
         metadata: contract.metadata.clone(),
         dedupe_key: contract.dedupe_key.clone(),
         claimed_at: contract.claimed_at.map(|dt| dt.to_rfc3339()),
+        claimed_by: contract.claimed_by.clone(),
+        lease_expires_at: contract.lease_expires_at.map(|dt| dt.to_rfc3339()),
+        attempt_count: contract.attempt_count,
+        next_attempt_at: contract.next_attempt_at.map(|dt| dt.to_rfc3339()),
         evaluated_at: contract.evaluated_at.map(|dt| dt.to_rfc3339()),
         created_at: contract.created_at.to_rfc3339(),
         updated_at: contract.updated_at.to_rfc3339(),
@@ -1136,6 +1147,10 @@ mod tests {
             }),
             dedupe_key: "routine:run-1".to_string(),
             claimed_at: None,
+            claimed_by: None,
+            lease_expires_at: None,
+            attempt_count: 0,
+            next_attempt_at: None,
             evaluated_at: Some(now),
             created_at: now,
             updated_at: now,

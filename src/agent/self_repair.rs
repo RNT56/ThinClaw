@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use crate::agent::Scheduler;
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
 use crate::error::RepairError;
@@ -27,10 +28,16 @@ impl DefaultSelfRepair {
     /// Create a new self-repair instance.
     pub fn new(
         context_manager: Arc<ContextManager>,
+        scheduler: Arc<Scheduler>,
+        store: Option<Arc<dyn Database>>,
         stuck_threshold: Duration,
         max_repair_attempts: u32,
     ) -> Self {
-        let context = Arc::new(RootRepairContext { context_manager }) as Arc<dyn RepairContextPort>;
+        let context = Arc::new(RootRepairContext {
+            context_manager,
+            scheduler,
+            store,
+        }) as Arc<dyn RepairContextPort>;
         Self {
             inner: thinclaw_agent::self_repair::DefaultSelfRepair::new(
                 context,
@@ -80,13 +87,15 @@ impl SelfRepair for DefaultSelfRepair {
         self.inner.repair_broken_tool(tool).await
     }
 
-    async fn dismiss_broken_tool(&self, tool_name: &str) {
-        self.inner.dismiss_broken_tool(tool_name).await
+    async fn quarantine_broken_tool(&self, tool_name: &str) {
+        self.inner.quarantine_broken_tool(tool_name).await
     }
 }
 
 struct RootRepairContext {
     context_manager: Arc<ContextManager>,
+    scheduler: Arc<Scheduler>,
+    store: Option<Arc<dyn Database>>,
 }
 
 #[async_trait]
@@ -116,10 +125,32 @@ impl RepairContextPort for RootRepairContext {
     }
 
     async fn attempt_recovery(&self, job_id: Uuid) -> Result<(), String> {
+        self.scheduler
+            .schedule(job_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn mark_manual_required(&self, job_id: Uuid, reason: &str) -> Result<(), String> {
         self.context_manager
-            .update_context(job_id, |ctx| ctx.attempt_recovery())
+            .update_context(job_id, |ctx| {
+                ctx.transition_to(JobState::Abandoned, Some(reason.to_string()))
+            })
             .await
             .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        if let Some(store) = &self.store {
+            let snapshot = self
+                .context_manager
+                .get_context(job_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            store
+                .save_job(&snapshot)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -139,6 +170,13 @@ impl BrokenToolStorePort for RootBrokenToolStore {
     async fn mark_tool_repaired(&self, tool_name: &str) -> Result<(), String> {
         self.store
             .mark_tool_repaired(tool_name)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn quarantine_tool_failure(&self, tool_name: &str) -> Result<(), String> {
+        self.store
+            .quarantine_tool_failure(tool_name)
             .await
             .map_err(|error| error.to_string())
     }

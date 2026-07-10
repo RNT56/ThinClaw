@@ -61,7 +61,7 @@ impl Store {
             )
             ON CONFLICT (active_key) WHERE active_key IS NOT NULL DO UPDATE
             SET due_at = GREATEST(routine_trigger_queue.due_at, EXCLUDED.due_at),
-                diagnostics = EXCLUDED.diagnostics,
+                diagnostics = routine_trigger_queue.diagnostics || EXCLUDED.diagnostics,
                 coalesced_count = routine_trigger_queue.coalesced_count + 1,
                 backlog_collapsed = routine_trigger_queue.backlog_collapsed OR EXCLUDED.backlog_collapsed,
                 routine_config_version = EXCLUDED.routine_config_version
@@ -107,7 +107,7 @@ impl Store {
                 WITH candidates AS (
                     SELECT id
                     FROM routine_trigger_queue
-                    WHERE status = 'pending'
+                    WHERE (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
                        OR (
                             status = 'processing'
                             AND (
@@ -115,8 +115,12 @@ impl Store {
                                 OR (claimed_at IS NOT NULL AND claimed_at < $2)
                             )
                        )
-                    ORDER BY due_at ASC, created_at ASC
+                    ORDER BY
+                        CASE WHEN status = 'pending' AND next_attempt_at IS NULL THEN 0 ELSE 1 END ASC,
+                        due_at ASC,
+                        created_at ASC
                     LIMIT $3
+                    FOR UPDATE SKIP LOCKED
                 ),
                 claimed AS (
                     UPDATE routine_trigger_queue
@@ -140,6 +144,7 @@ impl Store {
     pub async fn release_routine_trigger(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
@@ -147,15 +152,16 @@ impl Store {
             r#"
             UPDATE routine_trigger_queue
             SET status = 'pending',
-                diagnostics = $2,
+                diagnostics = COALESCE(diagnostics, '{}'::jsonb) || $2,
                 claimed_by = NULL,
                 claimed_at = NULL,
                 lease_expires_at = NULL,
+                next_attempt_at = $3,
                 processed_at = NULL,
                 error_message = NULL
             WHERE id = $1
             "#,
-            &[&id, diagnostics],
+            &[&id, diagnostics, &next_attempt_at],
         )
         .await?;
         Ok(())
@@ -181,6 +187,7 @@ impl Store {
                 claimed_by = NULL,
                 claimed_at = NULL,
                 lease_expires_at = NULL,
+                next_attempt_at = NULL,
                 error_message = NULL
             WHERE id = $1
             "#,
@@ -206,6 +213,7 @@ impl Store {
                 claimed_by = NULL,
                 claimed_at = NULL,
                 lease_expires_at = NULL,
+                next_attempt_at = NULL,
                 error_message = $3
             WHERE id = $1
             "#,

@@ -24,7 +24,15 @@ impl Store {
             ON CONFLICT (tool_name) DO UPDATE SET
                 error_message = $2,
                 error_count = tool_failures.error_count + 1,
-                last_failure = NOW()
+                last_failure = NOW(),
+                repair_attempts = CASE
+                    WHEN tool_failures.repaired_at IS NOT NULL OR tool_failures.quarantined_at IS NOT NULL
+                    THEN 0 ELSE tool_failures.repair_attempts END,
+                last_build_result = CASE
+                    WHEN tool_failures.repaired_at IS NOT NULL OR tool_failures.quarantined_at IS NOT NULL
+                    THEN NULL ELSE tool_failures.last_build_result END,
+                repaired_at = NULL,
+                quarantined_at = NULL
             "#,
             &[&tool_name, &error_message],
         )
@@ -43,7 +51,9 @@ impl Store {
                 SELECT tool_name, error_message, error_count, first_failure, last_failure,
                        last_build_result, repair_attempts
                 FROM tool_failures
-                WHERE error_count >= $1 AND repaired_at IS NULL
+                WHERE error_count >= $1
+                  AND repaired_at IS NULL
+                  AND quarantined_at IS NULL
                 ORDER BY error_count DESC
                 "#,
                 &[&threshold],
@@ -69,11 +79,21 @@ impl Store {
         let conn = self.conn().await?;
 
         conn.execute(
-            "UPDATE tool_failures SET repaired_at = NOW(), error_count = 0 WHERE tool_name = $1",
+            "UPDATE tool_failures SET repaired_at = NOW(), quarantined_at = NULL, error_count = 0, repair_attempts = 0 WHERE tool_name = $1",
             &[&tool_name],
         )
         .await?;
 
+        Ok(())
+    }
+
+    pub async fn quarantine_tool_failure(&self, tool_name: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE tool_failures SET quarantined_at = NOW() WHERE tool_name = $1",
+            &[&tool_name],
+        )
+        .await?;
         Ok(())
     }
 

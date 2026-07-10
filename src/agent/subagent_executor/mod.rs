@@ -81,6 +81,20 @@ const SUBAGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// How long a cancelled sub-agent gets to exit cooperatively (and run its
 /// finalization) before the task is hard-aborted.
 const SUBAGENT_CANCEL_GRACE: Duration = Duration::from_secs(20);
+/// Bound all post-loop status, learning, and routine finalization work. A
+/// failed backend must not keep `wait=true` callers or shutdown drains open.
+const SUBAGENT_FINALIZATION_GRACE: Duration = if cfg!(test) {
+    Duration::from_millis(250)
+} else {
+    Duration::from_secs(10)
+};
+const SUBAGENT_STATUS_DELIVERY_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(2)
+};
+const SUBAGENT_STATE_PERSIST_TIMEOUT: Duration = Duration::from_secs(2);
+const SUBAGENT_RESULT_REINJECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long finished sub-agent handles stay visible in list() before being
 /// evicted from the active map.
 const SUBAGENT_HANDLE_RETENTION: Duration = Duration::from_secs(3600);
@@ -648,214 +662,246 @@ impl SubagentExecutor {
                 0,
             )));
 
-            let _ = channels
-                .send_status(
-                    &ch_name,
-                    StatusUpdate::SubagentCompleted {
-                        agent_id: id.to_string(),
-                        name: subagent_result.name.clone(),
-                        success: subagent_result.success,
-                        response: subagent_completion_status_response(&subagent_result),
-                        duration_ms,
-                        iterations: subagent_result.iterations,
-                        task_packet: event_task_packet.clone(),
-                        allowed_tools: event_allowed_tools.clone(),
-                        allowed_skills: event_allowed_skills.clone(),
-                        memory_mode: event_memory_mode.clone(),
-                        tool_mode: event_tool_mode.clone(),
-                        skill_mode: event_skill_mode.clone(),
-                    },
-                    &ch_meta,
-                )
-                .await;
-
-            // Persist a learning event for sub-agent completions so the
-            // orchestrator can learn from delegated task outcomes.
-            if let Some(ref store) = store_for_task {
-                let conversation_id = Uuid::parse_str(&parent_thread_id).ok();
-                let actor = parent_identity
-                    .as_ref()
-                    .map(|identity| identity.actor_id.clone())
-                    .or_else(|| actor_id.clone());
-
-                let completion = subagent_learning_completion(&subagent_result);
-                let risk_tier = match subagent_learning_risk_tier(&subagent_result) {
-                    SubagentLearningRiskTier::Low => RiskTier::Low,
-                    SubagentLearningRiskTier::Medium => RiskTier::Medium,
-                };
-                let event = RuntimeLearningEvent::new(
-                    "subagent_executor::completion",
-                    ImprovementClass::Skill,
-                    risk_tier,
-                    completion.summary,
-                )
-                .with_target("subagent")
-                .with_confidence(completion.confidence)
-                .with_metadata(completion.metadata);
-
-                let persisted = event.into_persisted(
-                    parent_user_id.clone(),
-                    actor,
-                    Some(ch_name.clone()),
-                    Some(parent_thread_id.clone()),
-                    conversation_id,
-                    None,
-                    None,
-                );
-                if let Err(err) = store.insert_learning_event(&persisted).await {
-                    tracing::debug!(
-                        error = %err,
-                        subagent_id = %subagent_result.agent_id,
-                        "Failed to persist subagent learning event"
-                    );
-                } else {
-                    let orchestrator = LearningOrchestrator::new(Arc::clone(store), None, None);
-                    if let Err(err) = orchestrator
-                        .handle_event("subagent_completion", &persisted)
-                        .await
-                    {
-                        tracing::debug!(
-                            error = %err,
-                            subagent_id = %subagent_result.agent_id,
-                            "Learning orchestrator skipped subagent completion event"
-                        );
-                    }
-                }
+            let status_delivery = channels.send_status(
+                &ch_name,
+                StatusUpdate::SubagentCompleted {
+                    agent_id: id.to_string(),
+                    name: subagent_result.name.clone(),
+                    success: subagent_result.success,
+                    response: subagent_completion_status_response(&subagent_result),
+                    duration_ms,
+                    iterations: subagent_result.iterations,
+                    task_packet: event_task_packet.clone(),
+                    allowed_tools: event_allowed_tools.clone(),
+                    allowed_skills: event_allowed_skills.clone(),
+                    memory_mode: event_memory_mode.clone(),
+                    tool_mode: event_tool_mode.clone(),
+                    skill_mode: event_skill_mode.clone(),
+                },
+                &ch_meta,
+            );
+            if tokio::time::timeout(SUBAGENT_STATUS_DELIVERY_TIMEOUT, status_delivery)
+                .await
+                .is_err()
+            {
+                tracing::warn!(agent_id = %id, "Timed out delivering sub-agent completion status");
             }
 
-            // ── Routine run finalization ─────────────────────────────
-            // If this subagent was spawned by a routine, finalize the
-            // routine_run record and emit a RoutineLifecycle SSE event.
-            if let (Some(routine_name), Some(run_id_str)) = (
-                ch_meta.get("routine_name").and_then(|v| v.as_str()),
-                ch_meta.get("routine_run_id").and_then(|v| v.as_str()),
-            ) {
-                let completion = subagent_routine_completion(&subagent_result);
-                let run_status = completion.run_status;
-                let summary = Some(completion.summary.clone());
-
-                if let Some(ref store) = store_for_task
-                    && let Ok(run_id) = run_id_str.parse::<Uuid>()
-                {
-                    if let Err(e) = store
-                        .complete_routine_run(run_id, run_status, summary.as_deref(), None)
-                        .await
-                    {
-                        tracing::error!(
-                            routine = %routine_name,
-                            run_id = %run_id_str,
-                            "Failed to finalize routine run from subagent: {}", e
-                        );
-                    } else {
-                        tracing::info!(
-                            routine = %routine_name,
-                            run_id = %run_id_str,
-                            success = %subagent_result.success,
-                            "Finalized routine run from subagent"
-                        );
-                    }
-
-                    let routine_actor = subagent_routine_actor(
-                        parent_identity
+            let finalization = async {
+                let learning = async {
+                    // Persist a learning event for sub-agent completions so the
+                    // orchestrator can learn from delegated task outcomes.
+                    if let Some(ref store) = store_for_task {
+                        let conversation_id = Uuid::parse_str(&parent_thread_id).ok();
+                        let actor = parent_identity
                             .as_ref()
-                            .map(|identity| identity.actor_id.as_str()),
-                        actor_id.as_deref(),
-                        &parent_user_id,
-                    );
-                    let routine = ch_meta
-                        .get("routine_id")
-                        .and_then(|value| value.as_str())
-                        .and_then(|value| Uuid::parse_str(value).ok());
-                    let mut resolved_routine = None;
-                    if let Some(routine_id) = routine
-                        && let Ok(Some(found)) = store.get_routine(routine_id).await
-                        && found.user_id == parent_user_id
-                        && found.owner_actor_id() == routine_actor
-                    {
-                        resolved_routine = Some(found);
-                    }
-                    if resolved_routine.is_none()
-                        && let Ok(Some(found)) = store
-                            .get_routine_by_name_for_actor(
-                                &parent_user_id,
-                                &routine_actor,
-                                routine_name,
-                            )
-                            .await
-                    {
-                        resolved_routine = Some(found);
-                    }
-                    if let Some(routine) = resolved_routine {
-                        let completed_at = chrono::Utc::now();
-                        let runtime_already_advanced =
-                            routine_state_has_runtime_advance_for_run(&routine.state, run_id);
-                        let next_fire_at = if runtime_already_advanced {
-                            routine.next_fire_at
-                        } else {
-                            crate::agent::routine::next_fire_for_routine(
-                                &routine,
-                                None,
-                                completed_at,
-                            )
-                            .unwrap_or(routine.next_fire_at)
+                            .map(|identity| identity.actor_id.clone())
+                            .or_else(|| actor_id.clone());
+
+                        let completion = subagent_learning_completion(&subagent_result);
+                        let risk_tier = match subagent_learning_risk_tier(&subagent_result) {
+                            SubagentLearningRiskTier::Low => RiskTier::Low,
+                            SubagentLearningRiskTier::Medium => RiskTier::Medium,
                         };
-                        let run_count = if runtime_already_advanced {
-                            routine.run_count
-                        } else {
-                            routine.run_count + 1
-                        };
-                        let consecutive_failures =
-                            if run_status == crate::agent::routine::RunStatus::Failed {
-                                routine.consecutive_failures + 1
-                            } else {
-                                0
-                            };
-                        let state = routine_state_with_runtime_advance(
-                            &routine.state,
-                            run_id,
-                            completed_at,
-                        );
-                        if let Err(error) = persist_routine_runtime_update(
-                            store,
-                            routine.id,
-                            completed_at,
-                            next_fire_at,
-                            run_count,
-                            consecutive_failures,
-                            &state,
+                        let event = RuntimeLearningEvent::new(
+                            "subagent_executor::completion",
+                            ImprovementClass::Skill,
+                            risk_tier,
+                            completion.summary,
                         )
-                        .await
-                        {
-                            tracing::error!(
-                                routine = %routine.name,
-                                run_id = %run_id_str,
-                                "Failed to update routine runtime after subagent finalization: {}",
-                                error
+                        .with_target("subagent")
+                        .with_confidence(completion.confidence)
+                        .with_metadata(completion.metadata);
+
+                        let persisted = event.into_persisted(
+                            parent_user_id.clone(),
+                            actor,
+                            Some(ch_name.clone()),
+                            Some(parent_thread_id.clone()),
+                            conversation_id,
+                            None,
+                            None,
+                        );
+                        if let Err(err) = store.insert_learning_event(&persisted).await {
+                            tracing::debug!(
+                                error = %err,
+                                subagent_id = %subagent_result.agent_id,
+                                "Failed to persist subagent learning event"
                             );
+                        } else {
+                            let orchestrator =
+                                LearningOrchestrator::new(Arc::clone(store), None, None);
+                            if let Err(err) = orchestrator
+                                .handle_event("subagent_completion", &persisted)
+                                .await
+                            {
+                                tracing::debug!(
+                                    error = %err,
+                                    subagent_id = %subagent_result.agent_id,
+                                    "Learning orchestrator skipped subagent completion event"
+                                );
+                            }
                         }
                     }
-                }
+                };
 
-                // Emit SSE lifecycle event
-                if let Some(ref sse_tx) = sse_tx_for_task {
-                    let _ = sse_tx.send(SseEvent::RoutineLifecycle {
-                        routine_name: routine_name.to_string(),
-                        event: completion.lifecycle_event.to_string(),
-                        run_id: Some(run_id_str.to_string()),
-                        result_summary: summary.clone(),
-                    });
-                }
+                let routine_finalization = async {
+                    // ── Routine run finalization ─────────────────────────────
+                    // If this subagent was spawned by a routine, finalize the
+                    // routine_run record and emit a RoutineLifecycle SSE event.
+                    if let (Some(routine_name), Some(run_id_str)) = (
+                        ch_meta.get("routine_name").and_then(|v| v.as_str()),
+                        ch_meta.get("routine_run_id").and_then(|v| v.as_str()),
+                    ) {
+                        let completion = subagent_routine_completion(&subagent_result);
+                        let run_status = completion.run_status;
+                        let summary = Some(completion.summary.clone());
+
+                        if let Some(ref store) = store_for_task
+                            && let Ok(run_id) = run_id_str.parse::<Uuid>()
+                        {
+                            if let Err(e) = store
+                                .complete_routine_run(run_id, run_status, summary.as_deref(), None)
+                                .await
+                            {
+                                tracing::error!(
+                                    routine = %routine_name,
+                                    run_id = %run_id_str,
+                                    "Failed to finalize routine run from subagent: {}", e
+                                );
+                            } else {
+                                tracing::info!(
+                                    routine = %routine_name,
+                                    run_id = %run_id_str,
+                                    success = %subagent_result.success,
+                                    "Finalized routine run from subagent"
+                                );
+                            }
+
+                            let routine_actor = subagent_routine_actor(
+                                parent_identity
+                                    .as_ref()
+                                    .map(|identity| identity.actor_id.as_str()),
+                                actor_id.as_deref(),
+                                &parent_user_id,
+                            );
+                            let routine = ch_meta
+                                .get("routine_id")
+                                .and_then(|value| value.as_str())
+                                .and_then(|value| Uuid::parse_str(value).ok());
+                            let mut resolved_routine = None;
+                            if let Some(routine_id) = routine
+                                && let Ok(Some(found)) = store.get_routine(routine_id).await
+                                && found.user_id == parent_user_id
+                                && found.owner_actor_id() == routine_actor
+                            {
+                                resolved_routine = Some(found);
+                            }
+                            if resolved_routine.is_none()
+                                && let Ok(Some(found)) = store
+                                    .get_routine_by_name_for_actor(
+                                        &parent_user_id,
+                                        &routine_actor,
+                                        routine_name,
+                                    )
+                                    .await
+                            {
+                                resolved_routine = Some(found);
+                            }
+                            if let Some(routine) = resolved_routine {
+                                let completed_at = chrono::Utc::now();
+                                let runtime_already_advanced =
+                                    routine_state_has_runtime_advance_for_run(
+                                        &routine.state,
+                                        run_id,
+                                    );
+                                let next_fire_at = if runtime_already_advanced {
+                                    routine.next_fire_at
+                                } else {
+                                    crate::agent::routine::next_fire_for_routine(
+                                        &routine,
+                                        None,
+                                        completed_at,
+                                    )
+                                    .unwrap_or(routine.next_fire_at)
+                                };
+                                let run_count = if runtime_already_advanced {
+                                    routine.run_count
+                                } else {
+                                    routine.run_count + 1
+                                };
+                                let consecutive_failures =
+                                    if run_status == crate::agent::routine::RunStatus::Failed {
+                                        routine.consecutive_failures + 1
+                                    } else {
+                                        0
+                                    };
+                                let state = routine_state_with_runtime_advance(
+                                    &routine.state,
+                                    run_id,
+                                    completed_at,
+                                );
+                                if let Err(error) = persist_routine_runtime_update(
+                                    store,
+                                    routine.id,
+                                    completed_at,
+                                    next_fire_at,
+                                    run_count,
+                                    consecutive_failures,
+                                    &state,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        routine = %routine.name,
+                                        run_id = %run_id_str,
+                                        "Failed to update routine runtime after subagent finalization: {}",
+                                        error
+                                    );
+                                }
+                            }
+                        }
+
+                        // Emit SSE lifecycle event
+                        if let Some(ref sse_tx) = sse_tx_for_task {
+                            let _ = sse_tx.send(SseEvent::RoutineLifecycle {
+                                routine_name: routine_name.to_string(),
+                                event: completion.lifecycle_event.to_string(),
+                                run_id: Some(run_id_str.to_string()),
+                                result_summary: summary.clone(),
+                            });
+                        }
+                    }
+                };
+
+                let _ = tokio::join!(learning, routine_finalization);
+            };
+            if tokio::time::timeout(SUBAGENT_FINALIZATION_GRACE, finalization)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    agent_id = %id,
+                    timeout_secs = SUBAGENT_FINALIZATION_GRACE.as_secs(),
+                    "Sub-agent optional finalization exceeded its deadline"
+                );
             }
 
             let ledger_status = subagent_status_from_result(&subagent_result);
 
-            {
+            let active_update = async {
                 let mut active = active_for_task.write().await;
                 if let Some(handle) = active.get_mut(&id) {
                     handle.status = ledger_status.clone();
                     handle.completed_at = Some(chrono::Utc::now());
                     handle.join_handle = None;
                 }
+            };
+            if tokio::time::timeout(SUBAGENT_STATE_PERSIST_TIMEOUT, active_update)
+                .await
+                .is_err()
+            {
+                tracing::warn!(agent_id = %id, "Timed out updating in-memory sub-agent state");
             }
 
             // ── Durable ledger: record completion (success, failure, ──────
@@ -867,14 +913,21 @@ impl SubagentExecutor {
             if let Some(ref store) = store_for_task {
                 let (ledger_status_str, ledger_error) =
                     subagent_run_status_for_completion(&ledger_status);
-                if let Err(e) = store
-                    .complete_subagent_run(id, ledger_status_str, ledger_error.as_deref())
-                    .await
+                match tokio::time::timeout(
+                    SUBAGENT_STATE_PERSIST_TIMEOUT,
+                    store.complete_subagent_run(id, ledger_status_str, ledger_error.as_deref()),
+                )
+                .await
                 {
-                    tracing::warn!(
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::warn!(
                         agent_id = %id,
-                        "Failed to update subagent run ledger entry: {}", e
-                    );
+                        "Failed to update subagent run ledger entry: {}", error
+                    ),
+                    Err(_) => tracing::warn!(
+                        agent_id = %id,
+                        "Timed out updating subagent run ledger entry"
+                    ),
                 }
             }
 
@@ -882,16 +935,20 @@ impl SubagentExecutor {
 
             // Inject result back to parent agent via the result channel
             if !wait_for_completion && should_reinject_subagent_result(&ch_meta) {
-                let _ = result_tx
-                    .send(SubagentResultMessage {
-                        result: subagent_result.clone(),
-                        channel_name: ch_name,
-                        parent_user_id,
-                        parent_identity,
-                        channel_metadata: ch_meta,
-                        parent_thread_id,
-                    })
-                    .await;
+                let reinject = result_tx.send(SubagentResultMessage {
+                    result: subagent_result.clone(),
+                    channel_name: ch_name,
+                    parent_user_id,
+                    parent_identity,
+                    channel_metadata: ch_meta,
+                    parent_thread_id,
+                });
+                if tokio::time::timeout(SUBAGENT_RESULT_REINJECT_TIMEOUT, reinject)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(agent_id = %id, "Timed out reinjecting sub-agent result");
+                }
             }
 
             subagent_result

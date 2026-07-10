@@ -14,10 +14,18 @@
 //!                                                   Agent Loop
 //! ```
 
+use std::time::Duration;
+
 use thinclaw_channels_core::IncomingMessage;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+
+const JOB_MONITOR_INJECT_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(5)
+};
 
 /// Portable job event consumed by the agent job monitor.
 #[derive(Debug, Clone)]
@@ -40,76 +48,111 @@ pub enum JobMonitorEvent {
 /// the main agent's context window).
 pub fn spawn_job_monitor(
     job_id: Uuid,
-    mut event_rx: broadcast::Receiver<(Uuid, JobMonitorEvent)>,
+    event_rx: broadcast::Receiver<(Uuid, JobMonitorEvent)>,
     inject_tx: mpsc::Sender<IncomingMessage>,
 ) -> JoinHandle<()> {
+    tokio::spawn(run_job_monitor(
+        job_id,
+        event_rx,
+        inject_tx,
+        std::convert::identity,
+    ))
+}
+
+/// Run a job monitor over an arbitrary broadcast event type.
+///
+/// The mapper lets gateway adapters translate their native event without
+/// spawning a second forwarding task and channel.
+pub async fn run_job_monitor<E, F>(
+    job_id: Uuid,
+    mut event_rx: broadcast::Receiver<(Uuid, E)>,
+    inject_tx: mpsc::Sender<IncomingMessage>,
+    map_event: F,
+) where
+    E: Clone + Send + 'static,
+    F: Fn(E) -> JobMonitorEvent + Send + 'static,
+{
     let short_id = job_id.to_string()[..8].to_string();
 
-    tokio::spawn(async move {
-        tracing::info!(job_id = %short_id, "Job monitor started successfully");
+    tracing::info!(job_id = %short_id, "Job monitor started successfully");
 
-        loop {
-            match event_rx.recv().await {
-                Ok((ev_job_id, event)) => {
-                    if ev_job_id != job_id {
-                        continue;
-                    }
+    loop {
+        match event_rx.recv().await {
+            Ok((ev_job_id, event)) => {
+                if ev_job_id != job_id {
+                    continue;
+                }
 
-                    match event {
-                        // IC-025: Only forward assistant messages — system/tool messages
-                        // are too noisy for the parent agent's context window.
-                        JobMonitorEvent::Message { role, content } if role == "assistant" => {
-                            let msg = IncomingMessage::new(
-                                "job_monitor",
-                                "system",
-                                format!("[Job {}] Container agent: {}", short_id, content),
-                            );
-                            if inject_tx.send(msg).await.is_err() {
-                                tracing::debug!(
-                                    job_id = %short_id,
-                                    "Inject channel closed, stopping monitor"
-                                );
-                                break;
-                            }
-                        }
-                        JobMonitorEvent::Result { status } => {
-                            let msg = IncomingMessage::new(
-                                "job_monitor",
-                                "system",
-                                format!(
-                                    "[Job {}] Container finished (status: {})",
-                                    short_id, status
-                                ),
-                            );
-                            let _ = inject_tx.send(msg).await;
+                match map_event(event) {
+                    // IC-025: Only forward assistant messages — system/tool messages
+                    // are too noisy for the parent agent's context window.
+                    JobMonitorEvent::Message { role, content } if role == "assistant" => {
+                        let msg = IncomingMessage::new(
+                            "job_monitor",
+                            "system",
+                            format!("[Job {}] Container agent: {}", short_id, content),
+                        );
+                        if !send_monitor_message(&inject_tx, msg, &short_id).await {
                             tracing::debug!(
                                 job_id = %short_id,
-                                status = %status,
-                                "Job monitor exiting (job finished)"
+                                "Inject channel closed, stopping monitor"
                             );
                             break;
                         }
-                        JobMonitorEvent::SessionResult => {}
-                        _ => {}
                     }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(
-                        job_id = %short_id,
-                        skipped = n,
-                        "Job monitor lagged, some events were dropped"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::debug!(
-                        job_id = %short_id,
-                        "Broadcast channel closed, stopping monitor"
-                    );
-                    break;
+                    JobMonitorEvent::Result { status } => {
+                        let msg = IncomingMessage::new(
+                            "job_monitor",
+                            "system",
+                            format!("[Job {}] Container finished (status: {})", short_id, status),
+                        );
+                        let _ = send_monitor_message(&inject_tx, msg, &short_id).await;
+                        tracing::debug!(
+                            job_id = %short_id,
+                            status = %status,
+                            "Job monitor exiting (job finished)"
+                        );
+                        break;
+                    }
+                    JobMonitorEvent::SessionResult => {}
+                    _ => {}
                 }
             }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    job_id = %short_id,
+                    skipped = n,
+                    "Job monitor lagged, some events were dropped"
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                tracing::debug!(
+                    job_id = %short_id,
+                    "Broadcast channel closed, stopping monitor"
+                );
+                break;
+            }
         }
-    })
+    }
+}
+
+async fn send_monitor_message(
+    inject_tx: &mpsc::Sender<IncomingMessage>,
+    message: IncomingMessage,
+    short_id: &str,
+) -> bool {
+    match tokio::time::timeout(JOB_MONITOR_INJECT_TIMEOUT, inject_tx.send(message)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            tracing::warn!(
+                job_id = short_id,
+                timeout_ms = JOB_MONITOR_INJECT_TIMEOUT.as_millis() as u64,
+                "Job monitor injection timed out; dropping backpressured update"
+            );
+            true
+        }
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +247,33 @@ mod tests {
             .await
             .expect("monitor should have exited")
             .expect("monitor task should not panic");
+    }
+
+    #[tokio::test]
+    async fn test_monitor_exits_on_terminal_result_when_inject_queue_is_full() {
+        let (event_tx, _) = broadcast::channel::<(Uuid, JobMonitorEvent)>(16);
+        let (inject_tx, _inject_rx) = mpsc::channel::<IncomingMessage>(1);
+        inject_tx
+            .send(IncomingMessage::new("test", "system", "occupy queue"))
+            .await
+            .unwrap();
+
+        let job_id = Uuid::new_v4();
+        let handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx);
+        event_tx
+            .send((
+                job_id,
+                JobMonitorEvent::Result {
+                    status: "completed".to_string(),
+                },
+            ))
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("terminal monitor should not wait forever on a full inject queue")
+            .expect("monitor task should not panic");
+        assert_eq!(event_tx.receiver_count(), 0);
     }
 
     #[tokio::test]

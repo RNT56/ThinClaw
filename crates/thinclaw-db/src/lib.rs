@@ -283,10 +283,30 @@ pub trait ConversationStore: Send + Sync {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomeContract>, DatabaseError>;
+    async fn claim_due_outcome_contracts_with_lease(
+        &self,
+        worker_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+        lease_secs: i64,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError>;
+    async fn claim_due_outcome_contracts_for_user_with_lease(
+        &self,
+        user_id: &str,
+        worker_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+        lease_secs: i64,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError>;
     async fn update_outcome_contract(
         &self,
         contract: &OutcomeContract,
     ) -> Result<(), DatabaseError>;
+    async fn update_claimed_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+        worker_id: &str,
+    ) -> Result<bool, DatabaseError>;
     async fn outcome_summary_stats(
         &self,
         user_id: &str,
@@ -640,6 +660,7 @@ pub trait RoutineStore: Send + Sync {
     async fn release_routine_event(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError>;
     async fn list_pending_routine_events(
@@ -719,6 +740,7 @@ pub trait RoutineStore: Send + Sync {
     async fn release_routine_trigger(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError>;
     async fn complete_routine_trigger(
@@ -928,6 +950,7 @@ pub trait ToolFailureStore: Send + Sync {
     ) -> Result<(), DatabaseError>;
     async fn get_broken_tools(&self, threshold: i32) -> Result<Vec<BrokenTool>, DatabaseError>;
     async fn mark_tool_repaired(&self, tool_name: &str) -> Result<(), DatabaseError>;
+    async fn quarantine_tool_failure(&self, tool_name: &str) -> Result<(), DatabaseError>;
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), DatabaseError>;
     async fn record_tool_repair_result(
         &self,

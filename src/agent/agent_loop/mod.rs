@@ -648,6 +648,8 @@ impl Agent {
         // ── Self-repair ─────────────────────────────────────────────────
         let mut repair = DefaultSelfRepair::new(
             self.context_manager.clone(),
+            self.scheduler.clone(),
+            self.deps.store.clone(),
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
         );
@@ -807,13 +809,11 @@ impl Agent {
                         }
                         Ok(RepairResult::ManualRequired { message }) => {
                             tracing::warn!(
-                                "Manual intervention needed for tool '{}': {} — clearing failure counter to stop re-detection",
+                                "Manual intervention needed for tool '{}': {} — quarantining incident until a new failure reopens it",
                                 tool.name,
                                 message,
                             );
-                            // Clear the failure counter so this tool isn't
-                            // endlessly re-detected every cycle.
-                            repair.dismiss_broken_tool(&tool.name).await;
+                            repair.quarantine_broken_tool(&tool.name).await;
                         }
                         Ok(result) => {
                             tracing::info!("Tool repair result: {:?}", result);
@@ -1116,6 +1116,7 @@ impl Agent {
         let (outcome_handle, outcome_shutdown_tx) = if let Some(store) = self.store() {
             let service = Arc::new(
                 OutcomeService::new(Arc::clone(store), self.deps.cheap_llm.clone())
+                    .with_observer(Arc::clone(self.observer()))
                     .with_learning_context(
                         self.deps.workspace.clone(),
                         self.deps.skill_registry.clone(),
@@ -1336,6 +1337,14 @@ impl Agent {
         self.record_loop_stop(LoopKind::JobContextPruning, stop_reason);
         if let Some(h) = handle.heartbeat_handle {
             h.abort();
+            let stop_reason = Self::drain_or_abort_background_task(
+                "memory_hygiene",
+                h,
+                Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+                LoopStopReason::ExternalShutdown,
+            )
+            .await;
+            self.record_loop_stop(LoopKind::Maintenance, stop_reason);
         }
         if let Some(tx) = handle.routine_shutdown_tx {
             let _ = tx.send(());
@@ -1511,6 +1520,7 @@ impl Agent {
         // single ordered join point.
         let worker_tasks: Arc<Mutex<tokio::task::JoinSet<()>>> =
             Arc::new(Mutex::new(tokio::task::JoinSet::new()));
+        agent.record_loop_start(LoopKind::ConversationWorker);
         let turn_permits = Arc::new(tokio::sync::Semaphore::new(
             Self::MAIN_LOOP_MAX_CONCURRENT_TURNS,
         ));
@@ -1575,24 +1585,13 @@ impl Agent {
         conversation_workers.lock().await.clear();
         {
             let mut tasks = worker_tasks.lock().await;
-            let drain = async {
-                while let Some(joined) = tasks.join_next().await {
-                    if let Err(join_error) = joined
-                        && join_error.is_panic()
-                    {
-                        tracing::error!("A conversation worker panicked: {}", join_error);
-                    }
-                }
-            };
-            if tokio::time::timeout(Self::SHUTDOWN_DRAIN_TIMEOUT, drain)
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    timeout_secs = Self::SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
-                    "Conversation workers did not drain before shutdown timeout;                      in-flight turns may be dropped"
-                );
-            }
+            let stop_reason = shutdown::drain_conversation_tasks(
+                &mut tasks,
+                Self::SHUTDOWN_DRAIN_TIMEOUT,
+                Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+            )
+            .await;
+            agent.record_loop_stop(LoopKind::ConversationWorker, stop_reason);
         }
 
         // F-11: emit the agent-lifecycle end (uptime + cumulative tokens) before teardown.
@@ -1962,6 +1961,7 @@ impl Agent {
 mod heartbeat;
 mod message_handling;
 mod repo_projects_config;
+mod shutdown;
 mod startup_hooks;
 
 #[cfg(test)]

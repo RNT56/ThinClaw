@@ -1,5 +1,42 @@
 use super::*;
+use axum::extract::State;
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::{Json, Router};
 use hmac::KeyInit;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use thinclaw_agent::loop_control::LoopRetryPolicy;
+
+fn test_repository_json() -> serde_json::Value {
+    serde_json::json!({
+        "id": 1,
+        "name": "r",
+        "full_name": "o/r",
+        "default_branch": "main",
+        "permissions": { "pull": true }
+    })
+}
+
+fn test_request_policy(max_retries: u32, circuit_failure_threshold: u32) -> GitHubRequestPolicy {
+    GitHubRequestPolicy {
+        retry: LoopRetryPolicy::bounded(max_retries, Duration::ZERO, Duration::ZERO),
+        circuit_failure_threshold,
+        circuit_open_duration: Duration::from_secs(30),
+    }
+}
+
+async fn spawn_github_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake GitHub server");
+    let address = listener.local_addr().expect("read fake server address");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("fake GitHub server should run");
+    });
+    (format!("http://{address}"), handle)
+}
 
 fn signature(secret: &str, body: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
@@ -173,4 +210,141 @@ fn delivery_deduper_rejects_duplicate_delivery() {
         deduper.accept("delivery-1").unwrap_err(),
         GitHubWebhookError::DuplicateDelivery
     );
+}
+
+#[tokio::test]
+async fn idempotent_request_retries_transient_server_failure() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/repos/o/r",
+            get(|State(calls): State<Arc<AtomicUsize>>| async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({ "message": "unavailable" })),
+                    )
+                        .into_response();
+                }
+                (StatusCode::OK, Json(test_repository_json())).into_response()
+            }),
+        )
+        .with_state(Arc::clone(&calls));
+    let (base_url, server) = spawn_github_test_server(app).await;
+    let client = GitHubApiClient::with_base_url_and_token(base_url, "token")
+        .with_request_policy(test_request_policy(1, 5));
+
+    let repository = client
+        .get_repository("o", "r")
+        .await
+        .expect("GET should recover from one transient response");
+    assert_eq!(repository.full_name, "o/r");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn rate_limit_retry_honors_retry_after() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/repos/o/r",
+            get(|State(calls): State<Arc<AtomicUsize>>| async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "0")],
+                        Json(serde_json::json!({ "message": "rate limited" })),
+                    )
+                        .into_response();
+                }
+                (StatusCode::OK, Json(test_repository_json())).into_response()
+            }),
+        )
+        .with_state(Arc::clone(&calls));
+    let (base_url, server) = spawn_github_test_server(app).await;
+    let client = GitHubApiClient::with_base_url_and_token(base_url, "token")
+        .with_request_policy(test_request_policy(1, 5));
+
+    client
+        .get_repository("o", "r")
+        .await
+        .expect("rate-limited GET should retry after the server delay");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn circuit_breaker_rejects_calls_after_transient_failure_threshold() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/repos/o/r",
+            get(|State(calls): State<Arc<AtomicUsize>>| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "message": "unavailable" })),
+                )
+            }),
+        )
+        .with_state(Arc::clone(&calls));
+    let (base_url, server) = spawn_github_test_server(app).await;
+    let resilience = GitHubApiResilience::default();
+    let client = GitHubApiClient::with_base_url_and_token(base_url.clone(), "token")
+        .with_resilience(resilience.clone())
+        .with_request_policy(test_request_policy(0, 2));
+
+    assert!(matches!(
+        client.get_repository("o", "r").await,
+        Err(GitHubApiError::Api { .. })
+    ));
+    assert!(matches!(
+        client.get_repository("o", "r").await,
+        Err(GitHubApiError::Api { .. })
+    ));
+    let fresh_client = GitHubApiClient::with_base_url_and_token(base_url, "token")
+        .with_resilience(resilience)
+        .with_request_policy(test_request_policy(0, 2));
+    assert!(matches!(
+        fresh_client.get_repository("o", "r").await,
+        Err(GitHubApiError::CircuitOpen { .. })
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn request_timeout_is_bounded_and_retried_only_to_budget() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/repos/o/r",
+            get(|State(calls): State<Arc<AtomicUsize>>| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                (StatusCode::OK, Json(test_repository_json()))
+            }),
+        )
+        .with_state(Arc::clone(&calls));
+    let (base_url, server) = spawn_github_test_server(app).await;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_millis(20))
+        .build()
+        .unwrap();
+    let client = GitHubApiClient::with_client_and_auth(
+        base_url,
+        http,
+        GitHubApiAuth::BearerToken("token".to_string()),
+    )
+    .with_request_policy(test_request_policy(1, 5));
+
+    let started = Instant::now();
+    assert!(matches!(
+        client.get_repository("o", "r").await,
+        Err(GitHubApiError::Http { .. })
+    ));
+    assert!(started.elapsed() < Duration::from_millis(150));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    server.abort();
 }

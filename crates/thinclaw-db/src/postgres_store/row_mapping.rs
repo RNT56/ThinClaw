@@ -260,6 +260,23 @@ pub(super) fn outcome_contract_from_row(row: &tokio_postgres::Row) -> OutcomeCon
             .try_get::<_, Option<DateTime<Utc>>>("claimed_at")
             .ok()
             .flatten(),
+        claimed_by: row
+            .try_get::<_, Option<String>>("claimed_by")
+            .ok()
+            .flatten(),
+        lease_expires_at: row
+            .try_get::<_, Option<DateTime<Utc>>>("lease_expires_at")
+            .ok()
+            .flatten(),
+        attempt_count: row
+            .try_get::<_, i32>("attempt_count")
+            .ok()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or_default(),
+        next_attempt_at: row
+            .try_get::<_, Option<DateTime<Utc>>>("next_attempt_at")
+            .ok()
+            .flatten(),
         evaluated_at: row
             .try_get::<_, Option<DateTime<Utc>>>("evaluated_at")
             .ok()

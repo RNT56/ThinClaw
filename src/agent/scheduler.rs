@@ -50,6 +50,30 @@ pub struct Scheduler {
     observer: Arc<dyn Observer>,
 }
 
+async fn cleanup_finished_worker(
+    jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
+    context_manager: Arc<ContextManager>,
+    job_id: Uuid,
+) {
+    jobs.write().await.remove(&job_id);
+    let retain_for_repair = context_manager
+        .get_context(job_id)
+        .await
+        .ok()
+        .is_some_and(|context| {
+            context.state == JobState::Stuck
+                && context.metadata.get("routine_dispatched")
+                    != Some(&serde_json::Value::Bool(true))
+        });
+    if retain_for_repair {
+        tracing::warn!(job_id = %job_id, "Retaining stuck direct job for scheduler-backed self-repair");
+        return;
+    }
+    if let Err(error) = context_manager.remove_job(job_id).await {
+        tracing::debug!(job_id = %job_id, "ContextManager cleanup skipped: {}", error);
+    }
+}
+
 impl Scheduler {
     /// Create a new scheduler.
     pub fn new(
@@ -357,10 +381,7 @@ impl Scheduler {
             let ctx_cleanup = Arc::clone(&self.context_manager);
             tokio::spawn(async move {
                 let _ = done_rx.await;
-                jobs_cleanup.write().await.remove(&job_id);
-                if let Err(e) = ctx_cleanup.remove_job(job_id).await {
-                    tracing::debug!("ContextManager cleanup for reserved job {}: {}", job_id, e);
-                }
+                cleanup_finished_worker(jobs_cleanup, ctx_cleanup, job_id).await;
             });
         }
 
@@ -461,10 +482,7 @@ impl Scheduler {
             let ctx_cleanup = Arc::clone(&self.context_manager);
             tokio::spawn(async move {
                 let _ = done_rx.await;
-                jobs_cleanup.write().await.remove(&job_id);
-                if let Err(e) = ctx_cleanup.remove_job(job_id).await {
-                    tracing::debug!("ContextManager cleanup for routine job {}: {}", job_id, e);
-                }
+                cleanup_finished_worker(jobs_cleanup, ctx_cleanup, job_id).await;
             });
         }
 
@@ -498,14 +516,18 @@ impl Scheduler {
             // Transition job to in_progress
             self.context_manager
                 .update_context(job_id, |ctx| {
-                    ctx.transition_to(
-                        JobState::InProgress,
-                        Some(
-                            SchedulerAdmissionKind::Standard
-                                .transition_reason()
-                                .to_string(),
-                        ),
-                    )
+                    if ctx.state == JobState::Stuck {
+                        ctx.attempt_recovery()
+                    } else {
+                        ctx.transition_to(
+                            JobState::InProgress,
+                            Some(
+                                SchedulerAdmissionKind::Standard
+                                    .transition_reason()
+                                    .to_string(),
+                            ),
+                        )
+                    }
                 })
                 .await?
                 .map_err(|s| JobError::ContextError {
@@ -567,10 +589,7 @@ impl Scheduler {
             let ctx_cleanup = Arc::clone(&self.context_manager);
             tokio::spawn(async move {
                 let _ = done_rx.await; // wakes exactly once when job finishes
-                jobs_cleanup.write().await.remove(&job_id);
-                if let Err(e) = ctx_cleanup.remove_job(job_id).await {
-                    tracing::debug!("ContextManager cleanup for job {}: {}", job_id, e);
-                }
+                cleanup_finished_worker(jobs_cleanup, ctx_cleanup, job_id).await;
             });
         }
 
@@ -911,5 +930,49 @@ mod tests {
         // Compile-time check: oneshot::channel produces the expected types.
         let (tx, _rx) = tokio::sync::oneshot::channel::<()>();
         drop(tx); // sender drop signals receiver
+    }
+
+    #[tokio::test]
+    async fn cleanup_retains_only_repairable_stuck_direct_jobs() {
+        let contexts = Arc::new(ContextManager::new(2));
+        let direct_job = contexts
+            .create_job("direct", "repair me")
+            .await
+            .expect("direct job should be created");
+        contexts
+            .update_context(direct_job, |context| {
+                context.transition_to(JobState::InProgress, None).unwrap();
+                context.mark_stuck("timeout").unwrap();
+            })
+            .await
+            .expect("direct context should update");
+        cleanup_finished_worker(
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::clone(&contexts),
+            direct_job,
+        )
+        .await;
+        assert!(contexts.get_context(direct_job).await.is_ok());
+        assert_eq!(contexts.active_count().await, 0);
+
+        let routine_job = contexts
+            .create_job("routine", "do not repair directly")
+            .await
+            .expect("routine job should be created");
+        contexts
+            .update_context(routine_job, |context| {
+                context.metadata = serde_json::json!({"routine_dispatched": true});
+                context.transition_to(JobState::InProgress, None).unwrap();
+                context.mark_stuck("timeout").unwrap();
+            })
+            .await
+            .expect("routine context should update");
+        cleanup_finished_worker(
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::clone(&contexts),
+            routine_job,
+        )
+        .await;
+        assert!(contexts.get_context(routine_job).await.is_err());
     }
 }

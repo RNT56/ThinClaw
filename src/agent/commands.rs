@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use thinclaw_agent::command_registry::SystemCommandRoute;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -454,24 +455,30 @@ impl Agent {
         command: &str,
         args: &[String],
     ) -> Result<SubmissionResult, Error> {
-        match command {
-            "help" => Ok(SubmissionResult::response(
+        let Some(route) = SystemCommandRoute::from_name(command) else {
+            return Ok(SubmissionResult::error(format!(
+                "Unknown command: {}. Try /help",
+                command
+            )));
+        };
+        match route {
+            SystemCommandRoute::Help => Ok(SubmissionResult::response(
                 command_catalog::agent_help_text(),
             )),
 
-            "ping" => Ok(SubmissionResult::response("pong!")),
+            SystemCommandRoute::Ping => Ok(SubmissionResult::response("pong!")),
 
-            "version" => Ok(SubmissionResult::response(format!(
+            SystemCommandRoute::Version => Ok(SubmissionResult::response(format!(
                 "{} v{}",
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION")
             ))),
 
-            "rollback" => Ok(SubmissionResult::response(
+            SystemCommandRoute::Rollback => Ok(SubmissionResult::response(
                 self.handle_rollback_command(thread_id, args).await,
             )),
 
-            "rewind" => {
+            SystemCommandRoute::Rewind => {
                 let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
                     return Ok(SubmissionResult::error(
                         "Could not find the active session for this thread.",
@@ -480,7 +487,7 @@ impl Agent {
                 self.process_rewind(session, thread_id, args).await
             }
 
-            "plan" => {
+            SystemCommandRoute::Plan => {
                 let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
                     return Ok(SubmissionResult::error(
                         "Could not find the active session for this thread.",
@@ -530,7 +537,7 @@ impl Agent {
                 Ok(SubmissionResult::ok_with_message(body))
             }
 
-            "identity" => {
+            SystemCommandRoute::Identity => {
                 let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
                     return Ok(SubmissionResult::error(
                         "Could not find the active session for this thread.",
@@ -588,7 +595,7 @@ impl Agent {
                 )))
             }
 
-            "personality" | "vibe" => {
+            SystemCommandRoute::Personality => {
                 let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
                     return Ok(SubmissionResult::error(
                         "Could not find the active session for this thread.",
@@ -652,19 +659,19 @@ impl Agent {
                 )))
             }
 
-            "memory" => Ok(SubmissionResult::response(format!(
+            SystemCommandRoute::Memory => Ok(SubmissionResult::response(format!(
                 "{}",
                 command_catalog::memory_growth_text(self.workspace().is_some())
             ))),
 
-            "skin" => {
+            SystemCommandRoute::Skin => {
                 let available = CliSkin::available_names();
                 Ok(SubmissionResult::response(
                     command_catalog::skin_command_text(args, &self.config.cli_skin, &available),
                 ))
             }
 
-            "tools" => {
+            SystemCommandRoute::Tools => {
                 let tools = self.tools().list().await;
                 Ok(SubmissionResult::response(format!(
                     "Available tools: {}",
@@ -672,7 +679,7 @@ impl Agent {
                 )))
             }
 
-            "debug" => {
+            SystemCommandRoute::Debug => {
                 // Toggle debug mode on the originating channel.
                 // For WASM channels (Telegram, Slack, etc.), this controls
                 // whether tool-level status events are forwarded as messages.
@@ -685,7 +692,7 @@ impl Agent {
                 )))
             }
 
-            "skills" => {
+            SystemCommandRoute::Skills => {
                 if args.first().map(|s| s.as_str()) == Some("search") {
                     let query = args[1..].join(" ");
                     if query.is_empty() {
@@ -701,7 +708,7 @@ impl Agent {
                 }
             }
 
-            "model" => {
+            SystemCommandRoute::Model => {
                 let current = self.llm().active_model_name();
 
                 if args.is_empty() {
@@ -787,7 +794,7 @@ impl Agent {
                 }
             }
 
-            "status" => {
+            SystemCommandRoute::Status => {
                 let model = self.llm().active_model_name();
                 let workspace_mode = &self.config.workspace_mode;
                 Ok(SubmissionResult::response(
@@ -795,7 +802,7 @@ impl Agent {
                 ))
             }
 
-            "context" => {
+            SystemCommandRoute::Context => {
                 let detail = args.first().map(|s| s.as_str()) == Some("detail");
                 let ws = self.workspace();
 
@@ -895,11 +902,6 @@ impl Agent {
                     command_catalog::context_sources_text(&sections, detail),
                 ))
             }
-
-            _ => Ok(SubmissionResult::error(format!(
-                "Unknown command: {}. Try /help",
-                command
-            ))),
         }
     }
 

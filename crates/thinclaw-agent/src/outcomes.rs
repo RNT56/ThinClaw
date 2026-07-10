@@ -2,6 +2,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -17,6 +18,7 @@ use crate::learning_policy::{
     append_markdown_section, ensure_prompt_document_root, ensure_prompt_trailing_newline,
     remove_markdown_section, upsert_markdown_section,
 };
+use crate::loop_control::LoopRetryPolicy;
 use crate::routine::{Routine, RoutineAction, RoutineRun, RunStatus};
 
 pub const CONTRACT_TURN: &str = "turn_usefulness";
@@ -26,6 +28,11 @@ pub const CONTRACT_ROUTINE: &str = "routine_usefulness";
 pub const STATUS_OPEN: &str = "open";
 pub const STATUS_EVALUATING: &str = "evaluating";
 pub const STATUS_EVALUATED: &str = "evaluated";
+pub const STATUS_QUARANTINED: &str = "quarantined";
+
+pub const OUTCOME_MAX_ATTEMPTS: u32 = 5;
+pub const OUTCOME_EVALUATION_TIMEOUT_SECS: u64 = 300;
+pub const OUTCOME_CLAIM_LEASE_SECS: i64 = OUTCOME_EVALUATION_TIMEOUT_SECS as i64 + 60;
 
 pub const EVALUATOR_OUTCOME: &str = "outcome_evaluator_v1";
 pub const EVALUATOR_MANUAL_REVIEW: &str = "outcome_manual_review_v1";
@@ -84,6 +91,9 @@ pub struct OutcomeContractEvaluationPlan {
 pub struct OutcomeContractRequeuePlan {
     pub status: String,
     pub claimed_at: Option<DateTime<Utc>>,
+    pub claimed_by: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub next_attempt_at: Option<DateTime<Utc>>,
     pub evaluation_details: serde_json::Value,
     pub updated_at: DateTime<Utc>,
 }
@@ -256,6 +266,10 @@ pub fn apply_evaluated_contract_plan(
     contract.final_score = Some(plan.final_score);
     contract.evaluation_details = plan.evaluation_details.clone();
     annotate_contract_with_last_evaluator(contract, &plan.evaluator);
+    contract.claimed_at = None;
+    contract.claimed_by = None;
+    contract.lease_expires_at = None;
+    contract.next_attempt_at = None;
     contract.evaluated_at = Some(plan.evaluated_at);
     contract.updated_at = plan.updated_at;
 }
@@ -270,9 +284,42 @@ pub fn failed_contract_requeue_plan(
     }
     let mut evaluation_details = contract.evaluation_details.clone();
     upsert_json_string(&mut evaluation_details, "last_error", reason.to_string());
+    let exhausted = contract.attempt_count >= OUTCOME_MAX_ATTEMPTS;
+    let next_attempt_at = if exhausted {
+        None
+    } else {
+        let retry_index = contract.attempt_count.saturating_sub(1);
+        let delay = LoopRetryPolicy::bounded(
+            OUTCOME_MAX_ATTEMPTS,
+            Duration::from_secs(30),
+            Duration::from_secs(60 * 60),
+        )
+        .delay_for_retry(retry_index)
+        .unwrap_or(Duration::from_secs(60 * 60));
+        chrono::Duration::from_std(delay)
+            .ok()
+            .map(|delay| now + delay)
+    };
+    if exhausted {
+        upsert_json_string(
+            &mut evaluation_details,
+            "quarantine_reason",
+            format!(
+                "retry budget exhausted after {} attempts",
+                contract.attempt_count
+            ),
+        );
+    }
     Some(OutcomeContractRequeuePlan {
-        status: STATUS_OPEN.to_string(),
+        status: if exhausted {
+            STATUS_QUARANTINED.to_string()
+        } else {
+            STATUS_OPEN.to_string()
+        },
         claimed_at: None,
+        claimed_by: None,
+        lease_expires_at: None,
+        next_attempt_at,
         evaluation_details,
         updated_at: now,
     })
@@ -284,6 +331,9 @@ pub fn apply_failed_contract_requeue_plan(
 ) {
     contract.status = plan.status.clone();
     contract.claimed_at = plan.claimed_at;
+    contract.claimed_by.clone_from(&plan.claimed_by);
+    contract.lease_expires_at = plan.lease_expires_at;
+    contract.next_attempt_at = plan.next_attempt_at;
     contract.evaluation_details = plan.evaluation_details.clone();
     contract.updated_at = plan.updated_at;
 }
@@ -1307,6 +1357,10 @@ pub fn build_turn_contract(event: &LearningEvent, default_ttl_hours: u64) -> Out
         }),
         dedupe_key: stable_key(&[CONTRACT_TURN, SOURCE_LEARNING_EVENT, &event.id.to_string()]),
         claimed_at: None,
+        claimed_by: None,
+        lease_expires_at: None,
+        attempt_count: 0,
+        next_attempt_at: None,
         evaluated_at: None,
         created_at: now,
         updated_at: now,
@@ -1354,6 +1408,10 @@ pub fn build_artifact_contract(
             &version.id.to_string(),
         ]),
         claimed_at: None,
+        claimed_by: None,
+        lease_expires_at: None,
+        attempt_count: 0,
+        next_attempt_at: None,
         evaluated_at: None,
         created_at: now,
         updated_at: now,
@@ -1409,6 +1467,10 @@ pub fn build_proposal_contract(
             &proposal.id.to_string(),
         ]),
         claimed_at: None,
+        claimed_by: None,
+        lease_expires_at: None,
+        attempt_count: 0,
+        next_attempt_at: None,
         evaluated_at: None,
         created_at: now,
         updated_at: now,
@@ -1448,6 +1510,10 @@ pub fn build_routine_contract(routine: &Routine, run: &RoutineRun) -> OutcomeCon
         }),
         dedupe_key: stable_key(&[CONTRACT_ROUTINE, SOURCE_ROUTINE_RUN, &run.id.to_string()]),
         claimed_at: None,
+        claimed_by: None,
+        lease_expires_at: None,
+        attempt_count: 0,
+        next_attempt_at: None,
         evaluated_at: None,
         created_at: now,
         updated_at: now,

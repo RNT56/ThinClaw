@@ -232,7 +232,80 @@ All focused loop gates passed before edits:
   5 passed.
 - `git diff --check`: passed.
 
-## Remaining Lanes
+## Completion Hardening
+
+The follow-on completion pass closes the remaining local implementation lanes:
+
+- Added `LoopRunContext` so iteration, retry, wall-time, idle, cancellation,
+  and terminal-error accounting share one bounded run context and one final
+  stop summary.
+- Added durable `next_attempt_at` visibility for routine trigger and event
+  retries in LibSQL and Postgres, exponential retry delay, fresh-work priority,
+  source fairness, and a four-batch ceiling per drain. Trigger processing now
+  centrally requeues every dispatch failure, merges retry diagnostics instead
+  of replacing prior counters, and reaches a durable terminal `failed` state
+  after the bounded attempt ceiling. PostgreSQL claims use `FOR UPDATE SKIP
+  LOCKED`, with a parallel-worker contract proving each trigger is claimed
+  exactly once. Routine event dispatch errors now enter the same bounded
+  dead-letter policy and set a fatal queue stop reason instead of looking like
+  successful drains.
+- Applied whole-run wall-time and cancellation bounds to dispatcher provider
+  and tool calls, worker streams and plan actions, and subagent finalization,
+  persistence, and result reinjection. Subagent completion-status delivery has
+  an independent short timeout, while learning and routine finalization run
+  concurrently so optional channel backpressure cannot starve durable state.
+- Added atomic outcome leases with ownership-checked completion, stale-lease
+  recovery, per-user cancellation-safe process ownership, stable effect IDs,
+  bounded retry visibility, and terminal quarantine. Active leases no longer
+  reschedule a user; expired leases do.
+- Replaced self-repair's synthetic stuck-job update with real scheduler
+  resubmission, bounded abandonment, durable tool-repair evidence, and explicit
+  quarantine/reopen semantics. The sandbox job monitor now owns exactly one
+  receiver task, bounds downstream injection, and releases the receiver on
+  every terminal path even when the injection queue is full.
+- Made repo-project wakes nonblocking and coalescing, isolated each project
+  reconcile behind a deadline, made recovery and active reconciliation
+  shutdown-cancellable, and retained planner failure evidence in durable
+  `SupervisorError` events without stopping healthy projects.
+- Added bounded GitHub connect/request timeouts, rate-limit handling, jittered
+  retries only for idempotent methods, and a provider-shared circuit breaker.
+  Replay and live delivery continue through the same persisted supervisor
+  reducer path.
+- Replaced direct task aborts in conversation and memory-hygiene shutdown with
+  bounded drain followed by abort-and-join. Outcome planning and per-user work
+  also race the shutdown signal.
+- Replaced stringly system-command execution routing with an exhaustive typed
+  route enum and a coverage test for every registered command.
+- Split newly oversized loop-adjacent implementation into owned modules, added
+  an MSRV synchronization guard, and added loop-policy/fairness benchmarks and
+  a checked-in live loop inventory.
+
+Current deterministic evidence for this completion pass:
+
+- `cargo test --locked -p thinclaw-agent --lib`: 557 passed, 0 failed.
+- `cargo test -p thinclaw --features desktop --lib -- --test-threads=1`:
+  1,437 passed, 2 environment-gated tests ignored, 0 failed.
+- LibSQL contract suite (`--no-default-features --features libsql`): 58 passed,
+  0 failed.
+- Live PostgreSQL 17 + pgvector contract suite (`--no-default-features
+  --features postgres`): 58 passed, 0 failed; the isolated test database was
+  removed after the run.
+- GitHub fake-transport tests: 14 passed, covering transient retry, rate-limit
+  delay, timeout, and circuit opening in addition to signature and path rules.
+- `cargo check --locked --workspace --all-targets --all-features`: passed.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`:
+  passed.
+- `cargo deny check`: passed; configured duplicate-version warnings only, with
+  advisories, bans, licenses, and sources all clean.
+- `cargo bench --locked --bench loop_control`: passed in optimized mode;
+  10,000 loop-budget checks measured about 187 microseconds and fair
+  interleaving of 4,096 events across 64 sources measured about 1.32
+  milliseconds on the verification host.
+- `cargo fmt --all -- --check`, `git diff --check`,
+  `scripts/ci/check-file-sizes.sh`, `scripts/ci/check-msrv-sync.py`, and
+  `bash scripts/audit-loop-inventory.sh`: passed.
+
+## External Verification Boundaries
 
 - Provider-specific channel runtimes that own channel-lifetime loops have been
   converted to explicit task-handle shutdown or already used owned handles.
@@ -250,3 +323,9 @@ All focused loop gates passed before edits:
 - The CI-blocking file-size decomposition is complete for files touched by this
   loop-hardening slice. Any broader module reshaping beyond the guard is now a
   mechanical architecture follow-up rather than a behavioral blocker.
+
+These loops are bounded, recoverable, observable, and regression-tested by
+design. They are not described as perfect or flawless: external services,
+provider semantics, host resource exhaustion, and future code changes remain
+real failure domains, and the integration/nightly gates are the evidence layer
+for those environments.

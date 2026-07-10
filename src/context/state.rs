@@ -21,6 +21,7 @@ mod tests {
         assert!(JobState::Failed.is_terminal());
         assert!(JobState::Cancelled.is_terminal());
         assert!(!JobState::InProgress.is_terminal());
+        assert!(!JobState::Stuck.is_active());
     }
 
     #[test]

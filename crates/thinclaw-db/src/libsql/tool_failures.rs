@@ -27,7 +27,15 @@ impl ToolFailureStore for LibSqlBackend {
                 ON CONFLICT (tool_name) DO UPDATE SET
                     error_message = ?3,
                     error_count = tool_failures.error_count + 1,
-                    last_failure = ?4
+                    last_failure = ?4,
+                    repair_attempts = CASE
+                        WHEN tool_failures.repaired_at IS NOT NULL OR tool_failures.quarantined_at IS NOT NULL
+                        THEN 0 ELSE tool_failures.repair_attempts END,
+                    last_build_result = CASE
+                        WHEN tool_failures.repaired_at IS NOT NULL OR tool_failures.quarantined_at IS NOT NULL
+                        THEN NULL ELSE tool_failures.last_build_result END,
+                    repaired_at = NULL,
+                    quarantined_at = NULL
                 "#,
             params![Uuid::new_v4().to_string(), tool_name, error_message, now],
         )
@@ -44,7 +52,9 @@ impl ToolFailureStore for LibSqlBackend {
                 SELECT tool_name, error_message, error_count, first_failure, last_failure,
                        last_build_result, repair_attempts
                 FROM tool_failures
-                WHERE error_count >= ?1 AND repaired_at IS NULL
+                WHERE error_count >= ?1
+                  AND repaired_at IS NULL
+                  AND quarantined_at IS NULL
                 ORDER BY error_count DESC
                 "#,
                 params![threshold as i64],
@@ -76,7 +86,19 @@ impl ToolFailureStore for LibSqlBackend {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
-            "UPDATE tool_failures SET repaired_at = ?2, error_count = 0 WHERE tool_name = ?1",
+            "UPDATE tool_failures SET repaired_at = ?2, quarantined_at = NULL, error_count = 0, repair_attempts = 0 WHERE tool_name = ?1",
+            params![tool_name, now],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn quarantine_tool_failure(&self, tool_name: &str) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let now = fmt_ts(&Utc::now());
+        conn.execute(
+            "UPDATE tool_failures SET quarantined_at = ?2 WHERE tool_name = ?1",
             params![tool_name, now],
         )
         .await

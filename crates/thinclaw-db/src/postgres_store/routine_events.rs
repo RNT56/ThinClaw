@@ -88,7 +88,7 @@ impl Store {
                         error_message = NULL
                     WHERE id = $1
                       AND (
-                        status = 'pending'
+                        (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
                         OR (
                             status = 'processing'
                             AND (
@@ -110,6 +110,7 @@ impl Store {
     pub async fn release_routine_event(
         &self,
         id: Uuid,
+        next_attempt_at: DateTime<Utc>,
         diagnostics: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
@@ -121,10 +122,11 @@ impl Store {
                 claimed_by = NULL,
                 claimed_at = NULL,
                 lease_expires_at = NULL,
+                next_attempt_at = $3,
                 processed_at = NULL
             WHERE id = $1
             "#,
-            &[&id, diagnostics],
+            &[&id, diagnostics, &next_attempt_at],
         )
         .await?;
         Ok(())
@@ -140,7 +142,7 @@ impl Store {
             .query(
                 r#"
                 SELECT * FROM routine_event_inbox
-                WHERE status = 'pending'
+                WHERE (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
                    OR (
                         status = 'processing'
                         AND (
@@ -177,6 +179,7 @@ impl Store {
                 claimed_by = NULL,
                 claimed_at = NULL,
                 lease_expires_at = NULL,
+                next_attempt_at = NULL,
                 error_message = NULL
             WHERE id = $1
             "#,
@@ -207,6 +210,7 @@ impl Store {
                 claimed_by = NULL,
                 claimed_at = NULL,
                 lease_expires_at = NULL,
+                next_attempt_at = NULL,
                 error_message = $3
             WHERE id = $1
             "#,
@@ -232,6 +236,7 @@ impl Store {
                 claimed_by = NULL,
                 claimed_at = NULL,
                 lease_expires_at = NULL,
+                next_attempt_at = NULL,
                 error_message = $3,
                 diagnostics = $4
             WHERE id = $1
@@ -260,6 +265,7 @@ impl Store {
                         claimed_by = NULL,
                         claimed_at = NULL,
                         lease_expires_at = NULL,
+                        next_attempt_at = NULL,
                         processed_at = NULL,
                         error_message = NULL,
                         matched_routines = 0,
