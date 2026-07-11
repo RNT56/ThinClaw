@@ -53,7 +53,7 @@ final class ScriptedProvider: ByteStreamProvider, @unchecked Sendable {
     }
 
     func open(token: String) async throws -> ByteStream {
-        let connection: Connection = try lock.withLock {
+        let connection: Connection = lock.withLock {
             guard index < connections.count else {
                 // Exhausted: hang so the supervisor is quiescent until shutdown.
                 index += 1
