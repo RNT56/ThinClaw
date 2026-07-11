@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 chrono = { workspace = true }
-schemars = { version = "0.8", features = ["chrono"], optional = true }
+schemars = { version = "1.2", features = ["chrono04"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 specta = { version = "2.0.0-rc", features = ["derive", "serde", "serde_json", "chrono"], optional = true }

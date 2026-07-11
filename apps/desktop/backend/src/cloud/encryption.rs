@@ -16,10 +16,11 @@
 //! to back up. Without this key, cloud data is irrecoverable (by design).
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
 use hkdf::Hkdf;
+use rand::{RngCore, rngs::OsRng};
 use sha2::Sha256;
 use zeroize::Zeroize;
 
@@ -31,7 +32,7 @@ const FORMAT_VERSION: u16 = 1;
 const HEADER_SIZE: usize = 16;
 /// Nonce size for AES-256-GCM.
 const NONCE_SIZE: usize = 12;
-/// Auth tag is included in ciphertext by aes-gcm crate.
+// Auth tag is included in ciphertext by aes-gcm crate.
 
 // ── Master Key Management ────────────────────────────────────────────────────
 
@@ -45,7 +46,6 @@ pub struct MasterKey([u8; 32]);
 impl MasterKey {
     /// Generate a new random master key.
     pub fn generate() -> Self {
-        use rand::RngCore;
         let mut key = [0u8; 32];
         OsRng.fill_bytes(&mut key);
         Self(key)
@@ -152,17 +152,16 @@ pub fn encrypt(
 
     // 3. Generate random nonce
     let nonce_bytes: [u8; NONCE_SIZE] = {
-        use rand::RngCore;
         let mut buf = [0u8; NONCE_SIZE];
         OsRng.fill_bytes(&mut buf);
         buf
     };
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
 
     // 4. Encrypt (ciphertext includes auth tag)
     let cipher = Aes256Gcm::new(&key);
     let ciphertext = cipher
-        .encrypt(nonce, compressed.as_ref())
+        .encrypt(&nonce, compressed.as_ref())
         .map_err(|e| EncryptionError::EncryptFailed(format!("AES-GCM encrypt: {}", e)))?;
 
     // 5. Build output: header + nonce + ciphertext
@@ -225,7 +224,9 @@ pub fn decrypt(
     // 3. Extract nonce
     let nonce_start = HEADER_SIZE;
     let nonce_end = nonce_start + NONCE_SIZE;
-    let nonce = Nonce::from_slice(&encrypted[nonce_start..nonce_end]);
+    let nonce = Nonce::try_from(&encrypted[nonce_start..nonce_end]).map_err(|_| {
+        EncryptionError::InvalidFormat("Encrypted file has an invalid nonce".to_string())
+    })?;
 
     // 4. Extract ciphertext (rest of file)
     let ciphertext = &encrypted[nonce_end..];
@@ -235,7 +236,7 @@ pub fn decrypt(
 
     // 6. Decrypt
     let cipher = Aes256Gcm::new(&key);
-    let compressed = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+    let compressed = cipher.decrypt(&nonce, ciphertext).map_err(|_| {
         EncryptionError::DecryptFailed(
             "AES-GCM decryption failed (wrong key or corrupted data)".into(),
         )

@@ -2,14 +2,15 @@ use super::*;
 use thinclaw_channels::acp::session_modes;
 
 fn assert_json_schema_valid(schema: &Value, instance: &Value) {
-    let compiled = jsonschema::JSONSchema::compile(schema).expect("schema fixture compiles");
-    if let Err(errors) = compiled.validate(instance) {
+    let compiled = jsonschema::validator_for(schema).expect("schema fixture compiles");
+    let errors = compiled
+        .iter_errors(instance)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
         panic!(
             "ACP message did not match schema fixture: {}",
-            errors
-                .map(|error| error.to_string())
-                .collect::<Vec<_>>()
-                .join("; ")
+            errors.join("; ")
         );
     }
 }

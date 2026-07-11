@@ -119,7 +119,7 @@ fn insert_schema<T>(schemas: &mut serde_json::Map<String, Value>, name: &str)
 where
     T: JsonSchema,
 {
-    schemas.insert(name.to_string(), schema_to_value(schema_for!(T).schema));
+    schemas.insert(name.to_string(), schema_to_value(schema_for!(T)));
 }
 
 fn schema_to_value<T: Serialize>(schema: T) -> Value {

@@ -120,7 +120,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Configuration
 dotenvy = "0.15"
-toml = "0.8"
+toml = "1.1"
 
 # Core types
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
@@ -136,7 +136,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Terminal
 crossterm = "0.29"
-rustyline = { version = "17", features = ["custom-bindings", "derive", "with-file-history"] }
+rustyline = { version = "18", features = ["custom-bindings", "derive", "with-file-history"] }
 termimad = "0.34"
 
 # Channel integrations
@@ -151,7 +151,7 @@ cron = "0.17"
 regex = "1"
 aho-corasick = "1"
 unicode-normalization = "0.1"
-jsonschema = "0.18"
+jsonschema = "0.47"
 jsonwebtoken = "9"
 
 # YAML parsing for SKILL.md frontmatter
@@ -176,12 +176,12 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
-wasmtime-wasi = { version = "36", optional = true }  # WASI support for component model
+wasmtime = { version = "36.0.12", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
+wasmtime-wasi = { version = "36.0.12", optional = true }  # WASI support for component model
 wasmparser = { version = "0.220", optional = true }  # WASM binary parsing for validation
 
 # Cryptography for secrets management
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.13"
 sha2 = "0.11"
 blake3 = "1"
@@ -227,7 +227,7 @@ chrono-tz = "0.10"
 iana-time-zone = "0.1"
 
 # PostgreSQL TLS (feature gated, pulled in by postgres feature)
-tokio-postgres-rustls = { version = "0.13", optional = true }
+tokio-postgres-rustls = { version = "0.14", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
 rustls-native-certs = { version = "0.8", optional = true }
 
@@ -240,7 +240,7 @@ aws-sdk-bedrockruntime = { version = "1", optional = true }
 aws-smithy-types = { version = "1", optional = true }
 
 # Audio capture for voice wake word detection (headless mode only)
-cpal = { version = "0.15", optional = true }
+cpal = { version = "0.18", optional = true }
 prometheus-client = "0.25"
 
 # Optional rustls TLS listener for the gateway (mobile device pairing, D-X1)
@@ -258,8 +258,8 @@ security-framework = "3"
 
 # Linux secret-service (GNOME Keyring, KWallet)
 [target.'cfg(target_os = "linux")'.dependencies]
-secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
-zbus = "4"
+secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
+zbus = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = "0.8"

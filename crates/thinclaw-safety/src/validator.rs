@@ -235,7 +235,7 @@ impl Validator {
         schema: &serde_json::Value,
         params: &serde_json::Value,
     ) -> ValidationResult {
-        let compiled = match jsonschema::JSONSchema::compile(schema) {
+        let compiled = match jsonschema::validator_for(schema) {
             Ok(compiled) => compiled,
             Err(err) => {
                 return ValidationResult::error(ValidationError {
@@ -247,20 +247,18 @@ impl Validator {
         };
 
         let mut result = ValidationResult::ok();
-        if let Err(errors) = compiled.validate(params) {
-            for err in errors {
-                let path = err.instance_path.to_string();
-                let field = if path.is_empty() {
-                    "parameters".to_string()
-                } else {
-                    path
-                };
-                result = result.merge(ValidationResult::error(ValidationError {
-                    field,
-                    message: err.to_string(),
-                    code: ValidationErrorCode::SchemaViolation,
-                }));
-            }
+        for err in compiled.iter_errors(params) {
+            let path = err.instance_path().to_string();
+            let field = if path.is_empty() {
+                "parameters".to_string()
+            } else {
+                path
+            };
+            result = result.merge(ValidationResult::error(ValidationError {
+                field,
+                message: err.to_string(),
+                code: ValidationErrorCode::SchemaViolation,
+            }));
         }
 
         result

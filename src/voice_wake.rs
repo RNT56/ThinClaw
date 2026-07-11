@@ -384,18 +384,21 @@ impl VoiceWakeRuntime {
                 }
             };
 
-            let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+            let device_name = device
+                .description()
+                .map(|description| description.name().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
             tracing::info!(device = %device_name, "Audio input device selected");
 
             let stream_config = cpal::StreamConfig {
                 channels: 1,
-                sample_rate: cpal::SampleRate(config.sample_rate),
+                sample_rate: config.sample_rate,
                 buffer_size: cpal::BufferSize::Default,
             };
 
             let err_tx = audio_event_tx.clone();
             let stream = match device.build_input_stream(
-                &stream_config,
+                stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     if data.is_empty() {
                         return;
@@ -561,12 +564,12 @@ impl VoiceWakeRuntime {
 
             let stream_config = cpal::StreamConfig {
                 channels: 1,
-                sample_rate: cpal::SampleRate(sample_rate),
+                sample_rate,
                 buffer_size: cpal::BufferSize::Default,
             };
 
             let stream = match device.build_input_stream(
-                &stream_config,
+                stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     let _ = pcm_tx.try_send(data.to_vec());
                 },

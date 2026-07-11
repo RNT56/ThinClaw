@@ -15,7 +15,7 @@
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
-    aead::{AeadCore, AeadInPlace, OsRng},
+    aead::{AeadInOut, Generate},
 };
 use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
@@ -89,7 +89,7 @@ impl SecretsCrypto {
         })?;
 
         // Generate random nonce
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::generate();
 
         let mut ciphertext = plaintext.to_vec();
         cipher
@@ -137,11 +137,13 @@ impl SecretsCrypto {
 
         // Split: nonce || ciphertext
         let (nonce_bytes, ciphertext) = encrypted_value.split_at(NONCE_SIZE);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes).map_err(|_| {
+            SecretError::DecryptionFailed("Encrypted value has an invalid nonce".to_string())
+        })?;
 
         let mut plaintext = ciphertext.to_vec();
         cipher
-            .decrypt_in_place(nonce, aad, &mut plaintext)
+            .decrypt_in_place(&nonce, aad, &mut plaintext)
             .map_err(|e| SecretError::DecryptionFailed(format!("Decryption failed: {}", e)))?;
 
         DecryptedSecret::from_bytes(plaintext)
