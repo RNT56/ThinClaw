@@ -93,7 +93,6 @@ tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 tungstenite = "0.26"
 futures-util = "0.3"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }
-pkcs8 = { version = "0.10.2", features = ["std", "pem"] }
 regex = "1.12.3"
 thinclaw-desktop-tools = { path = "scrappy-mcp-tools" }
 rhai = { version = "1", features = ["sync", "serde"] }
@@ -104,7 +103,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 
 # Cloud storage (Work Stream A)
 opendal = { version = "0.55", features = ["services-s3", "services-webdav", "services-sftp"] }
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.13"
 zstd = "0.13"
 

@@ -235,7 +235,7 @@ impl Validator {
         schema: &serde_json::Value,
         params: &serde_json::Value,
     ) -> ValidationResult {
-        let compiled = match jsonschema::JSONSchema::compile(schema) {
+        let compiled = match jsonschema::validator_for(schema) {
             Ok(compiled) => compiled,
             Err(err) => {
                 return ValidationResult::error(ValidationError {
@@ -247,20 +247,18 @@ impl Validator {
         };
 
         let mut result = ValidationResult::ok();
-        if let Err(errors) = compiled.validate(params) {
-            for err in errors {
-                let path = err.instance_path.to_string();
-                let field = if path.is_empty() {
-                    "parameters".to_string()
-                } else {
-                    path
-                };
-                result = result.merge(ValidationResult::error(ValidationError {
-                    field,
-                    message: err.to_string(),
-                    code: ValidationErrorCode::SchemaViolation,
-                }));
-            }
+        for err in compiled.iter_errors(params) {
+            let path = err.instance_path().to_string();
+            let field = if path.is_empty() {
+                "parameters".to_string()
+            } else {
+                path
+            };
+            result = result.merge(ValidationResult::error(ValidationError {
+                field,
+                message: err.to_string(),
+                code: ValidationErrorCode::SchemaViolation,
+            }));
         }
 
         result
@@ -355,5 +353,28 @@ mod tests {
             validator.validate(&format!("Start of message{}End of message", "a".repeat(30)));
         assert!(result.is_valid); // Still valid, just a warning
         assert!(!result.warnings.is_empty());
+    }
+
+    #[test]
+    fn tool_schema_rejects_external_references() {
+        let validator = Validator::new();
+        for reference in [
+            "http://127.0.0.1:9/untrusted-schema.json",
+            "file:///etc/untrusted-schema.json",
+        ] {
+            let schema = serde_json::json!({"$ref": reference});
+            let result = validator.validate_tool_params_against_schema(
+                &schema,
+                &serde_json::json!({"value": "test"}),
+            );
+
+            assert!(
+                !result.is_valid,
+                "external reference was accepted: {reference}"
+            );
+            assert!(result.errors.iter().any(|error| {
+                error.code == ValidationErrorCode::SchemaViolation && error.field == "schema"
+            }));
+        }
     }
 }

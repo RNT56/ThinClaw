@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use schemars::{JsonSchema, schema_for};
-use serde::Serialize;
+use schemars::{
+    JsonSchema,
+    generate::{SchemaGenerator, SchemaSettings},
+};
 use serde_json::{Value, json};
 use thinclaw_runtime_contracts::*;
 
@@ -77,53 +79,106 @@ fn check_outputs(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn schema_components() -> String {
-    let mut schemas = serde_json::Map::new();
-    insert_schema::<ProviderEndpoint>(&mut schemas, "ProviderEndpoint");
-    insert_schema::<SecretDescriptor>(&mut schemas, "SecretDescriptor");
-    insert_schema::<ProviderCredentialDescriptor>(&mut schemas, "ProviderCredentialDescriptor");
-    insert_schema::<LocalRuntimeSnapshot>(&mut schemas, "LocalRuntimeSnapshot");
-    insert_schema::<LocalRuntimeEndpoint>(&mut schemas, "LocalRuntimeEndpoint");
-    insert_schema::<ModelDescriptor>(&mut schemas, "ModelDescriptor");
-    insert_schema::<ModelCapabilitySet>(&mut schemas, "ModelCapabilitySet");
-    insert_schema::<ModelPricing>(&mut schemas, "ModelPricing");
-    insert_schema::<ProviderDiscoveryResult>(&mut schemas, "ProviderDiscoveryResult");
-    insert_schema::<ModelDiscoveryResult>(&mut schemas, "ModelDiscoveryResult");
-    insert_schema::<AssetRef>(&mut schemas, "AssetRef");
-    insert_schema::<AssetRecord>(&mut schemas, "AssetRecord");
-    insert_schema::<DirectAttachedDocument>(&mut schemas, "DirectAttachedDocument");
-    insert_schema::<DirectChatMessage>(&mut schemas, "DirectChatMessage");
-    insert_schema::<DirectChatPayload>(&mut schemas, "DirectChatPayload");
-    insert_schema::<DirectTokenUsage>(&mut schemas, "DirectTokenUsage");
-    insert_schema::<DirectStreamChunk>(&mut schemas, "DirectStreamChunk");
-    insert_schema::<DirectConversation>(&mut schemas, "DirectConversation");
-    insert_schema::<DirectDocumentUploadResponse>(&mut schemas, "DirectDocumentUploadResponse");
-    insert_schema::<DirectDocumentIngestResponse>(&mut schemas, "DirectDocumentIngestResponse");
-    insert_schema::<DirectTtsResponse>(&mut schemas, "DirectTtsResponse");
-    insert_schema::<DirectSttResponse>(&mut schemas, "DirectSttResponse");
-
-    let output = json!({
-        "openapi": "3.1.0",
-        "info": {
-            "title": "ThinClaw Runtime Contracts",
-            "version": env!("CARGO_PKG_VERSION")
-        },
-        "components": { "schemas": schemas }
-    });
+    let output = schema_components_value();
     format!(
         "{}\n",
         serde_json::to_string_pretty(&output).expect("schema JSON")
     )
 }
 
-fn insert_schema<T>(schemas: &mut serde_json::Map<String, Value>, name: &str)
+fn schema_components_value() -> Value {
+    let mut settings = SchemaSettings::draft2020_12();
+    settings.definitions_path = "/components/schemas".into();
+    settings.meta_schema = None;
+    let mut generator = settings.into_generator();
+
+    register_schema::<ProviderEndpoint>(&mut generator);
+    register_schema::<SecretDescriptor>(&mut generator);
+    register_schema::<ProviderCredentialDescriptor>(&mut generator);
+    register_schema::<LocalRuntimeSnapshot>(&mut generator);
+    register_schema::<LocalRuntimeEndpoint>(&mut generator);
+    register_schema::<ModelDescriptor>(&mut generator);
+    register_schema::<ModelCapabilitySet>(&mut generator);
+    register_schema::<ModelPricing>(&mut generator);
+    register_schema::<ProviderDiscoveryResult>(&mut generator);
+    register_schema::<ModelDiscoveryResult>(&mut generator);
+    register_schema::<AssetRef>(&mut generator);
+    register_schema::<AssetRecord>(&mut generator);
+    register_schema::<DirectAttachedDocument>(&mut generator);
+    register_schema::<DirectChatMessage>(&mut generator);
+    register_schema::<DirectChatPayload>(&mut generator);
+    register_schema::<DirectTokenUsage>(&mut generator);
+    register_schema::<DirectStreamChunk>(&mut generator);
+    register_schema::<DirectConversation>(&mut generator);
+    register_schema::<DirectDocumentUploadResponse>(&mut generator);
+    register_schema::<DirectDocumentIngestResponse>(&mut generator);
+    register_schema::<DirectTtsResponse>(&mut generator);
+    register_schema::<DirectSttResponse>(&mut generator);
+
+    json!({
+        "openapi": "3.1.0",
+        "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+        "info": {
+            "title": "ThinClaw Runtime Contracts",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "components": { "schemas": generator.take_definitions(true) }
+    })
+}
+
+fn register_schema<T>(generator: &mut SchemaGenerator)
 where
     T: JsonSchema,
 {
-    schemas.insert(name.to_string(), schema_to_value(schema_for!(T).schema));
+    let _ = generator.subschema_for::<T>();
 }
 
-fn schema_to_value<T: Serialize>(schema: T) -> Value {
-    serde_json::to_value(schema).expect("schema serializes")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_component_references_resolve() {
+        let document = schema_components_value();
+        let mut references = Vec::new();
+        collect_references(&document, &mut references);
+
+        assert!(
+            !references.is_empty(),
+            "expected generated schema references"
+        );
+        for reference in references {
+            assert!(
+                reference.starts_with("#/components/schemas/"),
+                "unexpected non-component schema reference: {reference}"
+            );
+            assert!(
+                document
+                    .pointer(reference.trim_start_matches('#'))
+                    .is_some(),
+                "dangling schema reference: {reference}"
+            );
+        }
+    }
+
+    fn collect_references<'a>(value: &'a Value, references: &mut Vec<&'a str>) {
+        match value {
+            Value::Object(object) => {
+                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                    references.push(reference);
+                }
+                for child in object.values() {
+                    collect_references(child, references);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    collect_references(child, references);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn typescript_contracts() -> String {

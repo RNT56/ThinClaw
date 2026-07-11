@@ -10,6 +10,6 @@ ratatui = "0.30.0"
 serde = { workspace = true }
 termimad = "0.34"
 thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
-toml = "0.8"
+toml = "1.1"
 tracing = { workspace = true }
 unicode-width = "0.2.2"
