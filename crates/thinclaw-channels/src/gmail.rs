@@ -47,6 +47,10 @@ use thinclaw_channels_core::{
 };
 use thinclaw_types::error::ChannelError;
 
+mod message;
+
+use message::{build_multipart_message, sanitize_header_value};
+
 /// Gmail channel implementing the `Channel` trait.
 pub struct GmailChannel {
     config: GmailConfig,
@@ -1415,42 +1419,6 @@ async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
             tracing::warn!(channel = "gmail", task = name, "Gmail channel task did not drain before timeout; aborted");
         }
     }
-}
-
-fn build_multipart_message(
-    mut headers: String,
-    body_text: &str,
-    attachments: &[thinclaw_media::MediaContent],
-) -> String {
-    use base64::Engine;
-    let boundary = format!("thinclaw-{}", uuid::Uuid::new_v4());
-    headers.push_str(&format!(
-        "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"{}\"\r\n\r\n",
-        boundary
-    ));
-    let mut raw = headers;
-    raw.push_str(&format!(
-        "--{}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}\r\n",
-        boundary, body_text
-    ));
-    for attachment in attachments {
-        let filename = attachment.filename.as_deref().unwrap_or("attachment");
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&attachment.data);
-        raw.push_str(&format!(
-            "--{}\r\nContent-Type: {}; name=\"{}\"\r\nContent-Disposition: attachment; filename=\"{}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n",
-            boundary,
-            attachment.mime_type,
-            sanitize_header_value(filename),
-            sanitize_header_value(filename),
-            encoded
-        ));
-    }
-    raw.push_str(&format!("--{}--\r\n", boundary));
-    raw
-}
-
-fn sanitize_header_value(value: &str) -> String {
-    value.replace(['\r', '\n', '"'], "_")
 }
 
 #[cfg(test)]

@@ -16,10 +16,12 @@ pub(crate) fn floor_char_boundary(s: &str, pos: usize) -> usize {
 /// channels (iMessage, Apple Mail). Without it a hung child — a macOS
 /// automation-consent prompt on an unattended machine, a modal dialog, or a
 /// stuck database scan — wedges polling or sending forever.
+#[cfg(target_os = "macos")]
 pub(crate) const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Run a subprocess to completion under [`SUBPROCESS_TIMEOUT`], returning a
 /// human-readable error string on spawn failure or timeout.
+#[cfg(target_os = "macos")]
 pub(crate) async fn output_with_timeout(
     cmd: &mut tokio::process::Command,
     ctx: &str,
