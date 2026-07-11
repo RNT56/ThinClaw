@@ -637,7 +637,9 @@ jobs:
         with:
           key: windows-smoke
       - name: Host runtime smoke
-        timeout-minutes: 20
+        # A cold lockfile cache can spend more than 20 minutes compiling the
+        # full Windows feature set before this integration test starts.
+        timeout-minutes: 45
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
