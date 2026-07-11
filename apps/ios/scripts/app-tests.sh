@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=simulator-support.sh
+source "${SCRIPT_DIR}/simulator-support.sh"
 cd "${IOS_DIR}"
 
 SIMCTL_JSON="$(xcrun simctl list devices available --json)"
@@ -28,9 +30,7 @@ if [ -z "${DEVICE_UDID}" ]; then
   exit 1
 fi
 
-xcrun simctl bootstatus "${DEVICE_UDID}" -b >/dev/null 2>&1 \
-  || xcrun simctl boot "${DEVICE_UDID}" >/dev/null 2>&1 \
-  || true
+wait_for_simulator_boot "${DEVICE_UDID}"
 
 rm -rf build/app-tests.xcresult
 xcodebuild test \

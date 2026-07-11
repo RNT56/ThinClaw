@@ -31,6 +31,8 @@ IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FEATURES_DIR="${IOS_DIR}/Packages/Features"
 REQUIRE_SIM="${FEATURE_TESTS_REQUIRE_SIM:-0}"
 REQUESTED_RUNTIME="${IOS_RUNTIME_MAJOR:-}"
+# shellcheck source=simulator-support.sh
+source "${SCRIPT_DIR}/simulator-support.sh"
 
 # GitHub Actions annotation helpers that degrade to plain echo locally.
 warn() { echo "::warning::$*" 2>/dev/null || echo "WARN: $*"; }
@@ -44,11 +46,11 @@ for dir in "${FEATURES_DIR}"/*/; do
     PACKAGE_DIRS+=("${dir%/}")
   fi
 done
-for dir in "${IOS_DIR}/Packages/ThinClawWidgetKitShared"; do
-  if [ -d "${dir}/Tests" ] && [ -n "$(find "${dir}/Tests" -name '*.swift' -type f 2>/dev/null)" ]; then
-    PACKAGE_DIRS+=("${dir}")
-  fi
-done
+shared_package_dir="${IOS_DIR}/Packages/ThinClawWidgetKitShared"
+if [ -d "${shared_package_dir}/Tests" ] \
+  && [ -n "$(find "${shared_package_dir}/Tests" -name '*.swift' -type f 2>/dev/null)" ]; then
+  PACKAGE_DIRS+=("${shared_package_dir}")
+fi
 
 if [ "${#PACKAGE_DIRS[@]}" -eq 0 ]; then
   note "No Feature packages have test targets yet; nothing to run."
@@ -97,10 +99,7 @@ if [ -z "${DEVICE_UDID}" ]; then
 fi
 
 echo "==> Using supported iOS simulator udid: ${DEVICE_UDID}"
-# Boot it if needed (idempotent; 'already booted' is not an error we care about).
-xcrun simctl bootstatus "${DEVICE_UDID}" -b >/dev/null 2>&1 \
-  || xcrun simctl boot "${DEVICE_UDID}" >/dev/null 2>&1 \
-  || true
+wait_for_simulator_boot "${DEVICE_UDID}"
 
 DESTINATION="platform=iOS Simulator,id=${DEVICE_UDID}"
 
