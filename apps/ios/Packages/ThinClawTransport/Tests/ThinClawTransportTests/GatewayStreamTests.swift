@@ -4,7 +4,10 @@ import ThinClawCore
 
 @testable import ThinClawTransport
 
-@Suite("GatewayStream reconnect + watchdog")
+// These integration-style tests exercise real sub-second deadlines. Running
+// them concurrently makes scheduler contention indistinguishable from the
+// silence each watchdog is meant to detect.
+@Suite("GatewayStream reconnect + watchdog", .serialized)
 struct GatewayStreamTests {
     /// A near-instant backoff so reconnect scenarios don't wait on wall clock.
     private static let fastPolicy = ReconnectPolicy(
@@ -187,16 +190,17 @@ struct GatewayStreamTests {
     @Test("comment keep-alives keep an idle connection alive past the watchdog")
     func commentKeepAlivesResetWatchdog() async {
         // The gateway's idle keep-alive is an SSE *comment* line (leading `:`),
-        // which yields no decoded event. Drip one every 80 ms — comfortably
-        // inside the 200 ms watchdog window — for well over two windows, then
-        // hang. A watchdog that reset only on decoded events would trip; one
-        // that resets on any line (comments included) must not.
+        // which yields no decoded event. Drip one every 20 ms, leaving a 50x
+        // scheduling margin inside the one-second watchdog window, for well
+        // over two windows, then hang. A watchdog that reset only on decoded
+        // events would trip; one that resets on any line (comments included)
+        // must not.
         let policy = ReconnectPolicy(
             baseDelay: .milliseconds(1),
             maxDelay: .milliseconds(5),
-            heartbeatTimeout: .milliseconds(200))
+            heartbeatTimeout: .seconds(1))
         let provider = ScriptedProvider([
-            .drip(line: ": keep-alive\n", every: .milliseconds(80), count: 8)
+            .drip(line: ": keep-alive\n", every: .milliseconds(20), count: 150)
         ])
         let stream = GatewayStream(
             provider: provider,
@@ -205,8 +209,9 @@ struct GatewayStreamTests {
             clock: TestClock())
 
         let states = await stream.start()
-        // Observe for ~640 ms (three-plus watchdog windows) while keep-alives
-        // drip, then stop and assert the connection was never torn down.
+        // Observe for 2.4 seconds (more than two watchdog windows) while
+        // keep-alives drip, then stop and assert the connection was never torn
+        // down.
         let collector = Task { () -> [StreamState] in
             var collected: [StreamState] = []
             for await state in states {
@@ -214,7 +219,7 @@ struct GatewayStreamTests {
             }
             return collected
         }
-        try? await Task.sleep(for: .milliseconds(640))
+        try? await Task.sleep(for: .milliseconds(2_400))
         await stream.shutdown()
         let observed = await collector.value
 
