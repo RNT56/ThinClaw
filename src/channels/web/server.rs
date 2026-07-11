@@ -99,11 +99,11 @@ impl PendingApprovalsStore {
         }
     }
 
-    pub fn lock(&self) -> Result<PendingApprovalsGuard<'_>, ()> {
+    pub fn lock(&self) -> Result<PendingApprovalsGuard<'_>, std::sync::PoisonError<()>> {
         self.entries
             .lock()
             .map(|guard| PendingApprovalsGuard { owner: self, guard })
-            .map_err(|_| ())
+            .map_err(|_| std::sync::PoisonError::new(()))
     }
 
     pub fn remove_for_thread(&self, thread_id: &str) {
