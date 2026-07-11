@@ -61,7 +61,7 @@ html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = "4"
+zbus = "5"
 
 [dev-dependencies]
 secrecy = "0.10"

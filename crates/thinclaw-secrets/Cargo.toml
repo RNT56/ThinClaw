@@ -27,7 +27,7 @@ security-framework = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
-zbus = "4"
+zbus = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
