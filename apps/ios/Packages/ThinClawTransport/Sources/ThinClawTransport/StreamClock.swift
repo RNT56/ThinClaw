@@ -1,12 +1,12 @@
 import Foundation
 
 /// The time seam for ``GatewayStream``: backoff sleeps and the heartbeat
-/// watchdog measure duration through this, so tests can drive the reconnect
-/// state machine deterministically without wall-clock waits.
+/// watchdog measure duration through this, keeping timing policy injectable
+/// and the reconnect state machine independent of a concrete clock.
 ///
 /// Production uses ``SystemStreamClock`` (a `ContinuousClock` wrapper). Tests
-/// supply a manual clock whose `sleep` resolves immediately (or on demand) and
-/// whose `now` they advance by hand.
+/// inject this abstraction with short policy durations so reconnect behavior
+/// can be exercised without production-length waits.
 public protocol StreamClock: Sendable {
     /// Suspend for `duration`, honoring cancellation.
     func sleep(for duration: Duration) async throws

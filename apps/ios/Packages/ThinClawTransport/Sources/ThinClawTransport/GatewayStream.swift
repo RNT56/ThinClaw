@@ -7,8 +7,8 @@ import ThinClawCore
 /// lifecycle transitions (``connected``, ``reconnecting(attempt:)``,
 /// ``degraded(reason:)``) with decoded agent ``event(_:)`` values. Consumers
 /// render events and drive their connection-status UI from the lifecycle
-/// cases; ``AgentEvent/heartbeat`` is delivered like any other event but is
-/// primarily meaningful to the watchdog, which resets on *every* event.
+/// cases; ``AgentEvent/heartbeat`` is delivered like any other event. The
+/// watchdog resets on every completed SSE line, including comment keep-alives.
 public enum StreamState: Sendable {
     /// A fresh connection is established and events are flowing.
     case connected
@@ -24,8 +24,8 @@ public enum StreamState: Sendable {
 
 /// Why the stream reported ``StreamState/degraded(reason:)``.
 public enum DegradeReason: Hashable, Sendable {
-    /// No event (not even a heartbeat) arrived within the watchdog window;
-    /// the connection is presumed dead and will be reconnected.
+    /// No stream activity (event or comment keep-alive) arrived within the
+    /// watchdog window; the connection is presumed dead and will reconnect.
     case heartbeatTimeout
     /// The byte stream ended cleanly from the server side (EOF); will reconnect.
     case streamEnded
@@ -47,8 +47,8 @@ public enum DegradeReason: Hashable, Sendable {
 /// - reconnect on drop with full-jitter exponential backoff from
 ///   ``ReconnectPolicy``;
 /// - run a heartbeat watchdog that forces a reconnect after the policy's
-///   silence window elapses with no events (the gateway heartbeats well inside
-///   it, so crossing it means multiple keep-alives were missed);
+///   silence window elapses with no stream activity (the gateway heartbeats
+///   well inside it, so crossing it means multiple keep-alives were missed);
 /// - shut down cleanly on ``shutdown()`` or consumer cancellation.
 ///
 /// The reconnect attempt counter resets to zero on each successful connect.
@@ -161,9 +161,9 @@ public actor GatewayStream {
     ///
     /// The pump and the heartbeat watchdog run as two racing children in a
     /// task group; the first to produce an outcome wins and the group cancels
-    /// the other. The pump records the arrival time of every event on the
-    /// actor (`lastEventAt`); the watchdog re-reads it and re-sleeps until the
-    /// silence window is exhausted.
+    /// the other. The pump records the arrival time of every completed SSE
+    /// line on the actor (`lastEventAt`); the watchdog re-reads it and
+    /// re-sleeps until the silence window is exhausted.
     private func runConnection(
         token: String,
         onConnect: () -> Void
@@ -200,9 +200,8 @@ public actor GatewayStream {
         // keep-alives that yield no event. The gateway's idle keep-alive is an
         // SSE comment line, so a watchdog that only reset on decoded events
         // would needlessly tear down a healthy but quiet connection.
-        let onActivity: @Sendable () -> Void = { [weak self] in
-            guard let self else { return }
-            Task { await self.markActivity() }
+        let onActivity: @Sendable () async -> Void = { [weak self] in
+            await self?.markActivity()
         }
         do {
             for try await sse in await client.events(from: byteStream, onActivity: onActivity) {
@@ -224,7 +223,7 @@ public actor GatewayStream {
         }
     }
 
-    /// Trip once no event has arrived for `windowSeconds`.
+    /// Trip once no stream activity has arrived for `windowSeconds`.
     private func runWatchdog(windowSeconds: Double) async -> ConnectionOutcome {
         while !Task.isCancelled {
             let elapsed = clock.nowSeconds() - lastEventAt
