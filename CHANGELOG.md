@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Landed a 13-workstream audit-driven remediation across security, DB correctness, WASM channels, self-repair, desktop, experiments, LLM routing, docs, and test/CI infrastructure.
+- Hardened native and WASM channel lifecycles with owned shutdown/drain paths, bounded reconnect behavior, APNs HTTP/2 support, Gmail token refresh, and channel-manager ownership of hot-reload stream forwarders.
 - Decomposed 10 historical god-files into focused directory modules, and added a CI god-file size guard (`MAX_LINES=2000`).
 - Consolidated history/store onto `thinclaw-db`.
 - Completed the `thinclaw-media` crate migration, slimming `src/media` to a facade.
