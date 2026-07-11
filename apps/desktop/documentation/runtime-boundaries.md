@@ -25,7 +25,7 @@ Primary user surfaces:
 Primary backend ownership:
 
 - `backend/src/chat.rs`
-- `backend/src/sidecar.rs`
+- `backend/src/sidecar/`
 - `backend/src/engine/*`
 - `backend/src/inference/*`
 - `backend/src/rig_lib/*`

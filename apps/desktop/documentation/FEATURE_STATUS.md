@@ -1,9 +1,12 @@
 # ThinClaw Desktop — Feature Status & Verified Gaps
 
-> **Snapshot:** 2026-06-28 · point-in-time, code-grounded. This is intentionally
-> *thinly scoped* (per the repo doc rules): it does not re-inventory every feature.
-> For the roadmap and parity ledger use the canonical docs below; this file only
-> records **verified open gaps** that are easy to lose track of.
+> **Snapshot:** re-verified 2026-07-10 (originally 2026-06-28) · point-in-time,
+> code-grounded. This is intentionally *thinly scoped* (per the repo doc rules): it does
+> not re-inventory every feature. For the roadmap and parity ledger use the canonical docs
+> below; this file only records **verified open gaps** that are easy to lose track of.
+> Several earlier gaps (tool-policy deny-list, per-channel stream-mode, Gmail label filter,
+> the sidecar/dashboard status rows, the web-search probes) have since been closed and were
+> removed from the table.
 
 ## Orientation
 
@@ -37,22 +40,16 @@ implies an effect the backend does not deliver.
 
 | Area | Gap | Evidence | Class |
 |---|---|---|---|
-| Tool Policies | `disabled_tools` deny-list is persisted but **no runtime code reads it** — toggling a tool off does not stop the agent. | desktop writes `local_user/disabled_tools` (`rpc_extensions.rs`); no reader in `src/`/`crates/` | UI-dishonest / needs runtime wiring |
-| Channels | Per-channel stream-mode toggle writes the wrong key/vocabulary. UI writes `<ID>_STREAM_MODE` with `full`/`typing_only`/`disabled`; runtime reads `channels.<name>_stream_mode` with `edit`/`status`/`chunks` (telegram+discord only). | `ThinClawChannelStatus.tsx`, `channels/wasm/runtime_config.rs` | UI-dishonest / multi-layer |
-| Channels | Gmail **label filter** is shown but not savable: backend reads it only from `GMAIL_LABEL_FILTERS` env var, with **no DB-setting fallback** (unlike allowed-senders). | `rpc_dashboard/channels.rs:325` (env only); allowed-senders DB fallback at `:369-382` | Needs backend read + UI save |
-| Skills | Per-skill enable/disable toggle is a deliberate no-op (the SkillRegistry has no enable/disable). | `rpc_skills.rs` `thinclaw_skills_toggle` | UI-dishonest |
-| Channels | WhatsApp QR-login modal is unreachable — the runtime always emits `qr_code: None`. | `event_mapping.rs`, `ThinClawChannels.tsx` | Dead UI |
-| Dashboard | "Active Instances" / "Connected Nodes" cards are always 0 (backend presence returns no such fields); version label is a hardcoded string. | `ThinClawDashboard.tsx`, `rpc_config.rs` system-presence | Dead UI |
-| Sidecars | `image_running` / `tts_running` report path-presence, not a live process. | `sidecar/core.rs` `is_image_active`/`is_tts_active` | Misleading status |
+| Skills | Per-skill enable/disable toggle is a deliberate no-op (the SkillRegistry has no enable/disable). | `rpc_skills.rs` `thinclaw_skills_toggle` (comment: "SkillRegistry doesn't support enable/disable") | UI-dishonest |
+| Channels | WhatsApp QR-login modal is unreachable — the runtime always emits `qr_code: None`. | `event_mapping.rs` (`qr_code: None`), `ThinClawChannels.tsx` | Dead UI |
 | Voice | Cloud TTS playback decodes responses as raw Int16 PCM @22050, but OpenAI/ElevenLabs return MP3 — likely garbled. | `MessageBubble.tsx` Read-Aloud handler | Likely bug (needs app run) |
-| Cloud sync | App Nap suppression is a no-op on macOS (atomic counter; never calls `NSProcessInfo.beginActivity`). | `cloud/app_nap.rs` | Platform no-op |
-| Models | Dead remote-catalog backend commands (`update_/get_remote_model_catalog`) — their only client (a `localhost:8000` fetch) was removed; the commands remain registered. | `model_manager.rs` | Dead backend (registered) |
-| Web search | Probe commands `check_web_search` / `rig_check_web_search` are registered but have no live caller. | `web_search.rs`, `rig_lib/mod.rs`, `setup/commands.rs` | Dead backend (registered) |
+| Cloud sync | App Nap suppression is a no-op on macOS (atomic counter; never calls `NSProcessInfo.beginActivity`). | `cloud/app_nap.rs` (macOS `begin()` only increments `APP_NAP_GUARD_COUNT`) | Platform no-op |
+| Models | Dead remote-catalog backend commands (`update_/get_remote_model_catalog`) — their only client (a `localhost:8000` fetch) was removed; the commands remain registered. | `model_manager.rs:886,918`; still registered in `setup/commands.rs` | Dead backend (registered) |
 
 ## Notes
 
 - Items above marked "dead backend (registered)" require regenerating `bindings.ts`
   (specta) and updating the bindings contract test, so they are Rust-gated, not
   frontend-only cleanups.
-- Several items (WhatsApp QR, dashboard cards, per-skill toggle) are product calls —
-  wire real data vs. remove the control — rather than mechanical fixes.
+- Several items (WhatsApp QR, per-skill toggle) are product calls — wire real data vs.
+  remove the control — rather than mechanical fixes.

@@ -1,9 +1,22 @@
 # WS-11 — Dead-Code Sweep & Vision Decisions
 
-> **Status:** Not started · **Priority:** P2 · **Risk:** low · **Effort:** L
+> **Status:** Landed (2026-06-25) · **Priority:** P2 · **Risk:** low · **Effort:** L
 > **Depends on:** WS-05 (native plugins / self-repair `with_builder` & `RepairTask`), WS-10 (god-file decomposition & `src/history/store` dedup — declares `src/safety/*.rs` orphan deletion as **WS-11**'s) · **Blocks:** none
 > **Owns (symbols/files):** `src/safety/auth_profiles.rs`, `src/safety/credential_detect.rs`, `src/safety/dangerous_tools.rs`, `src/safety/device_pairing.rs`, `src/safety/elevated.rs`, `src/safety/key_rotation.rs`, `src/safety/leak_detector.rs`, `src/safety/media_url.rs`, `src/safety/osv_check.rs`, `src/safety/pii_redactor.rs`, `src/safety/policy.rs`, `src/safety/sanitizer.rs`, `src/safety/skill_path.rs`, `src/safety/validator.rs` (the 14 uncompiled orphan siblings of `src/safety/mod.rs`); `src/cli/nodes.rs`, `src/cli/subagent_spawn.rs`, `src/cli/session_export.rs` (declared-but-unwired CLI modules); `build.rs::build_telegram_channel`; `crates/thinclaw-gateway/src/web/sse.rs::SseManager::subscribe` (test-only); `crates/thinclaw-channels/src/self_message.rs` + `src/channels/self_message.rs` facade; `src/extensions/manager.rs::install_bundled_channel_from_artifacts`; `src/boot_screen.rs::redact_gateway_url`; `src/cli/secrets.rs::_secret_cli_access_context`; `src/voice_wake.rs` + `voice` feature + `cpal` dep; `src/tailscale.rs` (`TailscaleDiscovery`, the discovery module — **NOT** `src/tunnel/tailscale.rs::TailscaleTunnel`); `src/qr_pairing.rs`.
 > **Explicitly NOT owned by WS-11:** `crates/thinclaw-agent/src/self_repair.rs::RepairTask` and the self-repair `with_builder` wiring (WS-05 decides wire-vs-erase; WS-11 only flags it). `src/safety/mod.rs` itself (the live façade — keep, never delete).
+
+> ---
+>
+> ## Completion banner
+>
+> **This workstream is DONE. Do not execute the tasks below as pending work.** The erases landed in commit `4f26f5f4` ("Wave 4: erase ~7K lines of verified-dead code", 2026-06-25) and the one WIRE decision landed in `43460933`. The sibling ledger `DEFERRED-DELETIONS.md` records the same batch as APPLIED 2026-06-25. Verified end-state:
+>
+> - **ERASED:** the 14 `src/safety/*.rs` orphans (`src/safety/` now holds only the façade `mod.rs`); the 3 unwired CLI modules `src/cli/{nodes,subagent_spawn,session_export}.rs`; `build.rs::build_telegram_channel`; the test-only `SseManager::subscribe` (only `subscribe_raw` remains); the `self_message` module in **both** `crates/thinclaw-channels/src/self_message.rs` and the root façade `src/channels/self_message.rs` (`TrustedMetadata`/`SelfMessageConfig` gone); and the 3 dead helpers `install_bundled_channel_from_artifacts`, `redact_gateway_url`, `_secret_cli_access_context`.
+> - **ERASED (DECIDE items):** `src/tailscale.rs` (`TailscaleDiscovery`) and `src/qr_pairing.rs` were deleted. The live `src/tunnel/tailscale.rs::TailscaleTunnel` and `thinclaw_channels::pairing::PairingStore` are untouched.
+> - **WIRED (DECIDE item):** `voice_wake` was kept and wired, not erased. `VoiceWakeRuntime` is constructed in `src/app.rs:1671-1682` (behind the `voice` feature) and consumed in `src/async_main.rs:1094-1150`, routing wake-word utterances into the dispatcher.
+> - **Cross-note:** `spawn_heartbeat` and the standalone `HeartbeatRunner::run` are gone from both trees; `RepairTask` handling was left to WS-05 and WS-11 made no `self_repair.rs` edit.
+>
+> ---
 
 ## Vision & Goal
 
@@ -66,49 +79,51 @@ The audit confirmed ThinClaw is a mature platform whose dead code is *concentrat
 
 Ordered so the safe, no-decision erases land first; DECIDE items follow once the operator signs off (see Decision Points). Tasks touching files another WS owns are flagged.
 
-- [ ] **T1: Erase the 14 drifted `src/safety/*.rs` orphans (keep the façade).**
+- [x] **T1: Erase the 14 drifted `src/safety/*.rs` orphans (keep the façade).**
   - **Files:** delete `src/safety/{auth_profiles,credential_detect,dangerous_tools,device_pairing,elevated,key_rotation,leak_detector,media_url,osv_check,pii_redactor,policy,sanitizer,skill_path,validator}.rs`. Keep `src/safety/mod.rs` exactly as-is.
   - **Change:** `git rm` the 14 files. Do not touch `mod.rs`, `crates/thinclaw-safety/**`, or any `crate::safety::*` import (they resolve through the façade to the crate).
   - **Acceptance:** `src/safety/` contains only `mod.rs`; `cargo check --features light` and `--no-default-features --features edge` compile with zero new warnings; `grep -rn "crate::safety::" src/ | grep -v src/safety/mod.rs` still resolves (it always pointed at the crate).
   - **Effort:** S
   - **Verification:** `cargo check --no-default-features --features edge && cargo check --features light && cargo clippy --all --benches --tests --examples --all-features -- -D warnings`
 
-- [ ] **T2: Erase the 3 unwired CLI modules.**
+- [x] **T2: Erase the 3 unwired CLI modules.**
   - **Files:** delete `src/cli/nodes.rs`, `src/cli/subagent_spawn.rs`, `src/cli/session_export.rs`; remove `pub mod nodes;` (`src/cli/mod.rs:32`), `pub mod session_export;` (`:41`), `pub mod subagent_spawn;` (`:44`).
   - **Change:** `git rm` + delete the 3 `pub mod` lines. Confirm no re-export elsewhere first (`grep -rn "nodes::|subagent_spawn::|session_export::" src/`).
   - **Acceptance:** files gone; `grep` returns nothing; CLI command match unchanged; build green.
   - **Effort:** S
   - **Verification:** `cargo check --features full` (CLI surfaces live under `repl`/`full`) `&& cargo clippy --all --tests -- -D warnings`
 
-- [ ] **T3: Erase `build_telegram_channel` from `build.rs`.**
+- [x] **T3: Erase `build_telegram_channel` from `build.rs`.**
   - **Files:** `build.rs` — remove `fn build_telegram_channel` (lines 41–131, including the `#[allow(dead_code)]` and doc comment).
   - **Change:** delete the function. `main()` does not call it.
   - **Acceptance:** `build.rs` has no `build_telegram_channel`; a clean `cargo build` and `cargo build --features bundled-wasm` both succeed (bundled-wasm path is `build_all_wasm_extensions`, untouched).
   - **Effort:** S
   - **Verification:** `cargo build --features light && cargo build --release --features bundled-wasm` (the second requires `rustup target add wasm32-wasip2` + `wasm-tools`; if the WASM toolchain is unavailable in the runner, at minimum `cargo build --features light` must pass and a reviewer confirms `main()` is unchanged).
 
-- [ ] **T4: Erase test-only `SseManager::subscribe` (gateway).**
+- [x] **T4: Erase test-only `SseManager::subscribe` (gateway).**
   - **Files:** `crates/thinclaw-gateway/src/web/sse.rs` — remove `pub fn subscribe` (lines 85–~125, the `Sse`-returning fn) and its lone test caller at `sse.rs:254`; remove the now-unused imports `Sse`, `Event`, `KeepAlive` (`sse.rs:8`) and `Infallible` (`sse.rs:3`). Keep `subscribe_raw` and all its tests.
   - **Change:** delete the convenience SSE wrapper; production already wraps `subscribe_raw` into `Sse` in `src/channels/web/*`. Verify the deleted test at 254 only exercised `subscribe()` (the over-limit assertion has a `subscribe_raw` twin at `sse.rs:253`).
   - **Acceptance:** no `pub fn subscribe(` in `sse.rs`; `subscribe_raw` callers (`ws.rs:90`, `handlers/chat.rs:313,834,936`, `web/mod.rs:639`) compile unchanged; no unused-import warnings.
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw-gateway --features <gateway profile>` and `cargo clippy -p thinclaw-gateway --all-targets -- -D warnings`. (Gateway compiles under `web-gateway`/`full`; run with `--features full` from the root package or the crate's own default if standalone.)
 
-- [ ] **T5: Erase 3 confirmed-dead helpers.**
+- [x] **T5: Erase 3 confirmed-dead helpers.**
   - **Files:** `src/extensions/manager.rs` (remove `install_bundled_channel_from_artifacts`, ~lines 1678–1700+ — read the full fn body before cutting); `src/boot_screen.rs` (remove `redact_gateway_url`, line 243 + body); `src/cli/secrets.rs` (remove `_secret_cli_access_context`, lines 278–281).
   - **Change:** delete each fn and its `#[allow(dead_code)]`/doc. `manager.rs` is a god-file owned by **WS-10** for *decomposition*; this is a pure deletion of one dead method, not a structural move — **coordinate the cut with WS-10's manager.rs decomposition to avoid a merge collision** (land WS-11's deletion first or rebase). If WS-10's decomposition has already moved this method, drop this sub-item and note it resolved.
   - **Acceptance:** the 3 symbols gone; `grep -rn "install_bundled_channel_from_artifacts|redact_gateway_url|_secret_cli_access_context" src/` empty; build green.
   - **Effort:** S
   - **Verification:** `cargo check --features full && cargo clippy --all --tests -- -D warnings`
 
-- [ ] **T6: [DECISION 3] Erase `self_message` (default) — gate on operator sign-off.**
+- [x] **T6: [DECISION 3] Erase `self_message` (default) — gate on operator sign-off.**
+  - **RESOLVED → ERASED.** Both `crates/thinclaw-channels/src/self_message.rs` and the root façade `src/channels/self_message.rs` were deleted (`4f26f5f4`); `SelfMessageConfig`/`TrustedMetadata` have zero remaining references.
   - **Files:** delete `crates/thinclaw-channels/src/self_message.rs`; remove `pub mod self_message;` (`crates/thinclaw-channels/src/lib.rs:28`); delete root facade `src/channels/self_message.rs`; remove `pub mod self_message;` (`src/channels/mod.rs:68`) and the re-export `pub use self_message::{SelfMessageConfig, TrustedMetadata};` (`src/channels/mod.rs:99`).
   - **Change:** ERASE per Decision Point 3. **If operator chooses WIRE instead:** keep the module and add a call site in the channel ingest path (`crates/thinclaw-channels` manager runtime) that builds `SelfMessageConfig::from_env()` once and runs `filter_messages` before dispatch — then this task becomes a WIRE task and updates `docs/CHANNEL_ARCHITECTURE.md`.
   - **Acceptance (erase):** no `self_message` module in either location; `grep -rn "SelfMessageConfig|TrustedMetadata" crates/ src/` empty; `thinclaw-channels` and root build green under `full`.
   - **Effort:** S (erase) / M (wire)
   - **Verification:** `cargo check --features full && cargo test -p thinclaw-channels && cargo clippy --all --tests -- -D warnings`
 
-- [ ] **T7: [DECISION 4] WIRE `voice_wake` behind the `voice` feature (recommended) OR erase.**
+- [x] **T7: [DECISION 4] WIRE `voice_wake` behind the `voice` feature (recommended) OR erase.**
+  - **RESOLVED → WIRED.** `voice_wake` was kept behind the `voice` feature: `VoiceWakeRuntime` is built in `src/app.rs:1671-1682` and consumed in `src/async_main.rs:1094-1150`. `voice` remains opt-in and is not in any default build profile.
   - **WIRE plan — Files:** `src/voice_wake.rs` (keep, gate cleanly), the headless runtime spawn site (the non-Tauri agent runtime entry; coordinate with the owning runtime WS for the exact spawn module — do not edit `agent_loop.rs`/`runtime_manager.rs` god-files, which **WS-10** owns for decomposition; add only a thin `#[cfg(feature = "voice")]` spawn call), `Cargo.toml` (keep `voice`/`cpal`), `docs/RESEARCH_AND_EXPERIMENTS.md` or a headless-mode doc + `docs/BUILD_PROFILES.md`.
     - **Change:** add a `#[cfg(feature = "voice")]` spawn of the wake-word loop in the headless runtime that emits a "wake detected" event into the agent (mirror an existing background-task spawn pattern). Keep `voice` opt-in; document in `docs/BUILD_PROFILES.md` that `voice` is headless-only and not in any default profile. Do **not** add `voice` to `light`/`desktop`/`full`.
     - **Acceptance:** `cargo build --features voice` compiles and the loop is reachable from the headless runtime; `cargo build --features light` (no voice) still excludes `cpal`; the module is no longer `#[allow(dead_code)]`-reachable-only.
@@ -118,7 +133,8 @@ Ordered so the safe, no-decision erases land first; DECIDE items follow once the
     - **Effort:** S
   - **Verification:** WIRE → `cargo build --features voice && cargo build --features light`; ERASE → `cargo check --no-default-features --features edge && cargo check --features full && cargo deny check` (confirm `cpal` removal does not strand a transitive advisory).
 
-- [ ] **T8: [DECISION 5] WIRE `tailscale` discovery into deployment (recommended) OR erase.**
+- [x] **T8: [DECISION 5] WIRE `tailscale` discovery into deployment (recommended) OR erase.**
+  - **RESOLVED → ERASED.** `src/tailscale.rs` (`TailscaleDiscovery`) was deleted (`4f26f5f4`); `grep "TailscaleDiscovery" src/` is empty. The live `src/tunnel/tailscale.rs::TailscaleTunnel` was left untouched.
   - **WIRE plan — Files:** `src/tailscale.rs` (keep), a deployment/onboarding call site (coordinate with the setup/deploy owner — likely `src/setup/**` or `src/tunnel/mod.rs`; do not duplicate the live `TailscaleTunnel`), `docs/DEPLOYMENT.md`.
     - **Change:** feature-gate `TailscaleDiscovery` under `tunnel` and call it from the deploy/onboarding path so the thin client can auto-locate the headless orchestrator; surface discovered peers to the existing pairing/connect flow. Reuse the `reqwest::Client` pattern already in the file.
     - **Acceptance:** `cargo build --features tunnel` reaches `TailscaleDiscovery::*`; documented in `docs/DEPLOYMENT.md`.
@@ -128,7 +144,8 @@ Ordered so the safe, no-decision erases land first; DECIDE items follow once the
     - **Effort:** S
   - **Verification:** WIRE → `cargo build --features tunnel`; ERASE → `cargo check --features full` (ensure no confusion with `tunnel::tailscale`).
 
-- [ ] **T9: [DECISION 6] Erase `qr_pairing` (recommended) OR wire-with-hardening.**
+- [x] **T9: [DECISION 6] Erase `qr_pairing` (recommended) OR wire-with-hardening.**
+  - **RESOLVED → ERASED.** `src/qr_pairing.rs` was deleted (`4f26f5f4`); the live pairing path stays `thinclaw_channels::pairing::PairingStore`. The two security defects were retired with the module (no wire-with-hardening was needed).
   - **ERASE plan — Files:** delete `src/qr_pairing.rs`; remove `pub mod qr_pairing;` (`src/lib.rs:83`). Live pairing stays in `thinclaw_channels::pairing` (re-exported via `src/pairing/mod.rs`).
     - **Acceptance:** `src/qr_pairing.rs` gone; `grep -rn "qr_pairing::|PairingSession" src/` empty (the `validate_token` in `src/cli/tool.rs` is unrelated and remains); `PairingStore` path unchanged; build green.
     - **Effort:** S
@@ -138,7 +155,7 @@ Ordered so the safe, no-decision erases land first; DECIDE items follow once the
     - **Effort:** L
   - **Verification:** ERASE → `cargo check --features full && cargo clippy --all --tests -- -D warnings`; WIRE → add the security regression tests + `cargo test --features full`.
 
-- [ ] **T10: Coordinate `RepairTask` with WS-05 (no edit here).**
+- [x] **T10: Coordinate `RepairTask` with WS-05 (no edit here).**
   - **Files:** `crates/thinclaw-agent/src/self_repair.rs:325 RepairTask` (re-exported `src/agent/mod.rs:99`, zero constructors found). **WS-11 does not delete or wire this.**
   - **Change:** none — record the finding in WS-05's plan: `RepairTask` has no constructor and is dead today; its fate is tied to the self-repair `with_builder` wiring decision (WIRE if self-repair-rebuild is realized, ERASE if not). Add a back-reference in WS-05.
   - **Acceptance:** WS-05 doc lists `RepairTask` under its self-repair decision; WS-11 makes no `self_repair.rs` edit.
@@ -185,14 +202,14 @@ Ordered so the safe, no-decision erases land first; DECIDE items follow once the
 
 ## Definition of Done
 
-- [ ] T1–T5 landed: `src/safety/` is `mod.rs`-only; the 3 CLI modules, `build_telegram_channel`, `SseManager::subscribe` (+ its dead imports), and the 3 dead helpers are gone.
-- [ ] Decision Points 3–6 explicitly resolved with operator sign-off; the chosen branch (WIRE or ERASE) of T6–T9 is implemented and the other discarded.
-- [ ] `self_message` resolved one way (erased, or wired with a real ingest call site + `docs/CHANNEL_ARCHITECTURE.md` update).
-- [ ] `voice_wake` resolved: either wired behind `voice` with a headless spawn site + `docs/BUILD_PROFILES.md` note, or fully erased (module + `voice` feature + `cpal`).
-- [ ] `tailscale` discovery resolved: wired into deployment under `tunnel` + `docs/DEPLOYMENT.md`, or erased (root module only; `TailscaleTunnel` untouched).
-- [ ] `qr_pairing` resolved: erased (recommended), or wired with constant-time compare + `base64` crate + `PairingStore`-backed one-time-use.
-- [ ] T10 cross-note delivered to WS-05; WS-11 made no `self_repair.rs` edit.
-- [ ] Verification gate green on the full profile matrix: `cargo fmt --check`, `cargo clippy --all --benches --tests --examples --all-features -D warnings`, `cargo check` for edge/light/full, targeted `cargo test`, `cargo deny check` (post-T7).
-- [ ] `grep` confirms zero remaining references to every erased symbol.
-- [ ] Docs updated for any WIRE (`BUILD_PROFILES.md`, `DEPLOYMENT.md`, `CHANNEL_ARCHITECTURE.md` as applicable); no stale references to erased modules remain.
-- [ ] `/ship` and `/code-review` (high) pass on the final diff.
+- [x] T1–T5 landed: `src/safety/` is `mod.rs`-only; the 3 CLI modules, `build_telegram_channel`, `SseManager::subscribe` (+ its dead imports), and the 3 dead helpers are gone.
+- [x] Decision Points 3–6 explicitly resolved with operator sign-off; the chosen branch (WIRE or ERASE) of T6–T9 is implemented and the other discarded.
+- [x] `self_message` resolved one way (erased, or wired with a real ingest call site + `docs/CHANNEL_ARCHITECTURE.md` update).
+- [x] `voice_wake` resolved: either wired behind `voice` with a headless spawn site + `docs/BUILD_PROFILES.md` note, or fully erased (module + `voice` feature + `cpal`).
+- [x] `tailscale` discovery resolved: wired into deployment under `tunnel` + `docs/DEPLOYMENT.md`, or erased (root module only; `TailscaleTunnel` untouched).
+- [x] `qr_pairing` resolved: erased (recommended), or wired with constant-time compare + `base64` crate + `PairingStore`-backed one-time-use.
+- [x] T10 cross-note delivered to WS-05; WS-11 made no `self_repair.rs` edit.
+- [x] Verification gate green on the full profile matrix: `cargo fmt --check`, `cargo clippy --all --benches --tests --examples --all-features -D warnings`, `cargo check` for edge/light/full, targeted `cargo test`, `cargo deny check` (post-T7).
+- [x] `grep` confirms zero remaining references to every erased symbol.
+- [x] Docs updated for any WIRE (`BUILD_PROFILES.md`, `DEPLOYMENT.md`, `CHANNEL_ARCHITECTURE.md` as applicable); no stale references to erased modules remain.
+- [x] `/ship` and `/code-review` (high) pass on the final diff.

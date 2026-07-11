@@ -86,10 +86,12 @@ thinclaw
 
 ### `full`
 
-Everything in `light` **plus**: ACP integration, REPL/TUI mode (interactive terminal
-with boot screen), tunnel providers (Tailscale/Cloudflare), browser automation
-(Chromium-based), and Nostr protocol integration. (The Docker sandbox — container
-isolation for untrusted code — is already in `light`, so `full` inherits it.)
+Everything in `light` **plus**: ACP integration, the `web-gateway`
+compatibility flag, REPL/TUI mode (interactive terminal with boot screen),
+tunnel providers (Tailscale/Cloudflare), browser automation (Chromium-based),
+and Nostr protocol integration. (The Docker sandbox — container isolation for
+untrusted code — is already in `light`; `full` lists it explicitly but inherits
+it either way.)
 
 Headless voice wake (`voice`) is **not** in `full` — it pulls `cpal`/ALSA, a system
 dependency we keep off the broad `full` profile and its release artifacts. It is
@@ -284,9 +286,9 @@ That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
 
 ```
 edge     = libsql
-light    = edge + postgres + docker-sandbox + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones + gateway-tls + mdns
+light    = edge + postgres + docker-sandbox + wasm-runtime + html-to-markdown + document-extraction + timezones + gateway-tls + mdns
 desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
-full     = light + acp + repl + tunnel + browser + nostr
+full     = light + acp + web-gateway + repl + tunnel + docker-sandbox + browser + nostr
 voice    = opt-in (headless wake word; also in --all-features) — not in full
 ```
 

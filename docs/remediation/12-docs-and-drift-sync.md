@@ -1,9 +1,28 @@
 # WS-12 — Docs & Drift Sync
 
-> **Status:** Not started · **Priority:** P1 · **Risk:** low · **Effort:** M
+> **Status:** Landed (2026-06, commit `1ed26495`) · **Priority:** P1 · **Risk:** low · **Effort:** M
 > **Depends on:** none (the structural/inventory tasks) · the two coordination tasks trail WS-03 (Discord verification) and WS-01 (deny.toml header)
 > **Blocks:** none (no WS is gated on docs; this WS instead *trails* every other WS to absorb their canonical-doc updates)
 > **Owns (symbols/files):** `docs/CRATE_OWNERSHIP.md` (crate table + repo-shape prose), `docs/CLI_REFERENCE.md`, `FEATURE_PARITY.md` §20 + §12 area, `src/config/provider_catalog.rs` module-doc + `crates/thinclaw-config/src/provider_catalog.rs:4` doc-comment, `src/workspace/README.md` Heartbeat section, the ~37 stale "Scrappy" *doc-comment* references (NOT legacy/migration code), and the CLAUDE.md "Common Update Triggers" discipline note. **Does NOT own:** `deny.toml:3` (WS-01), `channels-src/discord/README.md` correctness fix (WS-03 lands the code, WS-12 only re-words the README in the same PR or immediately after).
+
+> ---
+>
+> ## Completion banner
+>
+> **This workstream is DONE (commit `1ed26495`, WS-12 docs drift sync + WS-13). Do not execute the tasks below as pending work.** The "Current State (verified)" section below is a historical snapshot of the drift as it stood before this WS landed; every assertion in it has since been resolved. Verified end-state:
+>
+> - **T1**: `docs/CRATE_OWNERSHIP.md` now lists `thinclaw-identity`, `thinclaw-soul`, `thinclaw-repo-projects`, and `thinclaw-runtime-contracts` in the crate table.
+> - **T2**: CLAUDE.md documents the repo-project supervisor as a wired-but-default-off subsystem (`CLAUDE.md:74` repo-shape, `:118` architecture note).
+> - **T3**: `docs/CLI_REFERENCE.md` has a full `thinclaw repo-projects` section with the subcommands.
+> - **T4**: `FEATURE_PARITY.md:584` carries a "Repo project supervisor" row.
+> - **T5**: `FEATURE_PARITY.md` §20 heading is now "Shipped Built-in Tools" with the "80 max" count and the "Updated:" date removed.
+> - **T6**: `crates/thinclaw-config/src/provider_catalog.rs` no longer says "20+ providers".
+> - **T7**: `src/workspace/README.md` no longer shows the stale 4-arg `spawn_heartbeat` / `with_interval` / `with_notify` example.
+> - **T8**: the drifted "Scrappy" doc-comments were purged (legacy/migration identifiers left intact).
+> - **T9**: `channels-src/discord/README.md` now accurately describes host-side Ed25519 verification, which WS-03 wired (`crates/thinclaw-channels/src/wasm/router.rs:316`, dispatched `:700`).
+> - **T10**: CLAUDE.md states the same-PR canonical-doc-update discipline as an enforceable rule.
+>
+> ---
 
 ## Vision & Goal
 ThinClaw's CLAUDE.md explicitly makes accurate, ownership-scoped docs an architectural rule ("Avoid brittle counts, stale inventories, and 'default forever' claims"; "When behavior changes, update the relevant canonical docs in the same branch"). The audit found the inventory docs have quietly drifted from a genuinely mature codebase: a whole shipping subsystem (the repo-project supervisor) is undocumented, four real crates are missing from the ownership table, and several hardcoded counts / renamed-product references lie. This workstream re-grounds the maintainer-facing map in code truth and *institutionalizes the discipline* so the other 11 workstreams keep their canonical docs in sync as they land. It is cheap, low-risk, and the connective tissue that keeps the rest of the remediation honest.
@@ -73,7 +92,7 @@ ThinClaw's CLAUDE.md explicitly makes accurate, ownership-scoped docs an archite
 
 ## Tasks
 
-- [ ] **T1: Add the 4 missing crates to `docs/CRATE_OWNERSHIP.md` crate table.**
+- [x] **T1: Add the 4 missing crates to `docs/CRATE_OWNERSHIP.md` crate table.**
   - **Files:** `docs/CRATE_OWNERSHIP.md` (table at lines 30–53).
   - **Change:** Add four rows, placed near their domain neighbors, matching the existing one-line "Owns" prose style:
     - `thinclaw-identity` — "conversation-scope and identity resolution DTOs: conversation kind/scope, resolved identity, actor endpoint references, and endpoint approval status."
@@ -84,63 +103,63 @@ ThinClaw's CLAUDE.md explicitly makes accurate, ownership-scoped docs an archite
   - **Effort:** S
   - **Verification:** `ls /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/crates | wc -l` (=26) and `grep -c '^| `thinclaw' docs/CRATE_OWNERSHIP.md` (=26).
 
-- [ ] **T2: Document the repo-project supervisor in CLAUDE.md repo-shape + a new CRATE_OWNERSHIP architecture note.**
+- [x] **T2: Document the repo-project supervisor in CLAUDE.md repo-shape + a new CRATE_OWNERSHIP architecture note.**
   - **Files:** `CLAUDE.md` ("Current Architecture Notes" bullets near lines 107–110; "Repo Shape" list near `src/cli/`), `docs/CRATE_OWNERSHIP.md` (the T1 row covers the crate; add a one-line mention in the root-owned-runtime prose if a concrete supervisor/pipeline lives in root).
   - **Change:** Add a CLAUDE.md architecture bullet describing the supervisor as a wired-but-default-off subsystem (CLI `thinclaw repo-projects`, GitHub App backed, `thinclaw-repo-projects` owns the domain types). Mirror the style of the existing `- thinclaw-agent owns …` bullet. Do not restate WS-06's open items.
   - **Acceptance:** `grep -ni "repo.project\|supervisor" CLAUDE.md` returns the new bullet(s); wording matches code (default-off, CLI-driven, GitHub App).
   - **Effort:** S
   - **Verification:** `grep -ni "repo-project\|supervisor" /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/CLAUDE.md`.
 
-- [ ] **T3: Add `thinclaw repo-projects` to `docs/CLI_REFERENCE.md`.**
+- [x] **T3: Add `thinclaw repo-projects` to `docs/CLI_REFERENCE.md`.**
   - **Files:** `docs/CLI_REFERENCE.md` (add under "Background Work & Operations", after the `experiments` entry near line 99, or a dedicated subsection).
   - **Change:** Document the subcommands from `src/cli/repo_projects.rs:18-105`: `list`, `show <project_id>`, `status`, `setup [--enable|--disable --app-id --installation-id --private-key-secret --webhook-secret-secret --app-slug --default-coding-backend --auto-merge --watchdog-interval-secs]`, `set-credential <name> [--value]`, `create --name --repo-url [--default-branch --description]`, `enroll <project_id> --repo-url [--default-branch]`, `repos`, `connect [repos…] [--all]`, `start/pause/resume/cancel <project_id>`, `events <project_id> [--limit]`. Pull one-line descriptions from the clap doc-comments verbatim. Note it is default-off (gated by the supervisor feature flag / settings).
   - **Acceptance:** Every `RepoProjectCommand` variant appears; flag names match the `#[arg(long)]` names exactly.
   - **Effort:** M
   - **Verification:** Cross-check each documented flag against `grep -n '#\[arg(long' /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/src/cli/repo_projects.rs`.
 
-- [ ] **T4: Add a repo-project supervisor entry to `FEATURE_PARITY.md`.**
+- [x] **T4: Add a repo-project supervisor entry to `FEATURE_PARITY.md`.**
   - **Files:** `FEATURE_PARITY.md` (Automation §14 or a new dedicated subsection; follow the existing `| Feature | OpenClaw | ThinClaw | Priority | Notes |` table shape used in §13/§14).
   - **Change:** Add a row describing the supervisor (GitHub App backed repo-project automation, CLI + gateway-wired, default off) with a link to `crates/thinclaw-repo-projects` and `src/cli/repo_projects.rs`. Keep notes factual to current state; defer completion gaps to WS-06.
   - **Acceptance:** `grep -ni "repo.project\|supervisor" FEATURE_PARITY.md` returns the new row.
   - **Effort:** S
   - **Verification:** `grep -ni "supervisor" /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/FEATURE_PARITY.md`.
 
-- [ ] **T5: Drop the dated hardcoded tool count in FEATURE_PARITY.md §20 (D1 → option a).**
+- [x] **T5: Drop the dated hardcoded tool count in FEATURE_PARITY.md §20 (D1 → option a).**
   - **Files:** `FEATURE_PARITY.md:601,603`.
   - **Change:** Rewrite heading `## 20. Shipped Built-in Tools (80 max; some conditional or feature-gated)` → `## 20. Shipped Built-in Tools` and remove the `> **Updated:** 2026-05-14` line. Add a one-line note: "Counts are intentionally omitted; the live tool registry is authoritative — see `src/tools/README.md` and `crates/thinclaw-tools-core`." Keep the per-category tables.
   - **Acceptance:** No "80 max" and no hardcoded "Updated: <date>" in §20; tables intact.
   - **Effort:** S
   - **Verification:** `grep -n "80 max\|Updated:" /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/FEATURE_PARITY.md` returns nothing in §20.
 
-- [ ] **T6: Fix the "20+ providers" doc-comment (D2-adjacent — count only).**
+- [x] **T6: Fix the "20+ providers" doc-comment (D2-adjacent — count only).**
   - **Files:** `crates/thinclaw-config/src/provider_catalog.rs:4`.
   - **Change:** Rewrite "This catalog enables ThinClaw to work with 20+ providers without requiring explicit base_url configuration." → "This catalog ships 16 built-in provider endpoints (see `registry/providers.json`); ThinClaw also works with additional env-configured OpenAI-compatible backends not in the catalog." Avoid re-introducing a brittle count if the registry can grow — prefer "the providers in `registry/providers.json`" if the exact number is likely to drift soon.
   - **Acceptance:** No "20+" in the file; the source-of-truth (`registry/providers.json`) is named.
   - **Effort:** S
   - **Verification:** `grep -n "20+" /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/crates/thinclaw-config/src/provider_catalog.rs` returns nothing; `cargo doc -p thinclaw-config --no-deps` builds.
 
-- [ ] **T7: Fix the stale `spawn_heartbeat` example in `src/workspace/README.md`.**
+- [x] **T7: Fix the stale `spawn_heartbeat` example in `src/workspace/README.md`.**
   - **Files:** `src/workspace/README.md:98-106`.
   - **Change:** Replace the wrong 4-arg call and the nonexistent `HeartbeatConfig::default().with_interval(...).with_notify(...)` builder with either (preferred) prose pointing at the routine-driven heartbeat (`crates/thinclaw-agent/src/routine_engine.rs`, settings-resolved `HeartbeatConfig` via `HeartbeatConfig::resolve(settings)` at `src/config/mod.rs:286`), or a corrected 7-arg signature matching `src/agent/heartbeat.rs:154-162` (`config, hygiene_config, workspace, llm, safety, response_tx, cost_tracker`). Do not invent APIs.
   - **Acceptance:** The code block compiles against the current signature or is replaced by accurate prose; no `with_interval`/`with_notify` calls remain.
   - **Effort:** S
   - **Verification:** `grep -n "with_interval\|with_notify\|spawn_heartbeat(config, workspace" /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/src/workspace/README.md` returns nothing.
 
-- [ ] **T8: Purge stale "Scrappy" doc-comment references (D2 → rename to "ThinClaw Desktop").**
+- [x] **T8: Purge stale "Scrappy" doc-comment references (D2 → rename to "ThinClaw Desktop").**
   - **Files (drifted comments only):** `crates/thinclaw-tools/src/builtin/agent_control.rs:101`, `crates/thinclaw-settings/src/providers.rs:19`, `crates/thinclaw-config/src/llm.rs:325`, `crates/thinclaw-config/src/provider_catalog.rs:17`, `crates/thinclaw-llm-core/src/routing_policy.rs:469`, `crates/thinclaw-channels/src/canvas_gateway.rs:10`, `crates/thinclaw-channels/src/status_view.rs:190`, `src/talk_mode.rs:10,15,94,95,112,606`, `src/tauri_commands.rs:3,7,162,746`, `src/voice_wake.rs:16`, `src/hardware_bridge.rs:3,8,16,17,152,155,226`, `src/app.rs:96,121,162,176,186,332,379`, `src/config/mod.rs:85`, `src/platform/linux_readiness.rs:516`, `src/cli/session_export.rs:188`, `src/cli/oauth_defaults.rs:119`, `src/api/config.rs:105`.
   - **Change:** Rename "Scrappy" → "ThinClaw Desktop" in these doc-comments (or delete the bare parenthetical where it adds nothing). **Do NOT touch** any legacy/migration identifier (env vars `SCRAPPY_*`, keychain `com.schack.scrappy`/`com.scrappy.*`, `scrappy.db`, `LEGACY_OBJECT_ROOT`/`"Scrappy"` cloud roots, persona alias `"scrappy"`, MLX `"PATCH (scrappy)"` detection — all enumerated in Current State). Work crate-by-crate to keep each crate's edit reviewable in isolation.
   - **Acceptance:** The targeted comment lines no longer say "Scrappy"; the legacy/migration grep set is unchanged; nothing compiles differently (comments only).
   - **Effort:** M
   - **Verification:** Re-run the audit's drift grep and confirm only legacy/migration hits remain: `grep -rni "scrappy" --include="*.rs" /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop | grep -vi "legacy\|migrat\|fallback\|SCRAPPY_MCP\|SCRAPPY_PROMPT\|com.schack.scrappy\|com.scrappy\|scrappy.db\|LEGACY\|persona\|PATCH (scrappy)"` should drop to ~0.
 
-- [ ] **T9: Correct the Discord WASM README verification claim (coordinate with WS-03).**
+- [x] **T9: Correct the Discord WASM README verification claim (coordinate with WS-03).**
   - **Files:** `channels-src/discord/README.md:105-108`.
   - **Change:** Only after WS-03 lands host-side Ed25519 verification, update the "Invalid Signature" section to describe the real mechanism. If WS-03 has not landed when WS-12 reaches this task, instead reword the claim to reflect reality ("signature verification is configured via …") rather than asserting a guarantee that does not exist. Do not edit `channels-src/discord/src/lib.rs` — that is WS-03.
   - **Acceptance:** README matches whatever WS-03 actually implemented; no claim of host verification that the code does not provide.
   - **Effort:** S
   - **Verification:** Diff the README claim against WS-03's merged code in `crates/thinclaw-channels/` / `channels-src/discord/src/lib.rs`.
 
-- [ ] **T10: Document the "canonical doc updated in the same PR" discipline (institutionalize the rule).**
+- [x] **T10: Document the "canonical doc updated in the same PR" discipline (institutionalize the rule).**
   - **Files:** `CLAUDE.md` ("Documentation Rules" / "Common Update Triggers" sections), `docs/remediation/README.md` (if/when it exists — otherwise reference from this WS doc).
   - **Change:** Add an explicit, checkable rule: every WS PR that changes behavior in an area with a canonical doc (per the CLAUDE.md "Canonical Docs" table and "Common Update Triggers") MUST update that doc in the same PR, and MUST update `FEATURE_PARITY.md` if tracked behavior changed. Recommend wiring this into `/code-review` and `/ship` review checklists. Add a short "WS-12 trails each wave" note so reviewers know docs sync is expected per-wave, not deferred to the end.
   - **Acceptance:** The rule is written as an imperative checklist item, not a vague aspiration; it names the same-PR requirement and the FEATURE_PARITY trigger.
@@ -178,13 +197,13 @@ ThinClaw's CLAUDE.md explicitly makes accurate, ownership-scoped docs an archite
   - No Postgres/libSQL/Docker needed.
 
 ## Definition of Done
-- [ ] `docs/CRATE_OWNERSHIP.md` crate table has 26 rows including `thinclaw-identity`, `thinclaw-soul`, `thinclaw-repo-projects`, `thinclaw-runtime-contracts` (T1).
-- [ ] Repo-project supervisor is documented in CLAUDE.md repo-shape/architecture notes (T2), `docs/CLI_REFERENCE.md` with all `RepoProjectCommand` subcommands/flags (T3), and `FEATURE_PARITY.md` (T4).
-- [ ] FEATURE_PARITY.md §20 no longer carries "80 max" or a hardcoded "Updated: <date>"; registry named as authoritative (T5).
-- [ ] `crates/thinclaw-config/src/provider_catalog.rs:4` no longer says "20+ providers"; the 16-entry `registry/providers.json` (plus env backends) is named accurately (T6).
-- [ ] `src/workspace/README.md` heartbeat example matches the current 7-arg signature or routine-driven prose; no `with_interval`/`with_notify` (T7).
-- [ ] The drift grep (legacy/migration excluded) returns ~0 "Scrappy" hits; the must-not-touch legacy set is verified unchanged (T8).
-- [ ] Discord README matches WS-03's merged verification code; no false guarantee (T9, after WS-03).
-- [ ] CLAUDE.md states the same-PR canonical-doc-update discipline as an enforceable rule (T10).
-- [ ] Gate green: `cargo fmt --all -- --check`, `cargo doc --workspace --no-deps`, `cargo check --workspace` all pass; `/code-review` shows no accidental code changes.
-- [ ] D1 and D2 resolved as recommended (count dropped, not regenerated; Scrappy renamed to "ThinClaw Desktop").
+- [x] `docs/CRATE_OWNERSHIP.md` crate table has 26 rows including `thinclaw-identity`, `thinclaw-soul`, `thinclaw-repo-projects`, `thinclaw-runtime-contracts` (T1).
+- [x] Repo-project supervisor is documented in CLAUDE.md repo-shape/architecture notes (T2), `docs/CLI_REFERENCE.md` with all `RepoProjectCommand` subcommands/flags (T3), and `FEATURE_PARITY.md` (T4).
+- [x] FEATURE_PARITY.md §20 no longer carries "80 max" or a hardcoded "Updated: <date>"; registry named as authoritative (T5).
+- [x] `crates/thinclaw-config/src/provider_catalog.rs:4` no longer says "20+ providers"; the 16-entry `registry/providers.json` (plus env backends) is named accurately (T6).
+- [x] `src/workspace/README.md` heartbeat example matches the current 7-arg signature or routine-driven prose; no `with_interval`/`with_notify` (T7).
+- [x] The drift grep (legacy/migration excluded) returns ~0 "Scrappy" hits; the must-not-touch legacy set is verified unchanged (T8).
+- [x] Discord README matches WS-03's merged verification code; no false guarantee (T9, after WS-03).
+- [x] CLAUDE.md states the same-PR canonical-doc-update discipline as an enforceable rule (T10).
+- [x] Gate green: `cargo fmt --all -- --check`, `cargo doc --workspace --no-deps`, `cargo check --workspace` all pass; `/code-review` shows no accidental code changes.
+- [x] D1 and D2 resolved as recommended (count dropped, not regenerated; Scrappy renamed to "ThinClaw Desktop").

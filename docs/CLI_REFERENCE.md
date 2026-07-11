@@ -30,9 +30,12 @@ These flags can be appended to almost any command:
 ## Configuration & Identity
 
 - `thinclaw config`: Manage configuration settings.
-  - `list`: Show all current configurations.
+  - `init`: Generate a default `config.toml` file (default `~/.thinclaw/config.toml`; `--force` overwrites).
+  - `list`: Show all current configurations (`--filter <PREFIX>` narrows to a setting prefix).
   - `get <KEY>`: Retrieve a specific configuration value.
   - `set <KEY> <VALUE>`: Update a configuration value.
+  - `reset <KEY>`: Reset a setting to its default value.
+  - `path`: Show the settings storage info.
 - `thinclaw identity`: Manage household actors and linked endpoints.
 - `thinclaw models`: Inspect available LLM models from your configured providers.
 - `thinclaw secrets`: Manage encrypted local secrets without printing values.
@@ -46,7 +49,11 @@ These flags can be appended to almost any command:
   - `info <NAME>`: Show channel-specific setup details.
   - `validate <NAME>`: Validate a configured native channel or installed WASM channel package. For WASM packages this checks the artifact, capabilities file, and required env-backed setup secrets; Provider Vault validation is available through the WebUI extension validator.
     Native APNs and browser-push endpoint registrations persist under `$THINCLAW_HOME/native-endpoints/` by default; override with `APNS_ENDPOINT_REGISTRY_PATH` or `BROWSER_PUSH_ENDPOINT_REGISTRY_PATH` when the service account needs a custom writable location.
-- `thinclaw gateway`: Manage the built-in web gateway settings.
+- `thinclaw gateway`: Manage the built-in web gateway.
+  - `start [--port <PORT>] [--host <HOST>] [--foreground]`: Start the web gateway (daemonizes unless `--foreground`).
+  - `stop`: Stop a running gateway.
+  - `reload [--port <PORT>] [--host <HOST>] [--foreground]`: Restart or refresh the managed gateway process.
+  - `status`: Show gateway status.
   - `access [--show-token]`: Print the bind address, WebUI URL, token URL, SSH tunnel command, auth status, health status, and service-safe warnings.
 - `thinclaw devices`: Manage paired mobile devices (pair, list, rename, revoke). Requires a running gateway and a resolvable `GATEWAY_AUTH_TOKEN` (from the environment or settings); commands talk to the gateway's `/api/devices/*` HTTP surface, the same way `thinclaw message` does.
   - `pair [--name <NAME>]`: Start a pairing session, render a terminal QR code and human-readable code, then poll until the pairing completes or expires. Pairing is how the iOS/mobile app links to this gateway — see [MOBILE_APP.md](MOBILE_APP.md).
@@ -61,11 +68,23 @@ These flags can be appended to almost any command:
   - `list`: List all installed WASM tools.
   - `remove <ID>`: Remove a WASM tool.
 - `thinclaw registry`: Browse and install extensions from the ThinClaw registry.
-- `thinclaw mcp`: Manage Model Context Protocol (MCP) servers.
-  - `add`: Add a new MCP server.
-  - `auth`: Configure authentication for an MCP server.
-  - `list`: Show configured MCP servers.
-  - `test`: Run a diagnostic test on an MCP server.
+- `thinclaw mcp`: Manage Model Context Protocol (MCP) servers. Grouped into five subcommand families:
+  - `thinclaw mcp server`: Manage MCP server registration, activation, and auth.
+    - `add <NAME> [URL] [--command <CMD>] [--args <A,B>] [--env <K=V>] [--client-id ...] [--auth-url ...] [--token-url ...] [--scopes ...] [--description ...]`: Add a server (HTTP via URL, or stdio via `--command`).
+    - `remove <NAME>`: Remove a server.
+    - `list [--verbose]`: Show configured servers.
+    - `show <NAME>`: Show a single server's configuration.
+    - `auth <NAME> [--user <ID>]`: Authenticate with a server (OAuth flow).
+    - `test <NAME> [--user <ID>]`: Test connection to a server.
+    - `toggle <NAME> [--enable|--disable]`: Enable or disable a server.
+  - `thinclaw mcp resource`: Browse MCP resources from a server.
+    - `list`, `read`, `templates`.
+  - `thinclaw mcp prompt`: Browse MCP prompts from a server.
+    - `list`, `get`.
+  - `thinclaw mcp root`: Inspect and manage roots grants for a server.
+    - `list`, `grant`, `revoke`.
+  - `thinclaw mcp log`: Inspect and change MCP logging levels.
+    - `show`, `set`.
 - `thinclaw browser`: Launch or debug the headless Chrome browser automation.
 - `thinclaw comfy`: Manage and use ComfyUI media generation.
   - `health`: Check the configured ComfyUI server and object-info availability.
@@ -88,10 +107,13 @@ for configuration, local/cloud mode, and workflow security details.
   - `search <QUERY>`: Search the vector database for memories.
   - `read <ID>`: Read a specific memory entry.
   - `write`: Manually inject a memory entry.
+  - `tree`: Show the workspace directory tree.
+  - `status`: Show workspace status (document count, index health).
 - `thinclaw sessions`: Manage active agent sessions.
   - `list`: View recent sessions.
   - `show <ID>`: View details of a specific session.
   - `prune`: Clean up old or inactive sessions.
+  - `export`: Export a session transcript.
 - `thinclaw agents`: Manage agent workspaces.
   - `add`: Register a new agent workspace.
   - `list`: View available agents.

@@ -2,10 +2,11 @@
 
 Tracks the follow-ups that were deferred while landing the first Lane-B parity batch
 (foundations #116 undo, #117 eval, #118 events, #119 channel-config) and their
-subsequent execution. **Updated 2026-06-29: items 1–5 are now implemented and in-flight
-(PRs #120–#123); item 6 needs a running app; items 7–8 are additive/optional.**
+subsequent execution. **Verified 2026-07-10: items 1–5 are shipped and merged to `main`
+(the backing commands/events are all present in the tree); item 6 needs a running app;
+items 7–8 are additive/optional.**
 
-State legend: ✅ shipped (PR) · 🟡 implemented, in-flight PR · ⏳ ready, not started ·
+State legend: ✅ shipped (merged to `main`) · ⏳ ready, not started ·
 ➖ intentionally skipped.
 
 **Shared foundations (in place):** generic `UiEvent::AgentLifecycleEvent`
@@ -16,29 +17,29 @@ the 5-matcher `StatusUpdate` ripple (tui/gateway-SSE/repl/acp/wasm); `Channel::c
 
 ---
 
-## 1. Undo/redo UI control — 🟡 **#120**
+## 1. Undo/redo UI control — ✅ **#120**
 Toolbar buttons in `ThinClawChatView` (next to Stop Run, gated on `gatewayRunning`) calling
 `thinclawCommands.thinclawUndo/Redo(effectiveSessionKey)` with toast feedback. Completes
 TDO-104 end-to-end (commands #116 + UI #120).
 
-## 2. Advisor-consultation lifecycle event — 🟡 **#121**
+## 2. Advisor-consultation lifecycle event — ✅ **#121**
 `StatusUpdate::AdvisorConsultationStarted` emitted at both `consult_advisor` sites in
 `tool_execution.rs` (inline + parallel) → `AgentLifecycleEvent`.
 
-## 3. Self-repair lifecycle event — 🟡 **#121**
+## 3. Self-repair lifecycle event — ✅ **#121**
 `StatusUpdate::SelfRepairStarted` / `SelfRepairCompleted` emitted from the background repair
-loop (`agent_loop.rs`) around `repair_stuck_job` / `repair_broken_tool`. **Decision D-1
+loop (`agent_loop/mod.rs`) around `repair_stuck_job` / `repair_broken_tool`. **Decision D-1
 applied:** broadcasts on the `web` target with synthetic `session_key=agent:main` (repair is
 decoupled from active runs — no per-session context to thread).
 
-## 4. Channel-config submit — 🟡 **#122**
+## 4. Channel-config submit — ✅ **#122**
 `thinclaw_channel_config_submit(channel_id, values)` persists each field under
 `channels.{id}_{field}` (`api::config::set_setting`) and forwards to the live channel via
 `ChannelManager::update_channel_runtime_config`. **Decisions D-2/D-3 applied:** WASM channels
 apply live; native channels persist + report `restart_required` (no live-reload refactor in
 v1); gated **LocalOnly** + classified in `ROUTE_TABLE` (no remote path in v1).
 
-## 5. Channel-config settings form — 🟡 **#123**
+## 5. Channel-config settings form — ✅ **#123**
 **Decision D-4 applied:** delivered as a **new Lane-B panel** `ThinClawChannelConfig` (a
 `channel-config` cockpit page) rather than editing the Lane-A-owned `ThinClawChannels.tsx`.
 Renders the schema (`thinclaw_channel_config_schemas`) as a dynamic form and submits via

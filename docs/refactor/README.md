@@ -47,18 +47,50 @@ Measured by the dashboard in [`METRICS_AND_GUARDRAILS.md`](METRICS_AND_GUARDRAIL
    task has one.
 5. After each wave, re-run the audit workflow and update the metrics dashboard.
 
-Line numbers in the backlog are from the 2026-06-29 audit and **drift** — always re-locate the
+Line numbers in the backlog originate from the 2026-06-29 audit and **drift** — always re-locate the
 symbol (`grep`/`rg`) before editing; treat the file + the pattern as authoritative, the line as a hint.
 
-## Status snapshot (2026-06-29)
+## Status snapshot (2026-07-11)
 
-- **Phase 0 — COMPLETE** (shipped this cycle, each verified): security correctness (#126), async
-  blocking-in-async (#127), panic resilience (#128), CI `--locked` guardrail (#129), desktop
-  dependency remediation + advisory CI (#130). Plan/audit: #125.
-- **Phase 1 / Wave A — NOT STARTED** (clean, ready now): crate-boundary moves, observability
-  bundle, god-file decompositions, async-lifecycle, security/panic long-tail.
-- **Phase 1 / Wave B — BLOCKED on the in-flight queue** (#117/#118/#119 touch the same files):
-  `StatusUpdate #[non_exhaustive]`, observer-event emission, WIT drift, command-surface migration.
-- **Phase 2/3 — NOT STARTED**: metrics endpoint, LLM extraction, maturity long-tail.
+The audit-hardening stack has landed on `main` (merges `1fb29984` / `bda7a61f`). Most of Phase 1
+Wave A and the unblocked Wave B items shipped; the Phase 2 metrics endpoint shipped too. What
+remains is dependency dedup, a handful of lint/coverage/release guardrails, and the long-tail
+typed-error and file-size targets.
+
+- **Phase 0 — COMPLETE** (verified): security correctness (#126), blocking-in-async (#127), panic
+  resilience (#128), CI `--locked` guardrail (#129), desktop dependency remediation + advisory CI
+  (#130). Plan/audit: #125.
+- **Phase 1 / Wave A — MOSTLY LANDED**: crate-boundary moves (A1 routine DTOs → `thinclaw-types`,
+  A2 MCP/execution DTOs → `thinclaw-tools-core`, both CI-guarded), the observability bundle (A3
+  rolling daily file sink, A4 real `/api/health` readiness), and the god-file decompositions (A5
+  experiments `lib.rs` now a 22-line façade, A7 skill-tool twins split into directories, A8 signal /
+  providers / server / routine-engine now under the 2,000-line guard) are done. The god-file size
+  guard is LIVE in CI. **Still open in Wave A:** A6 (`async_main` extracted to `src/async_main.rs`
+  but still ~1,928 lines), the `acp` / `reasoning` mod files (~1,900 lines, under the guard but not
+  yet at the < 800 target), and the security long-tail (A10). A9 (async lifecycle) is **partial**:
+  long-running loops are owned and drained, while channel-submission and scheduler cleanup waiters
+  remain detached one-shot tasks. A11 (panic long-tail) is **partial**: every named production
+  panic site is resolved, but the systemic
+  `clippy::unwrap_used` lint is still `"allow"`.
+- **Phase 1 / Wave B — PARTIALLY LANDED** (no longer blocked): B1 (`StatusUpdate` is now
+  `#[non_exhaustive]`), B2 (all 10 `ObserverEvent` variants have production emit sites, zero dead
+  variants), B3 (WIT `status-type` now covers every host `StatusUpdate` variant, conversions map
+  each explicitly, and the interface is versioned at `CHANNEL_WIT_VERSION = "0.2.0"`), and B4
+  (`ROUTE_TABLE` classifies all 346 commands, 100%, test-enforced) are done.
+  **Still open:** B5 (313/342 commands still return `Result<_, String>`), B6 (stringly-typed
+  `UiEvent` status fields).
+- **Phase 2/3 — metrics endpoint SHIPPED**: the Prometheus `/metrics` route is registered and
+  backed by the shared registry (`src/channels/web/server.rs:875`). **Still open:** LLM extraction
+  (reasoning/runtime_manager behind ports) and the maturity long-tail.
+
+**What actually remains** (do not treat these as done): dependency dedup (D2/D3; the root lock has
+82 `cargo deny` duplicate diagnostics, 3 `rand` versions, 2 `wit-bindgen` versions, and
+`deny.toml` still has `multiple-versions = "warn"`), finishing D1 (the `[workspace.dependencies]`
+table exists and 27/28 crates use it, but `tokio`/`uuid`/`reqwest`/`rand` are not hoisted), the
+`clippy::unwrap_used` panic-prevention lint (still `"allow"`), the coverage `--fail-under` threshold
+(still `--lib`, no gate), a signed desktop release (P3), sub-workspace `cargo-deny` scanning of
+`channels-src/` + `tools-src/`, the `Result<_, String>` → `BridgeError` command migration (B5),
+the remaining A9 one-shot task ownership, and the largest-file < 800 target (A8: largest is now
+1,999 lines, not 4,577).
 
 See [`BACKLOG.md`](BACKLOG.md) for the per-task detail.

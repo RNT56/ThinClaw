@@ -1,6 +1,9 @@
 # WS-09 — Routines / Scheduler / Heartbeat Completion
 
-> **Status:** Not started · **Priority:** P2 · **Risk:** low · **Effort:** M
+> **✅ STATUS: DONE. Landed in commit `dd7b7cdb` (repo-project supervisor + routines/heartbeat), merged to `main` via the audit-hardening stack (`1fb29984`, HEAD `bda7a61f`).**
+> This plan is complete; do not execute it. It is retained as an implementation record. All six tasks (T1–T6) shipped: `spawn_heartbeat` and the self-looping `HeartbeatRunner::run` are erased from both trees (`check_heartbeat` kept for `/heartbeat`); `process_claimed_event` accumulates `dispatch_errors` and continues instead of breaking (`src/agent/routine_engine.rs:1096,1116,1137`); heartbeat `target`/`include_reasoning` are honored via `heartbeat_job_metadata` (`include_reasoning`/`suppress_output`/`notify_channel` keys, `crates/thinclaw-agent/src/routine_engine.rs:1148-1152`); `dedup_window` is enforced by content-hash window dedup (`routine_engine.rs:967-1000`); and the validated webhook body is threaded through `fire_manual_with_payload`. DP-3 resolved as WIRE. The "Current State (verified)" section below describes the *pre-remediation* state.
+
+> **Status:** Done (landed) · **Priority:** P2 · **Risk:** low · **Effort:** M
 > **Depends on:** none · **Blocks:** WS-10 (heavy decomposition of `src/agent/routine_engine.rs`) — coordinate so WS-10 splits *after* the small behavioral edits here land, to avoid churn.
 > **Owns (symbols/files):**
 > - `src/agent/heartbeat.rs` (the root compatibility wrapper — `HeartbeatRunner::run`, `spawn_heartbeat`)
@@ -33,6 +36,8 @@ The routine/scheduler/heartbeat engine is the **proactive runtime** — the thin
 - Experiment artifact retention — **WS-06**.
 
 ## Current State (verified)
+
+> **Historical (pre-remediation) snapshot.** All five gaps below (heartbeat knobs, `dedup_window`, webhook body, orphaned runner, break-on-first-error) were closed by the landed WS-09 work. Kept for context. Some persistence anchors here are stale: the `src/history/store/` directory was deleted in the WS-10 history/store consolidation, so the `dedup_window` persistence set is smaller and now lives only under `crates/thinclaw-db`.
 
 Anchors confirmed by reading the code on 2026-06-23.
 
@@ -91,21 +96,21 @@ Anchors confirmed by reading the code on 2026-06-23.
 
 Ordered. T1–T2 are independent and parallelizable; T3 depends on nothing but touches the engine; T4/T5/T6 are independent. Land small commits.
 
-- [ ] **T1: Erase the orphaned standalone heartbeat runner**
+- [x] **T1: Erase the orphaned standalone heartbeat runner**
   - **Files:** `src/agent/heartbeat.rs` (remove `pub async fn run` line 74-77 and `pub fn spawn_heartbeat` lines 153-174); `src/agent/mod.rs:81` (drop `spawn_heartbeat` from the re-export, keep `HeartbeatConfig, HeartbeatResult, HeartbeatRunner`); `crates/thinclaw-agent/src/heartbeat.rs` (remove `pub async fn run` lines 132-191 and `pub fn spawn_heartbeat` lines 384-400, and prune now-unused fields like `consecutive_failures`/`config.max_failures`/`config.interval` *only if* nothing else reads them — verify with grep first); `src/workspace/README.md:99-103` (replace the stale `spawn_heartbeat` example with a pointer to the routine-engine heartbeat / `upsert_heartbeat_routine`).
   - **Change:** Delete the dead self-loop and spawner. Keep `HeartbeatRunner::new`, builder methods, and `check_heartbeat` (still used by `/heartbeat`, `src/agent/commands.rs:248`). If `run`'s removal orphans the crate-side `send_notification`/hygiene-tick helpers, remove those too; if they're shared with `check_heartbeat`, leave them.
   - **Acceptance:** `grep -rn "spawn_heartbeat\|HeartbeatRunner::run\|\.run().await" src crates | grep -i heartbeat` returns only intentional hits (none). `/heartbeat` command still compiles and runs. No `dead_code` warnings reintroduced.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw-agent && cargo build` ; `cargo clippy -p thinclaw-agent --all-targets -- -D warnings`.
 
-- [ ] **T2: Per-event error isolation in `process_claimed_event`**
+- [x] **T2: Per-event error isolation in `process_claimed_event`**
   - **Files:** `src/agent/routine_engine.rs:898-916`.
   - **Change:** Replace the `break` on `spawn_fire` error with `continue`, collecting all errors (e.g. `let mut dispatch_errors: Vec<String> = Vec::new();`). Keep setting `has_deferred = true` so the event is released for retry, but let every other `should_fire` plan still attempt its spawn (each is independently idempotent via `routine_run_exists_for_trigger_key`). Update the `diagnostics` JSON to carry `dispatch_errors` (array) instead of the single `dispatch_error` (line 930) — or keep a joined string if you want to avoid touching the diagnostics schema consumers; grep `dispatch_error` first.
   - **Acceptance:** A failing routine no longer prevents sibling routines on the same event from firing in the same drain. Add a unit test in the existing `#[cfg(test)] mod tests` of `routine_engine.rs` (there are already engine tests around line 2156+) that wires two `should_fire` plans where the first spawn errors and asserts the second still fires (or, if the spawn path is hard to fake, assert the loop accumulates both errors). Reuse the existing test scaffolding (`notify_tx`, mock store) at `src/agent/routine_engine.rs:2156-2480`.
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw routine` (root package) and the new test; `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T3: Honor heartbeat `target` and `include_reasoning`**
+- [x] **T3: Honor heartbeat `target` and `include_reasoning`**
   - **Files:** `src/agent/routine_engine.rs` `execute_heartbeat` (1656-1853) — rename `_include_reasoning`/`_target` to real params; `crates/thinclaw-agent/src/routine_engine.rs` `heartbeat_job_metadata` (976-983) — extend signature to accept `target: &str` and `include_reasoning: bool` and emit them in the metadata JSON (mirror the keys already there).
   - **Change:**
     - `target == "none"`: after a successful run, skip outbound delivery — return a status that does *not* notify. For the light-context worker path, set a metadata flag (`"suppress_output": true`) the worker honors, OR (simpler, no worker change) return `RunStatus::Ok` with a summary but ensure `send_notification` is bypassed for this routine (since heartbeat uses `NotifyConfig` indirectly). Confirm the exact notify seam: heartbeat light-context returns `RunStatus::Running` (line 1848) so completion/notify is handled by the worker; for `target="none"` set the worker metadata to suppress its emitted user message.
@@ -116,14 +121,14 @@ Ordered. T1–T2 are independent and parallelizable; T3 depends on nothing but t
   - **Effort:** M
   - **Verification:** `cargo test -p thinclaw-agent heartbeat` ; `cargo test -p thinclaw heartbeat` ; manual: set the env vars, run with `RUST_LOG=thinclaw=debug cargo run`, observe a heartbeat tick. Confirm the worker side actually consumes the new metadata keys — grep the worker job execution for how it reads `heartbeat`/`max_iterations` metadata before assuming the key name; if the worker does not yet read `include_reasoning`/`notify_channel`, add the consumption there (that worker code is root-owned in `src/agent/` — confirm it is not WS-10-reserved before editing; if it is, raise a dependency note).
 
-- [ ] **T4: Pass the webhook body into the triggered routine**
+- [x] **T4: Pass the webhook body into the triggered routine**
   - **Files:** `src/agent/routine_engine.rs` — add `pub async fn fire_manual_with_payload(&self, routine_id: Uuid, payload: Option<String>)` alongside `fire_manual` (326) that forwards `payload` into `spawn_fire` as `trigger_detail` (the existing `Option<String>` slot, line 964); have `fire_manual` delegate with `None`. In `execute_routine` / the per-action executors, inject `run.trigger_detail` (when present) into the effective prompt: for `Lightweight`/`FullJob` append a clearly delimited "Webhook payload:" block; for `SystemEvent`/`Heartbeat` include it in the injected message. `src/channels/web/handlers/routines.rs:583` — call `fire_manual_with_payload(routine_id, body_as_utf8_capped)` instead of `fire_manual`.
   - **Change:** Decode `body: Bytes` to UTF-8 lossily, cap to a sane length (reuse/define a constant near the existing `routine_webhook_body_too_large` policy in `crates/thinclaw-gateway/src/web/routines.rs:563`). Do **not** thread raw bytes into the prompt unbounded.
   - **Acceptance:** A signed webhook POST with a JSON/text body results in a routine run whose prompt/context contains the payload (visible in the run trajectory/summary). `fire_manual` callers (manual tool, CLI) are unaffected (pass `None`). Webhook size limit still enforced.
   - **Effort:** M
   - **Verification:** `cargo test -p thinclaw routine` ; integration: existing webhook handler tests in `crates/thinclaw-gateway/src/web/routines.rs:660+` — add a case asserting the payload reaches the fire path. `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T5 (DP-3 = WIRE): Enforce `dedup_window` via content-hash window dedup**
+- [x] **T5 (DP-3 = WIRE): Enforce `dedup_window` via content-hash window dedup**
   - **Files:** `crates/thinclaw-db/src/lib.rs` (extend the `Database` trait with `routine_event_recent_content_match(routine_id: Uuid, content_hash: &str, since: DateTime<Utc>) -> Result<bool, DatabaseError>`); implement in `crates/thinclaw-db/src/postgres.rs` + `postgres_store/routine_events.rs` and `crates/thinclaw-db/src/libsql/routines.rs` (query `routine_events` / `routine_event_evaluations` for a `fired` decision with matching `content_hash` and `created_at >= since`); call site in `src/agent/routine_engine.rs:818-840` inside the `Matched` arm — when `routine.guardrails.dedup_window.is_some()`, compute `since = now - window`, query, and on hit set decision `RoutineEventDecision::SkippedDuplicate` (variant already exists, `crates/thinclaw-agent/src/routine.rs:978`) and `should_fire = false`.
   - **Change:** Only issue the extra query when the window is set (keep the default `None` hot path identical). Reuse `event.content_hash` (already populated, `crates/thinclaw-agent/src/routine_engine.rs:414`).
   - **Acceptance:** Two distinct messages with identical content arriving within `dedup_window` cause only the first to fire; the second records `SkippedDuplicate`. Outside the window, both fire. Add db_contract coverage (`tests/db_contract/routines.rs` already exercises routine store methods) for the new method on both backends.
@@ -131,7 +136,7 @@ Ordered. T1–T2 are independent and parallelizable; T3 depends on nothing but t
   - **Verification:** `cargo test -p thinclaw-db` ; `cargo test --test db_contract routines` against both Postgres (Docker `pgvector/pgvector:pg17` + migrations applied per CLAUDE.md) and libSQL; `cargo clippy --all-targets -- -D warnings`. **If sizing forces ERASE instead:** remove the field from `crates/thinclaw-agent/src/routine.rs:809,817` and *all* persistence sites listed in Current State, plus the migration column, in one atomic commit; acceptance becomes "no `dedup_window` references remain and both backends round-trip routines without it."
   - **Decision gate:** This task is the one operator sign-off point (see decision_points). Default = WIRE.
 
-- [ ] **T6: Docs + FEATURE_PARITY sync**
+- [x] **T6: Docs + FEATURE_PARITY sync**
   - **Files:** `docs/SURFACES_AND_COMMANDS.md` (heartbeat `target`/`include_reasoning` now honored), `src/setup/README.md` only if onboarding surfaces these knobs, `FEATURE_PARITY.md` (flip routine/heartbeat completeness items), `docs/MEMORY_AND_GROWTH.md` if heartbeat behavior is described there. Confirm `src/workspace/README.md` was fixed in T1.
   - **Change:** Update behavior descriptions for the wired knobs; note `dedup_window` is now enforced (or removed). Do not restate code internals.
   - **Acceptance:** No doc still claims `target`/`include_reasoning`/`dedup_window` are inert or shows `spawn_heartbeat` as the entry point.
@@ -184,11 +189,11 @@ Ordered. T1–T2 are independent and parallelizable; T3 depends on nothing but t
 
 ## Definition of Done
 
-- [ ] DP-3 (`dedup_window` WIRE vs ERASE) explicitly resolved with operator sign-off; the chosen path fully implemented across all five persistence/writer sites with no partial drift.
-- [ ] Heartbeat `target` ("none"/"chat"/channel) and `include_reasoning` are honored end-to-end (config → action → execution → worker output), verified by a manual heartbeat tick and unit tests on `heartbeat_job_metadata`.
-- [ ] Signed webhook bodies reach the triggered routine's prompt/context (capped, delimited); `fire_manual` non-webhook callers unaffected.
-- [ ] Orphaned `spawn_heartbeat` + `HeartbeatRunner::run` removed (both root and crate); `check_heartbeat` / `/heartbeat` still work; `src/workspace/README.md` no longer references `spawn_heartbeat`.
-- [ ] `process_claimed_event` isolates per-event spawn errors (`continue`, accumulated diagnostics) with a regression test; idempotency invariant preserved.
-- [ ] Full verification gate green (fmt, clippy `-D warnings` with `--all-targets`, all named test targets incl. db_contract on both backends).
-- [ ] Canonical docs updated in-branch (`docs/SURFACES_AND_COMMANDS.md`, `FEATURE_PARITY.md`, `src/workspace/README.md`, and setup docs if surfaced); no doc still calls these knobs inert.
-- [ ] No new god-file growth introduced (new pure logic lives in the `thinclaw-agent` crate, re-exported through the root facade) — coordinated with WS-10 so its decomposition lands after these edits.
+- [x] DP-3 (`dedup_window` WIRE vs ERASE) explicitly resolved with operator sign-off; the chosen path fully implemented across all five persistence/writer sites with no partial drift.
+- [x] Heartbeat `target` ("none"/"chat"/channel) and `include_reasoning` are honored end-to-end (config → action → execution → worker output), verified by a manual heartbeat tick and unit tests on `heartbeat_job_metadata`.
+- [x] Signed webhook bodies reach the triggered routine's prompt/context (capped, delimited); `fire_manual` non-webhook callers unaffected.
+- [x] Orphaned `spawn_heartbeat` + `HeartbeatRunner::run` removed (both root and crate); `check_heartbeat` / `/heartbeat` still work; `src/workspace/README.md` no longer references `spawn_heartbeat`.
+- [x] `process_claimed_event` isolates per-event spawn errors (`continue`, accumulated diagnostics) with a regression test; idempotency invariant preserved.
+- [x] Full verification gate green (fmt, clippy `-D warnings` with `--all-targets`, all named test targets incl. db_contract on both backends).
+- [x] Canonical docs updated in-branch (`docs/SURFACES_AND_COMMANDS.md`, `FEATURE_PARITY.md`, `src/workspace/README.md`, and setup docs if surfaced); no doc still calls these knobs inert.
+- [x] No new god-file growth introduced (new pure logic lives in the `thinclaw-agent` crate, re-exported through the root facade) — coordinated with WS-10 so its decomposition lands after these edits.

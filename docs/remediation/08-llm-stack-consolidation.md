@@ -1,6 +1,9 @@
 # WS-08 — LLM Stack Consolidation
 
-> **Status:** Not started · **Priority:** P2 · **Risk:** medium · **Effort:** L
+> **✅ STATUS: DONE. Landed in commit `c5c27e56` (experiments + LLM routing consolidation), merged to `main` via the audit-hardening stack (`1fb29984`, HEAD `bda7a61f`).**
+> This plan is complete; do not execute it. It is retained as an implementation record. All eight tasks (T1–T8) shipped: `SmartRoutingProvider` and `crates/thinclaw-llm/src/smart_routing.rs` are deleted (only historical comments remain); `RoutePlanner` is the sole routing engine; the CheapSplit cascade is executed by the planner-driven runtime path using the shared `crates/thinclaw-llm/src/cascade.rs` heuristic (`response_is_uncertain`) with re-issue in `src/llm/runtime_manager/provider.rs`; streaming `finish_reason` maps real reasons via `finish_reason_for_tool_use(saw_tool_call)` (`rig_adapter.rs:719,1726`); and both dead fields are erased: `SpawnSubagentTool` is now a unit struct (`subagent.rs:64`) and `Reasoning::new` takes only `llm` (`reasoning.rs:564`). The "Current State (verified)" section describes the *pre-remediation* state; `src/llm/runtime_manager.rs` has since been decomposed into the `src/llm/runtime_manager/` directory.
+
+> **Status:** Done (landed) · **Priority:** P2 · **Risk:** medium · **Effort:** L
 > **Depends on:** none · **Blocks:** none (coordinates with WS-10 on shared files — see Scope)
 > **Owns (symbols/files):**
 > - `crates/thinclaw-llm/src/route_planner.rs` (RoutePlanner, RouteDecision, CascadePolicy, plan_cheap_split)
@@ -30,6 +33,8 @@ ThinClaw's headline LLM capability is intelligent, cost-aware multi-provider rou
 - The subagent *dispatch* path (`SubagentExecutor`, dispatcher interception) — WS-08 only deletes the dead field on the tool, not the spawn pipeline. Confirm with WS-10 before touching `reasoning.rs` (see Decision Points).
 
 ## Current State (verified)
+
+> **Historical (pre-remediation) snapshot.** The dual-engine stacking, computed-but-dropped cascade, always-`Stop` streaming finish reason, and the two dead fields below were all resolved by the landed WS-08 work. Kept for context. Anchors here are stale: `crates/thinclaw-llm/src/smart_routing.rs` no longer exists, and `src/llm/runtime_manager.rs` is now the `src/llm/runtime_manager/` directory (cascade execution lives in `provider.rs`).
 
 **Dual engines both live, and stacked in CheapSplit mode:**
 - `RoutePlanner` is the canonical Phase-6b engine. Its module header (`crates/thinclaw-llm/src/route_planner.rs:1–11`) explicitly claims it "Replaces the dual-path routing logic (SmartRoutingProvider + RoutingPolicy)". It is constructed in the runtime at `src/llm/runtime_manager.rs:972` and invoked at `src/llm/runtime_manager.rs:606` (interactive) and `:1877` (a second `plan()` call). **Wired.**
@@ -72,49 +77,49 @@ ThinClaw's headline LLM capability is intelligent, cost-aware multi-provider rou
 
 ## Tasks
 
-- [ ] **T1: Surface the cascade decision through the runtime route resolution.**
+- [x] **T1: Surface the cascade decision through the runtime route resolution.**
   - **Files:** `src/llm/runtime_manager.rs` (`ResolvedRoute` struct ~139–142; `resolve_route` RoutePlanner block ~605–644).
   - **Change:** Add a `cascade: CascadePolicy` field to `ResolvedRoute` (import the type from `crate::llm::route_planner`). In the RoutePlanner block, set `cascade: decision.cascade` on the returned `ResolvedRoute`; default `CascadePolicy::None` on all other return sites (override path ~552, kill-switch path ~574, fallback ~652). Do **not** restructure the function — additive field only (WS-10 owns decomposition).
   - **Acceptance:** `ResolvedRoute` carries the planner's cascade decision; all existing callers still compile; no behavior change yet (cascade not acted on until T2).
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw && cargo clippy -p thinclaw --all-targets -- -D warnings`
 
-- [ ] **T2: Execute inspect-and-escalate in the planner-driven completion path.**
+- [x] **T2: Execute inspect-and-escalate in the planner-driven completion path.**
   - **Files:** `src/llm/runtime_manager.rs` (the `RuntimeLlmProvider::complete` path that uses `resolve_route` — locate via the `complete`/`complete_with_tools` impls; the non-streaming `complete` is the cascade target since the decorator only cascaded on `complete()`, not `complete_with_tools` per `smart_routing.rs:215–227`). Reuse logic from `crates/thinclaw-llm/src/smart_routing.rs:111–143` (`response_is_uncertain`).
   - **Change:** When `resolved.cascade == CascadePolicy::InspectAndEscalate` and the resolved target is the cheap lane: run the cheap completion, inspect with a moved/shared `response_is_uncertain`, and on uncertainty re-issue against the primary chain (resolve "primary" via `provider_chain_for_targets`). Move `response_is_uncertain` into a shared location in `crates/thinclaw-llm` (a small `cascade.rs` module or pub(crate) fn on the planner) — do **not** leave it stranded in `smart_routing.rs` since that file is deleted in T4. Emit a tracing event mirroring `smart_routing.rs:189–193` and record an escalation counter if one is available; otherwise log only.
   - **Acceptance:** With `routing_mode = CheapSplit`, `smart_routing_cascade = true`, and a Moderate-complexity turn whose cheap response trips `response_is_uncertain`, the runtime re-issues against primary. A unit test asserts escalation fires for an uncertain cheap response and does not fire for a confident one.
   - **Effort:** M
   - **Verification:** `cargo test -p thinclaw-llm cascade` and `cargo test -p thinclaw runtime` (add a focused test); `cargo clippy -p thinclaw-llm --all-targets -- -D warnings`
 
-- [ ] **T3: Make the planner own the cheap/primary classification (stop double-routing).**
+- [x] **T3: Make the planner own the cheap/primary classification (stop double-routing).**
   - **Files:** `crates/thinclaw-llm/src/provider_factory.rs` (smart-routing wiring ~947–997).
   - **Change:** Stop wrapping the chain in `SmartRoutingProvider`. Keep building `cheap_llm` (still returned as the second tuple element and used widely — see `src/app.rs:483`, `runtime_manager.rs:970`), but the `if smart_routing_enabled { Arc::new(SmartRoutingProvider::new(...)) }` block (`:981–994`) becomes just `llm` (no decorator). The classification + cascade now live exclusively in the planner path (T1/T2). Update the doc comment at `:854–862` (drop step 4 "SmartRoutingProvider").
   - **Acceptance:** `build_provider_chain` no longer constructs `SmartRoutingProvider`; `cheap_llm` is still returned; CheapSplit routing now flows solely through `RoutePlanner` → cheap/primary target → `provider_chain_for_targets`. No stacked re-classification.
   - **Effort:** M
   - **Verification:** `cargo build -p thinclaw-llm`; grep shows zero `SmartRoutingProvider::new` callers remain in non-test code: `rg -n "SmartRoutingProvider::new" --type rust src/ crates/`
 
-- [ ] **T4: Delete `SmartRoutingProvider` and its exports.**
+- [x] **T4: Delete `SmartRoutingProvider` and its exports.**
   - **Files:** `crates/thinclaw-llm/src/smart_routing.rs` (struct + impl `:55–...`, stats `:24–49`); `crates/thinclaw-llm/src/lib.rs:28` (`pub use smart_routing::SmartRoutingProvider`); `src/llm/mod.rs:73` (re-export). Keep `SmartRoutingConfig`/`TaskComplexity`/`classify_message` (owned by `thinclaw-llm-core::smart_routing` and re-exported — the planner depends on them via `route_planner.rs:18`); only the *provider decorator* and its stats/snapshot types are removed.
   - **Change:** Remove `SmartRoutingProvider`, `SmartRoutingStats`, `SmartRoutingSnapshot`, and the now-orphaned `response_is_uncertain` (moved in T2). Fix the two `pub use` lines to drop the decorator while preserving the still-used config/classifier re-exports. Update `provider_factory.rs:20` import.
   - **Acceptance:** `SmartRoutingProvider` no longer exists; `SmartRoutingConfig`/`TaskComplexity`/`classify_message` still resolve for the planner; workspace compiles.
   - **Effort:** S
   - **Verification:** `rg -n "SmartRoutingProvider|SmartRoutingSnapshot|SmartRoutingStats" --type rust` returns no definitions/uses; `cargo build --workspace`
 
-- [ ] **T5: Fix streaming `finish_reason` to map real reasons.**
+- [x] **T5: Fix streaming `finish_reason` to map real reasons.**
   - **Files:** `crates/thinclaw-llm/src/rig_adapter.rs` (streaming fn ~1490–1631).
   - **Change:** Add `let mut saw_tool_call = false;` before the `stream!` block (near `:1524`). Set `saw_tool_call = true;` in the `StreamedAssistantContent::ToolCall` arm (`:1545`) and the `ToolCallDelta` arm (`:1561`). In the `Final` arm `Done` chunk (`:1606–1613`), replace `finish_reason: FinishReason::Stop` with `finish_reason: if saw_tool_call { FinishReason::ToolUse } else { FinishReason::Stop }` — mirroring the non-streaming derivation at `:612–616`. (If the upstream `resp` exposes a provider-native finish reason, prefer mapping that and fall back to the `saw_tool_call` heuristic; otherwise the heuristic is sufficient and matches the existing non-streaming behavior.)
   - **Acceptance:** A streaming completion that emits tool-call chunks ends with `FinishReason::ToolUse`; a plain text stream ends with `Stop`. Add/extend a streaming test alongside `rig_adapter.rs:1960`/`:1972` style assertions.
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw-llm rig_adapter` (or the streaming-specific test); `cargo clippy -p thinclaw-llm --all-targets -- -D warnings`
 
-- [ ] **T6: Erase `SpawnSubagentTool.executor` (dead field).**
+- [x] **T6: Erase `SpawnSubagentTool.executor` (dead field).**
   - **Files:** `crates/thinclaw-tools/src/builtin/subagent.rs:60–68`; call site `src/main.rs:1702`.
   - **Change:** Remove the `executor` field, drop the `#[allow(dead_code)]`, and make `SpawnSubagentTool::new()` take no args (or keep a unit struct). Update `src/main.rs:1702` to `SpawnSubagentTool::new()` and drop the now-unused `Arc::clone(&subagent_port)` only if it has no other consumer at that site (verify `subagent_port` is still used by List/Cancel tools nearby before deleting the clone). Leave `SubagentToolPort`, `ListSubagentsTool`, `CancelSubagentTool` untouched (their executor is live).
   - **Acceptance:** `SpawnSubagentTool` has no `executor`; `execute()` unchanged (still emits the action packet); `subagent_port` still wired to List/Cancel tools.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw-tools && cargo build -p thinclaw`; `rg -n "SpawnSubagentTool" --type rust` shows the new signature everywhere.
 
-- [ ] **T7: Erase `Reasoning.safety` (dead field) — coordinate with WS-10 (DP-3).**
+- [x] **T7: Erase `Reasoning.safety` (dead field) — coordinate with WS-10 (DP-3).**
   - **Files:** `src/llm/reasoning.rs` (field `:492–493`, constructor `:556–575`, fork propagation `:600`, ~17 `SafetyLayer::new` construction sites in tests `:2207+`); import `:21`.
   - **Change:** Remove the `safety` field and its `Arc<SafetyLayer>` constructor parameter; drop `:600` propagation; update `Reasoning::new` to `new(llm: Arc<dyn LlmProvider>)`; update every caller (production + the ~17 test constructions). Drop the `SafetyLayer` import at `:21` if `sanitize_prompt_bound_content` is imported separately (it is). **Do not** touch `crates/thinclaw-safety` (that is separate WS-11 dead-`src/safety` cleanup territory) — only remove the unused dependency edge from `Reasoning`.
   - **Acceptance:** `Reasoning` no longer references `SafetyLayer`; sanitization via `sanitize_prompt_bound_content` is unchanged; all callers updated.
@@ -122,7 +127,7 @@ ThinClaw's headline LLM capability is intelligent, cost-aware multi-provider rou
   - **Verification:** `cargo build -p thinclaw && cargo test -p thinclaw reasoning`; `rg -n "self\.safety|Reasoning::new" --type rust src/llm/reasoning.rs`
   - **Sequencing note:** If WS-10 is decomposing `reasoning.rs` this cycle, fold this one-line field removal into their split to avoid a merge collision; otherwise WS-08 executes it directly.
 
-- [ ] **T8: Document the routing-engine decision and update operator docs.**
+- [x] **T8: Document the routing-engine decision and update operator docs.**
   - **Files:** `docs/LLM_PROVIDERS.md` (routing section; `SMART_ROUTING_CASCADE` table row `:525`); the `route_planner.rs:1–11` header (drop the "Replaces … (SmartRoutingProvider…)" past-tense if the decorator is now actually gone — make it present-tense "is the single routing engine"). Check `FEATURE_PARITY.md` for any SmartRoutingProvider/routing-engine claim and update if present.
   - **Change:** State that `RoutePlanner` is the single routing engine, that cascade is now executed by the planner-driven runtime path, and that `SMART_ROUTING_CASCADE` still controls inspect-and-escalate. Remove any doc text implying a separate `SmartRoutingProvider` decorator.
   - **Acceptance:** Docs match code; no reference to a live `SmartRoutingProvider` decorator remains; `SMART_ROUTING_CASCADE` semantics documented against the new path.
@@ -170,11 +175,11 @@ ThinClaw's headline LLM capability is intelligent, cost-aware multi-provider rou
 
 ## Definition of Done
 
-- [ ] `RoutePlanner` is the sole routing engine; `SmartRoutingProvider` (decorator + stats + snapshot) is deleted and exports removed (T3, T4).
-- [ ] CheapSplit cascade decided by the planner is actually executed in the runtime completion path (T1, T2) — escalation fires on uncertain cheap responses and is covered by a unit test.
-- [ ] No stacked double-classification remains (`build_provider_chain` no longer wraps `SmartRoutingProvider`; grep clean).
-- [ ] Streaming `finish_reason` reports `ToolUse` when tool-call chunks were emitted, `Stop` otherwise, with test coverage (T5).
-- [ ] `SpawnSubagentTool.executor` and `Reasoning.safety` dead fields removed; all call sites updated (T6, T7).
-- [ ] DP-1, DP-2, DP-3 resolved and recorded; routing-engine decision documented in `docs/LLM_PROVIDERS.md` and the `route_planner.rs` header; `FEATURE_PARITY.md` updated if it referenced the old engine (T8).
-- [ ] `cargo fmt` clean; `cargo clippy --all --benches --tests --examples --all-features` clean (`-D warnings`); `cargo test -p thinclaw-llm -p thinclaw-tools -p thinclaw` green.
-- [ ] No structural edits leaked into `src/llm/runtime_manager.rs` beyond the additive `ResolvedRoute.cascade` field and escalation branch (WS-10 ownership respected).
+- [x] `RoutePlanner` is the sole routing engine; `SmartRoutingProvider` (decorator + stats + snapshot) is deleted and exports removed (T3, T4).
+- [x] CheapSplit cascade decided by the planner is actually executed in the runtime completion path (T1, T2) — escalation fires on uncertain cheap responses and is covered by a unit test.
+- [x] No stacked double-classification remains (`build_provider_chain` no longer wraps `SmartRoutingProvider`; grep clean).
+- [x] Streaming `finish_reason` reports `ToolUse` when tool-call chunks were emitted, `Stop` otherwise, with test coverage (T5).
+- [x] `SpawnSubagentTool.executor` and `Reasoning.safety` dead fields removed; all call sites updated (T6, T7).
+- [x] DP-1, DP-2, DP-3 resolved and recorded; routing-engine decision documented in `docs/LLM_PROVIDERS.md` and the `route_planner.rs` header; `FEATURE_PARITY.md` updated if it referenced the old engine (T8).
+- [x] `cargo fmt` clean; `cargo clippy --all --benches --tests --examples --all-features` clean (`-D warnings`); `cargo test -p thinclaw-llm -p thinclaw-tools -p thinclaw` green.
+- [x] No structural edits leaked into `src/llm/runtime_manager.rs` beyond the additive `ResolvedRoute.cascade` field and escalation branch (WS-10 ownership respected).

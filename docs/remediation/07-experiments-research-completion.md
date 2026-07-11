@@ -1,6 +1,9 @@
 # WS-07 — Experiments / Research Platform Completion
 
-> **Status:** Not started · **Priority:** P2 · **Risk:** med · **Effort:** L
+> **✅ STATUS: DONE. Landed in commit `c5c27e56` (experiments + LLM routing consolidation), merged to `main` via the audit-hardening stack (`1fb29984`, HEAD `bda7a61f`).**
+> This plan is complete; do not execute it. It is retained as an implementation record. The three operability gaps closed: the artifact-retention reaper is a real spawned maintenance loop threading `retention_days` (`src/api/experiments/controller.rs`, spawned from `src/async_main/runtime_maintenance.rs`); the durable `ArtifactStore` port + `LocalArtifactStore` exist (`src/experiments/artifact_store.rs`, host-local, no desktop-package dependency) and are used on the lease ingest path; and the RunPod credit≈USD cost basis is surfaced on the headline `cost_summary` (`src/api/experiments/execution.rs`). **One item stays deferred:** DP-1 Option B (the optional `opendal`/S3 object-store artifact backend) was intentionally NOT built (see DP-1 below). The "Current State (verified)" section describes the *pre-remediation* state; the `src/api/experiments.rs` monolith it references has since been decomposed into `src/api/experiments/` (`campaign.rs`, `controller.rs`, `crud.rs`, `execution.rs`, `git.rs`, `leases.rs`, `mod.rs`, `subagents.rs`, `tests.rs`, `types.rs`).
+
+> **Status:** Done (landed; opendal object-store backend deferred; see DP-1) · **Priority:** P2 · **Risk:** med · **Effort:** L
 > **Depends on:** none · **Blocks:** WS-10 (god-file split inherits this WS's error-taxonomy groundwork), WS-13 (flaky-E2E root-cause shares the worktree-teardown anchor)
 > **Owns (symbols/files):**
 > - `src/experiments/runner.rs` (remote runner job loop, artifact upload)
@@ -32,6 +35,8 @@ The experiments platform is a genuine, end-to-end autonomous-research engine (pl
 
 ## Current State (verified)
 
+> **Historical (pre-remediation) snapshot.** The "Half-wired (the WS-07 gaps)" items below were all closed by the landed WS-07 work. Kept for context. This section predates the WS-10 decomposition: `src/api/experiments.rs` no longer exists as a monolith; it is now the `src/api/experiments/` directory (the reaper lives in `controller.rs`, lease/artifact ingest in `leases.rs`, cost surfacing in `execution.rs`), so the `experiments.rs:NNNN` anchors below no longer resolve.
+
 **Wired / production:**
 - `ExperimentsConfig` is fully threaded: defined `crates/thinclaw-config/src/experiments.rs:9-16`, default `default_artifact_retention_days: 30` (`:23`), env override `EXPERIMENTS_ARTIFACT_RETENTION_DAYS` (`:39-42`), re-exported `src/config/experiments.rs:3`, resolved into `Config` at `src/config/mod.rs:294`, field at `src/config/mod.rs:146`.
 - The controller reconcile loop exists and is spawned only when experiments are enabled: `start_experiment_controller_loop` (`src/api/experiments.rs:762`) on a `DEFAULT_EXPERIMENT_CONTROLLER_TICK_SECS = 30` interval (`:83`); spawned at `src/main.rs:1820-1827` (gated by `config.experiments.enabled`). It is spawned with **only `Arc<dyn Database>`** — no config is threaded in.
@@ -58,6 +63,7 @@ The finding says "reuse desktop cloud providers / object store pattern." But `ap
 - **Option A (recommended): host-side durable copy in `lease_artifact`.** The runner posts the artifact bytes (or the gateway pulls from a runner-served path before completion); the *gateway host* writes them under a durable, operator-controlled root (e.g. `<workspace>/experiments/artifacts/<trial_id>/<artifact_id>`), then records `fetchable: true` + the durable path. This keeps all storage logic on the gateway side where the encrypted secrets and config already live, needs no new dependency, and works for the default (local) deployment. RunPod/Vast pods can `curl` the artifact bytes to the lease `/artifact` endpoint as a multipart/base64 body instead of a path. **This is the realize-the-vision path with the least coupling.**
 - **Option B: optional S3-compatible object store via `opendal`.** `s3.rs` already uses `opendal::Operator` (`apps/desktop/backend/src/cloud/providers/s3.rs:7-8`). Add an `opendal`-backed durable store *in the root or a small `thinclaw-experiments`-adjacent crate* (NOT importing the desktop crate) behind an `ExperimentsConfig` opt-in (`durable_artifact_store_url`). Heavier; defer to a follow-up.
 - **Recommendation: ship Option A now** (host-side durable copy + `fetchable: true`), structured behind a small `ArtifactStore` port so Option B can slot in later without touching call sites. Do **not** feature-gate the capability off — durability is core to trusting unattended runs.
+- **Outcome (landed):** Option A shipped: the `ArtifactStore` trait + host-local `LocalArtifactStore` live in `src/experiments/artifact_store.rs`, and the module comment notes that an `opendal`/S3 object-store backend "can slot in behind this same port later." **Option B (the `opendal` object-store backend) is deliberately DEFERRED** and remains open: it pulls a heavy dependency and needs a `cargo-deny` review before adoption, so it was not built. The `ArtifactStore` port makes adding it later a non-breaking change.
 
 **DP-2 — Reaper home: controller loop vs dedicated task. (BUILD.)**
 - **Option A (recommended): a dedicated reaper loop** mirroring `spawn_pricing_sync` (`src/llm/pricing_sync.rs:234`) and the existing controller loop. Spawn it next to the controller in `src/main.rs:1820-1827`, also gated on `config.experiments.enabled`, threading `config.experiments.default_artifact_retention_days`. A daily-ish interval (not the 30s controller tick) is correct for retention.
@@ -72,49 +78,49 @@ The assumption is already computed and stored in metadata. The fix is to *propag
 
 ## Tasks
 
-- [ ] **T1: Add the artifact-retention reaper loop**
+- [x] **T1: Add the artifact-retention reaper loop**
   - **Files:** `src/api/experiments.rs` (add `start_experiment_artifact_reaper_loop` + helper, near the controller loop ~`:762`); `src/main.rs` (spawn next to `:1820-1827`).
   - **Change:** New `pub async fn start_experiment_artifact_reaper_loop(store: Arc<dyn Database>, retention_days: u32)`. On a daily interval (constant `DEFAULT_ARTIFACT_REAPER_TICK_SECS = 86_400`, tick-first like the controller), call a `reap_expired_artifacts_once(&store, retention_days)` that: lists campaigns → trials (`list_experiment_trials`) → artifacts (`list_experiment_artifacts`); for each artifact older than `now - retention_days` (`ExperimentArtifactRef.created_at`), best-effort delete the local file when `!fetchable` *and* the path is under the experiments artifact root, then re-persist the surviving set via `replace_experiment_artifacts`. Treat `retention_days == 0` as "disabled" (skip). In `main.rs`, when `config.experiments.enabled`, `tokio::spawn(start_experiment_artifact_reaper_loop(Arc::clone(&db), config.experiments.default_artifact_retention_days))` with a `tracing::info!` mirroring the controller log.
   - **Acceptance:** Unit test `reap_expired_artifacts_removes_only_expired` using `crate::testing::test_db()` (pattern: existing `#[tokio::test]` tests ~`:4581`+) seeds two artifacts (one `created_at` 40d ago, one fresh) with a 30d window and asserts only the stale one is pruned from `list_experiment_artifacts`. A `retention_days = 0` case prunes nothing.
   - **Effort:** M
   - **Verification:** `cargo test -p thinclaw --lib experiments::tests::reap` (or the crate the API file compiles in — `src/api/experiments.rs` is in the root `thinclaw` package); `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T2: Define a durable `ArtifactStore` port + host-local implementation**
+- [x] **T2: Define a durable `ArtifactStore` port + host-local implementation**
   - **Files:** new `src/experiments/artifact_store.rs` (declare in `src/experiments/mod.rs` façade with `pub mod artifact_store;` + a narrow `pub use`).
   - **Change:** `pub trait ArtifactStore: Send + Sync { async fn put(&self, trial_id: Uuid, artifact_id: Uuid, kind: &str, bytes: &[u8]) -> anyhow::Result<String /* durable uri/path */>; }` plus `LocalArtifactStore { root: PathBuf }` writing under `<root>/<trial_id>/<artifact_id>` and returning the absolute path. Mirror the shape of `apps/desktop/backend/src/cloud/provider.rs:178` (`trait CloudProvider::put`) but own it in this crate so there is **no** dependency on the desktop package. Keep it minimal (no list/delete — the reaper in T1 handles deletion by path).
   - **Acceptance:** `LocalArtifactStore::put` round-trips bytes to disk and the returned path exists; unit test in the new module.
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw --lib experiments::artifact_store`; `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T3: Make remote-runner artifacts durable (close the dead-reference gap)**
+- [x] **T3: Make remote-runner artifacts durable (close the dead-reference gap)**
   - **Files:** `src/experiments/runner.rs` (post artifact bytes, not just paths); `src/api/experiments.rs` `lease_artifact` (`:2690-2725`); `crates/thinclaw-experiments/src/lib.rs` `ExperimentRunnerArtifactUpload` (`:727-733`).
   - **Change:** Extend `ExperimentRunnerArtifactUpload` with an optional inline payload (`#[serde(default, skip_serializing_if = "Option::is_none")] pub content_base64: Option<String>`). In `runner.rs`, for `run_log`/`summary_json`/failure-log uploads (`:154-258`), read the file and attach base64 content; keep `uri_or_local_path` as the pod-local breadcrumb but stop relying on it. In `lease_artifact`, when `content_base64` is present, decode and call `ArtifactStore::put` (host-local from T2, rooted under the campaign workspace e.g. `<workspace>/.thinclaw/experiments/artifacts`), then store the **durable** path with `fetchable: true`; when absent, preserve today's behavior (`fetchable` as posted). Update the completion manifest paths (`:197-202`) note to reference durable artifacts where available.
   - **Acceptance:** Extend an existing lease E2E (the non-flaky `launch_campaign_baseline_runs_local_docker_trial_end_to_end` family, `:4581`) or add a focused unit test asserting that an upload with `content_base64` produces an `ExperimentArtifactRef { fetchable: true, .. }` whose path exists on disk. Existing remote-runner tests stay green.
   - **Effort:** L
   - **Verification:** `cargo test -p thinclaw --lib experiments`; `cargo test -p thinclaw-experiments`; `cargo clippy --all-targets -- -D warnings`. (Feature matrix: touches default/desktop/full where experiments compile; experiments code is not in `edge`/`light` — confirm with `cargo check --no-default-features --features edge` still green since these paths gate on `config.experiments.enabled` but compile unconditionally in the root crate.)
 
-- [ ] **T4: Surface the RunPod credit≈USD assumption on the headline cost surface**
+- [x] **T4: Surface the RunPod credit≈USD assumption on the headline cost surface**
   - **Files:** `src/api/experiments.rs` finalization block (`:2925-2948`); optionally `crates/thinclaw-experiments/src/lib.rs` `RunnerCostBreakdown`/`runner_cost_breakdown` (`:2486-2595`).
   - **Change:** Propagate `estimated`, `native_currency`, and `normalization` from `runner_cost.details` (and `provider_metadata_overlay`) into the campaign-level `cost_summary` JSON (`:2941-2947`) — e.g. add `"runner_cost_basis": { "estimated": <bool>, "native_currency": <str|null>, "normalization": <str|null> }`. The data already exists in `runner_cost.details` (`crates/thinclaw-experiments/src/lib.rs:2564-2572`); no recomputation needed. Ensure the `cost_breakdown.runner` block already carries it (it does — just lift the key fields up to `cost_summary`).
   - **Acceptance:** A finalization unit test asserts that after a RunPod trial completes, the campaign `metadata.cost_summary` contains `normalization: "assumed_1_credit_equals_1_usd"` (or `estimated`/`native_currency`). Existing `runpod_cost_is_normalized_from_credits` (`:3401`) stays green.
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw-experiments`; `cargo test -p thinclaw --lib experiments`; `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T5: Low-risk error-taxonomy fixes (clear-cut subset only)**
+- [x] **T5: Low-risk error-taxonomy fixes (clear-cut subset only)**
   - **Files:** `src/api/experiments.rs` (the not-found / validation `map_err(|e| ApiError::Internal(...))` sites only).
   - **Change:** Re-classify the unambiguous cases: lease/trial/campaign "not found" lookups that currently flatten to `Internal` → the existing not-found path / message helpers already imported (`experiment_lease_not_found_message`, `experiment_campaign_not_found_message`, `:38-46`); caller-input validation → `ApiError::InvalidInput`. Leave genuine DB-failure mappings as `Internal`. Do **not** touch the reconcile-controller internals beyond these point fixes (WS-10 owns the restructure).
   - **Acceptance:** No behavioral regression in existing experiments tests; `error_code()` for the touched paths now returns the precise code (spot-checked in a test or by reading the changed sites). Net `map_err(... Internal ...)` count drops only for the re-classified sites; do not mass-rewrite.
   - **Effort:** S
   - **Verification:** `cargo test -p thinclaw --lib experiments`; `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **T6: Annotate the worktree-teardown race for WS-13 (no fix here)**
+- [x] **T6: Annotate the worktree-teardown race for WS-13 (no fix here)**
   - **Files:** `src/api/experiments.rs` `prepare_campaign_worktree` (`:3290-3317`) — comment only.
   - **Change:** Add a `// WS-13:` comment documenting the suspected race (cleanup `remove_dir_all` vs next reconcile's `worktree remove`/`prune`/`create_dir_all`) and the observed `Internal("No such file or directory (os error 2)")`. Do not change behavior — root-cause + de-quarantine is WS-13.
   - **Acceptance:** Comment present; no logic change; quarantined test still `#[ignore]`.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw`; `cargo fmt --check`.
 
-- [ ] **T7: Update docs**
+- [x] **T7: Update docs**
   - **Files:** `docs/RESEARCH_AND_EXPERIMENTS.md` (retention reaper, durable remote artifacts, the credit≈USD cost basis note); check `FEATURE_PARITY.md` for a coordinated status note per CLAUDE.md "Common Update Triggers" (experiments/runner change).
   - **Change:** Document that `default_artifact_retention_days` is now enforced by a reaper; that remote-runner artifacts are uploaded to durable host storage (`fetchable: true`); and that RunPod cost is normalized from credits under a `1 credit ≈ 1 USD` assumption now surfaced in `cost_summary`. Keep it thin per the documentation rules.
   - **Acceptance:** Docs reflect shipped behavior; no stale "no-op" implication remains.
@@ -163,12 +169,12 @@ The assumption is already computed and stored in metadata. The fix is to *propag
 
 ## Definition of Done
 
-- [ ] Reaper enforces `default_artifact_retention_days`: stale `experiment_artifact_refs` are pruned on schedule, with a passing unit test (incl. `retention_days = 0` = disabled) and spawn gated on `config.experiments.enabled`.
-- [ ] Remote-runner `run_log`/`summary_json`/failure-log artifacts land in durable host storage with `fetchable: true` and an on-disk path; no `fetchable: false` pod-local-only references remain on the success path. Test asserts the durable path exists.
-- [ ] `ArtifactStore` port + `LocalArtifactStore` live in `src/experiments/artifact_store.rs`, declared via the `src/experiments/mod.rs` façade, with **no** dependency on the desktop cloud package.
-- [ ] RunPod credit≈USD assumption (`estimated`/`native_currency`/`normalization`) is visible in the campaign `cost_summary` and runner cost `details`; test asserts it.
-- [ ] Clear-cut error-taxonomy mis-classifications in `src/api/experiments.rs` corrected to precise `ApiError` variants; DB-failure `Internal` mappings left intact; no mass rewrite (that is WS-10).
-- [ ] `prepare_campaign_worktree` carries a `// WS-13:` race-mechanism annotation; the quarantined E2E remains `#[ignore]` (de-quarantine owned by WS-13).
-- [ ] `docs/RESEARCH_AND_EXPERIMENTS.md` updated (reaper, durable artifacts, cost basis); `FEATURE_PARITY.md` checked for a coordinated status note.
-- [ ] All four decision points resolved as recorded (DP-1 Option A, DP-2 Option A, DP-3 surface-not-gate, DP-4 small subset).
-- [ ] Verification gate green: `cargo fmt`, `cargo clippy --all ... -D warnings`, `cargo test -p thinclaw-experiments`, `cargo test -p thinclaw --lib experiments`, `cargo check --no-default-features --features edge`, `/ship`.
+- [x] Reaper enforces `default_artifact_retention_days`: stale `experiment_artifact_refs` are pruned on schedule, with a passing unit test (incl. `retention_days = 0` = disabled) and spawn gated on `config.experiments.enabled`.
+- [x] Remote-runner `run_log`/`summary_json`/failure-log artifacts land in durable host storage with `fetchable: true` and an on-disk path; no `fetchable: false` pod-local-only references remain on the success path. Test asserts the durable path exists.
+- [x] `ArtifactStore` port + `LocalArtifactStore` live in `src/experiments/artifact_store.rs`, declared via the `src/experiments/mod.rs` façade, with **no** dependency on the desktop cloud package.
+- [x] RunPod credit≈USD assumption (`estimated`/`native_currency`/`normalization`) is visible in the campaign `cost_summary` and runner cost `details`; test asserts it.
+- [x] Clear-cut error-taxonomy mis-classifications in `src/api/experiments.rs` corrected to precise `ApiError` variants; DB-failure `Internal` mappings left intact; no mass rewrite (that is WS-10).
+- [x] `prepare_campaign_worktree` carries a `// WS-13:` race-mechanism annotation; the quarantined E2E remains `#[ignore]` (de-quarantine owned by WS-13).
+- [x] `docs/RESEARCH_AND_EXPERIMENTS.md` updated (reaper, durable artifacts, cost basis); `FEATURE_PARITY.md` checked for a coordinated status note.
+- [x] All four decision points resolved as recorded (DP-1 Option A, DP-2 Option A, DP-3 surface-not-gate, DP-4 small subset).
+- [x] Verification gate green: `cargo fmt`, `cargo clippy --all ... -D warnings`, `cargo test -p thinclaw-experiments`, `cargo test -p thinclaw --lib experiments`, `cargo check --no-default-features --features edge`, `/ship`.

@@ -1,8 +1,16 @@
 # ThinClaw Remediation — ULTRACODE Execution Playbook
 
-> **Audience:** the operator driving the remediation via ultracode multi-agent Workflows.
+> **STATUS: EXECUTED / HISTORICAL.** This playbook has been carried out. All 13 workstreams (WS-01
+> through WS-13) were implemented and merged into `main` as the audit-hardening stack
+> (`bda7a61f`/`1fb29984`); the god-file decomposition wave (WS-10) and the dead-code sweep (WS-11)
+> both landed (see the commit table in `EXECUTION-SUMMARY.md`). Do not re-execute the waves below:
+> the "kickoff", "decision register", and "verification gate" sections describe work that is already
+> done. It is retained as the record of *how* the remediation was driven. Remaining deliberately
+> deferred follow-ups are tracked in `FOLLOWUPS.md` / `HANDOFF-REMAINING-WORK.md`, not here.
+>
+> **Audience (at execution time):** the operator driving the remediation via ultracode multi-agent Workflows.
 > **Inputs:** `AUDIT-FINDINGS.md` (findings) + `WS-01..WS-13` (per-workstream plans).
-> **This doc:** the *order of operations* — how to drive the 13 workstreams to merged, green code with maximum safe parallelism and minimum rebase churn.
+> **This doc:** the *order of operations* — how the 13 workstreams were driven to merged, green code with maximum safe parallelism and minimum rebase churn.
 >
 > Repo root: `/Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop`. Default/main branch: `main`. Toolchain pinned to Rust 1.92.0.
 
@@ -106,19 +114,24 @@ Key invariants:
 
 ### 2.4 Explicit shared-file conflict register (DO NOT co-edit)
 
-| File | WS that touch it | Sequencing rule |
+> **Post-execution note:** the WS-10 decomposition wave landed, so several files named below are now
+> **directory modules**, not single files. The current paths are given in the File column; the
+> sequencing rules are retained as the historical record of how the additive edits and the splits
+> were ordered.
+
+| File (current path) | WS that touched it | Sequencing rule |
 |------|-----------------|-----------------|
-| `Cargo.lock` (wasmtime line) | WS-01 owns; everyone rebases | WS-01 lead-in lands first; others rebase. |
-| `.github/workflows/ci.yml` | WS-01 (clippy lines 52,121) · WS-13 (test jobs 640-723 + new `nightly.yml`) | Disjoint line ranges; WS-13 only *asserts* WS-01's flag landed. WS-01 merges first. |
-| `src/api/experiments.rs` | WS-07 (additive reaper/upload) · WS-10 (decomposition) | WS-07 lands **first** (additive); WS-10 splits after. |
-| `src/llm/runtime_manager.rs` | WS-08 (localized `resolve_route`) · WS-10 (decomposition) | WS-08 lands **first**; WS-10 splits after. |
-| `src/llm/reasoning.rs` | WS-08 (`safety` field erase) · WS-10 (decomposition) | WS-08 owns semantic removal; hand as rider to WS-10 if WS-10 splits it same cycle (WS-08 DP-3). |
-| `src/agent/routine_engine.rs` | WS-09 (named symbols) · WS-10 (decomposition) | WS-09 lands **first**; WS-10 splits after. |
-| `src/agent/agent_loop.rs` | WS-05 (additive `with_builder` block) · WS-10 (decomposition) | WS-05 lands **first**; WS-10 splits after. |
-| `src/extensions/manager.rs` | WS-05 (additive native arms) · WS-10 (decomposition) · WS-11 (deletes `install_bundled_channel_from_artifacts`) | WS-05 → WS-10 → WS-11, in that order. |
+| `Cargo.lock` (wasmtime line) | WS-01 owns; everyone rebases | WS-01 lead-in landed first; others rebased. |
+| `.github/workflows/ci.yml` | WS-01 (clippy) · WS-13 (test jobs + new `nightly.yml`) | Disjoint sections; WS-13 only *asserts* WS-01's flag landed. WS-01 merged first. |
+| `src/api/experiments/` (was `experiments.rs`; now 9 modules) | WS-07 (additive reaper/upload) · WS-10 (decomposition) | WS-07 landed **first** (additive); WS-10 split after. |
+| `src/llm/runtime_manager/` (was `runtime_manager.rs`; now 11 modules) | WS-08 (localized `resolve_route`) · WS-10 (decomposition) | WS-08 landed **first**; WS-10 split after. |
+| `src/llm/reasoning.rs` (still a single file, not decomposed) | WS-08 (`safety` field erase) · WS-10 (deferred split) | WS-08 owned the semantic removal; the reasoning.rs split was not part of the landed wave. |
+| `src/agent/routine_engine.rs` (module file, partially split: `execution.rs`, `tests.rs`) | WS-09 (named symbols) · WS-10 (partial split) | WS-09 landed **first**; WS-10 split some submodules out. |
+| `src/agent/agent_loop/mod.rs` (was `agent_loop.rs`) | WS-05 (additive `with_builder` block) · WS-10 (decomposition) | WS-05 landed **first**; WS-10 split after. |
+| `src/extensions/manager/` (was `manager.rs`; now 8 modules) | WS-05 (additive native arms) · WS-10 (decomposition) · WS-11 (deleted `install_bundled_channel_from_artifacts`) | WS-05 → WS-10 → WS-11, in that order. |
 | `crates/.../web/static/app.js` | WS-06 (additive SSE consumer) | Single owner; additive only. |
-| `tests/db_contract/support.rs` | WS-02 owns · WS-13 read-only | WS-13 does not edit; only gates the CI job. |
-| `channels-src/discord/README.md` | WS-03 (code+reword) · WS-12 (drift) | WS-03 lands the code + reword; WS-12 leaves it alone. |
+| `tests/db_contract/support.rs` | WS-02 owns · WS-13 read-only | WS-13 did not edit; only gated the CI job. |
+| `channels-src/discord/README.md` | WS-03 (code+reword) · WS-12 (drift) | WS-03 landed the code + reword; WS-12 left it alone. |
 | `deny.toml` | WS-01 only (incl. header) | WS-12 must NOT touch (explicitly disclaimed). |
 
 ---

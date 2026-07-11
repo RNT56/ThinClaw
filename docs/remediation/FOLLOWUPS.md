@@ -19,7 +19,7 @@ This pass closed the bulk of the ledger. Dispositions:
 | F-07 | ✅ Done | `app.js` consumes the 5 real repo-project SSE wire events → debounced dashboard refresh. |
 | F-08 | ✅ Done | `notify_tx` threaded WorkerDeps→scheduler→routine dispatch; `target=<channel>` heartbeats broadcast via the agent-loop forwarder. |
 | F-09 | 🟡 Partial | Drift-guard test added for the byte-identical github↔notion tools helpers. Full shared-`include!` extraction remains (Wave-3). |
-| F-10 | ✅ Done | Typed `production_status` added to the channel schema + 16 manifests (3 production / 9 beta) + per-shim READMEs + enforced catalog test. |
+| F-10 | ✅ Done | Typed `production_status` added to the channel schema + 16 manifests (7 production / 9 beta) + per-shim READMEs + enforced catalog test. |
 | F-11 | ✅ Done | `observer` threaded through `AgentDeps` (7 sites incl. desktop embed); emits ToolCallStart/End, LlmResponse, TurnComplete (no-op safe). |
 | F-12 | ✅ Done (docs) | EXTENSION_SYSTEM (panic-isolation + in-process caveat), NETWORK_SECURITY (native-plugin trust boundary), FEATURE_PARITY row. Gateway exposure intentionally NOT added. |
 | F-13 | ⏸️ Deferred | Object-store backend needs the heavy `opendal` dependency; deferred to avoid risking the required `cargo deny check` gate without a dedicated dependency/license review. Port + reaper unchanged. |
@@ -30,6 +30,15 @@ This pass closed the bulk of the ledger. Dispositions:
 | F-18 | ✅ Done | Capture-on-wake wired **and routed into the agent**: the voice-wake runtime is constructed in `build_all` and started/consumed in `main.rs` (where `channels.inject_sender()` exists); a detected utterance is transcribed via `capture_and_transcribe` and injected as an `IncomingMessage` on the synthetic `voice` channel. (Voice *reply/TTS* output channel remains future work.) |
 | F-19 | ✅ Done | `VoiceWakeConfig::from_env()` typed env overlay replaces `::default()`. True keyword model stays documented future work. |
 | Baseline | ✅ Done | `compile_error!` DB-backend guard in `src/lib.rs` locks `edge`/libSQL as the minimum profile. (`schema_divergence` strict-mode seeding needs a live dual-DB run — left to WS-13.) |
+
+---
+
+> **The per-wave sections below are the PRE-RESOLUTION ledger and are superseded by the
+> 2026-06-26 table above.** Their "Remains:" bullets describe work that has since landed;
+> read them as historical context, not open tasks. The **only** items still open are
+> `F-13` (⏸️ deferred — object-store backend) and `F-09` (🟡 partial — full shared-`include!`
+> extraction; the drift-guard test is done). Every other "Remains:" bullet is resolved per
+> the table above.
 
 ## Wave 0 — WS-01 (security)
 
@@ -136,7 +145,7 @@ This pass closed the bulk of the ledger. Dispositions:
 ## Wave 4 — WS-11 voice_wake (now WIRED)
 
 ### F-17 — CI ALSA for the `full` profile
-- `voice` is now in the `full` feature, so the Linux `full` build/check jobs need `libasound2-dev` + `pkg-config` (cpal). Update `.github/workflows/ci.yml` (the "Install Linux all-features packages" step ~:112) to also run for `matrix.name == 'full'`. macOS builds fine (CoreAudio). Out of the implementation lane (CI yaml).
+- ✅ **Resolved-by-reversal (see the 2026-06-26 table).** `voice` is intentionally **not** in the `full` feature (`Cargo.toml:335` — full = light/acp/web-gateway/repl/tunnel/docker-sandbox/browser/nostr), so the Linux `full` jobs do **not** need `libasound2-dev`. CI installs `libasound2-dev` only for the `all-features` leg. Do **not** add ALSA to the `full` CI leg — that would be wrong. (This bullet's original "voice is now in the full feature" premise was false.)
 
 ### F-18 — STT capture-on-wake glue
 - `VoiceWakeRuntime` is constructed + started under `#[cfg(feature="voice")]` + `THINCLAW_VOICE_WAKE`, and `WakeWordDetected` reaches a dispatch seam in `src/app.rs` that currently logs. Remaining: on wake, capture+transcribe the follow-up utterance (reuse `talk_mode.rs`/STT) and route the transcript into the agent dispatcher — needs a dispatcher/session handle threaded into the spawn block.

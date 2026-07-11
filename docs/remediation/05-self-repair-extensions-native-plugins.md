@@ -1,6 +1,9 @@
 # WS-05 — Self-Repair, Extensions & Native-Plugin Pipeline
 
-> **Status:** Not started · **Priority:** P1 · **Risk:** med · **Effort:** L
+> **✅ STATUS: DONE. Landed in commit `daf8f440` (self-repair + observability + native-plugin pipeline), merged to `main` via the audit-hardening stack (`1fb29984`, HEAD `bda7a61f`).**
+> This plan is complete; do not execute it. It is retained as an implementation record. Every task (T1–T10) shipped. The "Current State (verified)" section below describes the *pre-remediation* state and no longer reflects the code. Self-repair `with_builder` is invoked (`src/agent/agent_loop/mod.rs:672`), `create_observer` is wired through `AppBuilder` (`src/app.rs:1717`), `ExtensionKind::NativePlugin` exists (`src/extensions/mod.rs:59`), the health monitor and native activation path are wired (`src/extensions/ext_health_monitor.rs`, `src/extensions/manager/native.rs`), and the orphaned `RepairTask` was erased (zero occurrences in code).
+
+> **Status:** Done (landed) · **Priority:** P1 · **Risk:** med · **Effort:** L
 > **Depends on:** none · **Blocks:** none (coordinates with WS-10 on `extensions/manager.rs` decomposition; WS-11 now defers the `RepairTask` orphan entirely to this WS — see Decision Point 4)
 > **Owns (symbols/files):** `src/agent/self_repair.rs` (the `with_builder` adapter wiring), the self-repair construction block at `src/agent/agent_loop.rs:604-699`, the orphaned `RepairTask` at `crates/thinclaw-agent/src/self_repair.rs:325` (erase-or-consolidate decision), `src/extensions/native.rs`, `src/extensions/ext_health_monitor.rs`, the `ExtensionKind::NativePlugin` addition in `src/extensions/mod.rs:43`, the native-plugin dispatch arms in `src/extensions/manager.rs` (install/auth/activate/list/remove), the native-load call site inside `ExtensionRegistry::register_plugin_manifest_contributions` (`src/extensions/registry.rs:104`), and the observability factory call-through (`src/observability/mod.rs::create_observer` is consumed, not owned, by `src/app.rs`).
 
@@ -21,6 +24,8 @@ ThinClaw's pitch is a self-hosted agent that *heals itself* and *extends itself*
 - Sandboxing posture for `execute_code`/shell used *inside* the builder loop → owned by the safety/sandbox workstream; this WS reuses whatever the builder already enforces.
 
 ## Current State (verified)
+
+> **Historical (pre-remediation) snapshot.** Everything below has since been resolved by the landed WS-05 work. Kept for context on what the workstream fixed. Paths cited here predate the WS-10 decompositions: `src/agent/agent_loop.rs` is now `src/agent/agent_loop/mod.rs`, and `src/extensions/manager.rs` is now the `src/extensions/manager/` directory (`core.rs`, `native.rs`, `lifecycle.rs`, `mcp.rs`, etc.).
 
 **Self-repair tool rebuild — half-wired (adapter built, call site never invokes it):**
 - `DefaultSelfRepair` (crate) exposes `with_builder(builder, tools)` at `crates/thinclaw-agent/src/self_repair.rs:128-136`; when `builder` is `None`, `repair_broken_tool` short-circuits to `RepairResult::ManualRequired` (`crates/thinclaw-agent/src/self_repair.rs:228-233`).
@@ -65,7 +70,7 @@ ThinClaw's pitch is a self-hosted agent that *heals itself* and *extends itself*
 
 ## Tasks
 
-- [ ] **T1: Inject `LlmSoftwareBuilder` into self-repair at construction**
+- [x] **T1: Inject `LlmSoftwareBuilder` into self-repair at construction**
   - **Files:** `src/agent/agent_loop.rs:605-614`; `src/agent/self_repair.rs:53` (remove the `#[allow(dead_code)]` on `with_builder`).
   - **Change:** After `repair = repair.with_store(...)` (agent_loop.rs:612), build a software builder from deps and inject it. Reuse the exact constructor pattern from `src/tools/registry.rs:1068-1072`:
     ```rust
@@ -89,63 +94,64 @@ ThinClaw's pitch is a self-hosted agent that *heals itself* and *extends itself*
   - **Effort:** S
   - **Verification:** `cargo clippy -p thinclaw --all-targets -- -D warnings`; add a unit test in `src/agent/self_repair.rs` `tests` that constructs `DefaultSelfRepair` with a stub `SoftwareBuilder` (returning a successful `BuildResult`) and asserts `repair_broken_tool` yields `RepairResult::Success`. `cargo test -p thinclaw self_repair`.
 
-- [ ] **T2: Guard rebuild cost/loop and document the new autonomy**
+- [x] **T2: Guard rebuild cost/loop and document the new autonomy**
   - **Files:** `src/agent/agent_loop.rs:668-697` (broken-tool repair branch); `docs/EXTENSION_SYSTEM.md` or `src/tools/README.md` (self-repair note).
   - **Change:** Confirm the repair branch already increments attempts (it does, via `repair_broken_tool` → `store.increment_repair_attempts`, crate `self_repair.rs:256`) and that `max_repair_attempts` (config) caps the loop — no infinite rebuild. Add a one-paragraph doc note that automatic tool rebuild is now active and bounded by `max_repair_attempts` + `repair_check_interval`. If `cost_tracker` is absent, the rebuild still runs but is unmetered — note this.
   - **Acceptance:** No new unbounded loop; doc reflects that broken WASM tools are auto-rebuilt. `FEATURE_PARITY.md` self-repair row updated if one exists.
   - **Effort:** S
   - **Verification:** Re-read `crate self_repair.rs:241-247` (attempt cap) to confirm; `cargo test -p thinclaw-agent self_repair`.
 
-- [ ] **T3: Add `ExtensionKind::NativePlugin` and its serialization/DTO siblings**
+- [x] **T3: Add `ExtensionKind::NativePlugin` and its serialization/DTO siblings**
   - **Files:** `src/extensions/mod.rs:43-60` (enum + `Display`); `crates/thinclaw-gateway/src/web/extensions.rs:11-59` (`EXTENSION_KIND_NATIVE_PLUGIN` const, `ExtensionKindHint::NativePlugin`, `parse_extension_kind_hint` arm); `src/tools/builtin/extension_tools.rs:13-17` (`tool_kind_to_root_kind` if a `ToolExtensionKind::NativePlugin` is added — otherwise leave the tool-facing enum unchanged and surface native only via the manager/gateway).
   - **Change:** Add `NativePlugin` to `ExtensionKind` with `#[serde(rename = "native_plugin")]` semantics matching the existing `snake_case` derive; add `Display` arm `=> write!(f, "native_plugin")`; add the gateway string const + hint variant + parse arm. Keep the agent-facing `ToolExtensionKind` (in `thinclaw-tools`) unchanged unless native install via the LLM tool is desired — default to **not** exposing native install to the model (operator-only).
   - **Acceptance:** Workspace compiles with the new variant; all existing `match kind` sites get an arm (see T5). Round-trip `serde` test: `ExtensionKind::NativePlugin` ⇄ `"native_plugin"`.
+  - **Status:** Core `ExtensionKind::NativePlugin` variant, `"native_plugin"` `Display`/serde, and the round-trip test landed (`src/extensions/mod.rs`). The gateway DTO sibling (`EXTENSION_KIND_NATIVE_PLUGIN` const, `ExtensionKindHint::NativePlugin` variant, `parse_extension_kind_hint` arm in `crates/thinclaw-gateway/src/web/extensions.rs`) was **not** implemented — that enum still lists only `McpServer`/`WasmTool`/`WasmChannel`. Left outstanding because native install is operator-only and not surfaced through the gateway hint path.
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw -p thinclaw-gateway`; add a `serde_json` round-trip test next to `src/extensions/mod.rs` tests.
 
-- [ ] **T4: Native-plugin runtime registry + activation submodule (panic isolation, ABI/version checks)**
+- [x] **T4: Native-plugin runtime registry + activation submodule (panic isolation, ABI/version checks)**
   - **Files:** new `src/extensions/manager/native.rs` (or a focused `src/extensions/native_activation.rs` if avoiding a `manager/` dir to not collide with WS-10) — **do not** grow `manager.rs`; `src/extensions/manager.rs:134-218` (add an `RwLock<HashMap<String, Arc<NativePluginRuntime>>>` field `native_plugins` to `ExtensionManager` + init in `new`).
   - **Change:** Implement `activate_native_plugin(&self, name)` that: looks up the manifest + contribution + plugin root, then calls `unsafe { NativePluginRuntime::load(manifest, contribution, plugin_root, &settings) }` (the safety gates run inside `load`). Wrap each `invoke_json` call site in `std::panic::catch_unwind` (the C-ABI boundary can abort/panic) and treat a caught panic as a failed health check, never a host crash. Store the loaded runtime in the new `native_plugins` map keyed by contribution id. ABI version is enforced inside `load` (`native.rs:91` checks `abi`, and the manifest validator checks `abi_version` at `manifest.rs:284`) — assert the call path passes `abi_version` through.
   - **Acceptance:** A signed, allowlisted, hash-matching native manifest activates and `invoke_json` round-trips; an unsigned manifest with `require_plugin_signatures=true` fails activation *before* `libloading`. A plugin that panics in `invoke_json` marks the plugin unhealthy and is contained.
   - **Effort:** L
   - **Verification:** Extend the `native.rs` C-ABI smoke test (`src/extensions/native.rs:412-482`) into a manager-level test that goes through `activate_native_plugin`. `cargo test -p thinclaw native_plugin`. Requires a C compiler (`cc`) on the test host — skip gracefully if absent, mirroring the existing smoke test.
 
-- [ ] **T5: Wire native dispatch arms in `ExtensionManager`**
+- [x] **T5: Wire native dispatch arms in `ExtensionManager`**
   - **Files:** `src/extensions/manager.rs` install (`:575`), authenticate (`:640`), activate (`:659`), list (`:702/753/794`), remove (`:884`), install_from_entry (`:1208`), and the `kind_label` helpers (`:1224, :1764`).
   - **Change:** Add `ExtensionKind::NativePlugin => ...` arms. `activate` delegates to `activate_native_plugin` (T4). `authenticate` returns `auth_result(name, NativePlugin, "none", "no_auth_required")` (native plugins authenticate via signature, not OAuth/token). `install` for native is operator-side file placement into an allowlisted dir — return a clear "native plugins are installed by placing a signed manifest in an allowlisted directory" message rather than a download path (do **not** add a network download for native binaries). `list`/`remove`/`kind_label` get descriptive arms. Keep each arm minimal — this is dispatch, not new behavior (defer structural cleanup to WS-10).
   - **Acceptance:** Every `match kind` in `manager.rs` is exhaustive again; no `_ =>` catch-alls hide native. `tool activate` / gateway activate of a native plugin reaches `activate_native_plugin`.
   - **Effort:** M
   - **Verification:** `cargo build -p thinclaw`; `cargo clippy -p thinclaw --all-targets -- -D warnings` (catches non-exhaustive matches as errors only if `#[non_exhaustive]`; otherwise compiler errors on missing arms confirm coverage).
 
-- [ ] **T6: Startup manifest scan → `register_plugin_manifest_contributions` (the missing entrypoint)**
+- [x] **T6: Startup manifest scan → `register_plugin_manifest_contributions` (the missing entrypoint)**
   - **Files:** `src/app.rs` (extension-manager assembly) calling a new `ExtensionManager::scan_and_register_plugin_manifests(&self, plugins_dir, &settings)`; the call delegates to `ExtensionRegistry::register_plugin_manifest_contributions` (`src/extensions/registry.rs:104`); extend that function so, when `settings.allow_native_plugins` and a native contribution is present, it eagerly invokes the T4 activation (or records it for lazy activation) rather than only listing `native_plugins_available`.
   - **Change:** Add a directory scan over the configured plugin dir(s) (reuse `wasm_tools_dir`/`wasm_channels_dir` siblings or a new `native_plugin_allowlist_dirs` walk), parse each `PluginManifest` (JSON), and call `register_plugin_manifest_contributions`. Gate native activation strictly behind `allow_native_plugins`. This is the single missing link that makes the entire pipeline reachable.
   - **Acceptance:** With `allow_native_plugins=false` (default), native contributions are skipped (existing `native_plugins_skipped` behavior) and nothing loads. With it enabled + a valid signed manifest in an allowlisted dir, the plugin is registered and activatable.
   - **Effort:** M
   - **Verification:** Integration test placing a manifest fixture in a temp dir, constructing an `ExtensionManager` with native settings on/off, asserting registration vs skip. `cargo test -p thinclaw plugin_manifest`.
 
-- [ ] **T7: Wire `ExtensionHealthMonitor` to the native (and optionally WASM) activation path**
+- [x] **T7: Wire `ExtensionHealthMonitor` to the native (and optionally WASM) activation path**
   - **Files:** `src/extensions/ext_health_monitor.rs`; the native activation submodule from T4.
   - **Change:** Instantiate one `ExtensionHealthMonitor` (default config) owned by `ExtensionManager`; `register(name)` on activation; `record_success`/`record_failure` around each `invoke_json` (including caught panics → failure). Expose `summary()` for the existing extension status surface. This removes the dead-code status of the monitor and gives the unsafe native boundary observability.
   - **Acceptance:** Activating a native plugin registers it as `Unknown`; a successful invoke → `Healthy` after `recovery_threshold`; repeated failures/panics → `Unhealthy`. Monitor is no longer constructed only in tests.
   - **Effort:** M
   - **Verification:** `cargo test -p thinclaw ext_health` plus the T4 panic-isolation test asserting an unhealthy transition.
 
-- [ ] **T8: Write the native-plugin SAFETY section in docs**
+- [x] **T8: Write the native-plugin SAFETY section in docs**
   - **Files:** `docs/EXTENSION_SYSTEM.md`; `src/NETWORK_SECURITY.md` (trust-boundary note); `FEATURE_PARITY.md` (native-plugin row).
   - **Change:** Document the unsafe boundary explicitly: (a) signature verification (`require_plugin_signatures` default true, `trusted_manifest_keys`) runs before any `dlopen`; (b) ABI versioning (`NATIVE_PLUGIN_ABI_VERSION`, `CAbiJsonV1`) gates load; (c) allowlist + SHA-256 pin the artifact; (d) panic isolation via `catch_unwind` at every call; (e) default-off (`allow_native_plugins=false`); (f) native plugins run **in-process with full host privileges** — operators must only trust signed, audited binaries. State that native plugins are NOT sandboxed like WASM tools (this is the deliberate trade for native performance) and align with CLAUDE.md's "MCP servers are operator-trusted" framing.
   - **Acceptance:** Docs state every gate and the in-process-privilege caveat; no doc claims native plugins are sandboxed.
   - **Effort:** S
   - **Verification:** Doc review against `src/extensions/native.rs` gates; cross-check `CRATE_OWNERSHIP.md`/CLAUDE.md repo-shape notes still accurate (extensions stay root-owned).
 
-- [ ] **T9: Wire `create_observer` through `AppBuilder`**
+- [x] **T9: Wire `create_observer` through `AppBuilder`**
   - **Files:** `src/app.rs` (`AppBuilder` build flow, near where `Config` is consumed); a storage slot for `Arc<dyn Observer>` (new field on the runtime/app or `AgentDeps` if events should flow into the agent loop).
   - **Change:** Call `let observer = crate::observability::create_observer(&config.observability);` during build, store it as `Arc<dyn Observer>` (change `create_observer` return type to `Arc<dyn Observer>` *only if* a shared owner is needed — otherwise keep `Box` and wrap). Hold it on the app/runtime so it is at minimum constructed and reachable; if event emission sites are out of scope, at least record one startup `ObserverEvent` so the `"log"` backend is observably active.
   - **Acceptance:** With `OBSERVABILITY_BACKEND=log`, startup emits at least one structured event via `LogObserver`; with `none`, zero overhead. `create_observer` has a production caller; the wizard choice has an effect.
   - **Effort:** S
   - **Verification:** `RUST_LOG=thinclaw=debug OBSERVABILITY_BACKEND=log cargo run` shows the log-observer event; `cargo test -p thinclaw observability`. Confirm `cargo build --no-default-features --features edge` still green (observer must not pull desktop-only deps).
 
-- [ ] **T10: Resolve the orphaned `RepairTask` (ERASE-or-consolidate) — deletes-code → sign-off**
+- [x] **T10: Resolve the orphaned `RepairTask` (ERASE-or-consolidate) — deletes-code → sign-off**
   - **Files:** `crates/thinclaw-agent/src/self_repair.rs:325-388` (`RepairTask` + any test-only constructors); cross-check the inline loop body at `src/agent/agent_loop.rs:617-699`.
   - **Change:** Implements Decision Point 4 after T1 lands (T1 makes the inline loop the wired authority). First **read** `RepairTask` to confirm it is a drifted duplicate with no non-test caller. **ERASE (recommended):** delete `RepairTask` and its test-only constructors; ensure no `pub use` re-export dangles. **CONSOLIDATE (only if reading shows `RepairTask` is the better-factored home):** move the inline `agent_loop.rs:617-699` logic onto `RepairTask` and call it from the loop. Do not leave both the inline loop and `RepairTask` present. Because this removes a code path either way, it requires **sign-off** before deletion.
   - **Acceptance:** Exactly one self-repair loop home remains; no `#[allow(dead_code)]`/orphan-symbol warning for `RepairTask`; grep confirms no surviving non-test references to a deleted symbol. AUDIT-FINDINGS §6 `RepairTask` item is resolved.
@@ -196,13 +202,13 @@ ThinClaw's pitch is a self-hosted agent that *heals itself* and *extends itself*
 
 ## Definition of Done
 
-- [ ] T1: `DefaultSelfRepair::with_builder` is invoked at `agent_loop.rs:605`; `#[allow(dead_code)]` removed from `src/agent/self_repair.rs:53`; a test proves `repair_broken_tool` returns `Success` with a builder injected.
-- [ ] T2: broken-tool auto-rebuild is bounded by `max_repair_attempts`; self-repair docs updated.
-- [ ] T10: orphaned `RepairTask` resolved (erased as drifted duplicate, or consolidated as the loop home) with sign-off; exactly one self-repair loop home remains; AUDIT-FINDINGS §6 item closed.
-- [ ] T3: `ExtensionKind::NativePlugin` + gateway `ExtensionKindHint::NativePlugin` + `"native_plugin"` const exist with a serde round-trip test.
-- [ ] T4–T7: native plugins can be scanned, registered (gated by `allow_native_plugins`), activated via `NativePluginRuntime::load`, invoked with panic isolation, and health-tracked; `ExtensionHealthMonitor` and `NativePluginRuntime` have production callers; all `match kind` sites exhaustive.
-- [ ] T8: native-plugin SAFETY section documents signature/ABI/allowlist/SHA-256/panic-isolation/default-off and the in-process-privilege (non-sandboxed) caveat.
-- [ ] T9: `create_observer` has a production caller in `AppBuilder`; `OBSERVABILITY_BACKEND=log` produces observable events; `edge` build stays green.
-- [ ] Decision points 1 (WIRE native), 2 (WIRE observability), and 4 (`RepairTask` ERASE-or-consolidate, signed off) resolved and reflected in code + docs.
-- [ ] Full verification gate green (fmt, clippy `--all-targets -D warnings`, targeted tests, `edge` + default builds); `/ship` passes.
-- [ ] `docs/EXTENSION_SYSTEM.md`, `src/NETWORK_SECURITY.md`, `FEATURE_PARITY.md` updated; no overlap with WS-10 (`manager.rs` decomposition) or WS-11 (broader agent-loop restructure) — dependencies noted, not actioned. The `RepairTask` symbol is resolved here (T10), not deferred to WS-11.
+- [x] T1: `DefaultSelfRepair::with_builder` is invoked at `agent_loop.rs:605`; `#[allow(dead_code)]` removed from `src/agent/self_repair.rs:53`; a test proves `repair_broken_tool` returns `Success` with a builder injected.
+- [x] T2: broken-tool auto-rebuild is bounded by `max_repair_attempts`; self-repair docs updated.
+- [x] T10: orphaned `RepairTask` resolved (erased as drifted duplicate, or consolidated as the loop home) with sign-off; exactly one self-repair loop home remains; AUDIT-FINDINGS §6 item closed.
+- [x] T3: core `ExtensionKind::NativePlugin` variant (`src/extensions/mod.rs`, 4th variant) with `"native_plugin"` serialization and a serde round-trip test exists. NOTE: the gateway DTO sibling (`ExtensionKindHint::NativePlugin` + `EXTENSION_KIND_NATIVE_PLUGIN` const + `parse_extension_kind_hint` arm in `crates/thinclaw-gateway/src/web/extensions.rs`) was **not** added — that file still exposes only `McpServer`/`WasmTool`/`WasmChannel`. Native plugins are operator-side (not model/gateway-exposed by default), so the gateway hint sibling remains outstanding.
+- [x] T4–T7: native plugins can be scanned, registered (gated by `allow_native_plugins`), activated via `NativePluginRuntime::load`, invoked with panic isolation, and health-tracked; `ExtensionHealthMonitor` and `NativePluginRuntime` have production callers; all `match kind` sites exhaustive.
+- [x] T8: native-plugin SAFETY section documents signature/ABI/allowlist/SHA-256/panic-isolation/default-off and the in-process-privilege (non-sandboxed) caveat.
+- [x] T9: `create_observer` has a production caller in `AppBuilder`; `OBSERVABILITY_BACKEND=log` produces observable events; `edge` build stays green.
+- [x] Decision points 1 (WIRE native), 2 (WIRE observability), and 4 (`RepairTask` ERASE-or-consolidate, signed off) resolved and reflected in code + docs.
+- [x] Full verification gate green (fmt, clippy `--all-targets -D warnings`, targeted tests, `edge` + default builds); `/ship` passes.
+- [x] `docs/EXTENSION_SYSTEM.md`, `src/NETWORK_SECURITY.md`, `FEATURE_PARITY.md` updated; no overlap with WS-10 (`manager.rs` decomposition) or WS-11 (broader agent-loop restructure) — dependencies noted, not actioned. The `RepairTask` symbol is resolved here (T10), not deferred to WS-11.

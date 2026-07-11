@@ -1,9 +1,32 @@
 # ThinClaw — Robustness & Architecture Hardening Plan
 
-> **Status:** proposal v1 · **Created:** 2026-06-29 · Grounded in a 10-dimension code audit
+> **Status:** COMPLETED (proposal v1, 2026-06-29). Most of Phases 0–2 shipped via the
+> audit-driven remediation stack (13 workstreams, commits `4f88c43e`…`43460933` plus F-01..F-19
+> follow-ups), merged to `main` at `bda7a61f`. This document is retained as a historical record and
+> annotated with a **2026-07-11 status update**; it is no longer an execution checklist. Do not pick
+> it up and start executing landed phases.
+>
+> **What landed:** the two wrong-direction crate edges are removed and CI-guarded (§1.6); all
+> historical god-files are decomposed and a live 2,000-line CI guard prevents regression (§2.1);
+> `/api/health` is a real readiness probe, the persistent rolling log sink exists, and all 10
+> `ObserverEvent` variants emit (§0.4); the trusted-proxy CIDR fix (ipnet), the deleted
+> `DangerousToolTracker`, and `StatusUpdate #[non_exhaustive]` are done (§0.2, §1.3); ROUTE_TABLE
+> reached 100% coverage with a CI test (§2.2); desktop `cargo-deny` and pervasive `--locked` are in
+> CI (§0.1); the Prometheus `/metrics` endpoint is live (§2.3).
+>
+> **Still open (do NOT mark done):** root dependency dedup (82 `cargo deny` duplicate diagnostics,
+> improved from the 94 baseline but still above target; `deny.toml` still sets
+> `multiple-versions = "warn"`), the `clippy::unwrap_used`
+> panic-prevention lint (still `allow`), a coverage `--fail-under` threshold (CI still uses `--lib`
+> with no gate), a signed desktop release, finishing the `[workspace.dependencies]` migration (the
+> table exists and 27 of 28 crates use it, but `tokio`/`uuid`/`reqwest`/`rand` are not hoisted), and
+> detached channel-submission/scheduler cleanup waiters (A9), and the "largest file < 800 lines"
+> stretch target. See the annotated §4 metrics table.
+>
+> **Original framing (2026-06-29):** Grounded in a 10-dimension code audit
 > (crate architecture, error/panic safety, async/concurrency, testing/CI, security, dependencies,
 > type/API extensibility, observability, build/packaging, and a hard-metrics inventory).
-> Every claim below is backed by a `file:line` or a counted occurrence in the audit.
+> Every claim below was backed by a `file:line` or a counted occurrence in the audit.
 
 ## 0. Honest framing
 
@@ -22,11 +45,11 @@ finite, addressable set of real risks. Two audit findings were **over-flagged an
 
 | Area | Strength (evidence) |
 |---|---|
-| Crate graph | **No dependency cycles** across 27 members; root-import invariant holds (zero `use thinclaw::` in crates); 26 extracted crates with a thin 145-line root `lib.rs`; explicit port/adapter seam (`src/agent/root_ports.rs`, 11 `Root*Port` adapters). |
+| Crate graph | **No dependency cycles** across 29 workspace members; root-import invariant holds (zero `use thinclaw::` in crates); 28 extracted crates with a thin 145-line root `lib.rs`; explicit port/adapter seam (`src/agent/root_ports.rs`, 12 `Root*Port` adapter structs, 10 bundled into `RootAgentRuntimePorts`). |
 | Error model | Comprehensive `thiserror` hierarchy (14 typed enums in `thinclaw-types/src/error.rs`); `anyhow` correctly scoped to CLI/tunnel only; dispatcher & gateway hot paths free of production `unwrap`. |
 | Async | `BackgroundTasksHandle` tracks + aborts long-lived tasks; `spawn_blocking` used for git/fs; cooperative cancellation via `TurnCancellationRegistry`; lock discipline mostly correct. |
 | Security | 5-stage shell pipeline; AES-GCM secrets with AAD binding + OS keychain; constant-time bearer auth; WASM caps default-off + HTTPS allowlist; SSRF post-DNS pinning on the HTTP tool; leak-detector scrubs SSE logs; Ed25519 plugin/scanner signing. |
-| Testing/CI | 4,186 test fns; 7-profile feature matrix; `cargo-deny` with **zero advisory ignores**; 4 fuzz targets; multi-OS smoke; Postgres+libSQL contract tests; MSRV pinned 1.92. |
+| Testing/CI | 3,747 `#[test]` + 813 `#[tokio::test]` fns in `src/`+`crates/`; 7-profile feature matrix; `cargo-deny` with **zero advisory ignores**; 4 fuzz targets; multi-OS smoke; Postgres+libSQL contract tests; MSRV pinned 1.92. |
 | Dep hygiene | `cargo-deny` bans git/unknown registries, yanked, wildcards; documented in-tree libsql patch; edge-dependency footprint guard. |
 
 These are genuine differentiators. The plan **adds guardrails to keep them true**, not to rebuild them.
@@ -42,25 +65,27 @@ Severity uses the audit's P0–P3. Each phase ends with a CI guardrail so fixes 
 These are *silent-wrongness* bugs: things that pass CI today but are incorrect, insecure, or
 un-shippable.
 
-**0.1 Supply-chain coverage gaps (P0)**
-- `cargo-deny` runs against the **root workspace only** — the desktop workspace + 28 sub-workspace
-  lockfiles (channels/tools) get **zero** advisory/license/yanked scanning (`ci.yml:66`). → Add
-  `cargo deny check --manifest-path apps/desktop/backend/Cargo.toml` and a per-sub-workspace sweep.
-- Root CI omits `--locked` on every `cargo check/test/build` (only the desktop backend uses it — and
-  that gap already caused a real CI break). → Add `--locked` everywhere.
+**0.1 Supply-chain coverage gaps (P0)** *(partially landed, 2026-07-10)*
+- **[LANDED]** Desktop `cargo-deny` coverage: the desktop backend is now scanned by two invocations
+  in CI (`cargo deny check licenses bans sources` at `ci.yml:210` and `cargo deny check advisories`
+  at `ci.yml:213`). **[STILL OPEN]** The `channels-src/` and `tools-src/` sub-workspace lockfiles
+  are still not swept by `cargo-deny`.
+- **[LANDED]** `--locked` is now used pervasively across clippy/check/test/build and tool installs
+  (e.g. `ci.yml:66`, `:74`, `:131`).
 - `ort = "=2.0.0-rc.9"` with `download-binaries` fetches native ONNX libs from a third-party CDN at
   build time **without Cargo's hash verification** — a supply-chain injection point into every desktop
   release. → Vendor/pin+verify the artifact, or hash-check in the build script.
 - `clawscan 1.0.0` drags `reqwest 0.11` (hyper 0.14) + `tokio-tungstenite 0.21` (CVE-era) into the
   desktop binary. → Replace/remove or upgrade.
 
-**0.2 Security correctness gaps (P0)**
-- **`DangerousToolTracker` is orphaned** — `is_disabled()` has zero call sites outside its own tests;
-  enforcement is entirely in `ToolPolicyManager`. Calling `tracker.disable(tool)` gives a **false
-  security guarantee**. → Wire it into `prepare_tool_call()` or delete it; add an enforcement test.
-- **Trusted-proxy CIDR silently degrades to a single IP** (`gateway/web/auth.rs:64` —
-  `"10.0.0.0/8".split('/').next()` → `10.0.0.0`). Operators trusting a subnet trust one host. → Use
-  `ipnet` membership; warn on parse failure; test /8,/16,/24.
+**0.2 Security correctness gaps (P0)** *(the two flagged items below landed; `/tmp` exemption unverified)*
+- **[RESOLVED BY DELETION]** The orphaned `DangerousToolTracker` (false security guarantee) was
+  removed in the Wave-4 dead-code purge (`4f26f5f4`). `DangerousToolTracker` no longer exists in
+  `src/` or `crates/`; enforcement lives in `ToolPolicyManager`.
+- **[LANDED]** Trusted-proxy CIDR now uses `ipnet` membership. `trusted_proxy_ips` is a
+  `Vec<IpNet>` and `parse_trusted_proxy_entry` parses a CIDR network
+  (`crates/thinclaw-gateway/src/web/auth.rs`), so `10.0.0.0/8` trusts the whole subnet rather than a
+  single host.
 - **`/tmp` is exempted from path-escape detection** (`shell_security.rs:1311`) — the sandbox lets
   agent shell commands stage payloads in a world-readable shared dir. → Remove the exemption or gate
   it behind an opt-in setting (default off).
@@ -72,15 +97,18 @@ un-shippable.
   `brew install`/cloudflared (`setup/channels/tunnel.rs`) run synchronously in `async fn`s — a
   multi-minute build freezes the runtime/UI. → `tokio::process::Command` or `spawn_blocking`.
 
-**0.4 Observability black-holes (P0)**
-- **No persistent log sink** — `tracing-appender` is absent; logs go only to stderr + a 500-entry
-  in-memory ring buffer. Post-incident analysis on a non-service deployment is **impossible**. →
-  Add a rolling file sink to `state_paths().logs_dir`.
-- **5 of 10 `ObserverEvent` variants are dead** (`LlmRequest`, `ChannelMessage`, `HeartbeatTick`,
-  `AgentEnd`, `Error` never emitted) and the observer defaults to `none` in every wizard profile. →
-  Emit the missing 5; default to `log` (zero-cost when filtered).
-- **`/api/health` is static** (`{status:"healthy"}` unconditionally) — supervisors route to broken
-  instances. → Real readiness probe (DB ping, provider configured, return 503 on failure).
+**0.4 Observability black-holes (P0)** *(all three landed, 2026-07-10)*
+- **[LANDED]** Persistent log sink: `tracing-appender` is a dependency and a rolling daily file sink
+  (`thinclaw.log`) writing to `state_paths().logs_dir` is wired for both the service and the desktop
+  backend (`crates/thinclaw-gateway/src/web/log_layer.rs`).
+- **[LANDED]** All 10 `ObserverEvent` variants now emit from production paths (the previously-dead
+  `LlmRequest`, `ChannelMessage`, `HeartbeatTick`, `AgentEnd`, `Error` included), e.g. `HeartbeatTick`
+  at `src/agent/commands.rs:319`, `LlmRequest` at `src/agent/dispatcher/llm_turn.rs:368`, `AgentEnd`
+  and `Error` at `src/agent/agent_loop/mod.rs`. Zero dead variants.
+- **[LANDED]** `/api/health` is a real readiness probe: it checks DB reachability (via
+  `store.health_check()` under a 2s timeout), a configured LLM provider, and a wired inbound channel,
+  returning 200 only when all three hold and 503 otherwise. Decision fn:
+  `crates/thinclaw-gateway/src/web/status.rs`.
 
 **0.5 Build/packaging shippability (P0)**
 - **`bundled-wasm` uses `cargo build`, not the component pipeline** (`build.rs:125` vs the per-channel
@@ -117,18 +145,26 @@ un-shippable.
   across full disk discovery.
 
 **1.3 Protocol & enum extensibility (P1)** — directly fixes the maintenance tax you already hit.
-- Annotate `StatusUpdate` `#[non_exhaustive]` and add wildcard arms to the 2 hard-exhaustive matchers
-  (`gateway/web/status.rs`, `tui.rs`) so a new variant no longer force-edits 5 sites across 3 crates.
+- **[LANDED]** `StatusUpdate` is now `#[non_exhaustive]`
+  (`crates/thinclaw-channels-core/src/channel.rs:231`) and the gateway status matcher collapses
+  future variants via a wildcard arm (`crates/thinclaw-gateway/src/web/status.rs`), so a new variant
+  no longer force-edits sites across the crates.
 - Fix the **WIT `StatusType` drift** (11 variants vs `StatusUpdate`'s 21) — 10 variants collapse lossily
   to `Status`, so WASM channels can't see lifecycle/subagent/credential events. Extend the WIT enum +
   bump the interface version.
 - Standardize `UiEvent::Connected.protocol` (local emits `2`, remote proxy emits `1`).
 
-**1.4 Dependency hygiene (P1)**
-- Add a `[workspace.dependencies]` table; migrate the 22 crates to `workspace = true` (kills silent
-  drift — e.g. `rand` is declared 6× independently). Collapse `rand 0.8→0.9` (3 simultaneous versions
-  today). Flip `deny.toml` `multiple-versions = warn → deny` with documented skips.
-- Add Renovate/Dependabot (35 lockfiles, ~1k packages each — manual hygiene isn't sustainable).
+**1.4 Dependency hygiene (P1)** *(partially landed; dedup still open)*
+- **[LANDED]** A `[workspace.dependencies]` table exists and hoists 9 shared deps (serde, serde_json,
+  anyhow, thiserror, tracing, chrono, async-trait, futures, utoipa) at `Cargo.toml:26`.
+  **[STILL OPEN]** The full per-crate `workspace = true` migration is incomplete (tokio/uuid/reqwest/
+  rand are intentionally not yet hoisted).
+- **[STILL OPEN]** Dependency dedup improved but remains above target: the root `Cargo.lock` now
+  produces **82** `cargo deny` duplicate diagnostics (baseline 94), including 3 `rand` versions
+  (`0.8.6`, `0.9.4`, `0.10.2`) and 2 `wit-bindgen` versions. `deny.toml` still has
+  `[bans] multiple-versions = "warn"`
+  (not `deny`), `deny.toml:38`.
+- Add Renovate/Dependabot (many lockfiles; manual hygiene isn't sustainable).
 
 **1.5 Test & CI coverage (P1)**
 - Add a coverage **threshold gate** (`--fail-under`) and drop `--lib` so integration paths count.
@@ -137,42 +173,54 @@ un-shippable.
 - Root-cause the Windows-smoke flake (remove the retry mask); un-quarantine or decompose the
   autonomous-campaign Docker E2E.
 
-**1.6 Crate boundaries — the two wrong-direction edges (P1)**
-- Move `Routine*` domain types `thinclaw-agent → thinclaw-types`; drop `thinclaw-db`'s dependency on
-  `thinclaw-agent` (a persistence crate must not depend on the agent layer).
-- Move MCP + execution DTOs `thinclaw-tools → thinclaw-tools-core`; drop `thinclaw-gateway`'s heavy
-  `thinclaw-tools` dependency (which transitively pulls wasmtime/chromiumoxide/nostr).
+**1.6 Crate boundaries — the two wrong-direction edges (P1)** *(both LANDED and CI-guarded)*
+- **[LANDED]** `thinclaw-db` no longer depends on `thinclaw-agent`; the `Routine` DTOs live in
+  `thinclaw_types::routine`.
+- **[LANDED]** `thinclaw-gateway` depends on `thinclaw-tools-core`, not `thinclaw-tools` (no
+  transitive wasmtime/chromiumoxide/nostr pull).
+- Both edges are enforced by the "Check crate boundaries" step in `.github/workflows/ci.yml`, which
+  fails the build if either edge reappears.
 
 ---
 
 ### Phase 2 — Architecture & extensibility (target: ~6–8 weeks, incremental)
 
-**2.1 God-file decomposition (P1–P2)** — 18 files exceed 2,000 lines; the project bans god-files.
-Highest value first (effort in parens):
-- `skill.rs` (4,577) + `skill_tools.rs` (4,385) twin files → per-tool + policy/scan submodules (L).
-- `thinclaw-experiments/src/lib.rs` (3,482, *zero submodules* in an extracted crate) → types/policy/
-  cost/campaign/lease (M).
-- `src/main.rs` (2,384; `async_main` ≈1,934 lines) → `bootstrap.rs`/`surface_wiring.rs`/`signal_handling.rs`,
-  main < 200 lines (M).
-- Then: `channels/web/server.rs` (2,392) → per-port modules; `signal.rs` (2,918); `gateway/web/providers.rs`
-  (2,827); `routine_engine.rs` (2,809); `llm/reasoning.rs` (2,553); `acp.rs` (3,150); `tui/mod.rs` (1,160).
+**2.1 God-file decomposition (P1–P2): LANDED.** As of 2026-07-11 **zero** committed `.rs` files
+exceed 2,000 lines anywhere in the repo, and a live CI guard (`scripts/ci/check-file-sizes.sh`,
+`MAX_LINES=2000`, run at `.github/workflows/ci.yml`) prevents regression. The largest file is now
+`crates/thinclaw-channels/src/gmail.rs` at 1,999 lines. Every god-file the audit named was decomposed
+into a directory module:
+- `skill.rs` (4,577) and `skill_tools.rs` (4,385) no longer exist at those paths/sizes.
+- `thinclaw-experiments/src/lib.rs` (was 3,482, *zero submodules*) is now a thin façade split into
+  types/policy/cost/opportunities/support/messages submodules.
+- `src/main.rs` (was 2,384) is now ~356 lines.
+- `channels/web/server.rs` (was 2,392) is ~1,672; `signal.rs`, `gateway/web/providers.rs`,
+  `routine_engine.rs`, `llm/reasoning.rs`, and `acp.rs` are all decomposed and under 2,000.
+
+*Remaining stretch work:* the guard threshold is 2,000, not the "< 800 lines" target in §4; ~45 files
+sit in the 1,500–1,999 band and could be split further if desired.
 
 **2.2 Command-surface consistency (P2)**
-- Migrate the ~149 `Result<T, String>` Tauri commands to `Result<T, BridgeError>` (the `From<String>`
-  impl makes this mechanical); retire `local_unavailable()`.
-- Expand `ROUTE_TABLE` from 15/341 to full coverage + a CI test asserting every registered command is
-  classified (the bridge linter already proves this pattern works).
+- **[STILL OPEN]** 313 of 342 Tauri commands with a return type still return `Result<_, String>` and
+  should migrate to `Result<T, BridgeError>` (the `From<String>` impl makes this mechanical); retire
+  `local_unavailable()`.
+- **[LANDED]** `ROUTE_TABLE` (`apps/desktop/backend/src/thinclaw/bridge.rs:116`) reached 100%
+  coverage: 346 entries for 346 `#[tauri::command]` fns, enforced by the CI test
+  `all_registered_commands_are_classified` (`bridge.rs:764`), which fails the build on any unclassified
+  command.
 - Replace stringly-typed `UiEvent` status/phase fields (`ToolUpdate.status`, `RunStatus.status`, …)
   with specta-exported enums so the TS side gets exhaustive unions.
 
 **2.3 Metrics & operability (P2)**
-- Feature-gated Prometheus `/metrics` endpoint backed by the existing `ObserverMetric` variants
-  (latency p99, token burn, queue depth) → external alerting becomes possible.
+- **[LANDED]** A Prometheus `/metrics` endpoint is registered at `src/channels/web/server.rs:875`,
+  backed by the shared registry (`src/observability/prometheus.rs`, 22 series); it returns 200
+  text/plain when `OBSERVABILITY_BACKEND=prometheus`, else 503. External alerting is now possible.
 - Surface per-provider LLM `route_health` in `/api/status` + `thinclaw status`; warn on degraded score.
 
 **2.4 LLM subsystem extraction (P2/P3)**
-- The LLM layer is partially extracted; `reasoning.rs` (2,553) + `runtime_manager` remain root-only.
-  Continue the port-based extraction so crates needing reasoning policy don't route through root.
+- The LLM layer is partially extracted; `src/llm/reasoning.rs` (now ~1,938 lines) and
+  `src/llm/runtime_manager/` (now a directory of 11 modules) remain root-only. Continue the
+  port-based extraction so crates needing reasoning policy don't route through root.
 
 ---
 
@@ -184,7 +232,9 @@ Highest value first (effort in parens):
 - `SAFE_BINS` rename + split (curl/wget/docker are not "safe"); `ExternalScanner` default
   `FailOpen → FailClosed`; in-memory secrets-store audit trail; `?token=` query-param log-exposure warning.
 - Frontend test coverage for the chat hook + Tauri bridge (53 Vitest cases cover only utilities today).
-- Dedicated MSRV-verification CI job (the stable pin coincidentally equals MSRV today).
+
+Landed guardrail: `check-msrv-sync.py` now runs in CI and enforces that package MSRV and the pinned
+developer/CI toolchain remain Rust 1.92.
 
 ---
 
@@ -193,35 +243,35 @@ Highest value first (effort in parens):
 The single highest-leverage investment. At 538k LOC, discipline must be **automated**, not reviewed.
 Add to CI (most are S-effort, P0/P1):
 
-| Guardrail | Prevents |
-|---|---|
-| `--locked` on all cargo invocations | lockfile drift (already bit us twice) |
-| `cargo-deny` across **all** workspaces/sub-lockfiles | unscanned advisories in desktop/channel/tool deps |
-| `clippy::await_holding_lock = deny` + `unwrap_used/expect_used = warn` (non-test) | async deadlocks; new production panics |
-| `deny.toml multiple-versions = deny` (+ documented skips) | duplicate-version creep (94 today) |
-| God-file size guard (fail if any `.rs` > N lines) | re-growing the 18 god-files |
-| ROUTE_TABLE coverage test (every command classified) | unclassified dual-mode commands |
-| `wit-bindgen` single-version check | WASM interface skew (2 versions today) |
-| Bundle-reference resolution test | broken registry bundles (`slack-tool` today) |
-| Coverage threshold (`--fail-under`, no `--lib`) | silent coverage erosion |
-| `[workspace.dependencies]` enforced | per-crate version drift |
+| Guardrail | Prevents | Status (2026-07-11) |
+|---|---|---|
+| `--locked` on all cargo invocations | lockfile drift (already bit us twice) | Landed |
+| `cargo-deny` across **all** workspaces/sub-lockfiles | unscanned advisories in desktop/channel/tool deps | Partial: desktop scanned; `channels-src/`/`tools-src/` sub-lockfiles still unswept |
+| `clippy::await_holding_lock = deny` + `unwrap_used/expect_used = warn` (non-test) | async deadlocks; new production panics | Open: `clippy::unwrap_used` still `allow` (`Cargo.toml:466`) |
+| `deny.toml multiple-versions = deny` (+ documented skips) | duplicate-version creep (82 `cargo deny` diagnostics in the root lock today) | Open: still `warn` (`deny.toml:38`) |
+| God-file size guard (fail if any `.rs` > N lines) | re-growing the god-files | Landed: `scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000` |
+| ROUTE_TABLE coverage test (every command classified) | unclassified dual-mode commands | Landed: `all_registered_commands_are_classified` |
+| `wit-bindgen` single-version check | WASM interface skew (2 versions today) | Open: 2 versions (`0.51.0`, `0.57.1`) |
+| Bundle-reference resolution test | broken registry bundles (`slack-tool` today) | Unverified |
+| Coverage threshold (`--fail-under`, no `--lib`) | silent coverage erosion | Open: CI still `--lib`, no `--fail-under` (`ci.yml:881`) |
+| `[workspace.dependencies]` enforced | per-crate version drift | Partial: table exists (9 deps); per-crate migration incomplete |
 
 ## 4. Metrics — baseline & targets
 
-| Metric | Baseline | Target |
-|---|---|---|
-| Dependency cycles | 0 | 0 (guarded) |
-| Wrong-direction crate edges | 2 | 0 |
-| Files > 2,000 lines | 18 | < 5, then 0 (guarded) |
-| Largest file | 4,577 | < 800 |
-| Duplicate-versioned crates (root lock) | 94 | < 30 (deny-gated) |
-| ROUTE_TABLE command coverage | 15/341 (4%) | 100% (gated) |
-| Commands returning `Result<_, String>` | ~149 | 0 |
-| Dead `ObserverEvent` variants | 5/10 | 0 |
-| Persistent log sink | none | rolling file + ring buffer |
-| `cargo-deny` workspace coverage | 1/2+28 | all |
-| Signed desktop release | no | yes |
-| StatusUpdate `#[non_exhaustive]` | no | yes |
+| Metric | Baseline (2026-06-29) | Target | Now (2026-07-11) |
+|---|---|---|---|
+| Dependency cycles | 0 | 0 (guarded) | 0, CI-guarded |
+| Wrong-direction crate edges | 2 | 0 | 0, CI-guarded |
+| Files > 2,000 lines | 18 | < 5, then 0 (guarded) | 0, guard live |
+| Largest file | 4,577 | < 800 | 1,999 (target not yet met) |
+| Duplicate-versioned crates (root lock) | 94 | < 30 (deny-gated) | 82 (improved; not gated) |
+| ROUTE_TABLE command coverage | 15/341 (4%) | 100% (gated) | 346/346 (100%), gated |
+| Commands returning `Result<_, String>` | ~149 | 0 | 313/342 (not met) |
+| Dead `ObserverEvent` variants | 5/10 | 0 | 0 |
+| Persistent log sink | none | rolling file + ring buffer | rolling daily file + ring buffer |
+| `cargo-deny` workspace coverage | root only | all | root + desktop (sub-workspaces still unswept) |
+| Signed desktop release | no | yes | no (not met) |
+| StatusUpdate `#[non_exhaustive]` | no | yes | yes |
 
 ## 5. Sequencing
 
@@ -233,12 +283,17 @@ Phase 2 (god-files, command surface, metrics)        ── larger, incremental,
 Phase 3 (maturity long-tail)                          ── ongoing, opportunistic
 ```
 
-**Recommended first PRs (all P0, mostly small, land the guardrails early):**
-1. CI: `--locked` everywhere + `cargo-deny` all workspaces + `clippy::await_holding_lock=deny` + `unwrap_used=warn`.
-2. Security: wire/delete `DangerousToolTracker`; fix trusted-proxy CIDR; remove `/tmp` exemption.
-3. Async: fix the `docker_chromium` blocking connect + the `spawn_blocking` wrappers.
-4. Observability: rolling file log sink + real `/api/health` + emit the 5 dead observer events.
-5. Build: fix `bundled-wasm` component pipeline + extraction smoke test; auto-PR registry checksums.
+**Recommended first PRs (all P0, mostly small, land the guardrails early)** *(historical; these were
+executed as part of the remediation stack. Current state noted inline)*
+1. CI: `--locked` everywhere (landed) + `cargo-deny` desktop workspace (landed; sub-workspaces still
+   open) + `clippy::await_holding_lock` / `unwrap_used=warn` (`unwrap_used` still `allow`).
+2. Security: `DangerousToolTracker` deleted; trusted-proxy CIDR fixed via `ipnet` (both landed);
+   `/tmp` exemption unverified.
+3. Async: `docker_chromium` blocking connect + `spawn_blocking` wrappers (not verified here).
+4. Observability: rolling file log sink + real `/api/health` + all 10 observer events emitting (all
+   landed).
+5. Build: `bundled-wasm` component pipeline + extraction smoke test; auto-PR registry checksums (not
+   verified here).
 
 Each first PR pairs a fix with its guardrail so the class of bug cannot silently return.
 

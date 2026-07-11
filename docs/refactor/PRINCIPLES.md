@@ -59,14 +59,15 @@ from becoming a large regression.
    --locked`; a stale desktop lockfile is the single most common self-inflicted CI break. After any
    `Cargo.toml` edit: `cargo check` the root *and* `cargo check` in `apps/desktop/backend`, then
    stage both lockfiles.
-2. **The `StatusUpdate` ripple.** `thinclaw_channels_core::StatusUpdate` is a shared, *not*
-   `#[non_exhaustive]` enum. Adding a variant forces an arm in **six** exhaustive matchers across
-   crates: `thinclaw-channels/src/tui.rs` (`From`), `thinclaw-gateway/src/web/status.rs` (SSE),
+2. **The `StatusUpdate` ripple.** `thinclaw_channels_core::StatusUpdate` is a shared enum that is
+   **now `#[non_exhaustive]`** (B1 landed; `crates/thinclaw-channels-core/src/channel.rs:231`), so
+   the matchers carry `_` fallback arms and merely *adding* a variant no longer forces edits. But a
+   *structured* change to those variants still touches the same ~6 exhaustive matchers across crates:
+   `thinclaw-channels/src/tui.rs` (`From`), `thinclaw-gateway/src/web/status.rs` (SSE),
    `src/channels/repl.rs`, `src/channels/acp.rs` (a `=> None` group), `thinclaw-channels/src/wasm/
    wrapper/conversions.rs`, and `apps/desktop/backend/src/thinclaw/event_mapping.rs`. Several are
-   feature-gated — a default `cargo check` won't see them; CI's `--all-features` will. **Backlog
-   B1 makes the enum `#[non_exhaustive]` to end this tax.** Until then, verify with `cargo check`
-   *and* `cargo check -p thinclaw-channels --all-features`.
+   feature-gated — a default `cargo check` won't see them; CI's `--all-features` will. Verify with
+   `cargo check` *and* `cargo check -p thinclaw-channels --all-features`.
 3. **`#[non_exhaustive]` semantics.** On an *enum*, it forces external crates to add a `_` arm when
    matching, but it does **not** block constructing existing variants externally (like
    `std::io::ErrorKind`). So the ~50 emit sites are unaffected; only the matchers need `_`.

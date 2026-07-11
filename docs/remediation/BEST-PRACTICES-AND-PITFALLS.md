@@ -5,9 +5,19 @@
 > workstream conflicts with a rule here, this doc wins unless the task explicitly justifies the exception in writing.
 >
 > This is a **guardrails** doc, not a task list. It has no `cargo` tasks of its own beyond the Quality Gate.
-> Its job is to keep the rest of the remediation from re-introducing the exact failure modes the
-> 2026-06-23 audit (`AUDIT-FINDINGS.md`) found. Citations below are real `file:line` anchors verified
-> against the working tree on 2026-06-23 (`main` @ `9e707985`).
+> Its job is to keep future work from re-introducing the exact failure modes the
+> 2026-06-23 audit (`AUDIT-FINDINGS.md`) found.
+>
+> **Note on the audit findings cited below:** every specific bug this doc references (empty-token
+> bypass, FTS5 divergence, `split_message` panic, Discord verification, self-repair `with_builder`,
+> WASM table/instance limits, the `cargo deny` advisory, CI clippy `--all-targets`, the god-files)
+> has since been **RESOLVED** by the remediation stack (merged to `main`). Those citations are kept
+> as the *rationale* for each rule (the lesson), not a live defect. Where a claim was written in the
+> present tense ("currently red", "stubbed", "never injected"), it has been corrected below to say
+> what shipped. The **rules themselves remain in force.** File:line anchors were originally verified
+> on 2026-06-23 (`main` @ `9e707985`); the load-bearing ones have been re-pointed to the current
+> tree, but some illustrative anchors still name a file that has since been decomposed into a
+> directory module or deleted, and are kept as historical references.
 
 ---
 
@@ -47,8 +57,9 @@ Remediation must **realize** these, not erode them.
   self-repair behind context/store/**builder** ports; `thinclaw-tools` shell runtime behind sandbox/ACP/
   smart-approval ports; `thinclaw-db` backends behind persistence traits. When you "wire" a built-but-dead
   capability (the operator's REALIZE-THE-VISION directive), wire it by **injecting the existing adapter into
-  the existing port** — e.g. the dead self-repair rebuild path is exactly a missing `with_builder` injection
-  (`src/agent/agent_loop.rs:605`), not a missing feature.
+  the existing port** — e.g. the once-dead self-repair rebuild path was exactly a missing `with_builder`
+  injection, now shipped at `src/agent/agent_loop/mod.rs:672`
+  (`repair = repair.with_builder(builder, self.deps.tools.clone())`), not a missing feature.
 
 - **Hybrid extensibility.** Native Rust where persistent connections / local system access matter; WASM
   where hot reload + credential isolation matter; MCP for external tool ecosystems. Do not collapse these
@@ -79,13 +90,14 @@ Verbatim intent from `CLAUDE.md` → *Architecture Hygiene*. **God files are arc
 - **Block new god-file growth in review.** A PR that adds substantial unrelated behavior to an
   already-broad file must split the module first or justify why it cannot be separated safely yet.
 
-**Worst current god-files (do not grow; split when you must touch them)** — from `AUDIT-FINDINGS.md §5`:
-`crates/thinclaw-channels/src/wasm/wrapper.rs` (5701L), `src/api/experiments.rs` (5434L),
-`crates/thinclaw-tools/src/builtin/skill.rs` (4577L) + `src/tools/builtin/skill_tools.rs` (4381L),
-`src/agent/thread_ops.rs` (3032L, ~850L `process_approval`), `src/llm/runtime_manager.rs` (~3100L),
-`src/extensions/manager.rs` (3343L). The structural overhaul of these is owned by workstream
-`10-architecture-overhaul.md` — **do not** restructure them from another workstream; note the dependency
-and make the minimal local change.
+The god-files the audit called out (`AUDIT-FINDINGS.md §5`) have all been decomposed into directory
+modules (WS-10). **No committed `.rs` file now exceeds 2,000 lines anywhere in the repo**, and a CI guard
+(`scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000`, run at `ci.yml:64`) keeps it that way. The rule still
+stands: **do not grow a module back toward that limit.** The largest surviving modules to keep an eye on
+(do not grow; split further when you must touch them): `crates/thinclaw-channels/src/gmail.rs` (1,999L),
+`crates/thinclaw-db/src/libsql_migrations.rs` (1,980L), `crates/thinclaw-secrets/src/store.rs` (1,974L),
+and `src/agent/agent_loop/mod.rs` (1,968L). Any structural re-cut of a still-large module should be
+its own focused change, not a rider on unrelated work.
 
 ---
 
@@ -112,9 +124,11 @@ Summary of `docs/CRATE_OWNERSHIP.md`. These are CI-enforced (code-style job runs
 - **Direction of new ports.** When extracting more behavior, the trait goes in the crate, the concrete
   adapter stays in root. The root-owned runtime list in `CRATE_OWNERSHIP.md` is the backlog of what still
   needs this treatment — consult it before deciding where new code lives.
-- **Beware near-duplicate half-migrations.** `src/history/store/` vs `crates/thinclaw-db/src/postgres_store/`
-  is near-byte-for-byte duplication maintained twice (`AUDIT-FINDINGS.md §5`). When you touch either, check
-  the other; do not deepen the fork. (Resolution is owned by `10-architecture-overhaul.md`.)
+- **Beware near-duplicate half-migrations.** The audit's canonical example — `src/history/store/` vs
+  `crates/thinclaw-db/src/postgres_store/` near-byte-for-byte duplication (`AUDIT-FINDINGS.md §5`) — was
+  resolved: `src/history/store/` was deleted and history consolidated onto `thinclaw-db` (`src/history/` is
+  now a facade `mod.rs`). The rule still applies to any future fork: when a runtime path exists in both a
+  crate and root, do not maintain two copies; pick the crate-owned one and make root a thin adapter.
 
 ---
 
@@ -138,12 +152,13 @@ full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr
   Nostr, document-extraction). If your change pulls a heavy dep into a code path reachable from `edge`,
   the matrix will fail — gate it.
 - **No flag enabled by no profile.** A feature that no profile turns on is dead weight masquerading as
-  capability. Confirmed live example: the `voice` feature (and `voice_wake.rs`, ~749L, + `cpal`) is enabled
-  by **no** profile — `light` excludes voice (`BUILD_PROFILES.md §light "Excluded"`), and it's only
-  reachable via the explicit `--features light,voice` custom combo. The audit's directive: **WIRE it into a
-  profile or ERASE it** (`AUDIT-FINDINGS.md §6`), don't leave it orphaned. When adding a flag, add it to a
-  profile in the same PR or document in `BUILD_PROFILES.md` why it is opt-in (the `voice`/`bedrock`/
-  `bundled-wasm`/`integration` table in `§full vs --all-features` is the template).
+  capability. The audit's example was the `voice` feature (and `voice_wake.rs` + `cpal`), enabled by **no**
+  profile. Its resolution was **WIRE** (not erase): `voice_wake` is now connected into the dispatcher
+  (wake-word utterances route through `capture_and_transcribe` → dispatch), while the `voice` feature stays
+  deliberately **opt-in**: it is not in `full` and is only reachable via an explicit `--features …,voice`
+  combo, documented as opt-in in `BUILD_PROFILES.md`. When adding a flag, either add it to a profile in the
+  same PR or document in `BUILD_PROFILES.md` why it is opt-in (the `voice`/`bedrock`/`bundled-wasm`/
+  `integration` table in `§full vs --all-features` is the template).
 - **`desktop` omits `wasm-runtime`.** WASM tools/channels are not available under the desktop profile
   (`AUDIT-FINDINGS.md §2 WASM-tools row`). Do not assume a WASM runtime exists in desktop builds; gate
   accordingly or document the omission.
@@ -161,12 +176,13 @@ They must behave identically. Authority: `crates/thinclaw-db/`, workstream `02-d
 - **Every query-shape change is tested on both backends.** The `db_contract` test runs against Postgres
   and libSQL (`BUILD_PROFILES.md §CI/CD`). If you change a query, a projection, ordering, NULL handling, or
   a search path, it must pass on both — not just the one you ran locally.
-- **Sanitize before FTS5 `MATCH`.** This is the live divergence bug (finding #3): libSQL transcript search
-  feeds **raw user input** to FTS5 `MATCH` at `crates/thinclaw-db/src/libsql/conversations.rs:846`, so a
-  query containing `:`/`"`/`-` throws where Postgres tolerates it. The correct, already-in-repo pattern is
-  next door at `crates/thinclaw-db/src/libsql/workspace.rs:677-693`: split on non-alphanumerics and quote
-  each token (`"time" "sensitive" "notes"`), falling back to empty-result when the sanitized query is empty.
-  **Reuse that sanitizer; do not invent a second one.**
+- **Sanitize before FTS5 `MATCH`.** This was the audit's divergence bug (finding #3): libSQL transcript
+  search fed **raw user input** to FTS5 `MATCH`, so a query containing `:`/`"`/`-` threw where Postgres
+  tolerates it. It is now **fixed**: transcript search sanitizes via the shared
+  `super::fts::sanitize_fts5_match(query)` before `MATCH` at
+  `crates/thinclaw-db/src/libsql/conversations/mod.rs:574` (the file was decomposed into a directory module).
+  The rule stands: any new FTS5 `MATCH` path must run through `sanitize_fts5_match`; **reuse that shared
+  sanitizer, do not invent a second one.**
 - **Postgres tolerance is not a license for libSQL fragility.** Whenever Postgres "just works" with raw
   input, ask whether libSQL's FTS5/SQL dialect does too. Divergence is a correctness bug on the
   desktop-default backend, which is where most real users run.
@@ -184,9 +200,10 @@ Authority: `crates/thinclaw-secrets/`, `src/NETWORK_SECURITY.md §Authentication
 
 - **Constant-time compares for every secret/token/HMAC.** Use `subtle::ConstantTimeEq` (`ct_eq`), the
   pattern used by gateway bearer, webhook secret, per-job token (`src/channels/web/auth.rs`,
-  `src/channels/http.rs`, `src/orchestrator/auth.rs`). **Bad example to never copy:** `src/qr_pairing.rs:219`
-  compares a one-time pairing token with a plain `==` (`self.info.pairing_token == token`) — timing-leaky.
-  (qr_pairing is an ERASE candidate; if it is instead WIRED, the `==` must become `ct_eq` first.)
+  `src/channels/http.rs`, `src/orchestrator/auth.rs`). **Historical bad example (never reintroduce it):**
+  the deleted `src/qr_pairing.rs` compared a one-time pairing token with a plain `==`
+  (`self.info.pairing_token == token`) — timing-leaky. That module was ERASED in the dead-code sweep; if any
+  token-compare path is ever re-added, it must use `ct_eq` from the start, never `==`.
 - **Crypto is AES-256-GCM + HKDF-SHA256 + AAD.** Encryption derives a per-secret key via
   `Hkdf::<Sha256>::extract+expand` (`crates/thinclaw-secrets/src/crypto.rs:154-158`) and binds context with
   AAD via `encrypt_in_place(&nonce, aad, ...)` / `decrypt_in_place(nonce, aad, ...)`
@@ -213,28 +230,31 @@ Authority: `crates/thinclaw-secrets/`, `src/NETWORK_SECURITY.md §Authentication
 Authority: `crates/thinclaw-tools/src/wasm/`, `crates/thinclaw-channels/src/wasm/`,
 `src/NETWORK_SECURITY.md §Egress Controls / WASM Tool HTTP Requests`. Guests are **untrusted**.
 
-- **No panic that traps the guest — char-aware slicing.** This is the live finding #5: `split_message`
-  panics on a multibyte UTF-8 boundary in three shipped channels. **Bad:**
-  `channels-src/telegram/src/lib.rs:2189` does `let search_area = &remaining[..max_len];` — a byte-index
-  slice that panics when `max_len` lands mid-codepoint (same in `slack/src/lib.rs:1058`,
-  `discord/src/lib.rs:750`). **Good (already shipped, port it):** `channels-src/whatsapp/src/lib.rs:2096`
-  counts/iterates by `chars()` and uses `char_indices()` (`whatsapp ... :2097,2102`). Any string slicing in
-  guest code must use `char_indices()`/`is_char_boundary()`/`floor_char_boundary`, never a raw byte index
-  derived from a length budget.
+- **No panic that traps the guest — char-aware slicing.** This was finding #5: `split_message` panicked on
+  a multibyte UTF-8 boundary in three shipped channels (a byte-index slice `&remaining[..max_len]` that
+  panics when `max_len` lands mid-codepoint). It is now **fixed**: slack and discord build chunks with
+  `char_indices()` (`channels-src/slack/src/lib.rs:1055`, `channels-src/discord/src/lib.rs:778`) and
+  `split_message` is a shared helper, matching the char-aware `whatsapp` implementation the fix was ported
+  from. The rule stands: any string slicing in guest code must use
+  `char_indices()`/`is_char_boundary()`/`floor_char_boundary`, never a raw byte index derived from a length
+  budget.
 - **Allowlist + path-traversal hardening for egress.** WASM HTTP goes through the host allowlist
   (`src/tools/wasm/allowlist.rs`): host exact/wildcard, path-prefix, method restriction, **HTTPS by default**,
   reject userinfo (`user:pass@host`), normalize-and-block `../` / `%2e%2e/`, reject invalid percent-encoding
   (`NETWORK_SECURITY.md §Egress Controls`). New guest egress paths must route through this validator, not a
   bespoke check.
-- **Enforce declared resource limits.** Fuel + epoch + memory limits exist, but **table/instance limits are
-  stubbed**: `crates/thinclaw-tools/src/wasm/limits.rs:71,76` carry `#[allow(dead_code)] // Reserved` on
-  `tables_created`/`instances_created` — the counters are never incremented, so `max_tables`/`max_instances`
-  are not enforced (`AUDIT-FINDINGS.md §6 WIRE list`). If you touch the limiter, wire these (REALIZE) rather
-  than leave the reserved comment; if you add a new declared limit, enforce it in the same PR.
-- **Broken-auth declarations are worse than none.** Finding #4: Discord WASM declares webhook signature
-  verification (`channels-src/discord/src/lib.rs:148`, README claims it at `README.md:106`) but implements
-  none. Do not declare a security control in a `*.capabilities.json`/README that the code does not perform —
-  implement it (host Ed25519 verification) or remove the claim.
+- **Enforce declared resource limits.** Fuel + epoch + memory limits exist, and the table/instance limits
+  that were once stubbed are now **enforced** via a wasmtime `ResourceLimiter` in
+  `crates/thinclaw-tools/src/wasm/limits.rs` (`table_growing` returns `Ok(false)` past
+  `max_tables`/`max_table_elements`; `instances()` caps at `max_instances`); the old
+  `#[allow(dead_code)] // Reserved` counters are gone. The rule stands: if you add a new declared limit,
+  enforce it in the limiter in the same PR — do not leave a declared-but-unenforced knob.
+- **Broken-auth declarations are worse than none.** Finding #4: Discord WASM declared webhook signature
+  verification but implemented none. It is now **fixed**: Ed25519 verification is performed host-side
+  (`verify_discord_ed25519_signature`, `crates/thinclaw-channels/src/wasm/router.rs:316`), dispatched via
+  `WebhookSecretValidation::DiscordEd25519` (`schema.rs:556`, `router.rs:700`); the WASM guest only *declares*
+  the requirement. The rule stands: do not declare a security control in a `*.capabilities.json`/README that
+  the host does not actually perform — implement it or remove the claim.
 - **Shared SDK over copy-paste.** `json_response` / `split_message` / `conversation_scope_id` /
   `external_conversation_key` / `url_encode_path` / `validate_input_length` are copy-pasted across WASM
   channel crates, and that is **exactly why the `split_message` fix landed in only 1 of 4 copies**
@@ -265,11 +285,12 @@ Authority: `crates/thinclaw-tools/src/wasm/`, `crates/thinclaw-channels/src/wasm
 
 ## Async Pitfalls
 
-- **Never hold a `std`/blocking lock across `.await`.** `clippy::await_holding_lock` catches this — and it
-  fires today on `crates/thinclaw-config/src/secrets.rs` (the test `env_source_uses_allowed_key` holds the
-  `lock_env()` guard across an `.await` at ~`:144`, only surfaced because CI omits `--all-targets`, see
-  Quality Gate). Use `tokio::sync::Mutex` if you must hold across `.await`, or scope the `std` guard so it
-  drops before the await point.
+- **Never hold a `std`/blocking lock across `.await`.** `clippy::await_holding_lock` catches this. The one
+  historical instance in `crates/thinclaw-config/src/secrets.rs` (a test holding the `lock_env()` guard
+  across an `.await`) is now carried as an explicit `#[allow(clippy::await_holding_lock)]` with a justifying
+  comment, and CI now runs clippy with `--all-targets` so any *new* occurrence is caught (see Quality Gate).
+  Use `tokio::sync::Mutex` if you must hold across `.await`, or scope the `std` guard so it drops before the
+  await point — do not reach for a blanket `#[allow]` without a written justification.
 - **Correct cancellation.** Background listeners must drain on shutdown via `oneshot` + `tokio::select!`
   (gateway/webhook/orchestrator all do this; `NETWORK_SECURITY.md §Graceful Shutdown` per listener). Note
   the documented gap: the sandbox proxy `stop()` does **not** await a join handle, so in-flight connections
@@ -321,16 +342,15 @@ cargo clippy --all --benches --tests --examples --all-features -- -D warnings
 cargo test
 ```
 
-- **`--all-targets` / `--all` matters.** Note: CI's clippy currently runs `cargo clippy --workspace -- -D
-  warnings` **without `--all-targets`** (`.github/workflows/ci.yml:52,121`), so test/example/bench code
-  escapes `-D warnings` in CI — which is how the `await_holding_lock` in `secrets.rs` survives. **Locally you
-  must run the full `--all --benches --tests --examples` form** (the CLAUDE.md command) so you catch what CI
-  misses. (Fixing CI to add `--all-targets` is owned by `10-architecture-overhaul.md` / build-health work.)
-- **`cargo deny check`** must pass. It is **currently red on `main`** (RUSTSEC-2026-0182, wasmtime-wasi
-  36.0.10, `Cargo.toml:160`); the fix is `cargo update -p wasmtime-wasi --precise 36.0.11` plus removing the
-  three stale `advisory-not-detected` ignores at `deny.toml:22-24` — owned by the P0 security workstream. Do
-  not add a new `ignore` to `deny.toml` without a web-verified, dated justification comment in the
-  established style (`deny.toml:11-24`).
+- **`--all-targets` / `--all` matters.** CI's clippy now runs with `--all-targets --all-features`:
+  `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` (`.github/workflows/ci.yml:66`),
+  and the feature-matrix leg also passes `--all-targets` (`ci.yml:135`), so test/example/bench code is held
+  to `-D warnings` in CI. Still run the full `--all --benches --tests --examples` form locally (the CLAUDE.md
+  command) so you catch failures before the gate does.
+- **`cargo deny check`** must pass, and it is **green on `main`**. The audit's RUSTSEC-2026-0182 advisory is
+  resolved: `wasmtime-wasi` is now `36.0.12` in `Cargo.lock` and root `deny.toml` carries
+  `[advisories] ignore = []` (no stale ignores). Do not add a new `ignore` to `deny.toml` without a
+  web-verified, dated justification comment in the established style.
 - **Profile matrix.** Before merge, verify the profiles your change touches compile (see Feature-Flag
   Discipline); the CI feature matrix will gate this but catch it locally first for any `#[cfg(feature)]`
   edit.
@@ -374,23 +394,25 @@ The concrete failure modes the audit found. Each remediation PR should self-chec
    `telegram`/`slack`/`discord` (`AUDIT-FINDINGS.md §5`). **Rule:** when fixing a duplicated helper, grep for
    every copy and fix all of them in the same PR; prefer extracting a shared helper so there is one copy.
 
-2. **Empty string treated as "present".** `gateway_auth_token: ""` → `Some("")` → empty `Bearer`
-   authenticates (finding #1, `crates/thinclaw-config/src/channel_config.rs:183` — `.map(trim)` with **no**
-   `.filter(|s| !s.is_empty())`). The correct pattern exists in the parallel `GatewayAccess` path which
-   filters empties. **Rule:** treat empty/whitespace-only as **absent** for any credential, token, or
-   required-presence value; `.filter(|s| !s.trim().is_empty())` after the trim.
+2. **Empty string treated as "present".** Finding #1: `gateway_auth_token: ""` → `Some("")` → empty `Bearer`
+   authenticated. Now **fixed**: the `auth_token` builder trims then
+   `.filter(|token| !token.trim().is_empty())` at `crates/thinclaw-config/src/channel_config.rs:200`,
+   mirroring the `GatewayAccess` empty-token filter (`src/platform/gateway_access.rs:29`). **Rule:** treat
+   empty/whitespace-only as **absent** for any credential, token, or required-presence value;
+   `.filter(|s| !s.trim().is_empty())` after the trim.
 
 3. **Computed-but-dropped values.** The CheapSplit cascade is computed then discarded
    (`src/llm/route_planner.rs:565`); native-streaming `finish_reason` is computed as always-`Stop` even with
    tool calls (`crates/thinclaw-llm/src/rig_adapter.rs:1611`). **Rule:** if you compute it, use it or delete
    the computation.
 
-4. **Orphaned wired-looking code.** Subsystems that *look* connected but have zero runtime callers: desktop
-   cloud-sync (`apps/desktop/backend/src/cloud/mod.rs:445` flips a flag, spawns no sync), self-repair rebuild
-   (`with_builder` never injected, `src/agent/agent_loop.rs:605`), native dynamic-library plugin pipeline
-   (~1500L, zero callers), observability `create_observer` (never called). **Rule (REALIZE-THE-VISION):**
-   prefer wiring these via their existing port; if genuinely drifted cruft, ERASE explicitly and update docs.
-   Do not leave half-wired.
+4. **Orphaned wired-looking code.** The audit's canonical examples (desktop cloud-sync, self-repair rebuild
+   via `with_builder`, the native dynamic-library plugin pipeline, and observability `create_observer`) all
+   *looked* connected but had zero runtime callers. Every one was subsequently **wired** (cloud-sync via
+   `migrate_to_cloud`/`start_live_sync`; `with_builder` at `src/agent/agent_loop/mod.rs:672`;
+   `ExtensionKind::NativePlugin` signature-gated dispatch; `create_observer` from `AppBuilder` at
+   `src/app.rs:1717`). **Rule (REALIZE-THE-VISION):** prefer wiring such code via its existing port; if it is
+   genuinely drifted cruft, ERASE it explicitly and update docs. Do not leave half-wired.
 
 5. **Doc claims ahead of code.** See Doc-Update Triggers. **Rule:** a security/feature claim with no
    implementation is a bug, not just stale docs.

@@ -1,11 +1,15 @@
 # ThinClaw Remediation Plan
 
-> **Date:** 2026-06-23 · **Scope:** whole workspace (~543K LoC Rust, 25 crates + root facade + WASM channels/tools + Tauri desktop).
+> **STATUS — CLOSED 2026-06-25.** All 13 workstreams landed. See [`EXECUTION-SUMMARY.md`](./EXECUTION-SUMMARY.md) (commits `4f88c43e` … `43460933`, plus the F-01…F-19 follow-up pass `85ca082c`/`28f76f7f`/`a42021de`). This directory is retained as a **historical record of the plan** — do NOT re-schedule or re-execute it.
+>
+> **Closed is not the same as "every task delivered as originally specified."** A handful of individual tasks were superseded by a different design, deferred, or are not verifiable from the working tree. They are enumerated under [Residual open items](#residual-open-items) below and remain unchecked inside their workstream docs. Anything not listed there is done.
+
+> **Date:** 2026-06-23 · **Scope:** the whole Rust workspace (root facade + extracted crates + WASM channels/tools + Tauri desktop).
 > This is the navigational hub for the remediation effort. Findings live in [`AUDIT-FINDINGS.md`](./AUDIT-FINDINGS.md); the work is split into 13 numbered workstreams (`WS-01` … `WS-13`) plus a global guardrails reference; execution sequencing lives in [`EXECUTION-PLAYBOOK.md`](./EXECUTION-PLAYBOOK.md).
 
 ## Overview & Vision
 
-ThinClaw is already a **production-grade, fully-wired personal-agent platform** — the audit's headline conclusion. Its load-bearing systems (multi-session agent loop, routine/scheduler/heartbeat engine, tool registry + MCP runtime, twelve real WASM tool integrations, multi-provider LLM routing/failover/cache, both DB backends, the ~150-route web gateway, the autonomous experiments platform, and identity/soul/memory) are real and shipping.
+ThinClaw is already a **production-grade, fully-wired personal-agent platform** — the audit's headline conclusion. Its load-bearing systems (multi-session agent loop, routine/scheduler/heartbeat engine, tool registry + MCP runtime, twelve real WASM tool integrations, multi-provider LLM routing/failover/cache, both DB backends, the web gateway, the autonomous experiments platform, and identity/soul/memory) are real and shipping.
 
 What is **half-wired, aspirational, broken, or poorly-architected is concentrated and identifiable** — it clusters at the *frontier*: trust boundaries, the desktop app's newer subsystems, and the externally-packaged WASM channels. This plan exists to push that frontier to "done."
 
@@ -66,6 +70,8 @@ The DAG is **acyclic** (confirmed by the coverage critic). Each WS is one branch
 **Shared-file serialization** (do NOT co-edit) — seven hot files require ordered edits rather than parallel ones: `Cargo.lock`, `.github/workflows/ci.yml`, `src/api/experiments.rs`, `src/llm/runtime_manager.rs`, `src/llm/reasoning.rs`, `src/agent/routine_engine.rs`, `src/agent/agent_loop.rs`, `src/extensions/manager.rs`. The full sequencing rules are in the playbook's §2.4 conflict register.
 
 ## Decision Register
+
+> **Outcome (executed 2026-06-25):** every disposition below ran as recommended — each **WIRE** decision was wired end-to-end and each **ERASE** decision was deleted under operator sign-off (see [`EXECUTION-SUMMARY.md`](./EXECUTION-SUMMARY.md) and `DELETION-DOSSIER.md`). Wired: cloud-sync, native-plugin pipeline, self-repair `with_builder`, observability `create_observer`, WASM table/instance limits, Discord Ed25519, heartbeat target/verbosity, `dedup_window`, webhook-body pass-through, repo-project planner/concurrency/merge-bound, RoutePlanner + CheapSplit cascade, and `voice_wake` (behind the `voice` feature, not auto-enabled). Erased: the 14 `src/safety/*` orphans, the 3 unwired CLI modules, `self_message`, `qr_pairing`, the InferenceRouter chat modality, the `SmartRoutingProvider` decorator, `RepairTask`, the standalone heartbeat runner, and the `Reasoning.safety`/`SpawnSubagentTool.executor` leaky fields. **One reversal:** the `tailscale` `TailscaleDiscovery` row below recommended WIRE, but execution ERASED the Tailscale trust-identity/discovery code (`TailscaleIdentity`/`extract_identity`/`is_trusted_peer`) as verified-dead; Tailscale survives only as the outbound tunnel/setup concept in `src/config/tunnel.rs`.
 
 Every `decision_point` across all workstreams, with the recommended disposition and the wave that must have operator sign-off *before* it runs. Full rationale lives in each WS doc and in the playbook's §7. Items that delete built code are marked **(deletes code → sign-off)**.
 
@@ -149,19 +155,43 @@ Full detail: [`COVERAGE-CRITIC.md`](./COVERAGE-CRITIC.md).
 
 ## Status Tracker
 
-- [ ] **WS-01** Security & CI Hardening (P0) — 14 tasks
-- [ ] **WS-02** Database Correctness & Backend Parity (P0) — 5 tasks
-- [ ] **WS-03** WASM Channels & Tools Repair + Shared SDK (P1) — 6 tasks
-- [ ] **WS-04** Desktop App Completion (P1) — 12 tasks
-- [ ] **WS-05** Self-Repair, Extensions & Native-Plugin Pipeline (P1) — 10 tasks
-- [ ] **WS-12** Docs & Drift Sync (P1) — 10 tasks
-- [ ] **WS-13** Test & CI Infrastructure (P1) — 7 tasks
-- [ ] **WS-06** Repo-Project Supervisor Completion (P2) — 8 tasks
-- [ ] **WS-07** Experiments / Research Platform Completion (P2) — 7 tasks
-- [ ] **WS-08** LLM Stack Consolidation (P2) — 8 tasks
-- [ ] **WS-09** Routines / Scheduler / Heartbeat Completion (P2) — 6 tasks
-- [ ] **WS-10** Architecture Overhaul (P2) — 12 tasks
-- [ ] **WS-11** Dead-Code Sweep & Vision Decisions (P2) — 10 tasks
-- [ ] **CC-A** Global Best Practices & Common Pitfalls (reference) — guardrails doc complete
+*All workstreams landed by 2026-06-25. See [`EXECUTION-SUMMARY.md`](./EXECUTION-SUMMARY.md) for the commit-by-commit record.*
 
-**Wave gate:** [ ] Wave 0 green · [ ] Wave 1 merged · [ ] Wave 2 merged · [ ] Wave 3 merged · [ ] Wave 4 merged · [ ] `main` green under `--all-targets` + `cargo deny`
+- [x] **WS-01** Security & CI Hardening (P0) — 13/14 tasks · T11 superseded (see residuals)
+- [x] **WS-02** Database Correctness & Backend Parity (P0) — 5 tasks
+- [x] **WS-03** WASM Channels & Tools Repair + Shared SDK (P1) — 3/6 tasks · T3/T4/T6 open (see residuals)
+- [x] **WS-04** Desktop App Completion (P1) — 11/12 tasks · T12 open (see residuals)
+- [x] **WS-05** Self-Repair, Extensions & Native-Plugin Pipeline (P1) — 10 tasks
+- [x] **WS-12** Docs & Drift Sync (P1) — 10 tasks
+- [x] **WS-13** Test & CI Infrastructure (P1) — 6/7 tasks · T2 not tree-verifiable (see residuals)
+- [x] **WS-06** Repo-Project Supervisor Completion (P2) — 8 tasks
+- [x] **WS-07** Experiments / Research Platform Completion (P2) — 7 tasks
+- [x] **WS-08** LLM Stack Consolidation (P2) — 8 tasks
+- [x] **WS-09** Routines / Scheduler / Heartbeat Completion (P2) — 6 tasks
+- [x] **WS-10** Architecture Overhaul (P2) — 12 tasks
+- [x] **WS-11** Dead-Code Sweep & Vision Decisions (P2) — 10 tasks
+- [x] **CC-A** Global Best Practices & Common Pitfalls (reference) — guardrails doc complete
+
+**Wave gate:** [x] Wave 0 green · [x] Wave 1 merged · [x] Wave 2 merged · [x] Wave 3 merged · [x] Wave 4 merged · [x] `main` green under `--all-targets` + `cargo deny`
+
+### Residual open items
+
+Verified against the working tree on 2026-07-10. These are the only tasks from the 13 workstreams
+that were not delivered as originally specified. Each remains unchecked in its own workstream doc.
+
+| Item | WS | Disposition | Evidence |
+|---|---|---|---|
+| Filesystem `base_dir == None` cwd-containment | WS-01 T11 | **Superseded.** Shipped instead as an explicit, warned unrestricted trusted-operator mode. Containment is enforced only when a base is configured. | `crates/thinclaw-tools/src/builtin/file.rs:166` gates containment on `base_dir.is_some()` |
+| Shared tool helpers (`url_encode_path`, `validate_input_length`) | WS-03 T3 | **Open.** No `tools-src/shared_tool_helpers`; `url_encode_path` still defined in 2 crates. | `ls tools-src/shared_tool_helpers` → absent |
+| Shared channel helpers (`split_message`, `json_response`, …) | WS-03 T4 | **Open.** No `channels-src/shared_channel_helpers`; `split_message` still defined in 4 crates. | `ls channels-src/shared_channel_helpers` → absent |
+| Shim + `tools-src` buildability handoff to WS-13 | WS-03 T6 | **Open**, WS-13-owned. | — |
+| Desktop profile omits `wasm-runtime` | WS-04 T12 | **Open.** `desktop` feature neither adds `wasm-runtime` nor documents an explicit rationale. | `Cargo.toml:302` |
+| Worktree/Docker lifecycle-race tracking issue | WS-13 T2 | **Not verifiable from the tree** (a GitHub issue); the fix itself is WS-07-owned. | — |
+
+Two further items sit outside the WS task lists and remain open, tracked in
+[`FOLLOWUPS.md`](./FOLLOWUPS.md): **F-13** (object-store artifact backend, deferred pending an
+`opendal` dependency/licence review) and **F-09** (full shared-`include!` extraction, partial).
+
+Beyond this plan's scope, the coverage job still runs `cargo llvm-cov --all-features --lib` with no
+`--fail-under` floor, and `cargo deny` does not scan the `channels-src/` / `tools-src/`
+sub-workspace lockfiles. Both are tracked in [`../refactor/BACKLOG.md`](../refactor/BACKLOG.md).

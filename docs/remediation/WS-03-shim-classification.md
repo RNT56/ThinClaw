@@ -4,6 +4,14 @@
 > No channel source was modified. This is the input artifact for WS-03 task **T5**
 > (capabilities `production_status` + per-shim README) and the WS-12 doc-sync summary table.
 > Verified against the working tree on 2026-06-23 (`main` @ `9e707985`).
+>
+> **Post-execution status (T5 landed):** every recommendation below has been applied. All 12
+> `include!` shims now carry a `README.md`, and all 16 channel `*.capabilities.json` carry a
+> `production_status` field. A sixth `WebhookSecretValidation::DiscordEd25519` variant was added, so
+> `discord` is now production (not "after T2"). The "No README" entries in the tables below are the
+> audit-time snapshot and no longer hold. The one cross-cutting gap that remains genuinely open is
+> the CI-compile gate (the 12 shims are still not built in CI; `scripts/build-all.sh` still skips the
+> `tools-src/*` crates).
 
 ## Method
 
@@ -25,11 +33,12 @@ Each candidate was assessed on four dimensions plus a single biggest-gap call:
 - **Biggest gap** — the single highest-value missing piece.
 
 **Host validation grounding.** `WebhookSecretValidation`
-(`crates/thinclaw-channels/src/wasm/schema.rs:519-531`) and the router match
-(`crates/thinclaw-channels/src/wasm/router.rs:622-645`) support exactly five variants:
+(`crates/thinclaw-channels/src/wasm/schema.rs`) and the router match
+(`crates/thinclaw-channels/src/wasm/router.rs`) support **six** variants:
 `Equals`, `HmacSha256Body`, `HmacSha256Base64Body`, `TwitchEventsubHmacSha256`,
-`TwilioRequestSignature`. A shim is signature-grade only if its `secret_validation` maps to
-one of the four cryptographic variants; `equals` is a plaintext shared-secret compare and is
+`TwilioRequestSignature`, and `DiscordEd25519` (added by WS-03 T2, `schema.rs:556`, handled in the
+router at `router.rs:700`). A shim is signature-grade only if its `secret_validation` maps to
+one of the five cryptographic variants; `equals` is a plaintext shared-secret compare and is
 only meaningful if the operator configures the platform to send that exact secret in the
 configured header (most of these platforms do not).
 
@@ -162,9 +171,12 @@ correctly configured platform. The distinction is **auth correctness**, not miss
 | `mattermost` | **MARK NON-PRODUCTION** (`beta`) + caveat: per-webhook token via `equals` only if operator routes it into `X-Webhook-Secret`; native body-`token` placement not auto-handled. |
 
 ### Rollup for T5 / WS-12 table
-- **Production (4):** `line`, `twitch`, `twilio_sms` now; `discord` after WS-03 T2.
+- **Production (4):** `line`, `twitch`, `twilio_sms`, and `discord` (WS-03 T2 landed; `discord` now
+  verifies Ed25519 host-side via `WebhookSecretValidation::DiscordEd25519`).
 - **Beta / "inbound auth = shared-secret `equals` only" (9):** `dingtalk`, `feishu_lark`,
   `google_chat`, `matrix`, `mattermost`, `ms_teams`, `qq`, `wecom`, `weixin`.
-- **Stretch promotion:** `qq` → production via reused Ed25519 helper.
-- **Cross-cutting (deferred to T4/T5 + WS-13):** no shim has a README; no shim has a
-  config-wiring test; the 12 shims are never compiled in CI.
+- **Stretch promotion:** `qq` to production via reused Ed25519 helper (not yet taken; still `beta`).
+- **Cross-cutting status:** READMEs **landed**: all 12 shims now carry a `README.md` and all channel
+  `*.capabilities.json` carry `production_status` (T5). Still open (WS-13-owned): the config-wiring
+  round-trip test and the CI-compile gate. `scripts/build-all.sh` still skips the `tools-src/*`
+  crates and the channel matrix compiles only the four custom-WASM channels.

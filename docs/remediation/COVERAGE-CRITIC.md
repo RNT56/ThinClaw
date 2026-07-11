@@ -2,6 +2,23 @@
 
 > Reviewed AUDIT-FINDINGS.md against all 13 WS docs on 2026-06-23. Verified anchors against code where contested.
 
+> **STATUS: HISTORICAL (plan executed).** This was a pre-execution gate over the *remediation plan*.
+> The plan has since been executed and merged (all 13 workstreams, audit-hardening stack on `main`),
+> so the `DAG_OK` analysis, the `CONFLICTS` sequencing, and the `NOTES` reconciliation items are now a
+> record of how the waves were ordered, not live blockers. The `UNCOVERED findings` were largely
+> addressed:
+> - **#1 `image_gen.rs` divide-by-zero:** **FIXED**; the denominator is now guarded
+>   (`progress_fraction(current, total)` with an explicit zero-guard comment in
+>   `apps/desktop/backend/src/image_gen.rs`).
+> - **#5 DNS-rebind / OAuth `state`:** **DONE** (WS-01 wiring, commit `29188003`); OAuth state is
+>   validated via `oauth_state_matches`/`expected_state` in `src/cli/oauth_defaults.rs`.
+>
+> **Still genuinely open** (do not treat as resolved): **#2**, `scripts/build-all.sh` still does not
+> build the `tools-src/*` WASM tool crates (`build-all.sh:97` "Skipping tools-src/*"), and the channel
+> CI matrix still compiles only the four custom-WASM channels, so the 12 `include!` shims + `tools-src`
+> have no `wasm32-wasip2` compile gate. **#4**, the `desktop` profile still omits `wasm-runtime`
+> (`Cargo.toml:302`). Track remaining items via `HANDOFF-REMAINING-WORK.md` / `FOLLOWUPS.md`.
+
 ## DAG_OK: yes
 
 No cycles. Dependency edges form a strict partial order:

@@ -100,7 +100,7 @@ Proactive periodic execution (default: 30 minutes):
 
 Heartbeat scheduling is owned by the **routine engine**, not a standalone
 loop. The agent loop registers a heartbeat routine at startup via
-`upsert_heartbeat_routine` (`src/agent/agent_loop.rs`), and the engine fires
+`upsert_heartbeat_routine` (`src/agent/agent_loop/heartbeat.rs`), and the engine fires
 it on its cron schedule like any other routine. The interactive `/heartbeat`
 command runs a one-shot check through `HeartbeatRunner::check_heartbeat`.
 

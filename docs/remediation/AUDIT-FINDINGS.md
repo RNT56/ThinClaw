@@ -1,14 +1,22 @@
 # ThinClaw — State of the Project Audit (Findings)
 
-> **Date:** 2026-06-23 · **Scope:** whole workspace (~543K LoC Rust, 25 crates + root facade + WASM channels/tools + Tauri desktop).
+> **STATUS: HISTORICAL SNAPSHOT (2026-06-23). All findings below are now RESOLVED.**
+> This is a dated findings record, not a live bug list. Every confirmed bug and every
+> open-work item captured here was addressed by the 13-workstream remediation stack, which
+> merged into `main` (audit-hardening stack, `bda7a61f`/`1fb29984`). For the outcome and the
+> remaining deliberately-deferred follow-ups, see `EXECUTION-SUMMARY.md` and `FOLLOWUPS.md`.
+> Individual confirmed bugs below carry an inline **RESOLVED** annotation with the fixing commit
+> and current file location. Do not treat this document as work still to be done.
+>
+> **Date:** 2026-06-23 · **Scope (at audit time):** whole workspace (~543K LoC Rust, 28 crates + root facade + WASM channels/tools + Tauri desktop).
 > **Method:** 35-agent parallel audit (16 subsystem surveys + 6 cross-cutting hunts) followed by an adversarial verification pass over every high/critical finding (10 confirmed, 1 refuted, 0 left unverified). A hunt agent ran a real `cargo check`. All claims are grounded in `file:line` evidence; corrected severities reflect the verification pass.
-> This file is the source-of-truth findings record. The remediation plan that resolves these findings lives in the sibling `WS-*.md` workstream docs and `EXECUTION-PLAYBOOK.md`; the index is `README.md`.
+> This file is the source-of-truth findings record. The remediation plan that resolved these findings lives in the sibling `WS-*.md` workstream docs and `EXECUTION-PLAYBOOK.md`; the index is `README.md`.
 
 ## 1. Executive Summary
 
-ThinClaw is a **genuinely mature, production-grade personal-agent platform** — not a scaffold dressed up with aspirational docs. The load-bearing systems are real and wired end-to-end: the multi-session agent loop (LLM→tools→repeat with iteration caps, stuck-loop detection, compaction, advisor escalation), the durable routine/scheduler/heartbeat engine, the tool registry + MCP runtime, twelve real external WASM tool integrations, the multi-provider LLM stack with live routing/failover/caching, both database backends (Postgres + libSQL), the ~150-route web gateway control plane, an end-to-end autonomous experiments platform, and the identity/soul/memory system. The crate-vs-root split is largely disciplined ports/adapters work rather than copy-paste duplication.
+ThinClaw is a **genuinely mature, production-grade personal-agent platform** — not a scaffold dressed up with aspirational docs. The load-bearing systems are real and wired end-to-end: the multi-session agent loop (LLM→tools→repeat with iteration caps, stuck-loop detection, compaction, advisor escalation), the durable routine/scheduler/heartbeat engine, the tool registry + MCP runtime, twelve real external WASM tool integrations, the multi-provider LLM stack with live routing/failover/caching, both database backends (Postgres + libSQL), the 215-route web gateway control plane (plus 9 orchestrator routes), an end-to-end autonomous experiments platform, and the identity/soul/memory system. The crate-vs-root split is largely disciplined ports/adapters work rather than copy-paste duplication.
 
-What's **aspirational or half-wired** is concentrated and identifiable: the desktop cloud-sync subsystem (fully written, never spawned); the self-repair *automatic* tool-rebuild path (`with_builder` never injected); the native dynamic-library plugin pipeline (~1500 lines, signature-verified, zero runtime callers); the observability backend (`create_observer` never called); and several orphaned peripheral modules (voice_wake, tailscale discovery, qr_pairing).
+What was **aspirational or half-wired** at audit time was concentrated and identifiable: the desktop cloud-sync subsystem (fully written, never spawned); the self-repair *automatic* tool-rebuild path (`with_builder` never injected); the native dynamic-library plugin pipeline (~1500 lines, signature-verified, zero runtime callers); the observability backend (`create_observer` never called); and several orphaned peripheral modules (voice_wake, tailscale discovery, qr_pairing). **All of these were subsequently resolved:** cloud-sync, self-repair `with_builder`, `create_observer`, the native-plugin `ExtensionKind::NativePlugin` pipeline, and voice_wake are now wired; tailscale discovery and qr_pairing were deleted. See the per-bug RESOLVED annotations and `EXECUTION-SUMMARY.md`.
 
 ### The 5 biggest risks
 
@@ -32,7 +40,7 @@ None break the core agent runtime. They cluster in **trust boundaries, the deskt
 | WASM channels (external) | **Mixed** | Yes | 78% | 4 strong custom + 13 thin shims; Discord auth broken, split_message panic in 3 channels. |
 | LLM stack & routing | Production | Yes | 85% | Real multi-provider routing/failover/cache; dual routing engines coexist, CheapSplit cascade computed-but-dropped. |
 | Database & migrations | Production | Yes | 88% | Both backends shipping; FTS5 divergence bug, parity test only checks column names. |
-| Web gateway & HTTP API | Production | Yes | 88% | Solid auth + 150 routes; two API god-files, repo-project SSE emitted but never consumed by UI. |
+| Web gateway & HTTP API | Production | Yes | 88% | Solid auth + 215 routes (`src/channels/web/server.rs`) plus 9 orchestrator routes; two API god-files, repo-project SSE emitted but never consumed by UI. |
 | Experiments / research | Production | Yes (default off) | 88% | Genuine end-to-end platform; 5434L god-file, unenforced artifact retention, RunPod credit≈USD assumption. |
 | Repo-project supervisor | **Partial** | Yes (default off) | 78% | Recent, wired; NeedsPlanning never acted on, concurrency limits inert, unbounded merge-retry loop. |
 | Desktop app (Tauri) | **Mixed** | Yes | 82% | Large, mostly real; cloud-sync never spawned, InferenceRouter local + chat backends dead. |
@@ -44,18 +52,18 @@ None break the core agent runtime. They cluster in **trust boundaries, the deskt
 
 ## 3. Confirmed Bugs & Correctness Issues
 
-Severities are the corrected post-verification values.
+Severities are the corrected post-verification values. **Every bug in this table is now RESOLVED**; the Resolution column records the fixing commit and the current source location.
 
-| # | Issue | File | Sev | Fix |
+| # | Issue | File (at audit time) | Sev | Resolution |
 |---|---|---|---|---|
-| 1 | Empty `gateway_auth_token` → `Some("")` → empty `Bearer` authenticates → full `/api` auth bypass | `crates/thinclaw-config/src/channel_config.rs:183` | **High** | empty-filter after trim; treat empty as absent in `GatewayChannel::new` (`src/channels/web/mod.rs:73`) |
-| 2 | `cargo deny` fails on RUSTSEC-2026-0182 (wasmtime-wasi 36.0.10) — CI red | `Cargo.toml:160` | **Med** | `cargo update -p wasmtime-wasi --precise 36.0.11` |
-| 3 | libSQL transcript search throws on `:`/`"`/`-`; Postgres tolerates | `crates/thinclaw-db/src/libsql/conversations.rs:846` | **High** | reuse sanitizer from `crates/thinclaw-db/src/libsql/workspace.rs:677-693` |
-| 4 | Discord WASM declares signature verification, implements none | `channels-src/discord/src/lib.rs:148` | **High** | host Ed25519 variant + caps block; fix README |
-| 5 | `split_message` panics on multibyte UTF-8 boundary (telegram/slack/discord) | `channels-src/telegram/src/lib.rs:2189`, `channels-src/slack/src/lib.rs:1058`, `channels-src/discord/src/lib.rs:750` | **High** | port whatsapp's char-aware boundary |
-| 6 | Sandbox proxy credential resolver reads process env, never encrypted SecretsStore | `src/sandbox/proxy/mod.rs:72` | **Med** | store-backed resolver via `with_credential_resolver`, or document + delete hook |
-| 7 | Sandbox credential injection inert for HTTPS; all default mappings are HTTPS | `src/sandbox/proxy/http.rs:351` | **Med** | remove dead HTTPS defaults or implement OOB delivery |
-| 8 | Desktop `migrate_to_cloud` flips a flag but spawns no sync — writes stay local | `apps/desktop/backend/src/cloud/mod.rs:445` | **Med** | activate FileStore cloud mode + SyncEngine, or feature-gate |
+| 1 | Empty `gateway_auth_token` → `Some("")` → empty `Bearer` authenticates → full `/api` auth bypass | `crates/thinclaw-config/src/channel_config.rs:183` | **High** | **RESOLVED** (WS-01, `4f88c43e`). The `auth_token` builder now trims then `.filter(\|token\| !token.trim().is_empty())` at `crates/thinclaw-config/src/channel_config.rs:200`, mirroring the `GatewayAccess` empty-token filter at `src/platform/gateway_access.rs:29`. |
+| 2 | `cargo deny` fails on RUSTSEC-2026-0182 (wasmtime-wasi 36.0.10) — CI red | `Cargo.toml:160` | **Med** | **RESOLVED**. `wasmtime-wasi` is now `36.0.12` in `Cargo.lock`; root `deny.toml` carries `[advisories] ignore = []` (no stale ignores). `cargo deny check` is green. |
+| 3 | libSQL transcript search throws on `:`/`"`/`-`; Postgres tolerates | `crates/thinclaw-db/src/libsql/conversations.rs:846` | **High** | **RESOLVED** (WS-02, `4f88c43e`). Transcript search now sanitizes via the shared `super::fts::sanitize_fts5_match(query)` before `MATCH` at `crates/thinclaw-db/src/libsql/conversations/mod.rs:574` (the file was decomposed into a directory module). |
+| 4 | Discord WASM declares signature verification, implements none | `channels-src/discord/src/lib.rs:148` | **High** | **RESOLVED** (WS-03, `d1c447c8`). Ed25519 webhook verification is implemented host-side (`verify_discord_ed25519_signature`) at `crates/thinclaw-channels/src/wasm/router.rs:316`, dispatched via `WebhookSecretValidation::DiscordEd25519` (`schema.rs:556`, `router.rs:700`). |
+| 5 | `split_message` panics on multibyte UTF-8 boundary (telegram/slack/discord) | `channels-src/telegram/src/lib.rs:2189`, `channels-src/slack/src/lib.rs:1058`, `channels-src/discord/src/lib.rs:750` | **High** | **RESOLVED** (WS-03, `d1c447c8`). Chunking is now char-aware via `char_indices()` (`channels-src/slack/src/lib.rs:1055`, `channels-src/discord/src/lib.rs:778`); `split_message` is a shared helper. |
+| 6 | Sandbox proxy credential resolver reads process env, never encrypted SecretsStore | `src/sandbox/proxy/mod.rs:72` | **Med** | **RESOLVED** (WS-01 wiring, `29188003`). A store-backed `StoreCredentialResolver` reads the encrypted `SecretsStore` (`src/sandbox/proxy/http.rs`). |
+| 7 | Sandbox credential injection inert for HTTPS; all default mappings are HTTPS | `src/sandbox/proxy/http.rs:351` | **Med** | **RESOLVED** (WS-01 wiring, `29188003`), together with #6. |
+| 8 | Desktop `migrate_to_cloud` flips a flag but spawns no sync — writes stay local | `apps/desktop/backend/src/cloud/mod.rs:445` | **Med** | **RESOLVED** (WS-04, `41091179`). `migrate_to_cloud` (now `mod.rs:418`) runs `migration::run_to_cloud`, and `start_live_sync` (`apps/desktop/backend/src/cloud/live_sync.rs`) starts when `is_cloud_mode()` is true. |
 
 **Lower-severity confirmed:** native-streaming `finish_reason` always `Stop` even with tool calls (telemetry only) `crates/thinclaw-llm/src/rig_adapter.rs:1611`; image_gen progress divide-by-zero → garbage % label (display-only) `apps/desktop/backend/src/image_gen.rs:700`; routine event dispatch break-on-first-error defers the whole batch (self-correcting via idempotency) `src/agent/routine_engine.rs:898`; desktop child-session registry never cleaned (slow leak, lying doc comments) `apps/desktop/backend/src/thinclaw/commands/rpc_orchestration.rs:103`.
 
@@ -64,6 +72,11 @@ Severities are the corrected post-verification values.
 **Provably-safe (audited, no action):** all 22 first-party `unreachable!()` sites are sound; the lone `todo!()` is in vendored `patches/libsql` on a remote-hrana path local-file usage never hits; all four `len()`-subtraction sites are underflow-guarded. **Unverified high/critical findings: 0.**
 
 ## 4. Open Work (condensed)
+
+> **All items in this section have been actioned by the 13-workstream remediation stack (merged to
+> `main`, `bda7a61f`/`1fb29984`).** The list is retained as the historical work breakdown. A small
+> set of deliberately-deferred follow-ups (e.g. `F-13` opendal object-store backend) and known
+> not-yet-met targets are tracked live in `FOLLOWUPS.md` and `HANDOFF-REMAINING-WORK.md`, not here.
 
 ### P0 — security, red CI, data-correctness
 - Bump wasmtime-wasi 36.0.10→36.0.11 (RUSTSEC-2026-0182); remove 3 stale `advisory-not-detected` ignores in `deny.toml:22-24`.
@@ -90,6 +103,16 @@ Severities are the corrected post-verification values.
 - Build ergonomics: wasm target in tool-crate CI; `build-all.sh` build `tools-src`; `wasm-runtime` in desktop profile or document.
 
 ## 5. Overhaul Candidates
+
+> **RESOLVED (WS-10, decomposition wave).** Every god-file listed below was decomposed into a
+> directory module; **no committed `.rs` file now exceeds 2,000 lines** anywhere in the repo, and a
+> CI guard (`scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000`) enforces this. The largest surviving
+> modules are `crates/thinclaw-channels/src/gmail.rs` (1,999L),
+> `crates/thinclaw-db/src/libsql_migrations.rs` (1,980L), and
+> `crates/thinclaw-secrets/src/store.rs` (1,974L). The half-finished migrations were
+> also completed: `src/history/store/` was deleted (consolidated onto `thinclaw-db`) and the 14
+> orphaned `src/safety/*.rs` files were removed (live code is `crates/thinclaw-safety/src/*`). The
+> list below is the audit-time inventory and cites paths/line-counts that no longer exist.
 
 **God-files (worst first):** `crates/thinclaw-channels/src/wasm/wrapper.rs` (5701L); `src/api/experiments.rs` (5434L, 106 flattening `map_err`); `crates/thinclaw-tools/src/builtin/skill.rs` (4577L) + `src/tools/builtin/skill_tools.rs` (4381L) (clean split, but each a god-file); `src/agent/thread_ops.rs` (3032L, ~850L `process_approval`); `src/llm/runtime_manager.rs` (~3100L); `src/extensions/manager.rs` (3343L); `src/agent/routine_engine.rs`; `src/agent/agent_loop.rs`; `crates/thinclaw-workspace/src/workspace_core.rs`; desktop `rpc_dashboard.rs`/`remote_proxy.rs`/`sidecar.rs`; onboarding `wizard/mod.rs`/`wizard/llm.rs`/`setup/channels.rs`.
 
@@ -121,7 +144,7 @@ Lower-priority: `execute_code` runs on the bare host by default with weaker safe
 
 Builds clean (`cargo check --no-default-features --features edge` green, zero warnings). Toolchain pinned to Rust 1.92.0. CI matrix broad (7 profiles, 3 OSes, Postgres + libSQL `db_contract`, ACP/host-runtime/deploy smokes, desktop-companion).
 
-Two real problems: `cargo deny check` FAILS on main (RUSTSEC-2026-0182); CI clippy omits `--all-targets` (`ci.yml:52,121`) so test/example/bench code escapes `-D warnings` — locally surfaces a real `await_holding_lock` at `crates/thinclaw-config/src/secrets.rs:144`.
+Two real problems, **both now RESOLVED:** `cargo deny check` FAILED on main (RUSTSEC-2026-0182), now fixed (wasmtime-wasi now `36.0.12`, `deny.toml [advisories] ignore = []`, gate green); CI clippy omitted `--all-targets`, now fixed: `ci.yml:66` now runs `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` (the feature-matrix leg at `ci.yml:135` also uses `--all-targets`), and the `await_holding_lock` in `crates/thinclaw-config/src/secrets.rs` is now an explicit `#[allow]` with a justifying comment.
 
 15 `#[ignore]` tests (Docker E2Es, live smokes), incl. a quarantined known-flaky `autonomous_campaign_..._end_to_end` (`src/api/experiments.rs:5060`, commit `64b9572f`) masking an unfixed worktree/Docker race. None run in CI.
 

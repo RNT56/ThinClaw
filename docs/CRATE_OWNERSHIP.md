@@ -56,6 +56,7 @@ only to reduce root file count.
 | `thinclaw-app` | root-independent startup/runtime policy, app assembly DTOs, setup/onboarding/profile/provider planning DTOs, bootstrap env planning, quiet startup spinner behavior |
 | `thinclaw-repo-projects` | repo-project supervisor domain types and state machines: project/task/run states and transitions, coding backend, merge method, GitHub auth mode, project policy, and merge-gate decision DTOs |
 | `thinclaw-portability` | root-independent whole-agent backup bundle format: passphrase AEAD envelope (scrypt + XChaCha20-Poly1305), versioned manifest, and gzip-tar bundle assembly/extraction with path-traversal-safe restore. Gathering the state (DB, workspace) is the root CLI's job (`src/cli/backup.rs`); the crate only builds/opens byte payloads |
+| `thinclaw-client` | typed async Rust client SDK (the analog of an Agent SDK) that wraps the gateway HTTP + SSE surface: send chat messages, stream responses and tool-call events, browse thread history, and resolve tool approvals. Documented in `docs/CLIENT_SDK.md`. It is the only workspace crate not depended on by the root package; its dependency on `thinclaw-gateway` is a `dev-dependencies` contract test, not a runtime dependency |
 
 ## Root-Owned Runtime Still In Root
 
@@ -119,9 +120,14 @@ rg "use thinclaw::" crates
 rg '^\s*thinclaw\s*=|^\s*\[.*\.thinclaw\]' crates -g Cargo.toml
 rg 'package\s*=\s*"thinclaw"' crates -g Cargo.toml
 rg 'thinclaw-agent' crates/thinclaw-db/Cargo.toml
+rg 'thinclaw-tools\b' crates/thinclaw-gateway/Cargo.toml
 ```
 
 The structural searches should have no matches. CI runs the root-import,
-root-package, and `thinclaw-db`→`thinclaw-agent` dependency guards in the
-code-style job so crate-boundary violations fail before the expensive compile
-matrix. Persistence (`thinclaw-db`) must not depend on the agent layer.
+root-package, `thinclaw-db`→`thinclaw-agent`, and
+`thinclaw-gateway`→`thinclaw-tools` dependency guards in the code-style job's
+"Check crate boundaries" step so crate-boundary violations fail before the
+expensive compile matrix. Persistence (`thinclaw-db`) must not depend on the
+agent layer, and the light gateway crate (`thinclaw-gateway`) must not pull the
+heavyweight tool runtime (it depends on `thinclaw-tools-core` for MCP/execution
+DTOs instead).
