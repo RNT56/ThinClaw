@@ -239,7 +239,10 @@ impl Default for ChannelCounters {
 /// Includes an injection channel so background tasks (e.g., job monitors) can
 /// push messages into the agent loop without being a full `Channel` impl.
 pub struct ChannelManager {
-    channels: Arc<RwLock<HashMap<String, Box<dyn Channel>>>>,
+    // `Arc<dyn Channel>` (not `Box`) so callers can clone a handle out of the
+    // read guard and drop the guard before awaiting the channel — a hung
+    // channel then cannot stall unrelated manager operations behind the lock.
+    channels: Arc<RwLock<HashMap<String, Arc<dyn Channel>>>>,
     descriptors: Arc<RwLock<HashMap<String, ChannelDescriptor>>>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     /// Taken once in `start_all()` and merged into the stream.
@@ -341,7 +344,7 @@ impl ChannelManager {
 
     fn resolve_channel_name<'a>(
         requested: &'a str,
-        channels: &'a HashMap<String, Box<dyn Channel>>,
+        channels: &'a HashMap<String, Arc<dyn Channel>>,
     ) -> &'a str {
         if channels.contains_key(requested) {
             requested
@@ -352,6 +355,21 @@ impl ChannelManager {
         } else {
             requested
         }
+    }
+
+    /// Clone the `Arc` for `requested` (resolving the legacy `web`→`gateway`
+    /// alias) out of the read guard so the caller can await the channel without
+    /// holding the lock.
+    async fn channel_for(&self, requested: &str) -> Option<Arc<dyn Channel>> {
+        let channels = self.channels.read().await;
+        let resolved = Self::resolve_channel_name(requested, &channels);
+        channels.get(resolved).cloned()
+    }
+
+    /// Clone the `Arc` for the exact `name` out of the read guard (no alias
+    /// resolution), so the caller can await the channel without holding the lock.
+    async fn channel_exact(&self, name: &str) -> Option<Arc<dyn Channel>> {
+        self.channels.read().await.get(name).cloned()
     }
 
     /// Get a clone of the injection sender.
@@ -410,7 +428,10 @@ impl ChannelManager {
     /// Add a channel to the manager.
     pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
-        self.channels.write().await.insert(name.clone(), channel);
+        self.channels
+            .write()
+            .await
+            .insert(name.clone(), Arc::from(channel));
         let _ = self.counter_for(&name).await;
         tracing::debug!("Added channel: {}", name);
     }
@@ -433,11 +454,15 @@ impl ChannelManager {
     /// and spawns a task that forwards its stream messages through `inject_tx` into
     /// the agent loop.
     pub async fn hot_add(&self, channel: Box<dyn Channel>) -> Result<(), ChannelError> {
+        let channel: Arc<dyn Channel> = Arc::from(channel);
         let name = channel.name().to_string();
         let stream = channel.start().await?;
 
         // Register for respond/broadcast/send_status
-        self.channels.write().await.insert(name.clone(), channel);
+        self.channels
+            .write()
+            .await
+            .insert(name.clone(), Arc::clone(&channel));
         let _ = self.counter_for(&name).await;
 
         self.drain_stream_forwarder(&name).await;
@@ -490,10 +515,14 @@ impl ChannelManager {
     /// Also merges the injection channel so background tasks can push messages
     /// into the same stream.
     pub async fn start_all(&self) -> Result<MessageStream, ChannelError> {
-        let channels = self.channels.read().await;
+        // Snapshot handles, then start each without holding the read guard.
+        let channels: Vec<(String, Arc<dyn Channel>)> = {
+            let guard = self.channels.read().await;
+            guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
         let mut streams: Vec<MessageStream> = Vec::new();
 
-        for (name, channel) in channels.iter() {
+        for (name, channel) in channels {
             match channel.start().await {
                 Ok(stream) => {
                     tracing::info!("Started channel: {}", name);
@@ -544,21 +573,20 @@ impl ChannelManager {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         let requested_channel_name = msg.channel.clone();
-        let resolved_channel_name = {
+        let (resolved_channel_name, channel) = {
             let channels = self.channels.read().await;
-            Self::resolve_channel_name(&requested_channel_name, &channels).to_string()
-        };
-        let result = {
-            let channels = self.channels.read().await;
-            if let Some(channel) = channels.get(&resolved_channel_name) {
-                channel.respond(msg, response).await
-            } else {
-                return Err(ChannelError::SendFailed {
-                    name: requested_channel_name,
-                    reason: "Channel not found".to_string(),
-                });
-            }
+            let resolved =
+                Self::resolve_channel_name(&requested_channel_name, &channels).to_string();
+            let channel = channels.get(&resolved).cloned();
+            (resolved, channel)
         }; // lock guard drops here
+        let Some(channel) = channel else {
+            return Err(ChannelError::SendFailed {
+                name: requested_channel_name,
+                reason: "Channel not found".to_string(),
+            });
+        };
+        let result = channel.respond(msg, response).await;
         let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
             counter.sent.fetch_add(1, Ordering::Relaxed);
@@ -579,13 +607,10 @@ impl ChannelManager {
         status: StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        let channels = self.channels.read().await;
-        let channel_name = Self::resolve_channel_name(channel_name, &channels);
-        if let Some(channel) = channels.get(channel_name) {
-            channel.send_status(status, metadata).await
-        } else {
+        match self.channel_for(channel_name).await {
+            Some(channel) => channel.send_status(status, metadata).await,
             // Silently ignore if channel not found (status is best-effort)
-            Ok(())
+            None => Ok(()),
         }
     }
 
@@ -598,21 +623,19 @@ impl ChannelManager {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let resolved_channel_name = {
+        let (resolved_channel_name, channel) = {
             let channels = self.channels.read().await;
-            Self::resolve_channel_name(channel_name, &channels).to_string()
-        };
-        let result = {
-            let channels = self.channels.read().await;
-            if let Some(channel) = channels.get(&resolved_channel_name) {
-                channel.broadcast(user_id, response).await
-            } else {
-                return Err(ChannelError::SendFailed {
-                    name: channel_name.to_string(),
-                    reason: "Channel not found".to_string(),
-                });
-            }
+            let resolved = Self::resolve_channel_name(channel_name, &channels).to_string();
+            let channel = channels.get(&resolved).cloned();
+            (resolved, channel)
         }; // lock drops here
+        let Some(channel) = channel else {
+            return Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: "Channel not found".to_string(),
+            });
+        };
+        let result = channel.broadcast(user_id, response).await;
         let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
             counter.sent.fetch_add(1, Ordering::Relaxed);
@@ -630,19 +653,15 @@ impl ChannelManager {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Vec<(String, Result<(), ChannelError>)> {
-        let names: Vec<String> = self.channels.read().await.keys().cloned().collect();
+        let channels: Vec<(String, Arc<dyn Channel>)> = {
+            let guard = self.channels.read().await;
+            guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
         let mut results = Vec::new();
 
-        for name in &names {
-            let result = {
-                let channels = self.channels.read().await;
-                if let Some(channel) = channels.get(name.as_str()) {
-                    channel.broadcast(user_id, response.clone()).await
-                } else {
-                    continue;
-                }
-            };
-            let counter = self.counter_for(name).await;
+        for (name, channel) in channels {
+            let result = channel.broadcast(user_id, response.clone()).await;
+            let counter = self.counter_for(&name).await;
             if result.is_ok() {
                 counter.sent.fetch_add(1, Ordering::Relaxed);
             } else if let Err(ref err) = result {
@@ -656,11 +675,14 @@ impl ChannelManager {
 
     /// Check health of all channels.
     pub async fn health_check_all(&self) -> HashMap<String, Result<(), ChannelError>> {
-        let channels = self.channels.read().await;
+        let channels: Vec<(String, Arc<dyn Channel>)> = {
+            let guard = self.channels.read().await;
+            guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
         let mut results = HashMap::new();
 
-        for (name, channel) in channels.iter() {
-            results.insert(name.clone(), channel.health_check().await);
+        for (name, channel) in channels {
+            results.insert(name, channel.health_check().await);
         }
 
         results
@@ -668,13 +690,15 @@ impl ChannelManager {
 
     /// Shutdown all channels.
     pub async fn shutdown_all(&self) -> Result<(), ChannelError> {
-        let channels = self.channels.read().await;
-        for (name, channel) in channels.iter() {
+        let channels: Vec<(String, Arc<dyn Channel>)> = {
+            let guard = self.channels.read().await;
+            guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        for (name, channel) in channels {
             if let Err(e) = channel.shutdown().await {
                 tracing::error!("Error shutting down channel {}: {}", name, e);
             }
         }
-        drop(channels);
         self.drain_all_stream_forwarders().await;
         Ok(())
     }
@@ -718,9 +742,7 @@ impl ChannelManager {
 
     /// Return channel-specific diagnostics when the implementation exposes them.
     pub async fn channel_diagnostics(&self, channel_name: &str) -> Option<serde_json::Value> {
-        let channels = self.channels.read().await;
-        let channel_name = Self::resolve_channel_name(channel_name, &channels);
-        let channel = channels.get(channel_name)?;
+        let channel = self.channel_for(channel_name).await?;
         channel.diagnostics().await
     }
 
@@ -837,11 +859,9 @@ impl ChannelManager {
         draft: &DraftReplyState,
         metadata: &serde_json::Value,
     ) -> Result<Option<String>, ChannelError> {
-        let channels = self.channels.read().await;
-        if let Some(channel) = channels.get(channel_name) {
-            channel.send_draft(draft, metadata).await
-        } else {
-            Ok(None)
+        match self.channel_exact(channel_name).await {
+            Some(channel) => channel.send_draft(draft, metadata).await,
+            None => Ok(None),
         }
     }
 
@@ -855,11 +875,9 @@ impl ChannelManager {
         message_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        let channels = self.channels.read().await;
-        if let Some(channel) = channels.get(channel_name) {
-            channel.delete_message(message_id, metadata).await
-        } else {
-            Ok(())
+        match self.channel_exact(channel_name).await {
+            Some(channel) => channel.delete_message(message_id, metadata).await,
+            None => Ok(()),
         }
     }
 
@@ -867,14 +885,12 @@ impl ChannelManager {
     ///
     /// This allows the WebUI to change telegram streaming mode without restart.
     pub async fn set_channel_stream_mode(&self, channel_name: &str, mode: StreamMode) {
-        let channels = self.channels.read().await;
-        if let Some(channel) = channels.get(channel_name) {
-            channel.set_stream_mode(mode).await;
-        } else {
-            tracing::debug!(
+        match self.channel_exact(channel_name).await {
+            Some(channel) => channel.set_stream_mode(mode).await,
+            None => tracing::debug!(
                 channel = %channel_name,
                 "Cannot set stream mode: channel not found"
-            );
+            ),
         }
     }
 
@@ -884,8 +900,7 @@ impl ChannelManager {
         channel_name: &str,
         updates: std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<(), ChannelError> {
-        let channels = self.channels.read().await;
-        let Some(channel) = channels.get(channel_name) else {
+        let Some(channel) = self.channel_exact(channel_name).await else {
             return Err(ChannelError::SendFailed {
                 name: channel_name.to_string(),
                 reason: "Channel not found".to_string(),
@@ -900,8 +915,7 @@ impl ChannelManager {
         &self,
         channel_name: &str,
     ) -> Result<(), ChannelError> {
-        let channels = self.channels.read().await;
-        let Some(channel) = channels.get(channel_name) else {
+        let Some(channel) = self.channel_exact(channel_name).await else {
             return Err(ChannelError::SendFailed {
                 name: channel_name.to_string(),
                 reason: "Channel not found".to_string(),
@@ -917,15 +931,15 @@ impl ChannelManager {
     ///
     /// Used by `ChannelHealthMonitor` for auto-restart after consecutive failures.
     pub async fn restart_channel(&self, name: &str) -> Result<(), ChannelError> {
-        let channels = self.channels.read().await;
-        let Some(channel) = channels.get(name) else {
+        let Some(channel) = self.channel_exact(name).await else {
             return Err(ChannelError::SendFailed {
                 name: name.to_string(),
                 reason: "Channel not found".to_string(),
             });
         };
 
-        // Shutdown the old transport (best-effort).
+        // Shutdown the old transport (best-effort). The read guard is already
+        // dropped, so a slow shutdown/start here never blocks other channels.
         if let Err(e) = channel.shutdown().await {
             tracing::warn!(
                 channel = %name,
@@ -939,9 +953,6 @@ impl ChannelManager {
             tracing::error!(channel = %name, error = %e, "Failed to restart channel");
             e
         })?;
-
-        // Drop the read guard before spawning (we don't need it anymore).
-        drop(channels);
 
         self.drain_stream_forwarder(name).await;
         self.spawn_stream_forwarder(name.to_string(), stream, "restarted")
@@ -966,12 +977,9 @@ impl ChannelManager {
     /// Returns the new debug state (`true` = on, `false` = off).
     /// For channels that don't support debug mode (e.g., REPL), returns `false`.
     pub async fn toggle_debug_mode(&self, channel_name: &str) -> bool {
-        let channels = self.channels.read().await;
-        let channel_name = Self::resolve_channel_name(channel_name, &channels);
-        if let Some(channel) = channels.get(channel_name) {
-            channel.toggle_debug_mode().await
-        } else {
-            false
+        match self.channel_for(channel_name).await {
+            Some(channel) => channel.toggle_debug_mode().await,
+            None => false,
         }
     }
 }
@@ -1219,6 +1227,86 @@ mod tests {
         async fn health_check(&self) -> Result<(), ChannelError> {
             Ok(())
         }
+    }
+
+    /// A channel whose `respond` signals when it starts, then blocks until
+    /// released — used to prove the manager isn't holding the channels lock
+    /// while a channel is mid-`respond`.
+    struct BlockingChannel {
+        name: String,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Channel for BlockingChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn respond_releases_channels_lock_before_awaiting_channel() {
+        let manager = Arc::new(ChannelManager::new());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        manager
+            .add(Box::new(BlockingChannel {
+                name: "slow".to_string(),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }))
+            .await;
+
+        // Drive a respond that will block inside the channel.
+        let m = Arc::clone(&manager);
+        let slow = tokio::spawn(async move {
+            let msg = IncomingMessage::new("slow", "user", "hi");
+            m.respond(&msg, OutgoingResponse::text("x")).await
+        });
+
+        // Wait until the channel's respond is actually executing (mid-await).
+        entered.notified().await;
+
+        // A write-lock operation (hot_add) must succeed while the slow respond
+        // is still in flight. If respond held the read guard across its await,
+        // this write would block and the timeout would fire. This is the
+        // regression guard for the lock-across-await fix.
+        let added = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.hot_add(Box::new(MockChannel::new(
+                "added",
+                Arc::new(MockChannelState::default()),
+            ))),
+        )
+        .await;
+        assert!(
+            added.is_ok(),
+            "hot_add blocked — respond held the channels read guard across its await"
+        );
+        assert!(added.unwrap().is_ok());
+
+        // Release the slow channel and let its task finish cleanly.
+        release.notify_one();
+        let _ = slow.await;
     }
 
     #[tokio::test]

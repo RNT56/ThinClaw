@@ -439,15 +439,27 @@ impl ChannelHostState {
             .host_str()
             .ok_or_else(|| "URL has no host".to_string())?;
         let path = parsed.path();
-        if http
+        if !http
             .allowlist
             .iter()
             .any(|pattern| pattern.matches(host, path, method))
         {
-            Ok(())
-        } else {
-            Err(format!("HTTP request not allowed: {method} {url}"))
+            return Err(format!("HTTP request not allowed: {method} {url}"));
         }
+
+        // SSRF guard: even a wildcard host allowlist must not let a guest reach
+        // private, loopback, link-local, or cloud-metadata addresses. A literal
+        // IP host is checked here; hostnames that resolve to private IPs (DNS
+        // rebinding) are a residual not covered by this synchronous check.
+        let ip_literal = host.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = ip_literal.parse::<std::net::IpAddr>()
+            && is_blocked_http_ip(ip)
+        {
+            return Err(format!(
+                "HTTP request to a private/loopback address is not allowed: {host}"
+            ));
+        }
+        Ok(())
     }
 
     pub fn record_http_request(&mut self) -> Result<(), String> {
@@ -468,6 +480,39 @@ impl ChannelHostState {
 
     pub fn take_logs(&mut self) -> Vec<LogEntry> {
         std::mem::take(&mut self.logs)
+    }
+}
+
+/// Whether `ip` is one a guest HTTP request must never reach: loopback, private
+/// (RFC1918 / CGNAT), link-local (incl. the cloud-metadata 169.254.169.254),
+/// unspecified, broadcast, documentation, or the IPv6 equivalents.
+fn is_blocked_http_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // CGNAT / shared address space 100.64.0.0/10
+                || (a == 100 && (b & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_blocked_http_ip(IpAddr::V4(mapped));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // unique-local fc00::/7
+                || (first & 0xfe00) == 0xfc00
+                // link-local fe80::/10
+                || (first & 0xffc0) == 0xfe80
+        }
     }
 }
 
@@ -816,10 +861,44 @@ impl ChannelEmitRateLimiter {
 
 #[cfg(test)]
 mod tests {
+    use super::is_blocked_http_ip;
     use crate::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
     use crate::wasm::host::{
         ChannelEmitRateLimiter, ChannelHostState, EmittedMessage, MAX_EMITS_PER_EXECUTION,
     };
+
+    #[test]
+    fn blocked_http_ips_cover_private_loopback_and_metadata() {
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.169.254", // cloud metadata
+            "100.64.0.1",      // CGNAT
+            "0.0.0.0",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1", // IPv4-mapped loopback
+        ] {
+            assert!(
+                is_blocked_http_ip(ip.parse().unwrap()),
+                "{ip} should be blocked"
+            );
+        }
+        for ip in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "93.184.216.34",
+            "2606:4700:4700::1111",
+        ] {
+            assert!(
+                !is_blocked_http_ip(ip.parse().unwrap()),
+                "{ip} should be allowed"
+            );
+        }
+    }
 
     #[test]
     fn test_emit_message_basic() {

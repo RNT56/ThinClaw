@@ -44,16 +44,29 @@ pub trait NativeHttpClient: Send + Sync {
     async fn send(&self, request: NativeHttpRequest) -> Result<NativeHttpResponse, ChannelError>;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ReqwestNativeHttpClient {
     client: reqwest::Client,
 }
 
+impl Default for ReqwestNativeHttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReqwestNativeHttpClient {
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        // A bounded client is required: without timeouts a blackholed provider
+        // (Matrix homeserver, APNs, push endpoint) hangs the caller forever, and
+        // a stuck reply can wedge channel health checks. The `http2` cargo
+        // feature also lets reqwest negotiate h2 via ALPN, which APNs mandates.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        Self { client }
     }
 }
 
@@ -77,7 +90,11 @@ impl NativeHttpClient for ReqwestNativeHttpClient {
                 .await
                 .map_err(|error| ChannelError::SendFailed {
                     name: "native-http".to_string(),
-                    reason: error.to_string(),
+                    // `without_url` strips the request URL from the error text.
+                    // Provider URLs embed secrets (APNs device token in the
+                    // path, BlueBubbles password in the query), and this error
+                    // is logged upstream.
+                    reason: error.without_url().to_string(),
                 })?;
         let status = response.status().as_u16();
         let body = response
@@ -85,7 +102,7 @@ impl NativeHttpClient for ReqwestNativeHttpClient {
             .await
             .map_err(|error| ChannelError::SendFailed {
                 name: "native-http".to_string(),
-                reason: error.to_string(),
+                reason: error.without_url().to_string(),
             })?
             .to_vec();
         Ok(NativeHttpResponse { status, body })

@@ -301,6 +301,51 @@ fn verify_twitch_eventsub_signature(
     verify_signature(secret, &signed, signature)
 }
 
+/// Verify a Slack request signature.
+///
+/// Slack signs each request as `v0=<hex>` where the HMAC-SHA256 key is the app's
+/// signing secret and the message is `v0:{timestamp}:{body}`. The timestamp is
+/// the `X-Slack-Request-Timestamp` header; requests more than five minutes from
+/// now are rejected to bound replay. The hex comparison is constant-time.
+fn verify_slack_v0_signature(
+    signing_secret: &[u8],
+    headers: &HeaderMap,
+    body: &[u8],
+    signature: &str,
+) -> bool {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    use subtle::ConstantTimeEq;
+    type HmacSha256 = Hmac<Sha256>;
+
+    let Some(timestamp) = headers
+        .get("X-Slack-Request-Timestamp")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(ts_secs) = timestamp.parse::<i64>() else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    // Reject stale or far-future timestamps (5-minute replay window).
+    if (now - ts_secs).abs() > 300 {
+        return false;
+    }
+
+    let mut mac =
+        HmacSha256::new_from_slice(signing_secret).expect("HMAC-SHA256 accepts any key length");
+    mac.update(b"v0:");
+    mac.update(timestamp.as_bytes());
+    mac.update(b":");
+    mac.update(body);
+    let expected = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
+    expected.as_bytes().ct_eq(signature.as_bytes()).into()
+}
+
 /// Verify a Discord interaction signature.
 ///
 /// Discord signs every interaction webhook with Ed25519. The signed message is
@@ -697,6 +742,9 @@ async fn webhook_handler(
                     &body,
                     &provided,
                 ),
+                WebhookSecretValidation::SlackV0Signature => {
+                    verify_slack_v0_signature(expected.as_bytes(), &headers, &body, &provided)
+                }
                 WebhookSecretValidation::DiscordEd25519 => {
                     verify_discord_ed25519_signature(expected, &headers, &body, &provided)
                 }
@@ -717,6 +765,7 @@ async fn webhook_handler(
                             | WebhookSecretValidation::HmacSha256Base64Body
                             | WebhookSecretValidation::TwitchEventsubHmacSha256
                             | WebhookSecretValidation::TwilioRequestSignature
+                            | WebhookSecretValidation::SlackV0Signature
                             | WebhookSecretValidation::DiscordEd25519 => {
                                 "Invalid webhook signature"
                             }
@@ -807,10 +856,74 @@ mod tests {
     use std::sync::Arc;
 
     use axum::body::{Body, Bytes, to_bytes};
-    use axum::http::{Request, StatusCode};
+    use axum::http::{HeaderMap, Request, StatusCode};
     use tower::ServiceExt;
 
-    use super::{build_raw_http_response, create_wasm_channel_router};
+    use super::{build_raw_http_response, create_wasm_channel_router, verify_slack_v0_signature};
+
+    fn slack_signature(secret: &[u8], timestamp: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(b"v0:");
+        mac.update(timestamp.as_bytes());
+        mac.update(b":");
+        mac.update(body);
+        format!("v0={}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn slack_v0_signature_verifies_and_rejects_replay_and_tamper() {
+        let secret = b"8f742231b10e8888abcd99yyyzzz85a5";
+        let body = b"token=xyz&team_id=T1&text=hello";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Slack-Request-Timestamp", now.parse().unwrap());
+
+        // Correct signature over a fresh timestamp verifies.
+        let sig = slack_signature(secret, &now, body);
+        assert!(verify_slack_v0_signature(secret, &headers, body, &sig));
+
+        // Tampered signature and tampered body are rejected.
+        assert!(!verify_slack_v0_signature(
+            secret,
+            &headers,
+            body,
+            "v0=deadbeef"
+        ));
+        assert!(!verify_slack_v0_signature(
+            secret,
+            &headers,
+            b"token=xyz&team_id=T1&text=goodbye",
+            &sig
+        ));
+
+        // A correctly-signed but stale timestamp is rejected (replay window).
+        let stale = "1000000000";
+        let stale_sig = slack_signature(secret, stale, body);
+        let mut stale_headers = HeaderMap::new();
+        stale_headers.insert("X-Slack-Request-Timestamp", stale.parse().unwrap());
+        assert!(!verify_slack_v0_signature(
+            secret,
+            &stale_headers,
+            body,
+            &stale_sig
+        ));
+
+        // Missing timestamp header is rejected.
+        assert!(!verify_slack_v0_signature(
+            secret,
+            &HeaderMap::new(),
+            body,
+            &sig
+        ));
+    }
+
     use crate::pairing::PairingStore;
     use crate::wasm::capabilities::ChannelCapabilities;
     use crate::wasm::router::{RegisteredEndpoint, RegisteredWebhookAuth, WasmChannelRouter};

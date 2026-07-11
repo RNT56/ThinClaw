@@ -187,6 +187,7 @@ pub struct NativeLifecycleWebhookConfig {
     pub browser_push: Option<NativeLifecycleIngress>,
     pub apns_registry: Option<NativeEndpointRegistry>,
     pub browser_push_registry: Option<NativeEndpointRegistry>,
+    pub matrix_secret: Option<String>,
     pub voice_call_secret: Option<String>,
     pub apns_registration_secret: Option<String>,
     pub browser_push_secret: Option<String>,
@@ -226,6 +227,7 @@ pub fn native_lifecycle_webhook_routes(config: NativeLifecycleWebhookConfig) -> 
 
 async fn matrix_webhook_handler(
     State(config): State<Arc<NativeLifecycleWebhookConfig>>,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
     let Some(ingress) = config.matrix.as_ref() else {
@@ -235,6 +237,12 @@ async fn matrix_webhook_handler(
         )
             .into_response();
     };
+    // Reject forged room events when a secret is configured. Without this a
+    // reachable `/webhook/native/matrix` lets anyone inject `m.room.message`
+    // events as a spoofed trusted sender.
+    if !header_secret_matches(&headers, "x-thinclaw-matrix-secret", &config.matrix_secret) {
+        return (StatusCode::UNAUTHORIZED, "invalid matrix webhook secret").into_response();
+    }
     let events = matrix_events_from_payload(&payload);
     if events.is_empty() {
         return (StatusCode::BAD_REQUEST, "no Matrix message events found").into_response();
@@ -980,6 +988,58 @@ mod tests {
         assert_eq!(message.channel, "voice-call");
         assert_eq!(message.user_id, "caller");
         assert_eq!(message.content, "hello");
+    }
+
+    #[tokio::test]
+    async fn native_lifecycle_webhook_routes_validate_matrix_secret() {
+        let channel = NativeLifecycleChannel::matrix(Arc::new(MockNativeClient::default()));
+        let mut stream = channel.start().await.expect("start should pass");
+        let app = native_lifecycle_webhook_routes(NativeLifecycleWebhookConfig {
+            matrix: Some(channel.ingress()),
+            matrix_secret: Some("matrix-secret".to_string()),
+            ..Default::default()
+        });
+        let body = serde_json::to_vec(&serde_json::json!({
+            "room_id": "!room:example.org",
+            "sender": "@mallory:evil.example",
+            "content": {"body": "forged"}
+        }))
+        .unwrap();
+
+        // No secret header → rejected (previously accepted forged events).
+        let rejected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/native/matrix")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .expect("request should be served");
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct secret → accepted.
+        let accepted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/native/matrix")
+                    .header("content-type", "application/json")
+                    .header("x-thinclaw-matrix-secret", "matrix-secret")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("request should be served");
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+        let message = stream.next().await.expect("message should arrive");
+        assert_eq!(message.channel, "matrix");
+        assert_eq!(message.user_id, "@mallory:evil.example");
     }
 
     #[tokio::test]

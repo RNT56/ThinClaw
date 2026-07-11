@@ -54,6 +54,10 @@ const DEFAULT_WEBHOOK_PATH: &str = "/bluebubbles-webhook";
 /// Maximum text length for a single iMessage.
 const MAX_TEXT_LENGTH: usize = 4000;
 
+/// Maximum inbound attachment we buffer into memory (20 MB), matching the
+/// iMessage/Discord caps. Without it a large/lying payload can exhaust memory.
+const MAX_INBOUND_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
+
 /// BlueBubbles webhook event types that carry messages.
 const MESSAGE_EVENTS: &[&str] = &["new-message", "message", "updated-message"];
 
@@ -167,11 +171,43 @@ pub struct BlueBubblesChannel {
     /// LRU cache: phone/email → BlueBubbles chat GUID.
     guid_cache: Arc<RwLock<HashMap<String, String>>>,
     /// Sender half for pushing incoming messages from the webhook handler.
-    incoming_tx: Option<mpsc::Sender<IncomingMessage>>,
-    /// Receiver half — taken once by `start()` and returned as the stream.
+    /// Behind a Mutex so `start()` can install a fresh sender when the channel
+    /// is restarted (e.g. by the health monitor after a transient outage).
+    incoming_tx: std::sync::Mutex<Option<mpsc::Sender<IncomingMessage>>>,
+    /// Receiver half — taken by `start()` and returned as the stream. Recreated
+    /// alongside `incoming_tx` on restart.
     incoming_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
     /// ID of our registered webhook (for cleanup).
     webhook_id: Arc<RwLock<Option<i64>>>,
+    /// Recently-seen message GUIDs, to drop duplicate webhook deliveries.
+    seen_guids: Arc<std::sync::Mutex<SeenGuids>>,
+}
+
+/// Bounded set of recently-seen message GUIDs. BlueBubbles resends a message on
+/// edits (`updated-message`); without dedup the agent would answer it twice.
+#[derive(Default)]
+struct SeenGuids {
+    set: std::collections::HashSet<String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl SeenGuids {
+    const CAP: usize = 2048;
+
+    /// Record `guid`; returns `true` if it was newly inserted (not a duplicate).
+    fn insert_new(&mut self, guid: &str) -> bool {
+        if self.set.contains(guid) {
+            return false;
+        }
+        self.set.insert(guid.to_string());
+        self.order.push_back(guid.to_string());
+        if self.order.len() > Self::CAP
+            && let Some(old) = self.order.pop_front()
+        {
+            self.set.remove(&old);
+        }
+        true
+    }
 }
 
 impl BlueBubblesChannel {
@@ -201,9 +237,10 @@ impl BlueBubblesChannel {
             private_api: Arc::new(AtomicBool::new(false)),
             helper_connected: Arc::new(AtomicBool::new(false)),
             guid_cache: Arc::new(RwLock::new(HashMap::new())),
-            incoming_tx: Some(tx),
+            incoming_tx: std::sync::Mutex::new(Some(tx)),
             incoming_rx: tokio::sync::Mutex::new(Some(rx)),
             webhook_id: Arc::new(RwLock::new(None)),
+            seen_guids: Arc::new(std::sync::Mutex::new(SeenGuids::default())),
         })
     }
 
@@ -226,7 +263,8 @@ impl BlueBubblesChannel {
             .await
             .map_err(|e| ChannelError::Disconnected {
                 name: NAME.to_string(),
-                reason: format!("API GET {path} failed: {e}"),
+                // `without_url` strips the URL, which carries `?password=…`.
+                reason: format!("API GET {path} failed: {}", e.without_url()),
             })?;
 
         if !res.status().is_success() {
@@ -238,7 +276,7 @@ impl BlueBubblesChannel {
 
         res.json().await.map_err(|e| ChannelError::Disconnected {
             name: NAME.to_string(),
-            reason: format!("API GET {path} parse error: {e}"),
+            reason: format!("API GET {path} parse error: {}", e.without_url()),
         })
     }
 
@@ -257,7 +295,7 @@ impl BlueBubblesChannel {
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("API POST {path} failed: {e}"),
+                reason: format!("API POST {path} failed: {}", e.without_url()),
             })?;
 
         if !res.status().is_success() {
@@ -269,7 +307,7 @@ impl BlueBubblesChannel {
 
         res.json().await.map_err(|e| ChannelError::SendFailed {
             name: NAME.to_string(),
-            reason: format!("API POST {path} parse error: {e}"),
+            reason: format!("API POST {path} parse error: {}", e.without_url()),
         })
     }
 
@@ -745,11 +783,16 @@ impl BlueBubblesChannel {
             password: self.config.password.clone(),
             allow_from: self.config.allow_from.clone(),
             send_read_receipts: self.config.send_read_receipts,
-            tx: self.incoming_tx.clone(),
+            tx: self
+                .incoming_tx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone(),
             client: self.client.clone(),
             config: self.config.clone(),
             private_api: Arc::clone(&self.private_api),
             helper_connected: Arc::clone(&self.helper_connected),
+            seen: Arc::clone(&self.seen_guids),
         };
 
         axum::Router::new()
@@ -758,6 +801,54 @@ impl BlueBubblesChannel {
                 axum::routing::post(handle_webhook),
             )
             .with_state(state)
+    }
+
+    /// Spawn (or respawn) the webhook HTTP listener, draining any prior one
+    /// first so the port is free before rebinding. Owning the listener here —
+    /// rather than in `init()` — is what lets `start()` bring the channel back
+    /// after a `shutdown()`/restart.
+    async fn spawn_webhook_listener(&self) {
+        if let Some(handle) = self.webhook_task.lock().await.take() {
+            drain_channel_task(handle, NAME).await;
+        }
+
+        let router = self.webhook_routes();
+        let host = self.config.webhook_host.clone();
+        let port = self.config.webhook_port;
+        let shutdown = Arc::clone(&self.shutdown);
+        let shutdown_notify = Arc::clone(&self.shutdown_notify);
+
+        let handle = tokio::spawn(async move {
+            let addr = format!("{host}:{port}");
+            let listener = match tokio::net::TcpListener::bind(&addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!(
+                        addr = %addr,
+                        error = %e,
+                        "BlueBubbles: failed to bind webhook listener"
+                    );
+                    return;
+                }
+            };
+            tracing::info!(addr = %addr, "BlueBubbles: webhook listener started");
+
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    loop {
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        tokio::select! {
+                            _ = shutdown_notify.notified() => {}
+                            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        }
+                    }
+                })
+                .await
+                .ok();
+        });
+        *self.webhook_task.lock().await = Some(handle);
     }
 }
 
@@ -770,17 +861,27 @@ impl Channel for BlueBubblesChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        // Take the pre-created receiver out of the Mutex.
-        // This can only be called once (subsequent calls return an error).
-        let rx =
-            self.incoming_rx
-                .lock()
-                .await
-                .take()
-                .ok_or_else(|| ChannelError::StartupFailed {
-                    name: NAME.to_string(),
-                    reason: "BlueBubbles channel already started (stream taken)".to_string(),
-                })?;
+        // Clear any prior shutdown flag so the (re)spawned listener serves and
+        // does not immediately hit its graceful-shutdown path.
+        self.shutdown.store(false, Ordering::Relaxed);
+
+        // Take the receiver. If it was already taken (this is a restart), mint a
+        // fresh channel and install the new sender the webhook handler will use.
+        let rx = {
+            let mut rx_guard = self.incoming_rx.lock().await;
+            match rx_guard.take() {
+                Some(rx) => rx,
+                None => {
+                    let (tx, rx) = mpsc::channel(64);
+                    *self.incoming_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+                    rx
+                }
+            }
+        };
+
+        // Own the webhook HTTP listener here so a later shutdown()/start() cycle
+        // brings the channel fully back (a restart no longer leaves it dead).
+        self.spawn_webhook_listener().await;
 
         // The webhook handler pushes messages into incoming_tx;
         // the returned stream is what ChannelManager merges into the agent loop.
@@ -998,6 +1099,7 @@ struct WebhookState {
     config: BlueBubblesConfig,
     private_api: Arc<AtomicBool>,
     helper_connected: Arc<AtomicBool>,
+    seen: Arc<std::sync::Mutex<SeenGuids>>,
 }
 
 /// Handle incoming webhook POST from BlueBubbles server.
@@ -1078,6 +1180,17 @@ async fn handle_webhook(
 
     if is_from_me {
         return axum::http::StatusCode::OK;
+    }
+
+    // Drop duplicate deliveries. BlueBubbles resends the full message on edits
+    // (`updated-message`); without this the agent answers the same message twice.
+    if let Some(guid) = record.get("guid").and_then(|v| v.as_str())
+        && !guid.is_empty()
+    {
+        let mut seen = state.seen.lock().unwrap_or_else(|p| p.into_inner());
+        if !seen.insert_new(guid) {
+            return axum::http::StatusCode::OK;
+        }
     }
 
     // Extract text
@@ -1184,7 +1297,26 @@ async fn handle_webhook(
             .await
         {
             Ok(res) if res.status().is_success() => {
+                // Reject before buffering if the server declares an oversized body.
+                if res
+                    .content_length()
+                    .is_some_and(|len| len > MAX_INBOUND_ATTACHMENT_SIZE)
+                {
+                    tracing::warn!(
+                        att_guid = %redact_pii(att_guid),
+                        "BlueBubbles: attachment exceeds size limit, skipping"
+                    );
+                    continue;
+                }
                 if let Ok(data) = res.bytes().await {
+                    // Guard against a lying/absent Content-Length.
+                    if data.len() as u64 > MAX_INBOUND_ATTACHMENT_SIZE {
+                        tracing::warn!(
+                            att_guid = %redact_pii(att_guid),
+                            "BlueBubbles: attachment body exceeds size limit, skipping"
+                        );
+                        continue;
+                    }
                     let mc = thinclaw_media::MediaContent::new(data.to_vec(), mime);
                     media_attachments.push(mc);
                 }
@@ -1281,47 +1413,10 @@ impl BlueBubblesChannel {
         let mut channel = Self::new(config).await?;
         channel.connect().await?;
 
-        // Register webhook with the BlueBubbles server
+        // Register webhook with the BlueBubbles server. The webhook HTTP
+        // listener itself is spawned by `start()` so it can be torn down and
+        // brought back on restart.
         channel.register_webhook().await?;
-
-        // Start the standalone webhook HTTP listener
-        let router = channel.webhook_routes();
-        let host = channel.config.webhook_host.clone();
-        let port = channel.config.webhook_port;
-        let shutdown = Arc::clone(&channel.shutdown);
-        let shutdown_notify = Arc::clone(&channel.shutdown_notify);
-
-        let handle = tokio::spawn(async move {
-            let addr = format!("{host}:{port}");
-            let listener = match tokio::net::TcpListener::bind(&addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!(
-                        addr = %addr,
-                        error = %e,
-                        "BlueBubbles: failed to bind webhook listener"
-                    );
-                    return;
-                }
-            };
-            tracing::info!(addr = %addr, "BlueBubbles: webhook listener started");
-
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    loop {
-                        if shutdown.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        tokio::select! {
-                            _ = shutdown_notify.notified() => {}
-                            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-                        }
-                    }
-                })
-                .await
-                .ok();
-        });
-        *channel.webhook_task.lock().await = Some(handle);
 
         Ok(channel)
     }
@@ -1470,6 +1565,19 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
     use tower::ServiceExt;
+
+    #[test]
+    fn seen_guids_dedupes_and_evicts() {
+        let mut seen = SeenGuids::default();
+        assert!(seen.insert_new("a"), "first sighting is new");
+        assert!(!seen.insert_new("a"), "repeat is a duplicate");
+        assert!(seen.insert_new("b"), "different guid is new");
+        // Overflow the ring so "a" is eventually evicted and seen fresh again.
+        for i in 0..SeenGuids::CAP {
+            seen.insert_new(&format!("fill-{i}"));
+        }
+        assert!(seen.insert_new("a"), "evicted guid is treated as new again");
+    }
 
     #[test]
     fn test_normalize_server_url() {

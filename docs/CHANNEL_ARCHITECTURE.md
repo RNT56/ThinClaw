@@ -207,6 +207,18 @@ than the platform's native HMAC / Ed25519 / signed-JWT scheme — each beta shim
 `README.md` states the precise caveat. `tests/registry_channel_catalog.rs`
 enforces these dispositions; see `docs/remediation/WS-03-shim-classification.md`.
 
+The full (non-shim) packages back their `production` status with native inbound
+auth verified host-side by `WasmChannelRouter`: WhatsApp (`X-Hub-Signature-256`
+HMAC), Discord interactions (Ed25519), and Slack (`slack_v0_signature` — a
+`v0=<hex>` HMAC-SHA256 over `v0:{X-Slack-Request-Timestamp}:{body}` with a
+five-minute replay window). Telegram is a known exception: its webhook secret is
+host-injected at runtime and delivered in the platform's
+`X-Telegram-Bot-Api-Secret-Token` header, but the shipped manifest declares no
+webhook section, so the host cannot yet validate it and an operator who runs
+Telegram without a webhook secret accepts unauthenticated updates. Closing this
+requires coordinating the manifest's declared secret name with the host's
+injected secret and rebuilding the package artifact.
+
 ## Outbound Generated Media
 
 `OutgoingResponse.attachments` is the canonical transport for generated media
@@ -272,7 +284,7 @@ Gateway status and the WebUI setup surfaces expose actionable setup readiness
 for these native surfaces. Missing fields are reported using the provider
 environment variable names:
 
-- Matrix: `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN`
+- Matrix: `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN`, `MATRIX_WEBHOOK_SECRET` (optional; authenticates inbound `/webhook/native/matrix`)
 - Voice-call: `VOICE_CALL_RESPONSE_URL`, `VOICE_CALL_WEBHOOK_SECRET`
 - APNs: `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_BUNDLE_ID`, `APNS_PRIVATE_KEY` or `APNS_PRIVATE_KEY_PATH`, `APNS_REGISTRATION_SECRET`
 - Browser push: `BROWSER_PUSH_VAPID_PUBLIC_KEY`, `BROWSER_PUSH_VAPID_PRIVATE_KEY` or `BROWSER_PUSH_VAPID_PRIVATE_KEY_PATH`, `BROWSER_PUSH_VAPID_SUBJECT`, `BROWSER_PUSH_WEBHOOK_SECRET`
@@ -306,7 +318,9 @@ shared webhook server:
 
 - `POST /webhook/native/matrix`: accepts a Matrix room event, an `events` array,
   or a `/sync`-style joined-room timeline response and emits Matrix messages
-  through the shared `IncomingEvent` path.
+  through the shared `IncomingEvent` path. When `MATRIX_WEBHOOK_SECRET` is set it
+  requires a matching `X-ThinClaw-Matrix-Secret` header; leaving it unset accepts
+  events unauthenticated, so set it before exposing the webhook server publicly.
 - `POST /webhook/native/voice-call`: accepts call transcript payloads and
   requires `X-ThinClaw-Voice-Secret` when `VOICE_CALL_WEBHOOK_SECRET` is set.
 - `POST /webhook/native/browser-push`: accepts notification action/wake payloads

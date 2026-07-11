@@ -273,6 +273,18 @@ impl AcpConnectionState {
             .insert(session_id.to_string(), task);
     }
 
+    /// Whether a prompt turn is already registered for this session. Used to
+    /// reject a concurrent `session/prompt` before spawning, so a second prompt
+    /// cannot overwrite the in-flight task's registration (which would drop the
+    /// first turn's JSON-RPC response and hang the editor).
+    async fn has_active_prompt(&self, session_id: &str) -> bool {
+        self.io
+            .read()
+            .await
+            .active_prompt_tasks
+            .contains_key(session_id)
+    }
+
     async fn take_prompt_task(&self, session_id: &str) -> Option<ActivePromptTask> {
         self.io.write().await.active_prompt_tasks.remove(session_id)
     }
@@ -739,6 +751,24 @@ async fn handle_json_rpc(
             .get("sessionId")
             .and_then(Value::as_str)
             .map(str::to_string);
+
+        // Reject a concurrent prompt before spawning. stdin is dispatched
+        // sequentially, so if a task is already registered for this session the
+        // prior turn is genuinely in flight; spawning would overwrite its
+        // registration and strand its response.
+        if let Some(sid) = &session_id
+            && state.has_active_prompt(sid).await
+        {
+            let response = error_response(
+                id,
+                -32000,
+                format!("ACP session already has an active prompt turn: {sid}"),
+                None,
+            );
+            let _ = send_outbound(&prompt_writer_tx, response);
+            return None;
+        }
+
         let task_state = Arc::clone(&state);
         let task_session_id = session_id.clone();
         let handle = tokio::spawn(async move {
@@ -1191,6 +1221,10 @@ async fn handle_cancel_session(
         .complete_prompt(&request.session_id, wire::StopReason::Cancelled)
         .await;
     interrupt_acp_session(agent, state, &request.session_id).await;
+    // The cancel applies only to the turn just aborted. Clear the flag so the
+    // user's NEXT prompt reaches the agent instead of being silently returned
+    // as `cancelled`.
+    state.clear_cancelled(&request.session_id).await;
     Ok(json!({}))
 }
 

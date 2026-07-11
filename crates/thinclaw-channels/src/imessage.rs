@@ -26,7 +26,7 @@ use thinclaw_channels_core::{
 use thinclaw_media::MediaContent;
 use thinclaw_types::error::ChannelError;
 
-use crate::util::floor_char_boundary;
+use crate::util::{floor_char_boundary, output_with_timeout};
 
 /// Channel name constant.
 const NAME: &str = "imessage";
@@ -228,19 +228,37 @@ impl IMessageChannel {
 
     /// Get the latest ROWID from chat.db using sqlite3 CLI.
     async fn get_latest_rowid(db_path: &std::path::Path) -> Result<i64, ChannelError> {
-        let output = tokio::process::Command::new("sqlite3")
-            .arg(db_path)
-            .arg("SELECT MAX(ROWID) FROM message;")
-            .output()
+        let mut cmd = tokio::process::Command::new("sqlite3");
+        cmd.arg(db_path).arg("SELECT MAX(ROWID) FROM message;");
+        let output = output_with_timeout(&mut cmd, "sqlite3 max-rowid")
             .await
-            .map_err(|e| ChannelError::StartupFailed {
+            .map_err(|reason| ChannelError::StartupFailed {
                 name: NAME.to_string(),
-                reason: format!("sqlite3 failed: {e}"),
+                reason,
             })?;
 
+        // Don't let a query failure silently become ROWID 0 (which would drop
+        // the cursor to the start of history). An empty result is a genuinely
+        // empty table where 0 is correct.
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ChannelError::StartupFailed {
+                name: NAME.to_string(),
+                reason: format!("sqlite3 max-rowid failed: {stderr}"),
+            });
+        }
+
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let rowid: i64 = stdout.trim().parse().unwrap_or(0);
-        Ok(rowid)
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Ok(0);
+        }
+        trimmed
+            .parse::<i64>()
+            .map_err(|e| ChannelError::StartupFailed {
+                name: NAME.to_string(),
+                reason: format!("sqlite3 max-rowid returned unparseable output: {e}"),
+            })
     }
 
     /// Find the minimum ROWID that is newer than `max_age_secs` ago.
@@ -267,12 +285,9 @@ impl IMessageChannel {
 
         let query = format!("SELECT MIN(ROWID) FROM message WHERE date > {cutoff_ns};");
 
-        match tokio::process::Command::new("sqlite3")
-            .arg(db_path)
-            .arg(&query)
-            .output()
-            .await
-        {
+        let mut cmd = tokio::process::Command::new("sqlite3");
+        cmd.arg(db_path).arg(&query);
+        match output_with_timeout(&mut cmd, "sqlite3 age-floor").await {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 match stdout.trim().parse::<i64>() {
@@ -332,16 +347,13 @@ impl IMessageChannel {
              LIMIT 50;"
         );
 
-        let output = tokio::process::Command::new("sqlite3")
-            .arg("-separator")
-            .arg("|")
-            .arg(db_path)
-            .arg(&query)
-            .output()
+        let mut cmd = tokio::process::Command::new("sqlite3");
+        cmd.arg("-separator").arg("|").arg(db_path).arg(&query);
+        let output = output_with_timeout(&mut cmd, "sqlite3 poll")
             .await
-            .map_err(|e| ChannelError::Disconnected {
+            .map_err(|reason| ChannelError::Disconnected {
                 name: NAME.to_string(),
-                reason: format!("sqlite3 poll failed: {e}"),
+                reason,
             })?;
 
         if !output.status.success() {
@@ -393,8 +405,11 @@ impl IMessageChannel {
 
     /// Send a message via osascript (AppleScript).
     async fn send_via_osascript(recipient: &str, text: &str) -> Result<(), ChannelError> {
-        // Escape text for AppleScript
+        // Escape both text and recipient for AppleScript. The recipient is a
+        // chat identifier and must not be able to break out of the string
+        // literal (the file-send path already escapes it).
         let escaped = escape_applescript(text);
+        let escaped_recipient = escape_applescript(recipient);
 
         // Split long messages
         let chunks = split_message(&escaped);
@@ -403,19 +418,18 @@ impl IMessageChannel {
             let script = format!(
                 r#"tell application "Messages"
     set targetService to 1st account whose service type = iMessage
-    set targetBuddy to participant "{recipient}" of targetService
+    set targetBuddy to participant "{escaped_recipient}" of targetService
     send "{chunk}" to targetBuddy
 end tell"#
             );
 
-            let output = tokio::process::Command::new("osascript")
-                .arg("-e")
-                .arg(&script)
-                .output()
+            let mut cmd = tokio::process::Command::new("osascript");
+            cmd.arg("-e").arg(&script);
+            let output = output_with_timeout(&mut cmd, "osascript send")
                 .await
-                .map_err(|e| ChannelError::SendFailed {
+                .map_err(|reason| ChannelError::SendFailed {
                     name: NAME.to_string(),
-                    reason: format!("osascript failed: {e}"),
+                    reason,
                 })?;
 
             if !output.status.success() {
@@ -492,14 +506,13 @@ end tell"#
 end tell"#
         );
 
-        let output = tokio::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .output()
+        let mut cmd = tokio::process::Command::new("osascript");
+        cmd.arg("-e").arg(&script);
+        let output = output_with_timeout(&mut cmd, "osascript file send")
             .await
-            .map_err(|e| ChannelError::SendFailed {
+            .map_err(|reason| ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("osascript file send failed: {e}"),
+                reason,
             })?;
 
         if output.status.success() {
@@ -527,14 +540,15 @@ end tell"#
         for attachment in attachments {
             let filename = attachment.filename.as_deref().unwrap_or("attachment");
 
-            // Write to a temp file so osascript can reference a POSIX path
+            // Write to a temp file so osascript can reference a POSIX path.
+            // Use async fs so a slow disk cannot block the runtime worker.
             let tmp_dir = std::env::temp_dir().join("thinclaw_imessage");
-            if std::fs::create_dir_all(&tmp_dir).is_err() {
+            if tokio::fs::create_dir_all(&tmp_dir).await.is_err() {
                 tracing::warn!("iMessage: failed to create temp dir for attachment");
                 continue;
             }
             let tmp_path = tmp_dir.join(filename);
-            if let Err(e) = std::fs::write(&tmp_path, &attachment.data) {
+            if let Err(e) = tokio::fs::write(&tmp_path, &attachment.data).await {
                 tracing::warn!(
                     error = %e,
                     "iMessage: failed to write attachment to temp file"
@@ -565,7 +579,7 @@ end tell"#
             }
 
             // Clean up temp file (best-effort)
-            let _ = std::fs::remove_file(&tmp_path);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
         }
     }
 }
@@ -853,14 +867,9 @@ async fn fetch_imessage_attachments(
         message_rowid
     );
 
-    let output = match tokio::process::Command::new("sqlite3")
-        .arg("-separator")
-        .arg("|")
-        .arg(db_path)
-        .arg(&query)
-        .output()
-        .await
-    {
+    let mut cmd = tokio::process::Command::new("sqlite3");
+    cmd.arg("-separator").arg("|").arg(db_path).arg(&query);
+    let output = match output_with_timeout(&mut cmd, "sqlite3 attachments").await {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
@@ -920,7 +929,7 @@ async fn fetch_imessage_attachments(
             continue;
         }
 
-        match std::fs::read(&file_path) {
+        match tokio::fs::read(&file_path).await {
             Ok(data) => {
                 let filename = file_path
                     .file_name()

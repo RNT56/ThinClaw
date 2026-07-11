@@ -119,6 +119,13 @@ async fn register_native_lifecycle_channels(
                 let client = Arc::new(MatrixNativeClient::new(matrix_config, Arc::clone(&http)));
                 let channel = NativeLifecycleChannel::matrix(client);
                 webhook_config.matrix = Some(channel.ingress());
+                webhook_config.matrix_secret = env_value("MATRIX_WEBHOOK_SECRET");
+                if webhook_config.matrix_secret.is_none() {
+                    tracing::warn!(
+                        "Matrix webhook ingress (/webhook/native/matrix) has no MATRIX_WEBHOOK_SECRET set; \
+                         inbound events are unauthenticated — set it before exposing the webhook server"
+                    );
+                }
                 channels.add(Box::new(channel)).await;
                 channel_names.push("matrix".to_string());
                 tracing::info!("Matrix native lifecycle channel enabled");

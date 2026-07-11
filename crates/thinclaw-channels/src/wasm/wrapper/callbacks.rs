@@ -255,9 +255,14 @@ impl WasmChannel {
                 .map_err(|e| WasmChannelError::Config(format!("Failed to set fuel: {}", e)))?;
         }
 
-        // Configure epoch deadline for timeout backup
+        // Configure the epoch deadline as a backup timeout. It is scaled to the
+        // callback timeout (plus a margin) so it fires *after* the outer async
+        // timeout — it exists only to terminate a guest still spinning on a
+        // blocking thread, never to cut short legitimate in-budget work.
         store.epoch_deadline_trap();
-        store.set_epoch_deadline(1);
+        store.set_epoch_deadline(crate::wasm::runtime::epoch_deadline_ticks(
+            runtime.config().callback_timeout,
+        ));
 
         // Set up resource limiter
         store.limiter(|data| &mut data.limiter);
