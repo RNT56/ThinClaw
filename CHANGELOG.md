@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migrated gated desktop commands to a typed `BridgeError`.
 - Hardened the agentic loop end to end: retry policy, compaction summary reuse, and failure backoff.
 - Gated sub-agents by the shared `CostGuard` with an optional per-principal concurrency cap (`SUBAGENT_MAX_PER_PRINCIPAL`).
-- Migrated the desktop frontend to Tailwind CSS v4, consolidated cargo/npm dependency bumps, and added a `[workspace.dependencies]` table for shared deps.
+- Migrated the desktop frontend to Tailwind CSS v4, consolidated npm and MSRV-compatible Rust major upgrades, and added a `[workspace.dependencies]` table for shared deps.
 - Marked ThinClaw Desktop as experimental.
 - Refreshed channel, APNs/browser-push, ComfyUI media-generation, setup, CLI, tool/skill, parity, and dependency documentation to match the current native lifecycle, built-in sidecar, and WASM channel architecture, while keeping real-provider smoke requirements clearly marked as credential-gated validation.
 - Removed stale audit-planning closure documents from the current docs tree.
@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed the multibyte-UTF-8 `split_message` panic in the telegram, slack, and discord channels.
 - Added routine run-lease zombie reaping.
 - Fixed streaming `finish_reason` for tool calls.
+- Serialized iOS SSE activity updates so comment keep-alives reset the watchdog before timeout evaluation, eliminating a reconnect race under load.
+- Rebuilt the runtime-contract OpenAPI export around one shared component registry so every generated `$ref` resolves inside the document.
 - Guarded the `image_gen` progress divide-by-zero.
 - Replaced hot-path `expect`/parse panics with typed errors and moved `OnceLock` hot-path regexes/selectors off the hot path.
 - Removed blocking syscalls from async functions.
@@ -82,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added desktop backend advisory scanning in CI (`cargo deny check advisories`) with a desktop-scoped `deny.toml`.
 - Zero cargo-deny advisory ignores (`deny.toml` `[advisories] ignore = []`).
 - Patched RUSTSEC-2026-0187 (pdf-extract/lopdf), RUSTSEC-2026-0188 (wasmtime-wasi), and RUSTSEC-2026-0190 (anyhow) at the source.
+- Disabled JSON Schema's external HTTP and file resolvers for untrusted tool schemas; external references now fail closed.
 - Hardened the injection regex, audited in-memory secret access, and warn on token-in-URL.
 
 ## [0.14.0](https://github.com/RNT56/ThinClaw/releases/tag/v0.14.0) - 2026-05-14

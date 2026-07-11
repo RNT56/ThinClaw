@@ -14,7 +14,7 @@ How we know we're done, and how each invariant is kept fixed. Re-run the
 | Wrong-direction crate edges | 2 | 0 (removed + CI-guarded) ✅ | 0 | A1, A2 done |
 | Files > 2,000 lines | 18 | 0 ✅ | < 5 → 0 (guarded) | A5–A8, T10 done |
 | Largest file (lines) | 4,577 | 1,999 (`crates/thinclaw-channels/src/gmail.rs`) | < 800 | A8 (< 800 not met) |
-| Duplicate-versioned crates (root lock) | 94 | 82 (`cargo deny` duplicate diagnostics; improved, still above target) | < 30 (deny-gated) | D1–D3 |
+| Duplicate-versioned crates (root lock) | 94 | 82 (`cargo deny` duplicate diagnostics; +4 vs immediate pre-upgrade `main`, -12 vs the audit baseline, still above target) | < 30 (deny-gated) | D1–D3 |
 | `rand` versions in tree | 3 (root) / 4 (desktop) | 3 (root: 0.8.6 / 0.9.4 / 0.10.2); desktop advisory cleared | 1 | D2 |
 | ROUTE_TABLE command coverage | 15/341 (4%) | 346/346 (100%, test-enforced) ✅ | 100% (gated) | B4 done |
 | Commands returning `Result<_, String>` | ~149 (undercounted) | 313/342 | 0 | B5 |
