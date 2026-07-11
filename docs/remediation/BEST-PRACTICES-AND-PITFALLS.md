@@ -93,10 +93,10 @@ Verbatim intent from `CLAUDE.md` → *Architecture Hygiene*. **God files are arc
 The god-files the audit called out (`AUDIT-FINDINGS.md §5`) have all been decomposed into directory
 modules (WS-10). **No committed `.rs` file now exceeds 2,000 lines anywhere in the repo**, and a CI guard
 (`scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000`, run at `ci.yml:64`) keeps it that way. The rule still
-stands: **do not grow a module back toward that limit.** The largest surviving façades to keep an eye on
-(do not grow; split further when you must touch them): `crates/thinclaw-secrets/src/store.rs` (~1,974L),
-`src/agent/agent_loop/mod.rs` (~1,968L), `crates/thinclaw-agent/src/session.rs` (~1,958L), and
-`src/llm/reasoning.rs` (~1,938L, not yet split). Any structural re-cut of a still-large façade should be
+stands: **do not grow a module back toward that limit.** The largest surviving modules to keep an eye on
+(do not grow; split further when you must touch them): `crates/thinclaw-channels/src/gmail.rs` (1,999L),
+`crates/thinclaw-db/src/libsql_migrations.rs` (1,980L), `crates/thinclaw-secrets/src/store.rs` (1,974L),
+and `src/agent/agent_loop/mod.rs` (1,968L). Any structural re-cut of a still-large module should be
 its own focused change, not a rider on unrelated work.
 
 ---

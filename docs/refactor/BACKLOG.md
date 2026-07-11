@@ -6,10 +6,10 @@ state**, **Steps/todos**, **Verify**, and **Guardrail** (the regression gate to 
 
 Line numbers are 2026-06-29 audit hints — re-locate before editing (see `EXECUTION_PLAYBOOK.md`).
 
-> **Status (2026-07-10):** the audit-hardening stack has landed on `main` (`bda7a61f`). Each task
+> **Status (2026-07-11):** the audit-hardening and loop-hardening stacks have landed on `main`. Each task
 > below carries a **[DONE]** / **[PARTIAL]** / **[OPEN]** marker reflecting the code as of that date.
 > Do not execute a **[DONE]** task; the remaining work is the **[PARTIAL]** and **[OPEN]** items —
-> chiefly dependency dedup (D1–D3, which has *regressed*), the `unwrap_used` lint, the coverage
+> chiefly dependency dedup (D1–D3, still above target), the `unwrap_used` lint, the coverage
 > threshold, a signed release, B5's `Result<_, String>` migration, and the largest-file < 800 target.
 
 ---
@@ -24,7 +24,7 @@ fixed at source) + desktop advisory CI. Audit/plan: **#125**.
 
 ---
 
-## Wave A — mostly landed (2026-07-10)
+## Wave A — mostly landed (2026-07-11)
 
 A1–A5 and A7 are **[DONE]**; A8's size guard is LIVE and every file is under 2,000 lines. A6, A9,
 A10, A11 remain **[OPEN]/[PARTIAL]**.
@@ -126,22 +126,23 @@ etc.).
 Decompose, façade-preserving, each its own PR. Progress (all now under the 2,000-line guard):
 `thinclaw-channels/src/signal.rs` → `signal/` directory ✅; `thinclaw-gateway/src/web/providers.rs`
 → `providers/` directory ✅; `src/channels/web/server.rs` now 1,672 lines ✅;
-`src/agent/routine_engine.rs` now 1,580 lines ✅. **Still large (mod file under the guard but not at
+`src/agent/routine_engine.rs` now 1,704 lines ✅. **Still large (mod file under the guard but not at
 < 800):** `src/channels/acp.rs` (~1,928, decomposed into `acp/` submodules but the mod file remains
 big) and `src/llm/reasoning.rs` (~1,938, `reasoning/` submodules, mod file still big). `src/tui/mod.rs`
 is 1,160. **Verify per file:** crate `cargo check` + tests untouched. **Guardrail:** the size-guard
 is LIVE at 2,000 and passes; a stricter threshold is future work.
 
-### A9 · Async lifecycle hardening · P1 · M · **[OPEN]**
-**Files:** `src/agent/channel_submission.rs:35` (fire-and-forget spawn — already logs `Err`, but
-panics are swallowed + no shutdown tracking), `src/main.rs` (untracked experiment/SIGHUP/SSE
-spawns), `src/tools/builtin/learning_tools.rs:606` (skill-registry `reload()` under the write lock),
-`src/agent/scheduler.rs` (cleanup spawns not aborted at stop).
-**Steps:** add a `ShutdownSet`/`JoinSet` on the Agent (and register the channel-submission + main.rs
-spawns; `abort_all` in shutdown); refactor skill reload to load-then-swap (build a fresh registry
-off-lock via `discover_all`, then `*write().await = fresh` — touches `src/skills/registry.rs`
-internals); register scheduler cleanup spawns for abort. **Verify:** `cargo check`; agent/dispatcher
-tests. **Guardrail:** none (consider an `await_holding_lock` re-check).
+### A9 · Async lifecycle hardening · P1 · M · **[PARTIAL]**
+**Landed:** long-running runtime, watcher, provider-channel, outcome, repo-project, and maintenance
+loops now retain task handles, receive cooperative shutdown, and drain with bounded abort fallback.
+The SIGHUP/SSE/experiment paths formerly detached from `main` are owned by the runtime maintenance
+set, and skill-registry reload-all now discovers off-lock before a brief swap.
+**Remaining:** `RootChannelSubmissionPort::submit` still starts a detached one-shot message task, and
+the scheduler still starts detached job/subtask cleanup waiters. Their underlying workers/subtasks are
+owned and the cleanup polling is bounded, but the waiter handles themselves are not retained or
+joined at shutdown. Register those handles in an owned task set and add cancellation/drain coverage.
+**Verify:** `cargo check`; agent/dispatcher/scheduler shutdown tests. **Guardrail:** loop-inventory
+audit plus the existing `await_holding_lock` clippy gate.
 
 ### A10 · Security long-tail · P1/P2 · M · **[OPEN]**
 Independent fixes (can be 1–2 PRs): **(a)** `/tmp` path-escape exemption (`thinclaw-tools/.../
@@ -234,9 +235,9 @@ specta-exported enums (`ToolStatus`, `RunStatus`, `SubAgentStatus`, `MessageType
 
 ## Dependency hygiene
 
-> **Regression note (2026-07-10):** root-lock dedup has moved the *wrong* way — 100 duplicate-versioned
-> crates now (baseline was 94), 3 `rand` versions (0.8.6 / 0.9.4 / 0.10.1), 2 `wit-bindgen` versions
-> (0.51.0 / 0.57.1). D1–D3 are the priority open work.
+> **Current note (2026-07-11):** root-lock dedup is improved but still far from target — 82
+> `cargo deny` duplicate diagnostics (baseline was 94), 3 `rand` versions (0.8.6 / 0.9.4 / 0.10.2),
+> and 2 `wit-bindgen` versions (0.51.0 / 0.57.1). D1–D3 remain priority work.
 
 ### D1 · `[workspace.dependencies]` table · P1 · M · **[PARTIAL]**
 **Landed:** `[workspace.dependencies]` exists in root `Cargo.toml:26` with 9 hoisted deps (serde,
@@ -247,7 +248,7 @@ deliberately not hoisted yet, per the rationale comment at `Cargo.toml:21-24`. R
 split is D2. **Verify:** workspace `cargo check`; sync lockfiles. **Guardrail:** none direct.
 
 ### D2 · Collapse `rand 0.8 → 0.9` · P1 · M · **[OPEN]** · Blocked-by: D1 (do together)
-Root lock still carries 3 simultaneous `rand` versions (0.8.6 / 0.9.4 / 0.10.1). Upgrade to one.
+Root lock still carries 3 simultaneous `rand` versions (0.8.6 / 0.9.4 / 0.10.2). Upgrade to one.
 **Verify:** `cargo check`; sync lockfiles.
 
 ### D3 · `deny.toml multiple-versions = warn → deny` · P1 · S · **[OPEN]** · Blocked-by: D1/D2 (must dedup first)
@@ -280,7 +281,7 @@ The desktop formerly failed the root `deny.toml`'s bans/licenses. **Landed:** a 
 | T5 | Miri CI job for `thinclaw-secrets` (crypto) + `thinclaw-safety` (sanitizer/leak) | P2 | — |
 | T6 | Contract test for `SafetyLayer`/`SecretsStore` injection in `AppBuilder` | P2 | — |
 | T7 | Frontend tests for the chat hook (`use-chat.ts`) + Tauri bridge | P3 | — |
-| T8 | Dedicated MSRV-verification CI job (currently stable pin == MSRV by coincidence) | P3 | — |
+| T8 | **[DONE]** Enforce package MSRV == pinned developer/CI toolchain (`check-msrv-sync.py`; Rust 1.92) | P3 | — |
 | T9 | Extend `--locked` to the remaining CI jobs (host-smoke/acp/release/db-contract) | P1 | — |
 | T10 | **[DONE]** God-file size-guard CI (`scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000`, `ci.yml:64`) | P2 | A5–A8 |
 | T11 | `wit-bindgen` single-version check + bundle-reference resolution test — **[OPEN]**, still 2 versions (0.51.0, 0.57.1) | P1 | — |
@@ -329,7 +330,7 @@ Now (parallel-safe, pick any): A6 (finish async_main phases) · A8 (acp/reasonin
                                A9 A10 A11 · D1+D2 · T1 T2 T3 T9 T11 · P1 P2 P4 P5 · B3 B6
 After dedup (D1/D2):           D3 (multiple-versions = deny)
 Decouple -D warnings first:    clippy::unwrap_used
-Then:                          B5 (Result<_,String> migration) · D5 · T4 T5 T6 T7 T8 ·
+Then:                          B5 (Result<_,String> migration) · D5 · T4 T5 T6 T7 ·
                                LLM extraction / schema evolution / protocol versioning
 External/infra:               P3 (signed release — signing secrets)
 ```

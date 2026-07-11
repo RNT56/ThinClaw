@@ -3,7 +3,7 @@
 > **Status:** COMPLETED (proposal v1, 2026-06-29). Most of Phases 0–2 shipped via the
 > audit-driven remediation stack (13 workstreams, commits `4f88c43e`…`43460933` plus F-01..F-19
 > follow-ups), merged to `main` at `bda7a61f`. This document is retained as a historical record and
-> annotated with a **2026-07-10 status update**; it is no longer an execution checklist. Do not pick
+> annotated with a **2026-07-11 status update**; it is no longer an execution checklist. Do not pick
 > it up and start executing landed phases.
 >
 > **What landed:** the two wrong-direction crate edges are removed and CI-guarded (§1.6); all
@@ -14,12 +14,14 @@
 > reached 100% coverage with a CI test (§2.2); desktop `cargo-deny` and pervasive `--locked` are in
 > CI (§0.1); the Prometheus `/metrics` endpoint is live (§2.3).
 >
-> **Still open (do NOT mark done):** root dependency dedup (100 duplicate-versioned crates, up from
-> the 94 baseline; `deny.toml` still sets `multiple-versions = "warn"`), the `clippy::unwrap_used`
+> **Still open (do NOT mark done):** root dependency dedup (82 `cargo deny` duplicate diagnostics,
+> improved from the 94 baseline but still above target; `deny.toml` still sets
+> `multiple-versions = "warn"`), the `clippy::unwrap_used`
 > panic-prevention lint (still `allow`), a coverage `--fail-under` threshold (CI still uses `--lib`
 > with no gate), a signed desktop release, finishing the `[workspace.dependencies]` migration (the
 > table exists and 27 of 28 crates use it, but `tokio`/`uuid`/`reqwest`/`rand` are not hoisted), and
-> the "largest file < 800 lines" stretch target. See the annotated §4 metrics table.
+> detached channel-submission/scheduler cleanup waiters (A9), and the "largest file < 800 lines"
+> stretch target. See the annotated §4 metrics table.
 >
 > **Original framing (2026-06-29):** Grounded in a 10-dimension code audit
 > (crate architecture, error/panic safety, async/concurrency, testing/CI, security, dependencies,
@@ -157,9 +159,10 @@ un-shippable.
   anyhow, thiserror, tracing, chrono, async-trait, futures, utoipa) at `Cargo.toml:26`.
   **[STILL OPEN]** The full per-crate `workspace = true` migration is incomplete (tokio/uuid/reqwest/
   rand are intentionally not yet hoisted).
-- **[STILL OPEN]** Dependency dedup regressed rather than improved: the root `Cargo.lock` now carries
-  **100** duplicate-versioned crates (baseline 94), including 3 `rand` versions (`0.8.6`, `0.9.4`,
-  `0.10.1`) and 2 `wit-bindgen` versions. `deny.toml` still has `[bans] multiple-versions = "warn"`
+- **[STILL OPEN]** Dependency dedup improved but remains above target: the root `Cargo.lock` now
+  produces **82** `cargo deny` duplicate diagnostics (baseline 94), including 3 `rand` versions
+  (`0.8.6`, `0.9.4`, `0.10.2`) and 2 `wit-bindgen` versions. `deny.toml` still has
+  `[bans] multiple-versions = "warn"`
   (not `deny`), `deny.toml:38`.
 - Add Renovate/Dependabot (many lockfiles; manual hygiene isn't sustainable).
 
@@ -182,10 +185,10 @@ un-shippable.
 
 ### Phase 2 — Architecture & extensibility (target: ~6–8 weeks, incremental)
 
-**2.1 God-file decomposition (P1–P2): LANDED.** As of 2026-07-10 **zero** committed `.rs` files
+**2.1 God-file decomposition (P1–P2): LANDED.** As of 2026-07-11 **zero** committed `.rs` files
 exceed 2,000 lines anywhere in the repo, and a live CI guard (`scripts/ci/check-file-sizes.sh`,
 `MAX_LINES=2000`, run at `.github/workflows/ci.yml`) prevents regression. The largest file is now
-`crates/thinclaw-secrets/src/store.rs` at 1,974 lines. Every god-file the audit named was decomposed
+`crates/thinclaw-channels/src/gmail.rs` at 1,999 lines. Every god-file the audit named was decomposed
 into a directory module:
 - `skill.rs` (4,577) and `skill_tools.rs` (4,385) no longer exist at those paths/sizes.
 - `thinclaw-experiments/src/lib.rs` (was 3,482, *zero submodules*) is now a thin façade split into
@@ -195,7 +198,7 @@ into a directory module:
   `routine_engine.rs`, `llm/reasoning.rs`, and `acp.rs` are all decomposed and under 2,000.
 
 *Remaining stretch work:* the guard threshold is 2,000, not the "< 800 lines" target in §4; ~45 files
-sit in the 1,500–1,974 band and could be split further if desired.
+sit in the 1,500–1,999 band and could be split further if desired.
 
 **2.2 Command-surface consistency (P2)**
 - **[STILL OPEN]** 313 of 342 Tauri commands with a return type still return `Result<_, String>` and
@@ -229,7 +232,9 @@ sit in the 1,500–1,974 band and could be split further if desired.
 - `SAFE_BINS` rename + split (curl/wget/docker are not "safe"); `ExternalScanner` default
   `FailOpen → FailClosed`; in-memory secrets-store audit trail; `?token=` query-param log-exposure warning.
 - Frontend test coverage for the chat hook + Tauri bridge (53 Vitest cases cover only utilities today).
-- Dedicated MSRV-verification CI job (the stable pin coincidentally equals MSRV today).
+
+Landed guardrail: `check-msrv-sync.py` now runs in CI and enforces that package MSRV and the pinned
+developer/CI toolchain remain Rust 1.92.
 
 ---
 
@@ -238,12 +243,12 @@ sit in the 1,500–1,974 band and could be split further if desired.
 The single highest-leverage investment. At 538k LOC, discipline must be **automated**, not reviewed.
 Add to CI (most are S-effort, P0/P1):
 
-| Guardrail | Prevents | Status (2026-07-10) |
+| Guardrail | Prevents | Status (2026-07-11) |
 |---|---|---|
 | `--locked` on all cargo invocations | lockfile drift (already bit us twice) | Landed |
 | `cargo-deny` across **all** workspaces/sub-lockfiles | unscanned advisories in desktop/channel/tool deps | Partial: desktop scanned; `channels-src/`/`tools-src/` sub-lockfiles still unswept |
 | `clippy::await_holding_lock = deny` + `unwrap_used/expect_used = warn` (non-test) | async deadlocks; new production panics | Open: `clippy::unwrap_used` still `allow` (`Cargo.toml:466`) |
-| `deny.toml multiple-versions = deny` (+ documented skips) | duplicate-version creep (100 in root lock today, up from 94) | Open: still `warn` (`deny.toml:38`) |
+| `deny.toml multiple-versions = deny` (+ documented skips) | duplicate-version creep (82 `cargo deny` diagnostics in the root lock today) | Open: still `warn` (`deny.toml:38`) |
 | God-file size guard (fail if any `.rs` > N lines) | re-growing the god-files | Landed: `scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000` |
 | ROUTE_TABLE coverage test (every command classified) | unclassified dual-mode commands | Landed: `all_registered_commands_are_classified` |
 | `wit-bindgen` single-version check | WASM interface skew (2 versions today) | Open: 2 versions (`0.51.0`, `0.57.1`) |
@@ -253,13 +258,13 @@ Add to CI (most are S-effort, P0/P1):
 
 ## 4. Metrics — baseline & targets
 
-| Metric | Baseline (2026-06-29) | Target | Now (2026-07-10) |
+| Metric | Baseline (2026-06-29) | Target | Now (2026-07-11) |
 |---|---|---|---|
 | Dependency cycles | 0 | 0 (guarded) | 0, CI-guarded |
 | Wrong-direction crate edges | 2 | 0 | 0, CI-guarded |
 | Files > 2,000 lines | 18 | < 5, then 0 (guarded) | 0, guard live |
-| Largest file | 4,577 | < 800 | 1,974 (target not yet met) |
-| Duplicate-versioned crates (root lock) | 94 | < 30 (deny-gated) | 100 (regressed; not gated) |
+| Largest file | 4,577 | < 800 | 1,999 (target not yet met) |
+| Duplicate-versioned crates (root lock) | 94 | < 30 (deny-gated) | 82 (improved; not gated) |
 | ROUTE_TABLE command coverage | 15/341 (4%) | 100% (gated) | 346/346 (100%), gated |
 | Commands returning `Result<_, String>` | ~149 | 0 | 313/342 (not met) |
 | Dead `ObserverEvent` variants | 5/10 | 0 | 0 |

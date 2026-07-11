@@ -107,8 +107,9 @@ Severities are the corrected post-verification values. **Every bug in this table
 > **RESOLVED (WS-10, decomposition wave).** Every god-file listed below was decomposed into a
 > directory module; **no committed `.rs` file now exceeds 2,000 lines** anywhere in the repo, and a
 > CI guard (`scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000`) enforces this. The largest surviving
-> façades are `crates/thinclaw-secrets/src/store.rs` (1,974L), `src/agent/agent_loop/mod.rs`
-> (1,968L), and `crates/thinclaw-agent/src/session.rs` (1,958L). The half-finished migrations were
+> modules are `crates/thinclaw-channels/src/gmail.rs` (1,999L),
+> `crates/thinclaw-db/src/libsql_migrations.rs` (1,980L), and
+> `crates/thinclaw-secrets/src/store.rs` (1,974L). The half-finished migrations were
 > also completed: `src/history/store/` was deleted (consolidated onto `thinclaw-db`) and the 14
 > orphaned `src/safety/*.rs` files were removed (live code is `crates/thinclaw-safety/src/*`). The
 > list below is the audit-time inventory and cites paths/line-counts that no longer exist.

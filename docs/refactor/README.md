@@ -50,7 +50,7 @@ Measured by the dashboard in [`METRICS_AND_GUARDRAILS.md`](METRICS_AND_GUARDRAIL
 Line numbers in the backlog originate from the 2026-06-29 audit and **drift** — always re-locate the
 symbol (`grep`/`rg`) before editing; treat the file + the pattern as authoritative, the line as a hint.
 
-## Status snapshot (2026-07-10)
+## Status snapshot (2026-07-11)
 
 The audit-hardening stack has landed on `main` (merges `1fb29984` / `bda7a61f`). Most of Phase 1
 Wave A and the unblocked Wave B items shipped; the Phase 2 metrics endpoint shipped too. What
@@ -67,8 +67,10 @@ typed-error and file-size targets.
   providers / server / routine-engine now under the 2,000-line guard) are done. The god-file size
   guard is LIVE in CI. **Still open in Wave A:** A6 (`async_main` extracted to `src/async_main.rs`
   but still ~1,928 lines), the `acp` / `reasoning` mod files (~1,900 lines, under the guard but not
-  yet at the < 800 target), and the async-lifecycle / security long-tails (A9, A10). A11 (panic
-  long-tail) is **partial**: every named production panic site is resolved, but the systemic
+  yet at the < 800 target), and the security long-tail (A10). A9 (async lifecycle) is **partial**:
+  long-running loops are owned and drained, while channel-submission and scheduler cleanup waiters
+  remain detached one-shot tasks. A11 (panic long-tail) is **partial**: every named production
+  panic site is resolved, but the systemic
   `clippy::unwrap_used` lint is still `"allow"`.
 - **Phase 1 / Wave B — PARTIALLY LANDED** (no longer blocked): B1 (`StatusUpdate` is now
   `#[non_exhaustive]`), B2 (all 10 `ObserverEvent` variants have production emit sites, zero dead
@@ -82,12 +84,13 @@ typed-error and file-size targets.
   (reasoning/runtime_manager behind ports) and the maturity long-tail.
 
 **What actually remains** (do not treat these as done): dependency dedup (D2/D3; the root lock has
-*regressed* to 100 duplicate-versioned crates, 3 `rand` versions, 2 `wit-bindgen` versions, and
+82 `cargo deny` duplicate diagnostics, 3 `rand` versions, 2 `wit-bindgen` versions, and
 `deny.toml` still has `multiple-versions = "warn"`), finishing D1 (the `[workspace.dependencies]`
 table exists and 27/28 crates use it, but `tokio`/`uuid`/`reqwest`/`rand` are not hoisted), the
 `clippy::unwrap_used` panic-prevention lint (still `"allow"`), the coverage `--fail-under` threshold
 (still `--lib`, no gate), a signed desktop release (P3), sub-workspace `cargo-deny` scanning of
-`channels-src/` + `tools-src/`, the `Result<_, String>` → `BridgeError` command migration (B5), and
-the largest-file < 800 target (A7: largest is now 1,974 lines, not 4,577).
+`channels-src/` + `tools-src/`, the `Result<_, String>` → `BridgeError` command migration (B5),
+the remaining A9 one-shot task ownership, and the largest-file < 800 target (A8: largest is now
+1,999 lines, not 4,577).
 
 See [`BACKLOG.md`](BACKLOG.md) for the per-task detail.

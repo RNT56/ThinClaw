@@ -5,18 +5,18 @@ How we know we're done, and how each invariant is kept fixed. Re-run the
 
 ## Metrics dashboard (baseline 2026-06-29 → target)
 
-**Current** column verified 2026-07-10 against the merged audit-hardening stack (HEAD `bda7a61f`).
+**Current** column verified 2026-07-11 against the merged loop, channel, and dependency hardening stack.
 ✅ = target met.
 
-| Metric | Baseline | Current (2026-07-10) | Target | Tracked by |
+| Metric | Baseline | Current (2026-07-11) | Target | Tracked by |
 |---|---|---|---|---|
 | Dependency cycles | 0 | 0 ✅ | 0 (guarded) | crate-boundary CI |
 | Wrong-direction crate edges | 2 | 0 (removed + CI-guarded) ✅ | 0 | A1, A2 done |
 | Files > 2,000 lines | 18 | 0 ✅ | < 5 → 0 (guarded) | A5–A8, T10 done |
-| Largest file (lines) | 4,577 | 1,974 (`crates/thinclaw-secrets/src/store.rs`) | < 800 | A7 (< 800 not met) |
-| Duplicate-versioned crates (root lock) | 94 | 100 (regressed) | < 30 (deny-gated) | D1–D3 |
-| `rand` versions in tree | 3 (root) / 4 (desktop) | 3 (root: 0.8.6 / 0.9.4 / 0.10.1); desktop advisory cleared | 1 | D2 |
-| ROUTE_TABLE command coverage | 15/341 (4%) | 346/346 (100%, test-enforced) ✅ | 341/341 (gated) | B4 done |
+| Largest file (lines) | 4,577 | 1,999 (`crates/thinclaw-channels/src/gmail.rs`) | < 800 | A8 (< 800 not met) |
+| Duplicate-versioned crates (root lock) | 94 | 82 (`cargo deny` duplicate diagnostics; improved, still above target) | < 30 (deny-gated) | D1–D3 |
+| `rand` versions in tree | 3 (root) / 4 (desktop) | 3 (root: 0.8.6 / 0.9.4 / 0.10.2); desktop advisory cleared | 1 | D2 |
+| ROUTE_TABLE command coverage | 15/341 (4%) | 346/346 (100%, test-enforced) ✅ | 100% (gated) | B4 done |
 | Commands returning `Result<_, String>` | ~149 (undercounted) | 313/342 | 0 | B5 |
 | Dead `ObserverEvent` variants | 5/10 | 0 ✅ | 0 | B2 done |
 | `StatusUpdate` `#[non_exhaustive]` | no | yes ✅ | yes | B1 done |
@@ -49,7 +49,7 @@ Each architectural invariant must be machine-enforced. Status: ✅ live · 🟡 
 | bundle-reference resolution test | broken registry bundles | 🟡 with P5/T11 |
 | coverage threshold (`--fail-under`, no `--lib`) | silent coverage erosion | 🟡 with T1; still `cargo llvm-cov --all-features --lib`, no `--fail-under` |
 | `export_bindings` no-hand-edit + variant-coverage test | binding drift | ✅ exists; extend per B-tasks |
-| MSRV verification job | accidental MSRV bump | 🟡 with T8 |
+| MSRV/toolchain synchronization | accidental MSRV bump | ✅ `check-msrv-sync.py` runs in CI; the pinned toolchain equals package MSRV 1.92 |
 
 ## Re-audit procedure
 
