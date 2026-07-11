@@ -358,16 +358,23 @@ mod tests {
     #[test]
     fn tool_schema_rejects_external_references() {
         let validator = Validator::new();
-        let schema = serde_json::json!({
-            "$ref": "http://127.0.0.1:9/untrusted-schema.json"
-        });
+        for reference in [
+            "http://127.0.0.1:9/untrusted-schema.json",
+            "file:///etc/untrusted-schema.json",
+        ] {
+            let schema = serde_json::json!({"$ref": reference});
+            let result = validator.validate_tool_params_against_schema(
+                &schema,
+                &serde_json::json!({"value": "test"}),
+            );
 
-        let result = validator
-            .validate_tool_params_against_schema(&schema, &serde_json::json!({"value": "test"}));
-
-        assert!(!result.is_valid);
-        assert!(result.errors.iter().any(|error| {
-            error.code == ValidationErrorCode::SchemaViolation && error.field == "schema"
-        }));
+            assert!(
+                !result.is_valid,
+                "external reference was accepted: {reference}"
+            );
+            assert!(result.errors.iter().any(|error| {
+                error.code == ValidationErrorCode::SchemaViolation && error.field == "schema"
+            }));
+        }
     }
 }
