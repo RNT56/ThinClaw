@@ -354,4 +354,20 @@ mod tests {
         assert!(result.is_valid); // Still valid, just a warning
         assert!(!result.warnings.is_empty());
     }
+
+    #[test]
+    fn tool_schema_rejects_external_references() {
+        let validator = Validator::new();
+        let schema = serde_json::json!({
+            "$ref": "http://127.0.0.1:9/untrusted-schema.json"
+        });
+
+        let result = validator
+            .validate_tool_params_against_schema(&schema, &serde_json::json!({"value": "test"}));
+
+        assert!(!result.is_valid);
+        assert!(result.errors.iter().any(|error| {
+            error.code == ValidationErrorCode::SchemaViolation && error.field == "schema"
+        }));
+    }
 }

@@ -151,7 +151,7 @@ cron = "0.17"
 regex = "1"
 aho-corasick = "1"
 unicode-normalization = "0.1"
-jsonschema = "0.47"
+jsonschema = { version = "0.47", default-features = false }
 jsonwebtoken = "9"
 
 # YAML parsing for SKILL.md frontmatter
