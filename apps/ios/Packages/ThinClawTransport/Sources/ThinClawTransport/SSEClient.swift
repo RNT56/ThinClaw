@@ -36,10 +36,11 @@ public actor SSEClient {
     ///   (`:`) keep-alives that produce no ``ServerSentEvent`` — so a liveness
     ///   watchdog can distinguish an idle-but-alive connection (the gateway
     ///   heartbeats with SSE comments) from true silence. It may fire without a
-    ///   corresponding yielded event.
+    ///   corresponding yielded event. The callback is awaited before byte
+    ///   processing continues so watchdog state cannot lag behind the parser.
     public func events<Bytes>(
         from bytes: Bytes,
-        onActivity: (@Sendable () -> Void)? = nil
+        onActivity: (@Sendable () async -> Void)? = nil
     ) -> AsyncThrowingStream<ServerSentEvent, any Error>
     where Bytes: AsyncSequence & Sendable, Bytes.Element == UInt8 {
         let (stream, continuation) = AsyncThrowingStream<ServerSentEvent, any Error>
@@ -62,7 +63,7 @@ public actor SSEClient {
                     // as stream activity, even when it produced no event.
                     if parser.linesConsumed != lastLinesConsumed {
                         lastLinesConsumed = parser.linesConsumed
-                        onActivity?()
+                        await onActivity?()
                     }
                 }
                 parser.finish()
