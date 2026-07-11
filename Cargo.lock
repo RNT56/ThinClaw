@@ -7934,7 +7934,7 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "tokio-tungstenite 0.29.0",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tower 0.5.3",
  "tower-http 0.6.8",
  "tracing",
@@ -8016,7 +8016,7 @@ dependencies = [
  "serde",
  "termimad",
  "thinclaw-platform",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "unicode-width 0.2.2",
 ]
@@ -8415,7 +8415,7 @@ dependencies = [
  "tempfile",
  "thinclaw-llm-core",
  "thinclaw-platform",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
 ]
 
@@ -8475,7 +8475,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
- "toml 0.8.23",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "unicode-normalization",
  "url",
