@@ -1,70 +1,61 @@
 {
   "components": {
     "schemas": {
-      "AssetRecord": {
-        "$defs": {
-          "AssetKind": {
-            "enum": [
-              "image",
-              "audio",
-              "video",
-              "document",
-              "generated_image",
-              "other"
-            ],
+      "ApiStyle": {
+        "description": "API compatibility mode for a cloud provider.",
+        "oneOf": [
+          {
+            "const": "openai",
+            "description": "Native OpenAI API.",
             "type": "string"
           },
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
+          {
+            "const": "anthropic",
+            "description": "Native Anthropic API.",
             "type": "string"
           },
-          "AssetOrigin": {
-            "enum": [
-              "upload",
-              "generated",
-              "downloaded_model_output",
-              "voice_input",
-              "voice_output",
-              "rag_document"
-            ],
+          {
+            "const": "openai_compatible",
+            "description": "OpenAI-compatible endpoint.",
             "type": "string"
           },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          },
-          "AssetStatus": {
-            "enum": [
-              "ready",
-              "pending",
-              "deleted",
-              "error"
-            ],
-            "type": "string"
-          },
-          "AssetVisibility": {
-            "enum": [
-              "private",
-              "shared_by_explicit_handoff"
-            ],
+          {
+            "const": "ollama",
+            "description": "Local Ollama-compatible runtime.",
             "type": "string"
           }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        ]
+      },
+      "AssetKind": {
+        "enum": [
+          "image",
+          "audio",
+          "video",
+          "document",
+          "generated_image",
+          "other"
+        ],
+        "type": "string"
+      },
+      "AssetNamespace": {
+        "enum": [
+          "direct_workbench",
+          "thin_claw_agent"
+        ],
+        "type": "string"
+      },
+      "AssetOrigin": {
+        "enum": [
+          "upload",
+          "generated",
+          "downloaded_model_output",
+          "voice_input",
+          "voice_output",
+          "rag_document"
+        ],
+        "type": "string"
+      },
+      "AssetRecord": {
         "properties": {
           "createdAt": {
             "format": "date-time",
@@ -80,7 +71,7 @@
             ]
           },
           "kind": {
-            "$ref": "#/$defs/AssetKind"
+            "$ref": "#/components/schemas/AssetKind"
           },
           "metadata": {
             "additionalProperties": {
@@ -97,7 +88,7 @@
             ]
           },
           "origin": {
-            "$ref": "#/$defs/AssetOrigin"
+            "$ref": "#/components/schemas/AssetOrigin"
           },
           "path": {
             "type": "string"
@@ -117,7 +108,7 @@
             ]
           },
           "reference": {
-            "$ref": "#/$defs/AssetRef"
+            "$ref": "#/components/schemas/AssetRef"
           },
           "sha256": {
             "default": null,
@@ -136,14 +127,14 @@
             ]
           },
           "status": {
-            "$ref": "#/$defs/AssetStatus"
+            "$ref": "#/components/schemas/AssetStatus"
           },
           "updatedAt": {
             "format": "date-time",
             "type": "string"
           },
           "visibility": {
-            "$ref": "#/$defs/AssetVisibility"
+            "$ref": "#/components/schemas/AssetVisibility"
           },
           "width": {
             "default": null,
@@ -165,66 +156,45 @@
           "createdAt",
           "updatedAt"
         ],
-        "title": "AssetRecord",
         "type": "object"
       },
       "AssetRef": {
-        "$defs": {
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "id": {
             "type": "string"
           },
           "namespace": {
-            "$ref": "#/$defs/AssetNamespace"
+            "$ref": "#/components/schemas/AssetNamespace"
           }
         },
         "required": [
           "namespace",
           "id"
         ],
-        "title": "AssetRef",
         "type": "object"
       },
+      "AssetStatus": {
+        "enum": [
+          "ready",
+          "pending",
+          "deleted",
+          "error"
+        ],
+        "type": "string"
+      },
+      "AssetVisibility": {
+        "enum": [
+          "private",
+          "shared_by_explicit_handoff"
+        ],
+        "type": "string"
+      },
       "DirectAttachedDocument": {
-        "$defs": {
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "assetRef": {
             "anyOf": [
               {
-                "$ref": "#/$defs/AssetRef"
+                "$ref": "#/components/schemas/AssetRef"
               },
               {
                 "type": "null"
@@ -243,66 +213,14 @@
           "id",
           "name"
         ],
-        "title": "DirectAttachedDocument",
         "type": "object"
       },
       "DirectChatMessage": {
-        "$defs": {
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          },
-          "DirectAttachedDocument": {
-            "properties": {
-              "assetRef": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/AssetRef"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
-              },
-              "id": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "name"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "assets": {
             "default": null,
             "items": {
-              "$ref": "#/$defs/AssetRef"
+              "$ref": "#/components/schemas/AssetRef"
             },
             "type": [
               "array",
@@ -312,7 +230,7 @@
           "attachedDocs": {
             "default": null,
             "items": {
-              "$ref": "#/$defs/DirectAttachedDocument"
+              "$ref": "#/components/schemas/DirectAttachedDocument"
             },
             "type": [
               "array",
@@ -342,7 +260,7 @@
           "originalMessages": {
             "default": null,
             "items": {
-              "$ref": "#"
+              "$ref": "#/components/schemas/DirectChatMessage"
             },
             "type": [
               "array",
@@ -357,123 +275,9 @@
           "role",
           "content"
         ],
-        "title": "DirectChatMessage",
         "type": "object"
       },
       "DirectChatPayload": {
-        "$defs": {
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          },
-          "DirectAttachedDocument": {
-            "properties": {
-              "assetRef": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/AssetRef"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
-              },
-              "id": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "name"
-            ],
-            "type": "object"
-          },
-          "DirectChatMessage": {
-            "properties": {
-              "assets": {
-                "default": null,
-                "items": {
-                  "$ref": "#/$defs/AssetRef"
-                },
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "attachedDocs": {
-                "default": null,
-                "items": {
-                  "$ref": "#/$defs/DirectAttachedDocument"
-                },
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "content": {
-                "type": "string"
-              },
-              "images": {
-                "default": null,
-                "items": {
-                  "type": "string"
-                },
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "isSummary": {
-                "default": null,
-                "type": [
-                  "boolean",
-                  "null"
-                ]
-              },
-              "originalMessages": {
-                "default": null,
-                "items": {
-                  "$ref": "#/$defs/DirectChatMessage"
-                },
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "role": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "role",
-              "content"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "autoMode": {
             "default": false,
@@ -488,7 +292,7 @@
           },
           "messages": {
             "items": {
-              "$ref": "#/$defs/DirectChatMessage"
+              "$ref": "#/components/schemas/DirectChatMessage"
             },
             "type": "array"
           },
@@ -521,11 +325,9 @@
           "temperature",
           "topP"
         ],
-        "title": "DirectChatPayload",
         "type": "object"
       },
       "DirectConversation": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "createdAt": {
             "format": "int64",
@@ -548,179 +350,12 @@
           "createdAt",
           "updatedAt"
         ],
-        "title": "DirectConversation",
         "type": "object"
       },
       "DirectDocumentIngestResponse": {
-        "$defs": {
-          "AssetKind": {
-            "enum": [
-              "image",
-              "audio",
-              "video",
-              "document",
-              "generated_image",
-              "other"
-            ],
-            "type": "string"
-          },
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          },
-          "AssetOrigin": {
-            "enum": [
-              "upload",
-              "generated",
-              "downloaded_model_output",
-              "voice_input",
-              "voice_output",
-              "rag_document"
-            ],
-            "type": "string"
-          },
-          "AssetRecord": {
-            "properties": {
-              "createdAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "height": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "kind": {
-                "$ref": "#/$defs/AssetKind"
-              },
-              "metadata": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "default": {},
-                "type": "object"
-              },
-              "mimeType": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "origin": {
-                "$ref": "#/$defs/AssetOrigin"
-              },
-              "path": {
-                "type": "string"
-              },
-              "prompt": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "provider": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "reference": {
-                "$ref": "#/$defs/AssetRef"
-              },
-              "sha256": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "sizeBytes": {
-                "default": null,
-                "format": "uint64",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "status": {
-                "$ref": "#/$defs/AssetStatus"
-              },
-              "updatedAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "visibility": {
-                "$ref": "#/$defs/AssetVisibility"
-              },
-              "width": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "reference",
-              "kind",
-              "origin",
-              "status",
-              "visibility",
-              "path",
-              "createdAt",
-              "updatedAt"
-            ],
-            "type": "object"
-          },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          },
-          "AssetStatus": {
-            "enum": [
-              "ready",
-              "pending",
-              "deleted",
-              "error"
-            ],
-            "type": "string"
-          },
-          "AssetVisibility": {
-            "enum": [
-              "private",
-              "shared_by_explicit_handoff"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "asset": {
-            "$ref": "#/$defs/AssetRecord"
+            "$ref": "#/components/schemas/AssetRecord"
           },
           "documentId": {
             "type": "string"
@@ -730,179 +365,12 @@
           "documentId",
           "asset"
         ],
-        "title": "DirectDocumentIngestResponse",
         "type": "object"
       },
       "DirectDocumentUploadResponse": {
-        "$defs": {
-          "AssetKind": {
-            "enum": [
-              "image",
-              "audio",
-              "video",
-              "document",
-              "generated_image",
-              "other"
-            ],
-            "type": "string"
-          },
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          },
-          "AssetOrigin": {
-            "enum": [
-              "upload",
-              "generated",
-              "downloaded_model_output",
-              "voice_input",
-              "voice_output",
-              "rag_document"
-            ],
-            "type": "string"
-          },
-          "AssetRecord": {
-            "properties": {
-              "createdAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "height": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "kind": {
-                "$ref": "#/$defs/AssetKind"
-              },
-              "metadata": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "default": {},
-                "type": "object"
-              },
-              "mimeType": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "origin": {
-                "$ref": "#/$defs/AssetOrigin"
-              },
-              "path": {
-                "type": "string"
-              },
-              "prompt": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "provider": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "reference": {
-                "$ref": "#/$defs/AssetRef"
-              },
-              "sha256": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "sizeBytes": {
-                "default": null,
-                "format": "uint64",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "status": {
-                "$ref": "#/$defs/AssetStatus"
-              },
-              "updatedAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "visibility": {
-                "$ref": "#/$defs/AssetVisibility"
-              },
-              "width": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "reference",
-              "kind",
-              "origin",
-              "status",
-              "visibility",
-              "path",
-              "createdAt",
-              "updatedAt"
-            ],
-            "type": "object"
-          },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          },
-          "AssetStatus": {
-            "enum": [
-              "ready",
-              "pending",
-              "deleted",
-              "error"
-            ],
-            "type": "string"
-          },
-          "AssetVisibility": {
-            "enum": [
-              "private",
-              "shared_by_explicit_handoff"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "asset": {
-            "$ref": "#/$defs/AssetRecord"
+            "$ref": "#/components/schemas/AssetRecord"
           },
           "path": {
             "type": "string"
@@ -912,148 +380,9 @@
           "path",
           "asset"
         ],
-        "title": "DirectDocumentUploadResponse",
         "type": "object"
       },
       "DirectStreamChunk": {
-        "$defs": {
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          },
-          "DirectAttachedDocument": {
-            "properties": {
-              "assetRef": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/AssetRef"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
-              },
-              "id": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "name"
-            ],
-            "type": "object"
-          },
-          "DirectChatMessage": {
-            "properties": {
-              "assets": {
-                "default": null,
-                "items": {
-                  "$ref": "#/$defs/AssetRef"
-                },
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "attachedDocs": {
-                "default": null,
-                "items": {
-                  "$ref": "#/$defs/DirectAttachedDocument"
-                },
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "content": {
-                "type": "string"
-              },
-              "images": {
-                "default": null,
-                "items": {
-                  "type": "string"
-                },
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "isSummary": {
-                "default": null,
-                "type": [
-                  "boolean",
-                  "null"
-                ]
-              },
-              "originalMessages": {
-                "default": null,
-                "items": {
-                  "$ref": "#/$defs/DirectChatMessage"
-                },
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "role": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "role",
-              "content"
-            ],
-            "type": "object"
-          },
-          "DirectTokenUsage": {
-            "properties": {
-              "completionTokens": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "promptTokens": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "totalTokens": {
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "promptTokens",
-              "completionTokens",
-              "totalTokens"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "content": {
             "type": "string"
@@ -1061,7 +390,7 @@
           "contextUpdate": {
             "default": null,
             "items": {
-              "$ref": "#/$defs/DirectChatMessage"
+              "$ref": "#/components/schemas/DirectChatMessage"
             },
             "type": [
               "array",
@@ -1074,7 +403,7 @@
           "usage": {
             "anyOf": [
               {
-                "$ref": "#/$defs/DirectTokenUsage"
+                "$ref": "#/components/schemas/DirectTokenUsage"
               },
               {
                 "type": "null"
@@ -1087,179 +416,12 @@
           "content",
           "done"
         ],
-        "title": "DirectStreamChunk",
         "type": "object"
       },
       "DirectSttResponse": {
-        "$defs": {
-          "AssetKind": {
-            "enum": [
-              "image",
-              "audio",
-              "video",
-              "document",
-              "generated_image",
-              "other"
-            ],
-            "type": "string"
-          },
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          },
-          "AssetOrigin": {
-            "enum": [
-              "upload",
-              "generated",
-              "downloaded_model_output",
-              "voice_input",
-              "voice_output",
-              "rag_document"
-            ],
-            "type": "string"
-          },
-          "AssetRecord": {
-            "properties": {
-              "createdAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "height": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "kind": {
-                "$ref": "#/$defs/AssetKind"
-              },
-              "metadata": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "default": {},
-                "type": "object"
-              },
-              "mimeType": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "origin": {
-                "$ref": "#/$defs/AssetOrigin"
-              },
-              "path": {
-                "type": "string"
-              },
-              "prompt": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "provider": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "reference": {
-                "$ref": "#/$defs/AssetRef"
-              },
-              "sha256": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "sizeBytes": {
-                "default": null,
-                "format": "uint64",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "status": {
-                "$ref": "#/$defs/AssetStatus"
-              },
-              "updatedAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "visibility": {
-                "$ref": "#/$defs/AssetVisibility"
-              },
-              "width": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "reference",
-              "kind",
-              "origin",
-              "status",
-              "visibility",
-              "path",
-              "createdAt",
-              "updatedAt"
-            ],
-            "type": "object"
-          },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          },
-          "AssetStatus": {
-            "enum": [
-              "ready",
-              "pending",
-              "deleted",
-              "error"
-            ],
-            "type": "string"
-          },
-          "AssetVisibility": {
-            "enum": [
-              "private",
-              "shared_by_explicit_handoff"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "asset": {
-            "$ref": "#/$defs/AssetRecord"
+            "$ref": "#/components/schemas/AssetRecord"
           },
           "text": {
             "type": "string"
@@ -1269,11 +431,9 @@
           "text",
           "asset"
         ],
-        "title": "DirectSttResponse",
         "type": "object"
       },
       "DirectTokenUsage": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "completionTokens": {
             "format": "uint32",
@@ -1296,179 +456,12 @@
           "completionTokens",
           "totalTokens"
         ],
-        "title": "DirectTokenUsage",
         "type": "object"
       },
       "DirectTtsResponse": {
-        "$defs": {
-          "AssetKind": {
-            "enum": [
-              "image",
-              "audio",
-              "video",
-              "document",
-              "generated_image",
-              "other"
-            ],
-            "type": "string"
-          },
-          "AssetNamespace": {
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent"
-            ],
-            "type": "string"
-          },
-          "AssetOrigin": {
-            "enum": [
-              "upload",
-              "generated",
-              "downloaded_model_output",
-              "voice_input",
-              "voice_output",
-              "rag_document"
-            ],
-            "type": "string"
-          },
-          "AssetRecord": {
-            "properties": {
-              "createdAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "height": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "kind": {
-                "$ref": "#/$defs/AssetKind"
-              },
-              "metadata": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "default": {},
-                "type": "object"
-              },
-              "mimeType": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "origin": {
-                "$ref": "#/$defs/AssetOrigin"
-              },
-              "path": {
-                "type": "string"
-              },
-              "prompt": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "provider": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "reference": {
-                "$ref": "#/$defs/AssetRef"
-              },
-              "sha256": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "sizeBytes": {
-                "default": null,
-                "format": "uint64",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "status": {
-                "$ref": "#/$defs/AssetStatus"
-              },
-              "updatedAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "visibility": {
-                "$ref": "#/$defs/AssetVisibility"
-              },
-              "width": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "reference",
-              "kind",
-              "origin",
-              "status",
-              "visibility",
-              "path",
-              "createdAt",
-              "updatedAt"
-            ],
-            "type": "object"
-          },
-          "AssetRef": {
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "namespace": {
-                "$ref": "#/$defs/AssetNamespace"
-              }
-            },
-            "required": [
-              "namespace",
-              "id"
-            ],
-            "type": "object"
-          },
-          "AssetStatus": {
-            "enum": [
-              "ready",
-              "pending",
-              "deleted",
-              "error"
-            ],
-            "type": "string"
-          },
-          "AssetVisibility": {
-            "enum": [
-              "private",
-              "shared_by_explicit_handoff"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "asset": {
-            "$ref": "#/$defs/AssetRecord"
+            "$ref": "#/components/schemas/AssetRecord"
           },
           "audioBytes": {
             "description": "Base64-encoded audio bytes for existing web audio playback flows.",
@@ -1479,11 +472,9 @@
           "audioBytes",
           "asset"
         ],
-        "title": "DirectTtsResponse",
         "type": "object"
       },
       "LocalRuntimeEndpoint": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "apiKey": {
             "default": null,
@@ -1522,97 +513,25 @@
         "required": [
           "baseUrl"
         ],
-        "title": "LocalRuntimeEndpoint",
         "type": "object"
       },
+      "LocalRuntimeKind": {
+        "enum": [
+          "llama_cpp",
+          "mlx",
+          "vllm",
+          "ollama",
+          "none"
+        ],
+        "type": "string"
+      },
       "LocalRuntimeSnapshot": {
-        "$defs": {
-          "LocalRuntimeEndpoint": {
-            "properties": {
-              "apiKey": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "baseUrl": {
-                "type": "string"
-              },
-              "contextSize": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "modelFamily": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "modelId": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "baseUrl"
-            ],
-            "type": "object"
-          },
-          "LocalRuntimeKind": {
-            "enum": [
-              "llama_cpp",
-              "mlx",
-              "vllm",
-              "ollama",
-              "none"
-            ],
-            "type": "string"
-          },
-          "RuntimeCapability": {
-            "enum": [
-              "chat",
-              "embedding",
-              "tts",
-              "stt",
-              "diffusion"
-            ],
-            "type": "string"
-          },
-          "RuntimeExposurePolicy": {
-            "enum": [
-              "direct_only",
-              "shared_when_enabled",
-              "network_exposed"
-            ],
-            "type": "string"
-          },
-          "RuntimeReadiness": {
-            "enum": [
-              "ready",
-              "starting",
-              "setup_required",
-              "unavailable"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "capabilities": {
             "default": [],
             "description": "Capabilities that are active and ready in the current runtime snapshot.",
             "items": {
-              "$ref": "#/$defs/RuntimeCapability"
+              "$ref": "#/components/schemas/RuntimeCapability"
             },
             "type": "array"
           },
@@ -1622,7 +541,7 @@
           "endpoint": {
             "anyOf": [
               {
-                "$ref": "#/$defs/LocalRuntimeEndpoint"
+                "$ref": "#/components/schemas/LocalRuntimeEndpoint"
               },
               {
                 "type": "null"
@@ -1631,19 +550,19 @@
             "default": null
           },
           "exposurePolicy": {
-            "$ref": "#/$defs/RuntimeExposurePolicy"
+            "$ref": "#/components/schemas/RuntimeExposurePolicy"
           },
           "kind": {
-            "$ref": "#/$defs/LocalRuntimeKind"
+            "$ref": "#/components/schemas/LocalRuntimeKind"
           },
           "readiness": {
-            "$ref": "#/$defs/RuntimeReadiness"
+            "$ref": "#/components/schemas/RuntimeReadiness"
           },
           "supportedCapabilities": {
             "default": [],
             "description": "Capabilities this runtime family can support when the relevant local\nservices are configured and running.",
             "items": {
-              "$ref": "#/$defs/RuntimeCapability"
+              "$ref": "#/components/schemas/RuntimeCapability"
             },
             "type": "array"
           },
@@ -1661,11 +580,9 @@
           "readiness",
           "exposurePolicy"
         ],
-        "title": "LocalRuntimeSnapshot",
         "type": "object"
       },
       "ModelCapabilitySet": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "jsonMode": {
             "type": "boolean"
@@ -1694,98 +611,23 @@
           "jsonMode",
           "systemPrompt"
         ],
-        "title": "ModelCapabilitySet",
         "type": "object"
       },
+      "ModelCategory": {
+        "enum": [
+          "chat",
+          "embedding",
+          "tts",
+          "stt",
+          "diffusion",
+          "other"
+        ],
+        "type": "string"
+      },
       "ModelDescriptor": {
-        "$defs": {
-          "ModelCapabilitySet": {
-            "properties": {
-              "jsonMode": {
-                "type": "boolean"
-              },
-              "streaming": {
-                "type": "boolean"
-              },
-              "systemPrompt": {
-                "type": "boolean"
-              },
-              "thinking": {
-                "type": "boolean"
-              },
-              "tools": {
-                "type": "boolean"
-              },
-              "vision": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "streaming",
-              "tools",
-              "vision",
-              "thinking",
-              "jsonMode",
-              "systemPrompt"
-            ],
-            "type": "object"
-          },
-          "ModelCategory": {
-            "enum": [
-              "chat",
-              "embedding",
-              "tts",
-              "stt",
-              "diffusion",
-              "other"
-            ],
-            "type": "string"
-          },
-          "ModelPricing": {
-            "properties": {
-              "inputPerMillion": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "outputPerMillion": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "per1kChars": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "perImage": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "perMinute": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              }
-            },
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "capabilities": {
-            "$ref": "#/$defs/ModelCapabilitySet",
+            "$ref": "#/components/schemas/ModelCapabilitySet",
             "default": {
               "jsonMode": false,
               "streaming": false,
@@ -1796,7 +638,7 @@
             }
           },
           "category": {
-            "$ref": "#/$defs/ModelCategory"
+            "$ref": "#/components/schemas/ModelCategory"
           },
           "contextWindow": {
             "default": null,
@@ -1845,7 +687,7 @@
           "pricing": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ModelPricing"
+                "$ref": "#/components/schemas/ModelPricing"
               },
               {
                 "type": "null"
@@ -1879,223 +721,9 @@
           "providerName",
           "category"
         ],
-        "title": "ModelDescriptor",
         "type": "object"
       },
       "ModelDiscoveryResult": {
-        "$defs": {
-          "ModelCapabilitySet": {
-            "properties": {
-              "jsonMode": {
-                "type": "boolean"
-              },
-              "streaming": {
-                "type": "boolean"
-              },
-              "systemPrompt": {
-                "type": "boolean"
-              },
-              "thinking": {
-                "type": "boolean"
-              },
-              "tools": {
-                "type": "boolean"
-              },
-              "vision": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "streaming",
-              "tools",
-              "vision",
-              "thinking",
-              "jsonMode",
-              "systemPrompt"
-            ],
-            "type": "object"
-          },
-          "ModelCategory": {
-            "enum": [
-              "chat",
-              "embedding",
-              "tts",
-              "stt",
-              "diffusion",
-              "other"
-            ],
-            "type": "string"
-          },
-          "ModelDescriptor": {
-            "properties": {
-              "capabilities": {
-                "$ref": "#/$defs/ModelCapabilitySet",
-                "default": {
-                  "jsonMode": false,
-                  "streaming": false,
-                  "systemPrompt": false,
-                  "thinking": false,
-                  "tools": false,
-                  "vision": false
-                }
-              },
-              "category": {
-                "$ref": "#/$defs/ModelCategory"
-              },
-              "contextWindow": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "deprecated": {
-                "default": false,
-                "type": "boolean"
-              },
-              "displayName": {
-                "type": "string"
-              },
-              "embeddingDimensions": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "id": {
-                "type": "string"
-              },
-              "maxOutputTokens": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "metadata": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "default": {},
-                "type": "object"
-              },
-              "pricing": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/ModelPricing"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
-              },
-              "provider": {
-                "type": "string"
-              },
-              "providerName": {
-                "type": "string"
-              },
-              "supportsStreaming": {
-                "default": false,
-                "type": "boolean"
-              },
-              "supportsTools": {
-                "default": false,
-                "type": "boolean"
-              },
-              "supportsVision": {
-                "default": false,
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "id",
-              "displayName",
-              "provider",
-              "providerName",
-              "category"
-            ],
-            "type": "object"
-          },
-          "ModelPricing": {
-            "properties": {
-              "inputPerMillion": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "outputPerMillion": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "per1kChars": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "perImage": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "perMinute": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              }
-            },
-            "type": "object"
-          },
-          "ProviderDiscoveryResult": {
-            "properties": {
-              "error": {
-                "default": null,
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "fromCache": {
-                "type": "boolean"
-              },
-              "models": {
-                "items": {
-                  "$ref": "#/$defs/ModelDescriptor"
-                },
-                "type": "array"
-              },
-              "provider": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "provider",
-              "models",
-              "fromCache"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "errors": {
             "default": [],
@@ -2106,7 +734,7 @@
           },
           "providers": {
             "items": {
-              "$ref": "#/$defs/ProviderDiscoveryResult"
+              "$ref": "#/components/schemas/ProviderDiscoveryResult"
             },
             "type": "array"
           },
@@ -2120,11 +748,9 @@
           "providers",
           "totalModels"
         ],
-        "title": "ModelDiscoveryResult",
         "type": "object"
       },
       "ModelPricing": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "inputPerMillion": {
             "format": "double",
@@ -2162,11 +788,9 @@
             ]
           }
         },
-        "title": "ModelPricing",
         "type": "object"
       },
       "ProviderCredentialDescriptor": {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Provider credential metadata safe to expose to clients.",
         "properties": {
           "credentialReady": {
@@ -2199,194 +823,9 @@
           "secretName",
           "envKeyName"
         ],
-        "title": "ProviderCredentialDescriptor",
         "type": "object"
       },
       "ProviderDiscoveryResult": {
-        "$defs": {
-          "ModelCapabilitySet": {
-            "properties": {
-              "jsonMode": {
-                "type": "boolean"
-              },
-              "streaming": {
-                "type": "boolean"
-              },
-              "systemPrompt": {
-                "type": "boolean"
-              },
-              "thinking": {
-                "type": "boolean"
-              },
-              "tools": {
-                "type": "boolean"
-              },
-              "vision": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "streaming",
-              "tools",
-              "vision",
-              "thinking",
-              "jsonMode",
-              "systemPrompt"
-            ],
-            "type": "object"
-          },
-          "ModelCategory": {
-            "enum": [
-              "chat",
-              "embedding",
-              "tts",
-              "stt",
-              "diffusion",
-              "other"
-            ],
-            "type": "string"
-          },
-          "ModelDescriptor": {
-            "properties": {
-              "capabilities": {
-                "$ref": "#/$defs/ModelCapabilitySet",
-                "default": {
-                  "jsonMode": false,
-                  "streaming": false,
-                  "systemPrompt": false,
-                  "thinking": false,
-                  "tools": false,
-                  "vision": false
-                }
-              },
-              "category": {
-                "$ref": "#/$defs/ModelCategory"
-              },
-              "contextWindow": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "deprecated": {
-                "default": false,
-                "type": "boolean"
-              },
-              "displayName": {
-                "type": "string"
-              },
-              "embeddingDimensions": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "id": {
-                "type": "string"
-              },
-              "maxOutputTokens": {
-                "default": null,
-                "format": "uint32",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "metadata": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "default": {},
-                "type": "object"
-              },
-              "pricing": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/ModelPricing"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
-              },
-              "provider": {
-                "type": "string"
-              },
-              "providerName": {
-                "type": "string"
-              },
-              "supportsStreaming": {
-                "default": false,
-                "type": "boolean"
-              },
-              "supportsTools": {
-                "default": false,
-                "type": "boolean"
-              },
-              "supportsVision": {
-                "default": false,
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "id",
-              "displayName",
-              "provider",
-              "providerName",
-              "category"
-            ],
-            "type": "object"
-          },
-          "ModelPricing": {
-            "properties": {
-              "inputPerMillion": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "outputPerMillion": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "per1kChars": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "perImage": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              },
-              "perMinute": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              }
-            },
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "error": {
             "default": null,
@@ -2400,7 +839,7 @@
           },
           "models": {
             "items": {
-              "$ref": "#/$defs/ModelDescriptor"
+              "$ref": "#/components/schemas/ModelDescriptor"
             },
             "type": "array"
           },
@@ -2413,42 +852,13 @@
           "models",
           "fromCache"
         ],
-        "title": "ProviderDiscoveryResult",
         "type": "object"
       },
       "ProviderEndpoint": {
-        "$defs": {
-          "ApiStyle": {
-            "description": "API compatibility mode for a cloud provider.",
-            "oneOf": [
-              {
-                "const": "openai",
-                "description": "Native OpenAI API.",
-                "type": "string"
-              },
-              {
-                "const": "anthropic",
-                "description": "Native Anthropic API.",
-                "type": "string"
-              },
-              {
-                "const": "openai_compatible",
-                "description": "OpenAI-compatible endpoint.",
-                "type": "string"
-              },
-              {
-                "const": "ollama",
-                "description": "Local Ollama-compatible runtime.",
-                "type": "string"
-              }
-            ]
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Endpoint configuration for a cloud provider.",
         "properties": {
           "api_style": {
-            "$ref": "#/$defs/ApiStyle"
+            "$ref": "#/components/schemas/ApiStyle"
           },
           "base_url": {
             "type": "string"
@@ -2517,30 +927,53 @@
           "env_key_name",
           "secret_name"
         ],
-        "title": "ProviderEndpoint",
         "type": "object"
       },
+      "RuntimeCapability": {
+        "enum": [
+          "chat",
+          "embedding",
+          "tts",
+          "stt",
+          "diffusion"
+        ],
+        "type": "string"
+      },
+      "RuntimeExposurePolicy": {
+        "enum": [
+          "direct_only",
+          "shared_when_enabled",
+          "network_exposed"
+        ],
+        "type": "string"
+      },
+      "RuntimeReadiness": {
+        "enum": [
+          "ready",
+          "starting",
+          "setup_required",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "SecretConsumer": {
+        "description": "Runtime family requesting secret access.",
+        "enum": [
+          "direct_workbench",
+          "thin_claw_agent",
+          "gateway_proxy",
+          "extension",
+          "system"
+        ],
+        "type": "string"
+      },
       "SecretDescriptor": {
-        "$defs": {
-          "SecretConsumer": {
-            "description": "Runtime family requesting secret access.",
-            "enum": [
-              "direct_workbench",
-              "thin_claw_agent",
-              "gateway_proxy",
-              "extension",
-              "system"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Canonical secret identity plus compatibility aliases.",
         "properties": {
           "allowedConsumers": {
             "default": [],
             "items": {
-              "$ref": "#/$defs/SecretConsumer"
+              "$ref": "#/components/schemas/SecretConsumer"
             },
             "type": "array"
           },
@@ -2572,7 +1005,6 @@
         "required": [
           "canonicalName"
         ],
-        "title": "SecretDescriptor",
         "type": "object"
       }
     }
@@ -2581,5 +1013,6 @@
     "title": "ThinClaw Runtime Contracts",
     "version": "0.1.0"
   },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.1.0"
 }
