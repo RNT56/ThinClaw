@@ -690,6 +690,7 @@ pub(super) async fn make_test_agent_with_channel(
             external_scanner_require_verified: false,
         })),
         tools,
+        desktop_autonomy_manager: None,
         workspace: None,
         extension_manager: None,
         skill_registry: None,
@@ -787,7 +788,13 @@ pub(super) async fn register_tool(
 }
 
 pub(super) fn count_prompt(messages: &[ChatMessage], prompt: &str) -> usize {
-    messages.iter().filter(|msg| msg.content == prompt).count()
+    // Prompt V2 compiles typed directives into one authority-ordered system
+    // preamble; legacy mode retains standalone system messages. Count textual
+    // occurrences so the same behavioral assertion covers both transports.
+    messages
+        .iter()
+        .map(|message| message.content.matches(prompt).count())
+        .sum()
 }
 
 pub(super) fn contains_prompt(messages: &[ChatMessage], prompt: &str) -> bool {

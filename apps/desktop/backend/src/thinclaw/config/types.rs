@@ -443,7 +443,12 @@ impl ThinClawEngineConfig {
 
         // Extract port from baseUrl (http://127.0.0.1:PORT)
         let base_url = local.get("baseUrl")?.as_str()?;
-        let port = base_url.split(':').last()?.trim_matches('/').parse().ok()?;
+        let port = base_url
+            .split(':')
+            .next_back()?
+            .trim_matches('/')
+            .parse()
+            .ok()?;
 
         let api_key = local
             .get("apiKey")
@@ -453,12 +458,12 @@ impl ThinClawEngineConfig {
 
         // Context window from models[0]
         let models_list = local.get("models")?.as_array()?;
-        let context_size = models_list.get(0)?.get("contextWindow")?.as_u64()? as u32;
+        let context_size = models_list.first()?.get("contextWindow")?.as_u64()? as u32;
 
         // IC-016: Infer model family from config instead of hardcoding
         let family = if let Some(models_arr) = local.get("models").and_then(|v| v.as_array()) {
             models_arr
-                .get(0)
+                .first()
                 .and_then(|m| m.get("family"))
                 .and_then(|f| f.as_str())
                 .map(String::from)

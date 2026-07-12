@@ -152,51 +152,47 @@ impl RemoteGatewayProxy {
             buffer.push_str(&text);
 
             // Process complete SSE lines (terminated by \n)
-            loop {
-                if let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim_end_matches('\r').to_string();
-                    buffer.drain(..=pos);
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim_end_matches('\r').to_string();
+                buffer.drain(..=pos);
 
-                    if line.starts_with("data: ") {
-                        let data = line.trim_start_matches("data: ").trim();
-                        if data.is_empty() || data == "[DONE]" {
-                            continue;
-                        }
+                if line.starts_with("data: ") {
+                    let data = line.trim_start_matches("data: ").trim();
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
 
-                        // Prefer UiEvent for remote gateways that already speak
-                        // the desktop contract. Otherwise normalize ThinClaw
-                        // gateway SSE (`type`) events into the same bus.
-                        match serde_json::from_str::<crate::thinclaw::ui_types::UiEvent>(data) {
-                            Ok(event) => {
-                                debug!("[remote_proxy] SSE event: {:?}", event);
-                                if let Err(e) = app_handle.emit("thinclaw-event", &event) {
-                                    warn!("[remote_proxy] Failed to emit Tauri event: {}", e);
-                                }
+                    // Prefer UiEvent for remote gateways that already speak
+                    // the desktop contract. Otherwise normalize ThinClaw
+                    // gateway SSE (`type`) events into the same bus.
+                    match serde_json::from_str::<crate::thinclaw::ui_types::UiEvent>(data) {
+                        Ok(event) => {
+                            debug!("[remote_proxy] SSE event: {:?}", event);
+                            if let Err(e) = app_handle.emit("thinclaw-event", &event) {
+                                warn!("[remote_proxy] Failed to emit Tauri event: {}", e);
                             }
-                            Err(_) => match serde_json::from_str::<serde_json::Value>(data) {
-                                Ok(raw_json) => {
-                                    for event in
-                                        crate::thinclaw::event_mapping::gateway_sse_to_ui_events(
-                                            raw_json,
-                                        )
-                                    {
-                                        debug!("[remote_proxy] normalized SSE event: {:?}", event);
-                                        if let Err(e) = app_handle.emit("thinclaw-event", &event) {
-                                            warn!(
-                                                "[remote_proxy] Failed to emit mapped gateway event: {}",
-                                                e
-                                            );
-                                        }
+                        }
+                        Err(_) => match serde_json::from_str::<serde_json::Value>(data) {
+                            Ok(raw_json) => {
+                                for event in
+                                    crate::thinclaw::event_mapping::gateway_sse_to_ui_events(
+                                        raw_json,
+                                    )
+                                {
+                                    debug!("[remote_proxy] normalized SSE event: {:?}", event);
+                                    if let Err(e) = app_handle.emit("thinclaw-event", &event) {
+                                        warn!(
+                                            "[remote_proxy] Failed to emit mapped gateway event: {}",
+                                            e
+                                        );
                                     }
                                 }
-                                Err(e) => {
-                                    warn!("[remote_proxy] Failed to parse SSE data as JSON: {}", e)
-                                }
-                            },
-                        }
+                            }
+                            Err(e) => {
+                                warn!("[remote_proxy] Failed to parse SSE data as JSON: {}", e)
+                            }
+                        },
                     }
-                } else {
-                    break;
                 }
             }
         }

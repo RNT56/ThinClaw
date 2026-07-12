@@ -1,7 +1,6 @@
 #![cfg(feature = "docker-sandbox")]
 
 use std::collections::{HashMap, VecDeque};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,25 +20,18 @@ use thinclaw::orchestrator::{ContainerJobConfig, ContainerJobManager, JobMode, T
 use thinclaw::platform::resolve_data_dir;
 use thinclaw::sandbox_jobs::SandboxJobSpec;
 
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(15);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKER_JOB_TIMEOUT: Duration = Duration::from_secs(90);
 const BRIDGE_JOB_TIMEOUT: Duration = Duration::from_secs(240);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 type PromptQueue = Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>;
+type OrchestratorResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 struct SmokeHarness {
     job_manager: Arc<ContainerJobManager>,
     prompt_queue: PromptQueue,
-    orchestrator: tokio::task::JoinHandle<()>,
-}
-
-fn reserve_local_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("read local addr")
-        .port()
+    orchestrator: tokio::task::JoinHandle<OrchestratorResult>,
 }
 
 struct PromptAwareLlm;
@@ -105,7 +97,10 @@ impl LlmProvider for PromptAwareLlm {
     }
 }
 
-async fn wait_for_orchestrator_health(port: u16) {
+async fn wait_for_orchestrator_health(
+    port: u16,
+    orchestrator: &mut tokio::task::JoinHandle<OrchestratorResult>,
+) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -114,10 +109,17 @@ async fn wait_for_orchestrator_health(port: u16) {
     let deadline = Instant::now() + HEALTH_TIMEOUT;
 
     loop {
-        if let Ok(response) = client.get(&url).send().await
-            && response.status().is_success()
-        {
-            return;
+        tokio::select! {
+            result = &mut *orchestrator => match result {
+                Ok(Ok(())) => panic!("orchestrator exited before health became ready"),
+                Ok(Err(error)) => panic!("orchestrator failed before health became ready: {error}"),
+                Err(error) => panic!("orchestrator task failed before health became ready: {error}"),
+            },
+            response = client.get(&url).send() => {
+                if response.is_ok_and(|response| response.status().is_success()) {
+                    return;
+                }
+            }
         }
 
         assert!(
@@ -151,17 +153,29 @@ async fn wait_for_completion(
     }
 }
 
-async fn spawn_harness(config: ContainerJobConfig) -> SmokeHarness {
+async fn spawn_harness(mut config: ContainerJobConfig) -> SmokeHarness {
+    let bind_addr = if cfg!(target_os = "linux") {
+        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        std::net::SocketAddr::from(([127, 0, 0, 1], 0))
+    };
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .expect("bind orchestrator listener");
+    config.orchestrator_port = listener
+        .local_addr()
+        .expect("read orchestrator listener address")
+        .port();
     let port = config.orchestrator_port;
     let token_store = TokenStore::new();
     let prompt_queue: PromptQueue = Arc::new(Mutex::new(HashMap::new()));
     let job_manager = Arc::new(ContainerJobManager::new(config, token_store.clone()));
 
-    let orchestrator = tokio::spawn({
+    let mut orchestrator = tokio::spawn({
         let prompt_queue = Arc::clone(&prompt_queue);
         let job_manager = Arc::clone(&job_manager);
         async move {
-            let _ = OrchestratorApi::start(
+            OrchestratorApi::serve_listener(
                 OrchestratorState {
                     llm: Arc::new(PromptAwareLlm),
                     job_manager,
@@ -171,13 +185,14 @@ async fn spawn_harness(config: ContainerJobConfig) -> SmokeHarness {
                     store: None,
                     secrets_store: None,
                 },
-                port,
+                listener,
+                std::future::pending(),
             )
-            .await;
+            .await
         }
     });
 
-    wait_for_orchestrator_health(port).await;
+    wait_for_orchestrator_health(port, &mut orchestrator).await;
 
     SmokeHarness {
         job_manager,
@@ -190,7 +205,12 @@ impl SmokeHarness {
     async fn shutdown(self, job_id: Uuid) {
         self.job_manager.cleanup_job(job_id).await;
         self.orchestrator.abort();
-        let _ = self.orchestrator.await;
+        match self.orchestrator.await {
+            Err(error) if error.is_cancelled() => {}
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("orchestrator shutdown failed: {error}"),
+            Err(error) => panic!("orchestrator task failed during shutdown: {error}"),
+        }
     }
 }
 
@@ -251,7 +271,7 @@ fn claude_auth() -> Option<(Option<String>, Option<String>)> {
 #[ignore = "requires Docker plus a local thinclaw-worker:latest image"]
 async fn interactive_worker_container_smoke_completes_after_done_prompt() {
     let harness = spawn_harness(ContainerJobConfig {
-        orchestrator_port: reserve_local_port(),
+        orchestrator_port: 0,
         ..ContainerJobConfig::default()
     })
     .await;
@@ -312,7 +332,7 @@ async fn claude_code_bridge_container_smoke_completes_one_shot_when_auth_availab
     };
 
     let harness = spawn_harness(ContainerJobConfig {
-        orchestrator_port: reserve_local_port(),
+        orchestrator_port: 0,
         claude_code_api_key,
         claude_code_oauth_token,
         claude_code_enabled: true,
@@ -374,7 +394,7 @@ async fn codex_code_bridge_container_smoke_completes_one_shot_when_auth_availabl
     };
 
     let harness = spawn_harness(ContainerJobConfig {
-        orchestrator_port: reserve_local_port(),
+        orchestrator_port: 0,
         codex_code_api_key,
         codex_code_enabled: true,
         codex_code_home_dir,

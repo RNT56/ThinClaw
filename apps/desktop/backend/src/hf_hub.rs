@@ -118,7 +118,7 @@ fn parse_model_card(v: &serde_json::Value) -> Option<HfModelCard> {
             .unwrap_or_default(),
         last_modified: v["lastModified"].as_str().unwrap_or("").to_string(),
         gated: v["gated"].as_bool().unwrap_or(false)
-            || v["gated"].as_str().map_or(false, |s| s != "false"),
+            || v["gated"].as_str().is_some_and(|s| s != "false"),
     })
 }
 

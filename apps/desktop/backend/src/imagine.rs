@@ -51,7 +51,7 @@ fn parse_aspect_ratio(ratio: &str, resolution: Option<&str>) -> (u32, u32) {
         Some("4K") => 2048,
         Some("2K") => 1536,
         Some("1K") => 1024,
-        Some("512") | _ => 512,
+        _ => 512,
     };
 
     match ratio {
@@ -152,7 +152,7 @@ pub async fn direct_imagine_generate(
         "nano-banana" | "nano-banana-pro" | "gemini" | "openai" | "stability" | "fal"
         | "together" => generate_with_cloud_backend(&router, &params, width, height).await,
         // Local sd.cpp / mflux sidecar
-        "local" | _ => {
+        _ => {
             let local_params = crate::image_gen::ImageGenParams {
                 prompt: if let Some(style_prompt) = &params.style_prompt {
                     format!("{}\n\n{}", params.prompt, style_prompt)

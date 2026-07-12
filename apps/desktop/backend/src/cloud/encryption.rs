@@ -20,7 +20,7 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use hkdf::Hkdf;
-use rand::{RngCore, rngs::OsRng};
+use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 use zeroize::Zeroize;
 

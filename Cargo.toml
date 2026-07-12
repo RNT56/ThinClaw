@@ -301,6 +301,9 @@ light = [
 ]
 # Desktop embedding (ThinClaw Desktop/Tauri) — minimal footprint
 desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]
+# Explicit CI/integration profile for the dual-backend schema parity test.
+# Kept out of default builds because the test requires a live PostgreSQL URL.
+schema-divergence = ["postgres", "libsql"]
 # Individual runtime modules (can be combined with light)
 web-gateway = []
 acp = []

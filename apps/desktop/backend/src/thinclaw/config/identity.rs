@@ -19,7 +19,7 @@ fn new_desktop_device_id() -> String {
 
 /// Convert a keychain `String` error into `std::io::Error` for `?` chaining.
 fn io_err(msg: String) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, msg)
+    std::io::Error::other(msg)
 }
 
 impl ThinClawConfig {
@@ -42,7 +42,7 @@ impl ThinClawConfig {
         }
 
         // 1.1. Home Directory Migration (~/.moltbot -> ~/.thinclaw)
-        if let Some(home) = std::env::var("HOME").map(PathBuf::from).ok() {
+        if let Ok(home) = std::env::var("HOME").map(PathBuf::from) {
             let moltbot_home = home.join(".moltbot");
             let clawdbot_home = home.join(".clawdbot");
             let thinclaw_home = home.join(".thinclaw");
@@ -264,12 +264,7 @@ impl ThinClawConfig {
     }
 
     pub(crate) fn find_available_port() -> Option<u16> {
-        for port in 18789..18889 {
-            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-                return Some(port);
-            }
-        }
-        None
+        (18789..18889).find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
     }
 
     /// Update Anthropic API key — writes to Keychain, not identity.json.

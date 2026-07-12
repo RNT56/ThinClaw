@@ -60,6 +60,7 @@ struct RestoreTarget<'a> {
 /// 5. Verify cloud archive (spot check)
 /// 6. Switch mode in database
 /// 7. Cleanup (log, no deletion yet)
+#[allow(clippy::too_many_arguments)]
 pub async fn run_to_cloud(
     app: AppHandle,
     pool: &SqlitePool,
@@ -982,6 +983,90 @@ async fn sanitize_persisted_provider_config(pool: &SqlitePool) -> Result<(), Str
     Ok(())
 }
 
+// ── Database Helpers ──────────────────────────────────────────────────────
+
+/// Record the start of a migration.
+async fn record_migration_start(
+    pool: &SqlitePool,
+    id: &str,
+    direction: &str,
+    provider: &str,
+    files_total: u32,
+    bytes_total: u64,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "INSERT INTO cloud_migrations (id, direction, provider, started_at, files_total, bytes_total, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'in_progress')"
+    )
+    .bind(id)
+    .bind(direction)
+    .bind(provider)
+    .bind(now)
+    .bind(files_total as i64)
+    .bind(bytes_total as i64)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to record migration start: {}", e))?;
+
+    Ok(())
+}
+
+/// Record migration completion.
+async fn record_migration_complete(pool: &SqlitePool, id: &str) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query("UPDATE cloud_migrations SET status = 'completed', completed_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to record migration completion: {}", e))?;
+
+    Ok(())
+}
+
+/// Record migration failure.
+pub async fn record_migration_failure(
+    pool: &SqlitePool,
+    id: &str,
+    error: &str,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "UPDATE cloud_migrations SET status = 'failed', completed_at = ?, error = ? WHERE id = ?",
+    )
+    .bind(now)
+    .bind(error)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to record migration failure: {}", e))?;
+
+    Ok(())
+}
+
+/// Update migration progress in the DB (for resume detection).
+async fn update_migration_progress(pool: &SqlitePool, id: &str, files_done: u32, bytes_done: u64) {
+    let _ = sqlx::query("UPDATE cloud_migrations SET files_done = ?, bytes_done = ? WHERE id = ?")
+        .bind(files_done as i64)
+        .bind(bytes_done as i64)
+        .bind(id)
+        .execute(pool)
+        .await;
+}
+
+/// Check if migration has been cancelled.
+async fn check_cancelled(
+    flag: &Arc<RwLock<bool>>,
+    tracker: &mut ProgressTracker,
+) -> Result<(), String> {
+    if *flag.read().await {
+        tracker.fail("Migration cancelled by user".to_string());
+        return Err("Migration cancelled by user".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,88 +1175,4 @@ mod tests {
         assert!(!staging_dir.join(".thinclaw.db.restoring").exists());
         assert!(!staging_dir.join(".thinclaw-runtime.db.restoring").exists());
     }
-}
-
-// ── Database Helpers ──────────────────────────────────────────────────────
-
-/// Record the start of a migration.
-async fn record_migration_start(
-    pool: &SqlitePool,
-    id: &str,
-    direction: &str,
-    provider: &str,
-    files_total: u32,
-    bytes_total: u64,
-) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query(
-        "INSERT INTO cloud_migrations (id, direction, provider, started_at, files_total, bytes_total, status)
-         VALUES (?, ?, ?, ?, ?, ?, 'in_progress')"
-    )
-    .bind(id)
-    .bind(direction)
-    .bind(provider)
-    .bind(now)
-    .bind(files_total as i64)
-    .bind(bytes_total as i64)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to record migration start: {}", e))?;
-
-    Ok(())
-}
-
-/// Record migration completion.
-async fn record_migration_complete(pool: &SqlitePool, id: &str) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE cloud_migrations SET status = 'completed', completed_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("Failed to record migration completion: {}", e))?;
-
-    Ok(())
-}
-
-/// Record migration failure.
-pub async fn record_migration_failure(
-    pool: &SqlitePool,
-    id: &str,
-    error: &str,
-) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query(
-        "UPDATE cloud_migrations SET status = 'failed', completed_at = ?, error = ? WHERE id = ?",
-    )
-    .bind(now)
-    .bind(error)
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to record migration failure: {}", e))?;
-
-    Ok(())
-}
-
-/// Update migration progress in the DB (for resume detection).
-async fn update_migration_progress(pool: &SqlitePool, id: &str, files_done: u32, bytes_done: u64) {
-    let _ = sqlx::query("UPDATE cloud_migrations SET files_done = ?, bytes_done = ? WHERE id = ?")
-        .bind(files_done as i64)
-        .bind(bytes_done as i64)
-        .bind(id)
-        .execute(pool)
-        .await;
-}
-
-/// Check if migration has been cancelled.
-async fn check_cancelled(
-    flag: &Arc<RwLock<bool>>,
-    tracker: &mut ProgressTracker,
-) -> Result<(), String> {
-    if *flag.read().await {
-        tracker.fail("Migration cancelled by user".to_string());
-        return Err("Migration cancelled by user".to_string());
-    }
-    Ok(())
 }

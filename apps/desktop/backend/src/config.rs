@@ -647,9 +647,11 @@ mod tests {
     #[test]
     fn json_merge_preserves_unrelated_fields_from_base() {
         // Build the base: a config that has a specific mcp_base_url set.
-        let mut base = UserConfig::default();
-        base.mcp_base_url = Some("https://keep-me.com".to_string());
-        base.max_search_results = 7;
+        let base = UserConfig {
+            mcp_base_url: Some("https://keep-me.com".to_string()),
+            max_search_results: 7,
+            ..Default::default()
+        };
 
         // The "incoming" patch only mentions max_search_results.
         // We build it as a raw JSON object so serde does NOT emit a null for
@@ -683,8 +685,10 @@ mod tests {
         // Documents the expected behaviour: if a field is explicitly set to null
         // in the incoming patch (e.g. user cleared the URL field), it SHOULD
         // overwrite the base value. This is the "last write wins" semantic.
-        let mut base = UserConfig::default();
-        base.mcp_base_url = Some("https://old-url.com".to_string());
+        let base = UserConfig {
+            mcp_base_url: Some("https://old-url.com".to_string()),
+            ..Default::default()
+        };
 
         // Explicitly null overwrites
         let inc_val = serde_json::json!({ "mcp_base_url": null });

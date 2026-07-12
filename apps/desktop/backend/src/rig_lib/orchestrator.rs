@@ -91,12 +91,8 @@ fn compile_desktop_prompt(
 }
 
 fn untrusted_tool_result(source: &str, content: &str) -> String {
-    thinclaw_core::llm::ChatMessage::untrusted_context(
-        "desktop_tool_result",
-        source,
-        content,
-    )
-    .content
+    thinclaw_core::llm::ChatMessage::untrusted_context("desktop_tool_result", source, content)
+        .content
 }
 
 /// Extract the text-only portion from a message content string.

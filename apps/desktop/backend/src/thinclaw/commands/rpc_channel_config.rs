@@ -81,10 +81,9 @@ pub async fn thinclaw_channel_config_submit(
         )
     })?;
 
-    let obj = values
-        .as_object()
-        .cloned()
-        .ok_or_else(|| crate::thinclaw::bridge::BridgeError::from("channel config must be a JSON object"))?;
+    let obj = values.as_object().cloned().ok_or_else(|| {
+        crate::thinclaw::bridge::BridgeError::from("channel config must be a JSON object")
+    })?;
 
     if let Some(schema) = agent.channels().config_schema_for(&channel_id).await {
         for (field_id, value) in &obj {
@@ -98,10 +97,7 @@ pub async fn thinclaw_channel_config_submit(
                     ))
                 })?;
             let required_value_missing = field.required
-                && (value.is_null()
-                    || value
-                        .as_str()
-                        .is_some_and(|value| value.trim().is_empty()));
+                && (value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()));
             let value_valid = (!field.required && value.is_null())
                 || match field.field_type.as_str() {
                     "text" | "password" | "textarea" => value.is_string(),

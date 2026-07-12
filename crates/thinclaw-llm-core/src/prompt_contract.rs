@@ -3,6 +3,8 @@
 //! Provider adapters receive a compiled system preamble plus ordinary chat
 //! messages; they must never infer authority from string concatenation.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -10,6 +12,7 @@ use thiserror::Error;
 use crate::provider::ChatMessage;
 
 pub const PROMPT_CONTRACT_VERSION: &str = "v2";
+const SEGMENT_TRANSPORT_OVERHEAD_TOKENS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +180,8 @@ pub struct CompiledPrompt {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PromptCompileError {
+    #[error("duplicate prompt segment id: {id}")]
+    DuplicateSegmentId { id: String },
     #[error(
         "required prompt segments need approximately {required_tokens} tokens but only {available_tokens} are available"
     )]
@@ -214,13 +219,22 @@ impl PromptCompiler {
 
     pub fn compile(self, budget: PromptBudget) -> Result<CompiledPrompt, PromptCompileError> {
         let available = budget.available_prompt_tokens();
+        let mut seen_ids = HashSet::new();
+        for segment in &self.segments {
+            if !seen_ids.insert(segment.id.clone()) {
+                return Err(PromptCompileError::DuplicateSegmentId {
+                    id: segment.id.clone(),
+                });
+            }
+        }
         let mut candidates = self
             .segments
             .into_iter()
             .enumerate()
             .map(|(original_index, segment)| {
                 let rendered = render_segment(&segment);
-                let original_tokens = estimate_tokens(&rendered);
+                let original_tokens =
+                    estimate_tokens(&rendered).saturating_add(SEGMENT_TRANSPORT_OVERHEAD_TOKENS);
                 Candidate {
                     original_index,
                     segment,
@@ -258,9 +272,12 @@ impl PromptCompiler {
                 remaining -= candidate.original_tokens;
                 continue;
             }
-            if remaining >= 32 {
-                candidate.rendered = truncate_rendered_segment(&candidate.segment, remaining);
-                let compiled_tokens = estimate_tokens(&candidate.rendered);
+            if remaining >= 32 + SEGMENT_TRANSPORT_OVERHEAD_TOKENS {
+                candidate.rendered = truncate_rendered_segment(
+                    &candidate.segment,
+                    remaining.saturating_sub(SEGMENT_TRANSPORT_OVERHEAD_TOKENS),
+                );
+                let compiled_tokens = estimated_segment_tokens(&candidate.rendered);
                 if compiled_tokens > 0 && compiled_tokens <= remaining {
                     remaining -= compiled_tokens;
                     candidate.status = PromptSegmentStatus::Truncated;
@@ -287,7 +304,7 @@ impl PromptCompiler {
         let mut estimated_tokens = 0;
 
         for candidate in candidates {
-            let compiled_tokens = estimate_tokens(&candidate.rendered);
+            let compiled_tokens = estimated_segment_tokens(&candidate.rendered);
             manifest.push(PromptManifestEntry {
                 id: candidate.segment.id.clone(),
                 source: candidate.segment.source.clone(),
@@ -331,6 +348,14 @@ impl PromptCompiler {
             manifest,
             estimated_tokens,
         })
+    }
+}
+
+fn estimated_segment_tokens(rendered: &str) -> usize {
+    if rendered.is_empty() {
+        0
+    } else {
+        estimate_tokens(rendered).saturating_add(SEGMENT_TRANSPORT_OVERHEAD_TOKENS)
     }
 }
 
@@ -472,6 +497,33 @@ mod tests {
         assert!(matches!(
             result,
             Err(PromptCompileError::RequiredSegmentsExceedBudget { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_segment_ids_fail_closed() {
+        let result = PromptCompiler::new()
+            .push(PromptSegment::new(
+                "policy",
+                "core",
+                PromptTrust::ImmutablePolicy,
+                PromptLifetime::Stable,
+                1000,
+                "First",
+            ))
+            .push(PromptSegment::new(
+                "policy",
+                "extension",
+                PromptTrust::TrustedConfiguration,
+                PromptLifetime::Turn,
+                100,
+                "Second",
+            ))
+            .compile(budget(1024));
+
+        assert!(matches!(
+            result,
+            Err(PromptCompileError::DuplicateSegmentId { ref id }) if id == "policy"
         ));
     }
 

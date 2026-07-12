@@ -469,7 +469,7 @@ impl Agent {
             safety_margin_percent: prompt_settings.safety_margin_percent,
             prompt_cap_tokens: Some(prompt_settings.max_total_tokens),
         };
-        let prompt_assembly = assemble_dispatcher_prompt_materials_with_budget(&DispatcherPromptMaterials {
+        let prompt_materials = DispatcherPromptMaterials {
             workspace_prompt: workspace_prompt.clone(),
             provider_system_prompt: provider_system_prompt.clone(),
             skill_index_context,
@@ -484,7 +484,13 @@ impl Agent {
                 .as_ref()
                 .map(|ctx| ctx.context_refs.clone())
                 .unwrap_or_default(),
-        }, prompt_budget).unwrap_or_else(|error| {
+        };
+        let prompt_source_segments =
+            dispatcher_prompt_assembly(&prompt_materials).into_prompt_segments();
+        let prompt_assembly = assemble_dispatcher_prompt_materials_with_budget(
+            &prompt_materials,
+            prompt_budget,
+        ).unwrap_or_else(|error| {
             tracing::error!(thread = %thread_id, %error, "Prompt V2 compilation failed; using the bounded default compiler budget");
             assemble_dispatcher_prompt_materials(&DispatcherPromptMaterials {
                 workspace_prompt: workspace_prompt.clone(),
@@ -526,6 +532,10 @@ impl Agent {
             );
         }
         if let Some(store) = self.store().map(Arc::clone) {
+            let exact_v2_telemetry_is_deferred = matches!(
+                effective_rollout_mode,
+                crate::settings::PromptRolloutMode::V2
+            );
             let stable_hash = prompt_assembly.stable_hash.clone();
             let ephemeral_hash = prompt_assembly.ephemeral_hash.clone();
             let segment_order = prompt_assembly.segment_order.clone();
@@ -552,15 +562,18 @@ impl Agent {
                         .clone()
                         .or(frozen_provider_system_prompt.clone());
                 }
-                runtime.prompt_snapshot_hash = Some(stable_hash.clone());
-                runtime.ephemeral_overlay_hash = Some(ephemeral_hash.clone());
                 runtime.prompt_contract_version = Some(active_contract_version.clone());
-                runtime.prompt_manifest_digest = Some(manifest_digest.clone());
-                runtime.prompt_segment_order = segment_order.clone();
+                if !exact_v2_telemetry_is_deferred {
+                    runtime.prompt_snapshot_hash = Some(stable_hash.clone());
+                    runtime.ephemeral_overlay_hash = Some(ephemeral_hash.clone());
+                    runtime.prompt_manifest_digest = Some(manifest_digest.clone());
+                    runtime.prompt_segment_order = segment_order.clone();
+                }
                 runtime.provider_context_refs = provider_context_refs.clone();
             })
             .await;
-            if let Some(previous) = prior_stable_hash
+            if !exact_v2_telemetry_is_deferred
+                && let Some(previous) = prior_stable_hash
                 && previous != stable_hash
             {
                 tracing::info!(
@@ -603,20 +616,20 @@ impl Agent {
             reasoning = reasoning.with_response_cache(Arc::clone(cache));
         }
 
-        let (system_prompt, prompt_context_documents) = match effective_rollout_mode {
-            crate::settings::PromptRolloutMode::V2 => (
-                prompt_assembly.system_preamble.clone(),
-                prompt_assembly.ephemeral_documents.clone(),
-            ),
+        let prompt_context_documents = match effective_rollout_mode {
+            crate::settings::PromptRolloutMode::V2 => {
+                reasoning = reasoning.with_prompt_contract(prompt_source_segments, prompt_budget);
+                Vec::new()
+            }
             crate::settings::PromptRolloutMode::Legacy
-            | crate::settings::PromptRolloutMode::Shadow => (
-                prompt_assembly.stable_snapshot.clone(),
-                prompt_assembly.legacy_ephemeral_documents.clone(),
-            ),
+            | crate::settings::PromptRolloutMode::Shadow => {
+                let system_prompt = prompt_assembly.stable_snapshot.clone();
+                if !system_prompt.trim().is_empty() {
+                    reasoning = reasoning.with_system_prompt(system_prompt);
+                }
+                prompt_assembly.legacy_ephemeral_documents.clone()
+            }
         };
-        if !system_prompt.trim().is_empty() {
-            reasoning = reasoning.with_system_prompt(system_prompt);
-        }
 
         PreparedPromptContext {
             identity,

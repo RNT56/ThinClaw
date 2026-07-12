@@ -314,7 +314,7 @@ pub async fn thinclaw_routing_get(
         return Ok(serde_json::json!({ "smart_routing_enabled": enabled }));
     }
 
-    let enabled = if let Some(agent) = ironclaw.agent().await.ok() {
+    let enabled = if let Ok(agent) = ironclaw.agent().await {
         if let Some(store) = agent.store() {
             match store
                 .get_setting("local_user", "smart_routing_enabled")
@@ -348,7 +348,7 @@ pub async fn thinclaw_routing_set(
         return Ok(());
     }
 
-    if let Some(agent) = ironclaw.agent().await.ok() {
+    if let Ok(agent) = ironclaw.agent().await {
         if let Some(store) = agent.store() {
             store
                 .set_setting(
@@ -383,7 +383,7 @@ pub async fn thinclaw_routing_rules_list(
     let mut enabled = false;
     let mut rules: Vec<RoutingRule> = Vec::new();
 
-    if let Some(agent) = ironclaw.agent().await.ok() {
+    if let Ok(agent) = ironclaw.agent().await {
         if let Some(store) = agent.store() {
             // Read toggle state
             if let Ok(Some(val)) = store
@@ -421,7 +421,7 @@ pub async fn thinclaw_routing_rules_save(
         return remote_save_routing_rules(&proxy, &rules).await;
     }
 
-    if let Some(agent) = ironclaw.agent().await.ok() {
+    if let Ok(agent) = ironclaw.agent().await {
         if let Some(store) = agent.store() {
             let value = serde_json::to_value(&rules).map_err(|e| e.to_string())?;
             store
@@ -818,7 +818,7 @@ pub async fn thinclaw_routing_status(
         runtime_revision = Some(status.revision);
     }
 
-    if let Some(agent) = ironclaw.agent().await.ok() {
+    if let Ok(agent) = ironclaw.agent().await {
         if let Some(store) = agent.store() {
             if let Ok(Some(val)) = store
                 .get_setting("local_user", "smart_routing_enabled")
@@ -856,7 +856,7 @@ pub async fn thinclaw_routing_status(
     if let Ok(tracker) = ironclaw.cost_tracker().await {
         let ct = tracker.lock().await;
         if let Ok(summary) = thinclaw_core::tauri_commands::cost_summary(&ct) {
-            for (provider, _cost) in &summary.by_model {
+            for provider in summary.by_model.keys() {
                 latency_data.push(LatencyEntry {
                     provider: provider.clone(),
                     avg_latency_ms: 0.0,

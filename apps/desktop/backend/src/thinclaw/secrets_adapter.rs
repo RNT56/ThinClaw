@@ -409,6 +409,12 @@ pub struct KeychainSecretsAdapter {
     grants: Option<SecretGrantSnapshot>,
 }
 
+impl Default for KeychainSecretsAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeychainSecretsAdapter {
     pub fn new() -> Self {
         Self {
@@ -629,7 +635,7 @@ impl SecretsStore for KeychainSecretsAdapter {
         let thinclaw_key = self.keychain_key_for_name(&params.name).into_owned();
         let value = params.value.expose_secret();
 
-        keychain::set_key(&thinclaw_key, Some(value)).map_err(|e| SecretError::KeychainError(e))?;
+        keychain::set_key(&thinclaw_key, Some(value)).map_err(SecretError::KeychainError)?;
 
         Ok(Self::secret_record(
             _user_id,
@@ -728,8 +734,7 @@ impl SecretsStore for KeychainSecretsAdapter {
         self.ensure_granted(name)?;
         let thinclaw_key = self.keychain_key_for_name(name);
         let existed = keychain::get_key(thinclaw_key.as_ref()).is_some();
-        keychain::set_key(thinclaw_key.as_ref(), None)
-            .map_err(|e| SecretError::KeychainError(e))?;
+        keychain::set_key(thinclaw_key.as_ref(), None).map_err(SecretError::KeychainError)?;
         Ok(existed)
     }
 

@@ -1807,6 +1807,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         cheap_llm: components.cheap_llm,
         safety: components.safety,
         tools: components.tools,
+        desktop_autonomy_manager: components.desktop_autonomy_manager,
         workspace: components.workspace,
         extension_manager: components.extension_manager,
         skill_registry: components.skill_registry,

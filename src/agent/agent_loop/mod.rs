@@ -75,6 +75,9 @@ pub struct AgentDeps {
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
+    /// Runtime-scoped desktop autonomy manager used by routines and workers.
+    /// This must not be resolved from mutable process-global state.
+    pub desktop_autonomy_manager: Option<Arc<crate::desktop_autonomy::DesktopAutonomyManager>>,
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
@@ -930,7 +933,8 @@ impl Agent {
                         notify_tx,
                         Some(self.scheduler.clone()),
                     )
-                    .with_observer(Arc::clone(self.observer()));
+                    .with_observer(Arc::clone(self.observer()))
+                    .with_desktop_autonomy_manager(self.deps.desktop_autonomy_manager.clone());
 
                     // Wire SSE broadcasting if available
                     if let Some(ref sender) = self.deps.sse_sender {

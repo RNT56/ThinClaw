@@ -19,6 +19,7 @@ pub struct RigManager {
 }
 
 impl RigManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         kind: ProviderKind,
         base_url: String,

@@ -77,6 +77,10 @@ pub struct AppComponents {
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
+    /// Runtime-scoped desktop autonomy manager. Keeping this handle explicit
+    /// prevents independent application builds from changing routine behavior
+    /// through the legacy process-global compatibility accessor.
+    pub desktop_autonomy_manager: Option<Arc<crate::desktop_autonomy::DesktopAutonomyManager>>,
     pub embeddings: Option<Arc<dyn EmbeddingProvider>>,
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
@@ -654,6 +658,7 @@ impl AppBuilder {
             Option<Arc<ExtensionManager>>,
             Vec<crate::extensions::RegistryEntry>,
             Vec<String>,
+            Option<Arc<crate::desktop_autonomy::DesktopAutonomyManager>>,
         ),
         anyhow::Error,
     > {
@@ -1039,7 +1044,7 @@ impl AppBuilder {
             tracing::info!("Registered location tool (enabled via user toggle)");
         }
 
-        let _desktop_autonomy_manager = if self.config.desktop_autonomy.is_reckless_enabled()
+        let desktop_autonomy_manager = if self.config.desktop_autonomy.is_reckless_enabled()
             && desktop_autonomy_blocker.is_none()
         {
             let manager = Arc::new(crate::desktop_autonomy::DesktopAutonomyManager::new(
@@ -1158,6 +1163,7 @@ impl AppBuilder {
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
+            desktop_autonomy_manager,
         ))
     }
 
@@ -1347,6 +1353,7 @@ impl AppBuilder {
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
+            desktop_autonomy_manager,
         ) = self.init_extensions(&tools, &safety, &hooks).await?;
         tracing::info!(
             elapsed_ms = phase_start.elapsed().as_millis(),
@@ -1737,6 +1744,7 @@ impl AppBuilder {
             cheap_llm,
             safety,
             tools,
+            desktop_autonomy_manager,
             embeddings,
             workspace,
             extension_manager,

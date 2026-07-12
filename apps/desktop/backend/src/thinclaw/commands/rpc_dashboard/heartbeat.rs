@@ -17,7 +17,7 @@ pub async fn thinclaw_heartbeat_set_interval(
     ironclaw: State<'_, ThinClawRuntimeState>,
     interval_minutes: u32,
 ) -> Result<serde_json::Value, String> {
-    if interval_minutes < 5 || interval_minutes > 1440 {
+    if !(5..=1440).contains(&interval_minutes) {
         return Err("Interval must be between 5 and 1440 minutes".to_string());
     }
 
@@ -54,7 +54,7 @@ pub async fn thinclaw_heartbeat_set_interval(
 
     // ── 2. Persist to thinclaw.toml so boot won't overwrite ───────────
     let interval_secs = interval_minutes as u64 * 60;
-    let toml_path = crate::thinclaw::runtime_builder::runtime_toml_path(&ironclaw.state_dir());
+    let toml_path = crate::thinclaw::runtime_builder::runtime_toml_path(ironclaw.state_dir());
     if toml_path.exists() {
         match thinclaw_core::settings::Settings::load_toml(&toml_path) {
             Ok(Some(mut settings)) => {

@@ -46,7 +46,7 @@ enum DiffusionArchitecture {
     Flux2Klein,
     SD15,
     SD21,
-    SDXL,
+    Sdxl,
     SD35Medium,
     SD35LargeTurbo,
     QwenImage,
@@ -71,7 +71,7 @@ impl DiffusionArchitecture {
                 DiffusionArchitecture::SD35Medium
             }
         } else if lower.contains("sdxl") {
-            DiffusionArchitecture::SDXL
+            DiffusionArchitecture::Sdxl
         } else if lower.contains("qwen") && (lower.contains("image") || lower.contains("diffusion"))
         {
             DiffusionArchitecture::QwenImage
@@ -441,7 +441,7 @@ async fn run_inference(
                 args.push("--cfg-scale".into());
                 args.push("5.0".into());
             }
-            DiffusionArchitecture::SDXL => {
+            DiffusionArchitecture::Sdxl => {
                 args.push("--cfg-scale".into());
                 args.push("7.0".into());
             }
@@ -696,6 +696,10 @@ async fn run_inference(
 
     let mut success = true;
 
+    static PROGRESS_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let progress_re =
+        PROGRESS_RE.get_or_init(|| regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)").unwrap());
+
     while let Some(event) = rx.recv().await {
         match event {
             tauri_plugin_shell::process::CommandEvent::Stdout(line)
@@ -704,10 +708,7 @@ async fn run_inference(
                 println!("[image_gen] {}", text);
 
                 // Detect progress bars: |====>   | 28/795
-                static PROGRESS_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-                let re = PROGRESS_RE
-                    .get_or_init(|| regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)").unwrap());
-                if let Some(caps) = re.captures(&text) {
+                if let Some(caps) = progress_re.captures(&text) {
                     let current = caps[2].parse::<f32>().unwrap_or(0.0);
                     let total = caps[3].parse::<f32>().unwrap_or(1.0);
                     // Guard the denominator: a `0/0` progress line would otherwise

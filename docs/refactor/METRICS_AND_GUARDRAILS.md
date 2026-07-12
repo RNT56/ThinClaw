@@ -47,7 +47,7 @@ Each architectural invariant must be machine-enforced. Status: ✅ live · 🟡 
 | `deny.toml multiple-versions = deny` | duplicate-version creep | ⛔ still `"warn"` (`deny.toml:38`); blocked until D1/D2 dedup |
 | `wit-bindgen` single-version check | WASM interface skew | 🟡 with T11; still 2 versions (0.51.0, 0.57.1) |
 | bundle-reference resolution test | broken registry bundles | 🟡 with P5/T11 |
-| coverage threshold (`--fail-under`, no `--lib`) | silent coverage erosion | 🟡 with T1; still `cargo llvm-cov --all-features --lib`, no `--fail-under` |
+| coverage threshold (`--fail-under`, no `--lib`) | silent coverage erosion | 🟡 partial: CI enforces the measured 38% project floor and 70% changed-line coverage; expanding beyond `--lib` remains |
 | `export_bindings` no-hand-edit + variant-coverage test | binding drift | ✅ exists; extend per B-tasks |
 | MSRV/toolchain synchronization | accidental MSRV bump | ✅ `check-msrv-sync.py` runs in CI; the pinned toolchain equals package MSRV 1.92 |
 

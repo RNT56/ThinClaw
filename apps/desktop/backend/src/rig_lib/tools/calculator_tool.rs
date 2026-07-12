@@ -154,7 +154,7 @@ fn evaluate_full(expr: &str, mut variables: HashMap<String, f64>) -> Result<Eval
                 {
                     return Err(format!("Invalid variable name: '{}'", var_name));
                 }
-                if var_name.chars().next().map_or(true, |c| c.is_ascii_digit()) {
+                if var_name.chars().next().is_none_or(|c| c.is_ascii_digit()) {
                     return Err(format!(
                         "Variable name cannot start with a digit: '{}'",
                         var_name
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn format_decimal() {
-        assert_eq!(format_number(3.14), "3.14");
+        assert_eq!(format_number(3.125), "3.125");
     }
 
     #[test]

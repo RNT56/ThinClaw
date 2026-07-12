@@ -1,6 +1,11 @@
 [workspace]
 git_release_enable = false
+git_tag_enable = false
 
 [[package]]
 name = "thinclaw"
 publish = false
+git_only = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true

@@ -16,6 +16,8 @@ use crate::sidecar::SidecarManager;
 use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
+type BedrockCredentials = (Option<String>, Option<String>, Option<String>);
+
 async fn remote_secret_reads_are_opaque(ironclaw: &ThinClawRuntimeState) -> bool {
     ironclaw.remote_proxy().await.is_some()
 }
@@ -773,7 +775,7 @@ pub async fn thinclaw_save_bedrock_credentials(
 pub async fn thinclaw_get_bedrock_credentials(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+) -> Result<BedrockCredentials, String> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok((None, None, None));
     }

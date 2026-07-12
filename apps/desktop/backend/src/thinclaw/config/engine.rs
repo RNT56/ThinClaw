@@ -17,7 +17,6 @@ impl ThinClawConfig {
     ) -> ThinClawEngineConfig {
         // Determine primary model and provider content
 
-        let models;
         let mut agents_list = vec![];
 
         // Helper: check if a provider is usable (granted + valid non-empty API key)
@@ -228,7 +227,7 @@ impl ThinClawConfig {
                     "id": "model",
                     "name": "Local Model",
                     "contextWindow": context_size,
-                    "maxTokens": std::cmp::max(4096, std::cmp::min(8192, context_size / 4))
+                    "maxTokens": (context_size / 4).clamp(4096, 8192)
                 }
             ]
         });
@@ -302,7 +301,7 @@ impl ThinClawConfig {
             }
         }
 
-        models = Some(ModelsConfig {
+        let models = Some(ModelsConfig {
             providers,
             bedrock_discovery,
         });
@@ -357,8 +356,7 @@ impl ThinClawConfig {
         _local_llm: Option<(u16, String, u32, String)>,
     ) -> std::io::Result<()> {
         self.ensure_dirs()?;
-        let json = serde_json::to_string_pretty(config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
         std::fs::write(self.config_path(), json)?;
 
         // NOTE: auth-profiles.json, agent.json, and models.json were consumed
@@ -551,7 +549,7 @@ impl ThinClawConfig {
     /// Load config from disk
     pub fn load_config(&self) -> std::io::Result<ThinClawEngineConfig> {
         let json = std::fs::read_to_string(self.config_path())?;
-        serde_json::from_str(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::from_str(&json).map_err(std::io::Error::other)
     }
 
     /// Get environment variables to pass to ThinClawEngine process
