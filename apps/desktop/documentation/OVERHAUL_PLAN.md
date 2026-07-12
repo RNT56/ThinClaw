@@ -90,11 +90,11 @@ runtime is dual-mode: embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridg
 
 | Class | Items |
 |---|---|
-| **Remote-only in local mode** | `learning_evaluate_outcomes`, `experiments_gpu_validate`/`gpu_launch_test`, `job_restart`/`job_prompt` |
+| **Remote-only in local mode** | `learning_evaluate_outcomes` and GPU operations are honestly gated with gateway remediation; `job_restart`/`job_prompt` remain remote-only |
 | **Headless internals (no UI/telemetry)** | advisor auto-consult, pre-compaction flush, context-pressure, config watcher, observability metrics (self-repair, checkpoints/rollback, undo, and trajectory now have commands + UI) |
 | **CLI-only (no command)** | SFT/DPO trajectory export (`src/cli/trajectory.rs`), tunnel, Claude-Code/Codex bridge job modes (the eval framework now has `thinclaw_experiments_run_eval`) |
 | **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); only cron routines creatable (not event); no `/personality`, profile-evolution, or external-memory UI |
-| **Partial flows** | Repo-projects, Fleet, Cloud-Brain config, inline `MemoryEditor`, `subscribe_session` |
+| **Partial flows** | Fleet and Cloud-Brain config |
 | **Duplication** | secrets, models, history, settings, theming exist twice (Workbench vs Cockpit) |
 | **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `tauri_commands.rs`, and several `ThinClaw*` panel components |
 
@@ -174,9 +174,9 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
 | Event-triggered routines uncreatable | Extend `routine_create` to wire `Trigger::SystemEvent`; UI trigger-type selector | `rpc_routines.rs:326`, `ThinClawAutomations.tsx` | M |
-| `evaluate_outcomes` remote-only | Embedded evaluator OR honest gate w/ "needs gateway" CTA | `rpc_experiments_learning.rs:394` | M |
-| GPU validate/launch remote-only | Local credential path OR honest gate | `rpc_experiments_learning.rs:625-661` | M |
-| ~~Eval framework CLI-only~~ **DONE** | `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` exposed (runtime smoke-test remains a manual QA step) | `rpc_experiments_learning.rs` | L |
+| ~~`evaluate_outcomes` failed opaquely in local mode~~ **DONE** | Typed remote-only gate explains that a gateway is required | `rpc_experiments_learning.rs:394` | M |
+| ~~GPU validate/launch failed opaquely in local mode~~ **DONE** | Typed remote-only gates explain the gateway credential boundary | `rpc_experiments_learning.rs:631-675` | M |
+| Eval framework partially exposed | Commands are wired; add the Benchmarks panel and runtime smoke-test | `rpc_experiments_learning.rs`, frontend | L |
 | SFT/DPO export CLI-only | `thinclaw_trajectory_export(format)` + export button | `src/cli/trajectory.rs` | M |
 | Profile-evolution no panel | Dedicated viewer + force-run | `src/profile_evolution.rs` | S |
 
@@ -191,15 +191,15 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 |---|---|---|---|
 | No `/personality` (`/vibe`) overlay | `thinclaw_personality_set/clear` + chat control | identity/soul crates | S |
 | External-memory providers no UI | setup/status commands + panel (Mem0/Letta/Zep/…) | `external_memory_*` tools | M |
-| Inline MemoryEditor partial | Finish wiring to `get_memory/save_memory` | `MemoryEditor.tsx` | S |
+| ~~Inline MemoryEditor partial~~ **DONE** | Reads and saves the canonical memory document through registered commands | `MemoryEditor.tsx`, `commands/sessions.rs` | S |
 
 ### 5e. Repo-projects / fleet / remote (finish partials)
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| Repo-projects partial | Complete enroll→plan→merge-gate; surface readiness gates | `ThinClawRepoProjects.tsx` (split first), `rpc_repo_projects.rs` | L |
+| ~~Repo-projects partial~~ **DONE** | Enroll→plan→merge-gate flow and readiness gates are wired end to end | `ThinClawRepoProjects.tsx`, `rpc_repo_projects.rs`, `src/repo_projects` | L |
 | Fleet partial | Define fleet model (multi-agent A2A) → real status + broadcast | `thinclaw/fleet.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
 | Tunnel/Tailscale no UI | `thinclaw_tunnel_*` + Remote-access panel | `src/tunnel/` | M |
-| `subscribe_session` stub | Real subscription semantics | `thinclaw/commands/sessions.rs` | S |
+| ~~`subscribe_session` stub~~ **DONE** | Activates local/remote live-event routing with real subscription semantics | `thinclaw/commands/sessions.rs`, `runtime_bridge.rs` | S |
 
 **Phase 1 exit gate:** parity matrix shows zero stub / zero silent-unavailable; every
 panel wired or honestly gated; contract suite green.
