@@ -255,7 +255,7 @@ pub async fn direct_runtime_snapshot(
 // EngineManager — Tauri managed state holding the active engine instance
 // ---------------------------------------------------------------------------
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thinclaw_runtime_contracts::{
     LocalRuntimeEndpoint, LocalRuntimeKind, LocalRuntimeSnapshot, RuntimeCapability,
     RuntimeExposurePolicy, RuntimeReadiness,
@@ -490,11 +490,11 @@ impl EngineManager {
 
     /// Create the engine instance based on compile-time feature flags.
     #[allow(unused_variables)]
-    fn create_engine(app_data_dir: &PathBuf) -> Option<Box<dyn InferenceEngine>> {
+    fn create_engine(app_data_dir: &Path) -> Option<Box<dyn InferenceEngine>> {
         #[cfg(feature = "mlx")]
         {
             let engine = engine_mlx::MlxEngine::new();
-            engine.set_app_data_dir(app_data_dir.clone());
+            engine.set_app_data_dir(app_data_dir.to_path_buf());
             // Resolve the bundled `uv` sidecar binary path.
             // In dev: backend/bin/uv-{target}
             // In production: resolved by Tauri sidecar mechanism
@@ -508,7 +508,7 @@ impl EngineManager {
         #[cfg(feature = "vllm")]
         {
             let engine = engine_vllm::VllmEngine::new();
-            engine.set_app_data_dir(app_data_dir.clone());
+            engine.set_app_data_dir(app_data_dir.to_path_buf());
             let uv_path = Self::resolve_uv_path();
             if let Some(path) = uv_path {
                 engine.set_uv_path(path);

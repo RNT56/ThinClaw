@@ -358,6 +358,7 @@ impl TestHarnessBuilder {
             cheap_llm: None,
             safety,
             tools,
+            desktop_autonomy_manager: None,
             workspace: None,
             extension_manager: None,
             skill_registry: None,

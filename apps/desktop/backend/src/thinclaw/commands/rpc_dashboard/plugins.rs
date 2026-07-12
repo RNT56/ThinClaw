@@ -83,7 +83,7 @@ pub async fn thinclaw_clawhub_install(
     let cache_lock = ironclaw.catalog_cache().await?;
     let cache = cache_lock.lock().await;
     let result = thinclaw_core::tauri_commands::clawhub_prepare_install(&cache, &plugin_id)?;
-    Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
+    serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
 /// Get response cache statistics.

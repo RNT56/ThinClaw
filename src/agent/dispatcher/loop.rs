@@ -91,7 +91,8 @@ impl Agent {
                 .unwrap_or(false)
         };
         if plan_mode {
-            turn.context_messages.push(ChatMessage::system(
+            turn.context_messages.push(ChatMessage::immutable_policy(
+                "plan_mode",
                 "PLAN MODE is active. Investigate with read-only tools, then present a concise, \
                  numbered plan of the state-changing actions you intend to take (file edits, shell \
                  commands, sends) and why. Any state-changing tool you call will pause for the \
@@ -258,7 +259,8 @@ impl Agent {
                         );
                         override_lock.clear(&model_override_scope_key).await;
                         reasoning.swap_llm(original_llm.clone());
-                        turn.context_messages.push(ChatMessage::system(
+                        turn.context_messages.push(ChatMessage::trusted_prompt(
+                            "unsupported_model_override",
                             unsupported_model_override_note(model_spec),
                         ));
                         turn.last_applied_model_override = None;
@@ -364,7 +366,8 @@ impl Agent {
 
                     // Build a minimal context for the flush turn (system + flush prompt).
                     let today = chrono::Utc::now().format("%Y-%m-%d");
-                    let flush_system = ChatMessage::system(
+                    let flush_system = ChatMessage::immutable_policy(
+                        "memory_flush",
                         "Session nearing memory compaction. Store durable memories now.",
                     );
                     let flush_user = ChatMessage::user(format!(
@@ -488,15 +491,21 @@ impl Agent {
                         action = %action.action,
                         "Injecting canvas action into context"
                     );
-                    turn.context_messages.push(ChatMessage::system(&msg));
+                    turn.context_messages.push(ChatMessage::untrusted_context(
+                        "canvas_interaction",
+                        "canvas",
+                        msg,
+                    ));
                 }
             }
 
             // Inject a nudge message when approaching the iteration limit so the
             // LLM is aware it should produce a final answer on the next turn.
             if iteration_decision.inject_nudge {
-                turn.context_messages
-                    .push(ChatMessage::system(ITERATION_LIMIT_NUDGE_PROMPT));
+                turn.context_messages.push(ChatMessage::immutable_policy(
+                    "iteration_limit_nudge",
+                    ITERATION_LIMIT_NUDGE_PROMPT,
+                ));
             }
 
             let force_text = iteration_decision.force_text;
@@ -791,8 +800,10 @@ impl Agent {
                                 let mut synthesis_reasoning =
                                     reasoning.fork_with_llm(cheap_llm.clone());
                                 let mut synthesis_messages = turn.context_messages.clone();
-                                synthesis_messages
-                                    .push(ChatMessage::system(TOOL_PHASE_SYNTHESIS_PROMPT));
+                                synthesis_messages.push(ChatMessage::immutable_policy(
+                                    "tool_phase_synthesis",
+                                    TOOL_PHASE_SYNTHESIS_PROMPT,
+                                ));
 
                                 let synthesis_turn = self
                                     .execute_llm_turn(
@@ -959,8 +970,10 @@ impl Agent {
                                 blocked_message,
                             ));
                         }
-                        turn.context_messages
-                            .push(ChatMessage::system(ADVISOR_BLOCKED_SYSTEM_PROMPT));
+                        turn.context_messages.push(ChatMessage::immutable_policy(
+                            "advisor_blocked",
+                            ADVISOR_BLOCKED_SYSTEM_PROMPT,
+                        ));
                         turn.last_call_signature = None;
                         turn.consecutive_same_calls = 0;
                         continue;
@@ -975,8 +988,10 @@ impl Agent {
                                 "Stuck loop detected — forcing text-only response"
                             );
                             // Give the LLM one last chance with a strong nudge and no tools
-                            turn.context_messages
-                                .push(ChatMessage::system(STUCK_LOOP_FINALIZATION_PROMPT));
+                            turn.context_messages.push(ChatMessage::immutable_policy(
+                                "stuck_loop_finalization",
+                                STUCK_LOOP_FINALIZATION_PROMPT,
+                            ));
 
                             let result = self
                                 .finalize_primary_text_only(
@@ -1005,8 +1020,10 @@ impl Agent {
                                 tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
                                 "Possible stuck loop detected — injecting nudge"
                             );
-                            turn.context_messages
-                                .push(ChatMessage::system(STUCK_LOOP_NUDGE_PROMPT));
+                            turn.context_messages.push(ChatMessage::trusted_prompt(
+                                "stuck_loop_nudge",
+                                STUCK_LOOP_NUDGE_PROMPT,
+                            ));
                         }
                         StuckLoopDecision::Continue => {}
                     }

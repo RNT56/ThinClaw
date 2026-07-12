@@ -1,6 +1,6 @@
 # ThinClaw Desktop — Feature Status & Verified Gaps
 
-> **Snapshot:** re-verified 2026-07-10 (originally 2026-06-28) · point-in-time,
+> **Snapshot:** re-verified 2026-07-12 (originally 2026-06-28) · point-in-time,
 > code-grounded. This is intentionally *thinly scoped* (per the repo doc rules): it does
 > not re-inventory every feature. For the roadmap and parity ledger use the canonical docs
 > below; this file only records **verified open gaps** that are easy to lose track of.
@@ -35,21 +35,28 @@ before changing either system.
 
 ## Verified open gaps
 
-Each row was confirmed against code at the date above. "UI-dishonest" means the UI
-implies an effect the backend does not deliver.
+No correctness gap remains open in this narrow point-in-time list. Product breadth,
+packaging, shared-service unification, and native release qualification remain tracked
+in the canonical roadmap rather than being duplicated here.
 
-| Area | Gap | Evidence | Class |
-|---|---|---|---|
-| Skills | Per-skill enable/disable toggle is a deliberate no-op (the SkillRegistry has no enable/disable). | `rpc_skills.rs` `thinclaw_skills_toggle` (comment: "SkillRegistry doesn't support enable/disable") | UI-dishonest |
-| Channels | WhatsApp QR-login modal is unreachable — the runtime always emits `qr_code: None`. | `event_mapping.rs` (`qr_code: None`), `ThinClawChannels.tsx` | Dead UI |
-| Voice | Cloud TTS playback decodes responses as raw Int16 PCM @22050, but OpenAI/ElevenLabs return MP3 — likely garbled. | `MessageBubble.tsx` Read-Aloud handler | Likely bug (needs app run) |
-| Cloud sync | App Nap suppression is a no-op on macOS (atomic counter; never calls `NSProcessInfo.beginActivity`). | `cloud/app_nap.rs` (macOS `begin()` only increments `APP_NAP_GUARD_COUNT`) | Platform no-op |
-| Models | Dead remote-catalog backend commands (`update_/get_remote_model_catalog`) — their only client (a `localhost:8000` fetch) was removed; the commands remain registered. | `model_manager.rs:886,918`; still registered in `setup/commands.rs` | Dead backend (registered) |
+## Recently closed
+
+| Area | Resolution | Evidence |
+|---|---|---|
+| Skills | The unsupported toggle was removed; the panel is explicitly read-only. | `ThinClawSkills.tsx`, `rpc_skills.rs` |
+| Channels | The unreachable WhatsApp QR modal was removed; unsupported login is honestly gated. | `ThinClawChannels.tsx`, `rpc_config.rs` |
+| Voice | Read Aloud decodes encoded audio through `decodeAudioData`, with PCM fallback only for raw responses. | `MessageBubble.tsx` |
+| Cloud sync | `AppNapGuard` now owns a real `NSProcessInfo` activity token and ends it exactly once on drop. | `cloud/app_nap.rs` |
+| Desktop startup | The default `npm run dev` now launches the Tauri runtime; renderer-only development is explicit as `dev:web`. | `package.json`, `tauri.conf.json` |
+| Frontend performance | App/mode/control-surface lazy loading keeps every production JS chunk under the enforced 500 KiB budget. | `App.tsx`, `ChatLayout.tsx`, `ThinClawView.tsx`, `check_frontend_bundle.mjs` |
+| Frontend E2E | WebdriverIO Tauri browser mode exercises onboarding and deterministic IPC in CI without a native binary; the runner resolves the exact installed Chrome driver on macOS. | `wdio.browser.conf.ts`, `e2e/onboarding.e2e.ts`, `scripts/run_browser_e2e.mjs` |
+| Prompt authority | PromptStack and Prompt System V2 now compile through one typed, budgeted authority graph per real provider request; untyped system text is demoted to untrusted evidence. | `src/llm/reasoning.rs`, `crates/thinclaw-llm-core/src/prompt_stack.rs`, `docs/PROMPT_SYSTEM.md` |
+| Routine isolation | Desktop-autonomy state is retained by `AppComponents` and explicitly injected into the desktop agent and routine engine, so independent app builds cannot alter routine emergency-stop behavior through process-global state. | `src/app.rs`, `src/agent/routine_engine.rs`, `backend/src/thinclaw/runtime_builder.rs` |
+| Build hygiene | Bundled WASM extension builds now use the parent Cargo `OUT_DIR`; all-feature builds no longer create nested `target/` trees inside channel or tool sources. | `build.rs`, `tests/repo_hygiene.rs` |
 
 ## Notes
 
-- Items above marked "dead backend (registered)" require regenerating `bindings.ts`
-  (specta) and updating the bindings contract test, so they are Rust-gated, not
-  frontend-only cleanups.
-- Several items (WhatsApp QR, per-skill toggle) are product calls — wire real data vs.
-  remove the control — rather than mechanical fixes.
+- `update_remote_model_catalog` / `get_remote_model_catalog` remain a generated,
+  local-only backend contract with no current panel consumer. They are not presented as
+  a user feature; remove them only with the normal specta binding regeneration flow, or
+  wire them when the shared model-registry roadmap reaches that migration.

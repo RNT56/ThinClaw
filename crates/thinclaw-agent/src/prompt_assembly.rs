@@ -33,6 +33,7 @@ pub struct PromptAssemblyV2 {
     stable_segments: Vec<(String, String)>,
     ephemeral_segments: Vec<(String, String)>,
     trusted_ephemeral_segments: Vec<(String, String)>,
+    required_policy_segments: Vec<(String, String)>,
     provider_context_refs: Vec<String>,
 }
 
@@ -94,9 +95,84 @@ impl PromptAssemblyV2 {
         self
     }
 
+    /// Add immutable per-turn policy that must never be dropped or truncated.
+    pub fn push_required_policy(
+        mut self,
+        segment_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        let content = content.into();
+        if !content.trim().is_empty() {
+            self.required_policy_segments
+                .push((segment_name.into(), content));
+        }
+        self
+    }
+
     pub fn with_provider_context_refs(mut self, refs: Vec<String>) -> Self {
         self.provider_context_refs = refs;
         self
+    }
+
+    /// Return the typed, uncompiled source segments for final per-turn
+    /// compilation alongside the canonical policy stack.
+    pub fn prompt_segments(&self) -> Vec<PromptSegment> {
+        let mut segments = Vec::with_capacity(
+            self.required_policy_segments.len()
+                + self.stable_segments.len()
+                + self.trusted_ephemeral_segments.len()
+                + self.ephemeral_segments.len(),
+        );
+        segments.extend(self.required_policy_segments.iter().map(|(name, content)| {
+            PromptSegment::new(
+                name,
+                "prompt_assembly",
+                PromptTrust::ImmutablePolicy,
+                PromptLifetime::Turn,
+                1_000,
+                content,
+            )
+            .required()
+        }));
+        segments.extend(self.stable_segments.iter().map(|(name, content)| {
+            PromptSegment::new(
+                name,
+                "prompt_assembly",
+                PromptTrust::TrustedConfiguration,
+                PromptLifetime::Stable,
+                700,
+                content,
+            )
+        }));
+        segments.extend(
+            self.trusted_ephemeral_segments
+                .iter()
+                .map(|(name, content)| {
+                    PromptSegment::new(
+                        name,
+                        "prompt_assembly",
+                        PromptTrust::TrustedConfiguration,
+                        PromptLifetime::Turn,
+                        500,
+                        content,
+                    )
+                }),
+        );
+        segments.extend(self.ephemeral_segments.iter().map(|(name, content)| {
+            PromptSegment::new(
+                name,
+                "prompt_assembly",
+                PromptTrust::UntrustedData,
+                PromptLifetime::Turn,
+                100,
+                content,
+            )
+        }));
+        segments
+    }
+
+    pub fn into_prompt_segments(self) -> Vec<PromptSegment> {
+        self.prompt_segments()
     }
 
     pub fn build(self) -> PromptAssemblyResult {
@@ -110,42 +186,16 @@ impl PromptAssemblyV2 {
     ) -> Result<PromptAssemblyResult, PromptCompileError> {
         let stable_snapshot = render_segments(&self.stable_segments);
         let legacy_ephemeral_documents = self
-            .ephemeral_segments
+            .required_policy_segments
             .iter()
+            .chain(self.ephemeral_segments.iter())
             .chain(self.trusted_ephemeral_segments.iter())
             .map(|(_, content)| content.clone())
             .collect::<Vec<_>>();
 
         let mut compiler = PromptCompiler::new();
-        for (name, content) in &self.stable_segments {
-            compiler = compiler.push(PromptSegment::new(
-                name,
-                "prompt_assembly",
-                PromptTrust::TrustedConfiguration,
-                PromptLifetime::Stable,
-                700,
-                content,
-            ));
-        }
-        for (name, content) in &self.trusted_ephemeral_segments {
-            compiler = compiler.push(PromptSegment::new(
-                name,
-                "prompt_assembly",
-                PromptTrust::TrustedConfiguration,
-                PromptLifetime::Turn,
-                500,
-                content,
-            ));
-        }
-        for (name, content) in &self.ephemeral_segments {
-            compiler = compiler.push(PromptSegment::new(
-                name,
-                "prompt_assembly",
-                PromptTrust::UntrustedData,
-                PromptLifetime::Turn,
-                100,
-                content,
-            ));
+        for segment in self.prompt_segments() {
+            compiler = compiler.push(segment);
         }
         let compiled = compiler.compile(budget)?;
         let ephemeral_documents = compiled
@@ -333,6 +383,13 @@ pub fn assemble_dispatcher_prompt_materials_with_budget(
     materials: &DispatcherPromptMaterials,
     budget: PromptBudget,
 ) -> Result<PromptAssemblyResult, PromptCompileError> {
+    dispatcher_prompt_assembly(materials).build_with_budget(budget)
+}
+
+/// Build the dispatcher source graph without compiling it. The interactive
+/// reasoning path uses this to compile once, per turn, together with the
+/// PromptStack policy and the actual history/tool budget.
+pub fn dispatcher_prompt_assembly(materials: &DispatcherPromptMaterials) -> PromptAssemblyV2 {
     PromptAssemblyV2::new()
         .push_stable(
             "workspace_prompt",
@@ -346,7 +403,7 @@ pub fn assemble_dispatcher_prompt_materials_with_budget(
             "skills_index",
             materials.skill_index_context.clone().unwrap_or_default(),
         )
-        .push_ephemeral_trusted("transcript_guidance", CHANNEL_TRANSCRIPT_GUIDANCE)
+        .push_required_policy("transcript_guidance", CHANNEL_TRANSCRIPT_GUIDANCE)
         .push_ephemeral(
             "provider_recall",
             materials
@@ -391,7 +448,6 @@ pub fn assemble_dispatcher_prompt_materials_with_budget(
                 .unwrap_or_default(),
         )
         .with_provider_context_refs(materials.provider_context_refs.clone())
-        .build_with_budget(budget)
 }
 
 #[cfg(test)]
@@ -582,13 +638,20 @@ mod tests {
                 .all(|doc| doc.contains("UNTRUSTED CONTEXT DATA"))
         );
         assert_eq!(result.provider_context_refs, vec!["ctx-1"]);
+        let transcript = result
+            .manifest
+            .iter()
+            .find(|entry| entry.id == "transcript_guidance")
+            .expect("transcript guidance manifest entry");
+        assert!(transcript.required);
+        assert_eq!(transcript.trust, PromptTrust::ImmutablePolicy);
         assert_eq!(
             result.segment_order,
             vec![
+                "ephemeral:transcript_guidance".to_string(),
                 "stable:workspace_prompt".to_string(),
                 "stable:provider_system_prompt".to_string(),
                 "stable:skills_index".to_string(),
-                "ephemeral:transcript_guidance".to_string(),
                 "ephemeral:channel_formatting_hints".to_string(),
                 "ephemeral:personality_overlay".to_string(),
                 "ephemeral:runtime_capabilities".to_string(),
@@ -598,5 +661,23 @@ mod tests {
                 "ephemeral:post_compaction_fragment".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn required_policy_fails_closed_when_budget_is_too_small() {
+        let result = PromptAssemblyV2::new()
+            .push_required_policy("safety", "Never disclose secrets. ".repeat(100))
+            .build_with_budget(PromptBudget {
+                context_window_tokens: 8,
+                output_reserve_tokens: 0,
+                safety_margin_percent: 0,
+                prompt_cap_tokens: None,
+                ..PromptBudget::default()
+            });
+
+        assert!(matches!(
+            result,
+            Err(PromptCompileError::RequiredSegmentsExceedBudget { .. })
+        ));
     }
 }

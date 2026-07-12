@@ -5,8 +5,9 @@
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
-    "dev": "cd frontend && vite",
-    "build": "cd frontend && tsc && vite build",
+    "dev": "npm run tauri:dev",
+    "dev:web": "cd frontend && vite",
+    "build": "cd frontend && tsc && vite build && node ../scripts/check_frontend_bundle.mjs",
     "preview": "cd frontend && vite preview",
     "tauri": "tauri",
     "tauri:dev": "npm run tauri:dev:llamacpp",
@@ -28,6 +29,7 @@
     "test:watch": "cd frontend && vitest",
     "test:ui": "cd frontend && vitest --ui",
     "test:coverage": "cd frontend && vitest run --coverage",
+    "test:e2e:browser": "node scripts/run_browser_e2e.mjs",
     "test:backend": "cd backend && cargo test --no-default-features --features \"llamacpp runtime-postgres\" -- --skip web_search",
     "test:backend:all-engines": "cd backend && cargo test --no-default-features --features \"llamacpp runtime-postgres\" -- --skip web_search && cargo test --no-default-features --features \"mlx runtime-postgres\" -- engine && cargo test --no-default-features --features \"vllm runtime-postgres\" -- engine && cargo test --no-default-features --features \"ollama runtime-postgres\" -- engine",
     "setup:chromium": "bash backend/scripts/setup_chromium.sh",
@@ -37,7 +39,7 @@
     "lint:thinclaw:fix": "cd ../.. && cargo clippy --fix --allow-dirty --allow-staged --lib -p thinclaw",
     "lint:fmt": "cd ../.. && cargo fmt --all -- --check",
     "lint:fmt:fix": "cd ../.. && cargo fmt --all",
-    "lint:ts": "cd frontend && tsc --noEmit",
+    "lint:ts": "cd frontend && tsc --noEmit && cd .. && tsc --noEmit -p tsconfig.e2e.json",
     "lint:all": "npm run lint:fmt && npm run lint:thinclaw && npm run lint:ts",
     "test:thinclaw": "cd ../.. && cargo test --workspace",
     "ci": "npm run lint:all && npm run test:thinclaw",
@@ -90,6 +92,11 @@
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^6.0.3",
     "@vitest/ui": "^4.1.10",
+    "@wdio/cli": "^9.29.1",
+    "@wdio/jasmine-framework": "^9.29.1",
+    "@wdio/local-runner": "^9.29.1",
+    "@wdio/spec-reporter": "^9.29.1",
+    "@wdio/tauri-service": "^1.2.0",
     "jsdom": "^29.1.1",
     "postcss": "^8.5.16",
     "tailwindcss": "^4.3.2",
@@ -97,5 +104,8 @@
     "vite": "^8.1.4",
     "vitest": "^4.1.10"
   },
-  "packageManager": "npm@10.9.0"
+  "packageManager": "npm@10.9.0",
+  "overrides": {
+    "@wdio/native-utils": "2.5.0"
+  }
 }

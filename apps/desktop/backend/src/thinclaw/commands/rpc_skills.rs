@@ -506,7 +506,7 @@ pub async fn thinclaw_install_skill_repo(
 
     let repo_name = repo_url
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or("unknown-repo")
         .trim_end_matches(".git");
 

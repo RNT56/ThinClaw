@@ -45,6 +45,7 @@ pub struct RigManagerKey {
 }
 
 impl RigManagerKey {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         kind: &ProviderKind,
         base_url: &str,
@@ -74,6 +75,12 @@ impl RigManagerKey {
 /// build it.  Register with `app.manage(RigManagerCache::new())` in `lib.rs`.
 pub struct RigManagerCache {
     inner: Mutex<Option<(RigManagerKey, RigManager)>>,
+}
+
+impl Default for RigManagerCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RigManagerCache {

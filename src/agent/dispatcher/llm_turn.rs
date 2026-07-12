@@ -86,7 +86,10 @@ impl Agent {
     ) -> ReasoningContext {
         let mut messages = context_messages.to_vec();
         if options.planning_mode {
-            messages.push(ChatMessage::system(TOOL_PHASE_PLANNING_PROMPT));
+            messages.push(ChatMessage::immutable_policy(
+                "tool_phase_planning",
+                TOOL_PHASE_PLANNING_PROMPT,
+            ));
         }
         let mut context = ReasoningContext::new()
             .with_messages(messages)
@@ -286,13 +289,21 @@ impl Agent {
                         if final_system != system_msg
                             && let Some(new_system) = final_system
                         {
-                            if let Some(first_system) = context_messages
-                                .iter_mut()
-                                .find(|m| m.role == crate::llm::Role::System)
+                            if let Some(existing_override) =
+                                context_messages.iter_mut().find(|message| {
+                                    message
+                                        .prompt_authority()
+                                        .is_some_and(|(segment_id, _, _)| {
+                                            segment_id == "hook_system_override"
+                                        })
+                                })
                             {
-                                first_system.content = new_system;
+                                existing_override.content = new_system;
                             } else {
-                                context_messages.insert(0, ChatMessage::system(new_system));
+                                context_messages.insert(
+                                    0,
+                                    ChatMessage::trusted_prompt("hook_system_override", new_system),
+                                );
                             }
                             hook_changed_context = true;
                         }
@@ -658,7 +669,8 @@ impl Agent {
                         );
                         reasoning.swap_llm(original_llm.clone());
                         *last_applied_model_override = None;
-                        context_messages.push(ChatMessage::system(
+                        context_messages.push(ChatMessage::trusted_prompt(
+                            "failed_model_override_reset",
                             failed_model_override_reset_note(&failed_override.model_spec, &err),
                         ));
                         context = self.build_turn_context(
@@ -674,6 +686,42 @@ impl Agent {
                 }
             }
         };
+
+        // Persist the exact content-free manifest produced for this request.
+        // Prompt preparation also records a source-graph snapshot for shadow
+        // mode, but only this per-turn compilation includes the final
+        // PromptStack policy plus the actual history and authorized tools.
+        if let Some(telemetry) = reasoning.last_prompt_compilation()
+            && let Some(store) = self.store().map(Arc::clone)
+        {
+            let contract_version = telemetry.contract_version.clone();
+            let stable_hash = telemetry.stable_hash.clone();
+            let ephemeral_hash = telemetry.ephemeral_hash.clone();
+            let manifest_digest = telemetry.manifest_digest.clone();
+            let segment_order = telemetry
+                .manifest
+                .iter()
+                .map(|entry| match entry.lifetime {
+                    crate::llm::PromptLifetime::Stable => format!("stable:{}", entry.id),
+                    crate::llm::PromptLifetime::Turn => format!("ephemeral:{}", entry.id),
+                })
+                .collect::<Vec<_>>();
+            let _ = crate::agent::mutate_thread_runtime(&store, thread_id, |runtime| {
+                runtime.prompt_contract_version = Some(contract_version.clone());
+                runtime.prompt_snapshot_hash = Some(stable_hash.clone());
+                runtime.ephemeral_overlay_hash = Some(ephemeral_hash.clone());
+                runtime.prompt_manifest_digest = Some(manifest_digest.clone());
+                runtime.prompt_segment_order = segment_order.clone();
+            })
+            .await;
+            tracing::debug!(
+                thread = %thread_id,
+                manifest_digest = %telemetry.manifest_digest,
+                estimated_tokens = telemetry.estimated_tokens,
+                segment_count = telemetry.manifest.len(),
+                "Persisted exact unified Prompt V2 request telemetry"
+            );
+        }
 
         let active_llm = reasoning.current_llm();
         let active_model_name = active_llm.active_model_name();

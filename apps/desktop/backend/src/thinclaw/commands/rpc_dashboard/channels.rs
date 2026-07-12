@@ -338,7 +338,7 @@ pub async fn thinclaw_gmail_status(
     }
 
     // Fold in DB-backed ThinClaw channel settings when env vars are absent.
-    if let Some(agent) = ironclaw.agent().await.ok() {
+    if let Ok(agent) = ironclaw.agent().await {
         if let Some(store) = agent.store() {
             if std::env::var("GMAIL_ENABLED").is_err() {
                 if let Ok(Some(value)) = store

@@ -17,8 +17,8 @@
 > **Still open (do NOT mark done):** root dependency dedup (82 `cargo deny` duplicate diagnostics,
 > improved from the 94 baseline but still above target; `deny.toml` still sets
 > `multiple-versions = "warn"`), the `clippy::unwrap_used`
-> panic-prevention lint (still `allow`), a coverage `--fail-under` threshold (CI still uses `--lib`
-> with no gate), a signed desktop release, finishing the `[workspace.dependencies]` migration (the
+> panic-prevention lint (still `allow`), expanding coverage beyond `--lib` (CI now enforces the
+> measured 38% project floor plus 70% changed-line coverage), a signed desktop release, finishing the `[workspace.dependencies]` migration (the
 > table exists and 27 of 28 crates use it, but `tokio`/`uuid`/`reqwest`/`rand` are not hoisted), and
 > detached channel-submission/scheduler cleanup waiters (A9), and the "largest file < 800 lines"
 > stretch target. See the annotated §4 metrics table.
@@ -253,7 +253,7 @@ Add to CI (most are S-effort, P0/P1):
 | ROUTE_TABLE coverage test (every command classified) | unclassified dual-mode commands | Landed: `all_registered_commands_are_classified` |
 | `wit-bindgen` single-version check | WASM interface skew (2 versions today) | Open: 2 versions (`0.51.0`, `0.57.1`) |
 | Bundle-reference resolution test | broken registry bundles (`slack-tool` today) | Unverified |
-| Coverage threshold (`--fail-under`, no `--lib`) | silent coverage erosion | Open: CI still `--lib`, no `--fail-under` (`ci.yml:881`) |
+| Coverage threshold (`--fail-under`, no `--lib`) | silent coverage erosion | Partial: 38% project + 70% changed-line gates are live; CI still uses `--lib` (`ci.yml:892`) |
 | `[workspace.dependencies]` enforced | per-crate version drift | Partial: table exists (9 deps); per-crate migration incomplete |
 
 ## 4. Metrics — baseline & targets

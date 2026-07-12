@@ -46,7 +46,7 @@ enum DiffusionArchitecture {
     Flux2Klein,
     SD15,
     SD21,
-    SDXL,
+    Sdxl,
     SD35Medium,
     SD35LargeTurbo,
     QwenImage,
@@ -71,7 +71,7 @@ impl DiffusionArchitecture {
                 DiffusionArchitecture::SD35Medium
             }
         } else if lower.contains("sdxl") {
-            DiffusionArchitecture::SDXL
+            DiffusionArchitecture::Sdxl
         } else if lower.contains("qwen") && (lower.contains("image") || lower.contains("diffusion"))
         {
             DiffusionArchitecture::QwenImage
@@ -318,7 +318,7 @@ async fn run_inference(
     model_path: &str,
     params: &ImageGenParams,
     use_standard_fallbacks: bool,
-    sd_threads_config: u32,
+    _sd_threads_config: u32,
 ) -> Result<ImageResponse, String> {
     let output_temp =
         NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {}", e))?;
@@ -330,11 +330,13 @@ async fn run_inference(
     let height_val = params.height.unwrap_or(512).to_string();
     let neg = params.negative_prompt.as_deref().unwrap_or_default();
 
+    #[cfg(target_os = "macos")]
     let total_cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let threads = if sd_threads_config > 0 {
-        sd_threads_config
+    #[cfg(target_os = "macos")]
+    let threads = if _sd_threads_config > 0 {
+        _sd_threads_config
     } else {
         // Flux Klein is heavy; use half cores or max 4 to keep UI alive
         let t = std::cmp::min(total_cores / 2, 4);
@@ -401,7 +403,7 @@ async fn run_inference(
     #[cfg(target_os = "macos")]
     {
         args.push("-t".to_string());
-        args.push(if sd_threads_config == 0 {
+        args.push(if _sd_threads_config == 0 {
             "-1".to_string()
         } else {
             threads.to_string()
@@ -441,7 +443,7 @@ async fn run_inference(
                 args.push("--cfg-scale".into());
                 args.push("5.0".into());
             }
-            DiffusionArchitecture::SDXL => {
+            DiffusionArchitecture::Sdxl => {
                 args.push("--cfg-scale".into());
                 args.push("7.0".into());
             }
@@ -665,14 +667,13 @@ async fn run_inference(
     }
 
     if let Some(ref p) = bin_path {
-        let path_str = p.to_string_lossy().to_string();
-
         // Set working directory - most robust way for it to find shaders/libs
         command_runner = command_runner.current_dir(p.clone());
 
         // Essential environment variables for Metal
         #[cfg(target_os = "macos")]
         {
+            let path_str = p.to_string_lossy().to_string();
             command_runner = command_runner.env("DYLD_LIBRARY_PATH", &path_str);
             command_runner = command_runner.env("LD_LIBRARY_PATH", &path_str);
             command_runner = command_runner.env("DYLD_FRAMEWORK_PATH", &path_str);
@@ -696,6 +697,10 @@ async fn run_inference(
 
     let mut success = true;
 
+    static PROGRESS_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let progress_re =
+        PROGRESS_RE.get_or_init(|| regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)").unwrap());
+
     while let Some(event) = rx.recv().await {
         match event {
             tauri_plugin_shell::process::CommandEvent::Stdout(line)
@@ -704,10 +709,7 @@ async fn run_inference(
                 println!("[image_gen] {}", text);
 
                 // Detect progress bars: |====>   | 28/795
-                static PROGRESS_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-                let re = PROGRESS_RE
-                    .get_or_init(|| regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)").unwrap());
-                if let Some(caps) = re.captures(&text) {
+                if let Some(caps) = progress_re.captures(&text) {
                     let current = caps[2].parse::<f32>().unwrap_or(0.0);
                     let total = caps[3].parse::<f32>().unwrap_or(1.0);
                     // Guard the denominator: a `0/0` progress line would otherwise

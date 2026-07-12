@@ -705,9 +705,9 @@ pub async fn thinclaw_extension_validate_setup(
     }
 }
 
-fn mcp_ext_mgr<'a>(
-    agent: &'a thinclaw_core::agent::Agent,
-) -> Result<&'a std::sync::Arc<thinclaw_core::extensions::ExtensionManager>, String> {
+fn mcp_ext_mgr(
+    agent: &thinclaw_core::agent::Agent,
+) -> Result<&std::sync::Arc<thinclaw_core::extensions::ExtensionManager>, String> {
     agent
         .extension_manager()
         .ok_or_else(|| "Extension manager not available".to_string())

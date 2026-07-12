@@ -206,7 +206,7 @@ pub async fn thinclaw_get_fleet_status(
     let profiles = cfg.profiles.clone();
 
     // Run checks in parallel for remote agents
-    let futures = profiles.into_iter().map(|p| check_agent(p));
+    let futures = profiles.into_iter().map(check_agent);
     let mut results = futures::future::join_all(futures).await;
 
     let local_capabilities = get_capabilities(&cfg);

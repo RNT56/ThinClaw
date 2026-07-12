@@ -90,11 +90,10 @@ impl OrchestratorApi {
     /// Docker Desktop routes `host.docker.internal` through its VM to the
     /// host's `127.0.0.1`.
     ///
-    /// On Linux, containers reach the host via the docker bridge gateway
-    /// (`172.17.0.1`), which is NOT loopback. Binding to `127.0.0.1`
-    /// would reject container traffic. We bind to all interfaces instead
-    /// and rely on `worker_auth_middleware` (applied as a route_layer on
-    /// every `/worker/` endpoint) to reject unauthenticated requests.
+    /// On Linux, containers reach the host through the Docker bridge while
+    /// host-side health checks use loopback. Bind to all interfaces so both
+    /// routes reach the same listener, and rely on `worker_auth_middleware`
+    /// (applied to every `/worker/` endpoint) for worker API authentication.
     pub async fn start(
         state: OrchestratorState,
         port: u16,
@@ -110,25 +109,25 @@ impl OrchestratorApi {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let router = Self::router(state);
         let addr = orchestrator_bind_addr(port);
 
         tracing::info!("Orchestrator internal API listening on {}", addr);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        Self::serve_listener(state, listener, shutdown).await
+    }
 
-        let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(listener) => listener,
-            Err(error) if cfg!(target_os = "linux") => {
-                let fallback = linux_orchestrator_fallback_bind_addr(port);
-                tracing::warn!(
-                    %addr,
-                    %fallback,
-                    %error,
-                    "Failed to bind orchestrator to Docker bridge address; falling back to all interfaces"
-                );
-                tokio::net::TcpListener::bind(fallback).await?
-            }
-            Err(error) => return Err(Box::new(error)),
-        };
+    /// Serve on an already-bound listener. Integration harnesses use this to
+    /// eliminate the reserve-then-release port race and observe bind/startup
+    /// failures directly.
+    pub async fn serve_listener<F>(
+        state: OrchestratorState,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let router = Self::router(state);
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
             .await?;
@@ -139,14 +138,10 @@ impl OrchestratorApi {
 
 fn orchestrator_bind_addr(port: u16) -> SocketAddr {
     if cfg!(target_os = "linux") {
-        SocketAddr::from(([172, 17, 0, 1], port))
+        SocketAddr::from(([0, 0, 0, 0], port))
     } else {
         SocketAddr::from(([127, 0, 0, 1], port))
     }
-}
-
-fn linux_orchestrator_fallback_bind_addr(port: u16) -> SocketAddr {
-    SocketAddr::from(([0, 0, 0, 0], port))
 }
 
 // -- Handlers --
@@ -678,10 +673,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn orchestrator_bind_addr_uses_docker_bridge_on_linux() {
+    fn orchestrator_bind_addr_serves_host_and_docker_bridge_on_linux() {
         assert_eq!(
             orchestrator_bind_addr(50051),
-            std::net::SocketAddr::from(([172, 17, 0, 1], 50051))
+            std::net::SocketAddr::from(([0, 0, 0, 0], 50051))
         );
     }
 

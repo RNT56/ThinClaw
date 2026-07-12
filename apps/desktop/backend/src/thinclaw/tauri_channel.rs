@@ -35,6 +35,8 @@ use super::event_mapping::{routing_from_status, status_to_ui_event};
 use super::sanitizer::strip_llm_tokens;
 use super::ui_types::UiEvent;
 
+type ActiveSessions = Arc<RwLock<HashMap<String, u64>>>;
+
 /// Channel name used for routing. Must match what `api::chat` hardcodes.
 const CHANNEL_NAME: &str = "tauri";
 
@@ -52,7 +54,7 @@ pub struct TauriChannel {
     /// Active session tracking — maps session_key → activation timestamp (ms).
     /// The most recently activated session is used as fallback when metadata
     /// doesn't include a session key.
-    active_sessions: Arc<RwLock<HashMap<String, u64>>>,
+    active_sessions: ActiveSessions,
 }
 
 impl TauriChannel {
@@ -63,11 +65,7 @@ impl TauriChannel {
     /// active_sessions Arc is shared so commands can register sessions.
     pub fn new(
         app_handle: AppHandle<Wry>,
-    ) -> (
-        Self,
-        mpsc::Sender<IncomingMessage>,
-        Arc<RwLock<HashMap<String, u64>>>,
-    ) {
+    ) -> (Self, mpsc::Sender<IncomingMessage>, ActiveSessions) {
         let (tx, rx) = mpsc::channel(64);
 
         // Seed with the default session

@@ -13,6 +13,7 @@
       "parser": "typed compiler",
       "model_capabilities": "provider-neutral",
       "test_owner": "thinclaw-llm-core prompt_contract tests",
+      "prompt_paths": [],
       "paths": ["crates/thinclaw-llm-core/src/prompt_contract.rs", "crates/thinclaw-agent/src/prompt_assembly.rs"]
     },
     {
@@ -27,6 +28,21 @@
       "parser": "provider tool protocol",
       "model_capabilities": "native tools, streaming, reasoning",
       "test_owner": "dispatcher and reasoning tests",
+      "prompt_paths": [
+        "src/llm/reasoning.rs",
+        "src/agent/dispatcher_helpers.rs",
+        "src/agent/commands.rs",
+        "src/agent/dispatcher/advisor.rs",
+        "src/agent/dispatcher/llm_turn.rs",
+        "src/agent/dispatcher/loop.rs",
+        "src/agent/dispatcher/prompt_context.rs",
+        "src/agent/dispatcher/tool_execution.rs",
+        "apps/desktop/backend/src/thinclaw/runtime_bridge.rs",
+        "apps/desktop/frontend/src/components/thinclaw/ThinClawChatView.tsx",
+        "crates/thinclaw-agent/src/dispatcher_helpers.rs",
+        "crates/thinclaw-agent/src/learning_provider_policy.rs",
+        "crates/thinclaw-agent/src/context_monitor.rs"
+      ],
       "path_prefixes": ["src/agent/", "crates/thinclaw-agent/src/"]
     },
     {
@@ -41,6 +57,7 @@
       "parser": "markdown section parser",
       "model_capabilities": "provider-neutral",
       "test_owner": "workspace_core and prompt assembly tests",
+      "prompt_paths": [],
       "path_prefixes": ["crates/thinclaw-workspace/src/", "crates/thinclaw-soul/src/", "assets/personality_packs/"]
     },
     {
@@ -55,6 +72,12 @@
       "parser": "provider stream and Rhai tags",
       "model_capabilities": "vision, local/cloud completion, Rhai tools",
       "test_owner": "desktop backend and frontend tests",
+      "prompt_paths": [
+        "apps/desktop/frontend/src/lib/prompt-enhancer.ts",
+        "apps/desktop/backend/src/rig_lib/unified_provider.rs",
+        "apps/desktop/backend/src/rig_lib/agent.rs",
+        "apps/desktop/backend/src/rig_lib/orchestrator.rs"
+      ],
       "path_prefixes": ["apps/desktop/backend/src/rig_lib/", "apps/desktop/frontend/src/lib/prompt-enhancer.ts", "apps/desktop/frontend/src/components/thinclaw/"]
     },
     {
@@ -69,6 +92,16 @@
       "parser": "tool protocol or strict JSON with one repair where supported",
       "model_capabilities": "tools and schema output",
       "test_owner": "worker, subagent and advisor tests",
+      "prompt_paths": [
+        "src/tools/builtin/agent_management.rs",
+        "src/agent/worker.rs",
+        "src/agent/subagent_executor/mod.rs",
+        "src/worker/runtime.rs",
+        "crates/thinclaw-tools/src/builtin/advisor.rs",
+        "crates/thinclaw-tools/src/builtin/subagent.rs",
+        "crates/thinclaw-tools/src/builtin/agent_management.rs",
+        "crates/thinclaw-agent/src/worker_runtime.rs"
+      ],
       "path_prefixes": ["src/agent/worker.rs", "src/agent/subagent_executor/", "src/agent/dispatcher/advisor.rs", "crates/thinclaw-agent/src/worker_runtime.rs", "crates/thinclaw-tools/src/builtin/subagent.rs", "crates/thinclaw-tools/src/builtin/advisor.rs"]
     },
     {
@@ -83,6 +116,11 @@
       "parser": "exact serde JSON, fail closed",
       "model_capabilities": "text or schema output",
       "test_owner": "heartbeat and routine_engine tests",
+      "prompt_paths": [
+        "src/agent/routine_engine/execution.rs",
+        "crates/thinclaw-agent/src/routine_engine.rs",
+        "crates/thinclaw-agent/src/heartbeat.rs"
+      ],
       "path_prefixes": ["crates/thinclaw-agent/src/heartbeat.rs", "crates/thinclaw-agent/src/routine_engine.rs", "src/agent/routine_engine/"]
     },
     {
@@ -97,6 +135,13 @@
       "parser": "strict JSON for machine consumers",
       "model_capabilities": "text and optional schema output",
       "test_owner": "compaction, evaluation, search and tool tests",
+      "prompt_paths": [
+        "src/agent/compaction.rs",
+        "src/evaluation/success.rs",
+        "crates/thinclaw-tools/src/builtin/moa.rs",
+        "crates/thinclaw-agent/src/session_search.rs",
+        "crates/thinclaw-agent/src/outcomes.rs"
+      ],
       "path_prefixes": ["src/agent/compaction.rs", "src/evaluation/", "crates/thinclaw-agent/src/session_search.rs", "crates/thinclaw-agent/src/outcomes.rs", "crates/thinclaw-tools/src/builtin/moa.rs"]
     },
     {
@@ -111,6 +156,10 @@
       "parser": "strict role schema",
       "model_capabilities": "file tools and JSON",
       "test_owner": "repo_projects and experiments tests",
+      "prompt_paths": [
+        "src/tools/builder/core.rs",
+        "src/api/experiments/subagents.rs"
+      ],
       "path_prefixes": ["src/repo_projects/", "src/api/experiments/", "src/tools/builder/"]
     },
     {
@@ -125,6 +174,10 @@
       "parser": "tool protocol and exact deny/escalate JSON",
       "model_capabilities": "native tools or generated code-mode cards",
       "test_owner": "thinclaw-tools tests",
+      "prompt_paths": [
+        "crates/thinclaw-tools/src/smart_approve.rs",
+        "crates/thinclaw-tools/src/mcp/client.rs"
+      ],
       "path_prefixes": ["crates/thinclaw-tools/src/", "src/tools/"]
     },
     {
@@ -139,6 +192,12 @@
       "parser": "provider protocol",
       "model_capabilities": "provider-specific transport",
       "test_owner": "provider adapter tests",
+      "prompt_paths": [
+        "src/llm/bedrock.rs",
+        "crates/thinclaw-gateway/src/web/ports.rs",
+        "crates/thinclaw-llm-core/src/provider.rs",
+        "crates/thinclaw-llm/src/gemini.rs"
+      ],
       "path_prefixes": ["src/llm/", "crates/thinclaw-llm/src/", "crates/thinclaw-llm-core/src/", "crates/thinclaw-gateway/src/", "src/channels/web/", "crates/thinclaw-gateway/src/web/"]
     },
     {
@@ -153,6 +212,12 @@
       "parser": "serde DTOs",
       "model_capabilities": "provider-neutral",
       "test_owner": "registry and persistence tests",
+      "prompt_paths": [
+        "crates/thinclaw-agent/src/agent_registry.rs",
+        "crates/thinclaw-agent/src/thread_ops.rs",
+        "crates/thinclaw-db/src/postgres/agent_registry_store.rs",
+        "crates/thinclaw-db/src/libsql/agent_registry.rs"
+      ],
       "path_prefixes": ["crates/thinclaw-agent/src/agent_registry.rs", "crates/thinclaw-db/src/", "src/profile.rs", "src/worker/", "apps/desktop/backend/src/thinclaw/"]
     }
   ]

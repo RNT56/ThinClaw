@@ -289,10 +289,9 @@ async fn sync_engine_loop(
     master_key: MasterKey,
     app_data_dir: PathBuf,
 ) {
-    let mut tracker = match load_tracker_from_manifest(provider.as_ref(), &master_key).await {
-        Some(tracker) => tracker,
-        None => FileTracker::new(),
-    };
+    let mut tracker: FileTracker = load_tracker_from_manifest(provider.as_ref(), &master_key)
+        .await
+        .unwrap_or_default();
 
     let on_changes = move |changes: Vec<ChangedFile>| {
         let provider = provider.clone();

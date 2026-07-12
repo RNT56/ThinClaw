@@ -70,6 +70,8 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    const THINCLAW_PROMPT_METADATA: &'static str = "thinclaw_prompt";
+
     /// Create a system message.
     pub fn system(content: impl Into<String>) -> Self {
         Self {
@@ -81,6 +83,47 @@ impl ChatMessage {
             provider_metadata: std::collections::HashMap::new(),
             attachments: Vec::new(),
         }
+    }
+
+    /// Create a code-owned, immutable policy message for later canonical
+    /// compilation. Interactive Prompt V2 consumes this metadata and removes
+    /// the standalone system message before provider transport.
+    pub fn immutable_policy(segment_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::system(content).with_provider_metadata(
+            Self::THINCLAW_PROMPT_METADATA,
+            serde_json::json!({
+                "segment_id": segment_id.into(),
+                "trust": "immutable_policy",
+                "required": true,
+            }),
+        )
+    }
+
+    /// Create a trusted runtime/configuration instruction. It participates in
+    /// the prompt budget but may be dropped before immutable policy.
+    pub fn trusted_prompt(segment_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::system(content).with_provider_metadata(
+            Self::THINCLAW_PROMPT_METADATA,
+            serde_json::json!({
+                "segment_id": segment_id.into(),
+                "trust": "trusted_configuration",
+                "required": false,
+            }),
+        )
+    }
+
+    /// Return internal prompt authority metadata, if this system message was
+    /// created through a typed ThinClaw constructor.
+    pub fn prompt_authority(&self) -> Option<(&str, &str, bool)> {
+        let metadata = self.provider_metadata.get(Self::THINCLAW_PROMPT_METADATA)?;
+        Some((
+            metadata.get("segment_id")?.as_str()?,
+            metadata.get("trust")?.as_str()?,
+            metadata
+                .get("required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        ))
     }
 
     /// Create a user message.
@@ -911,6 +954,23 @@ mod tests {
         fn token_capture_support(&self) -> TokenCaptureSupport {
             self.token_support
         }
+    }
+
+    #[test]
+    fn typed_prompt_messages_preserve_authority_metadata() {
+        let immutable = ChatMessage::immutable_policy("plan_mode", "Plan first");
+        let trusted = ChatMessage::trusted_prompt("hook_override", "Be concise");
+
+        assert_eq!(
+            immutable.prompt_authority(),
+            Some(("plan_mode", "immutable_policy", true))
+        );
+        assert_eq!(
+            trusted.prompt_authority(),
+            Some(("hook_override", "trusted_configuration", false))
+        );
+        assert_eq!(immutable.role, Role::System);
+        assert_eq!(trusted.role, Role::System);
     }
 
     #[test]

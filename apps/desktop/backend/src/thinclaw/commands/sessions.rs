@@ -995,7 +995,7 @@ pub async fn thinclaw_clear_memory(
 
             // ── 1. Delete ThinClaw database (the real data store) ─────────
             let runtime_db =
-                crate::thinclaw::runtime_builder::runtime_db_path(&ironclaw.state_dir());
+                crate::thinclaw::runtime_builder::runtime_db_path(ironclaw.state_dir());
             if runtime_db.exists() {
                 if let Err(e) = std::fs::remove_file(&runtime_db) {
                     error!("[thinclaw] Failed to delete thinclaw-runtime.db: {}", e);
@@ -1012,7 +1012,7 @@ pub async fn thinclaw_clear_memory(
 
             // ── 2. Delete ThinClaw config (thinclaw.toml) ────────────────
             let runtime_toml =
-                crate::thinclaw::runtime_builder::runtime_toml_path(&ironclaw.state_dir());
+                crate::thinclaw::runtime_builder::runtime_toml_path(ironclaw.state_dir());
             if runtime_toml.exists() {
                 let _ = std::fs::remove_file(&runtime_toml);
                 info!("[thinclaw] Deleted thinclaw.toml");

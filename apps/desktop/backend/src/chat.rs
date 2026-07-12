@@ -152,6 +152,8 @@ pub async fn resolve_provider(
 
 #[tauri::command]
 #[specta::specta]
+// Tauri commands intentionally expose flat arguments for generated bindings.
+#[allow(clippy::too_many_arguments)]
 pub async fn direct_chat_stream(
     app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
@@ -367,10 +369,11 @@ pub async fn direct_chat_stream(
         // If they ARE referencing the image, keep the turn but replace the
         // assistant's "Generated image for: [Super Long Prompt]" with something cleaner
         for msg in processing_messages.iter_mut() {
-            if msg.role == "assistant" && msg.images.as_ref().is_some_and(|img| !img.is_empty()) {
-                if msg.content.contains("Generated image for:") {
-                    msg.content = "[Assistant generated an image based on the prompt]".to_string();
-                }
+            if msg.role == "assistant"
+                && msg.images.as_ref().is_some_and(|img| !img.is_empty())
+                && msg.content.contains("Generated image for:")
+            {
+                msg.content = "[Assistant generated an image based on the prompt]".to_string();
             }
         }
     }
@@ -661,7 +664,7 @@ pub async fn direct_chat_stream(
                 usage: None,
                 context_update: None,
             });
-            return Ok(());
+            Ok(())
         }
         Err(e) => {
             let _ = on_event.send(StreamChunk {
@@ -670,7 +673,7 @@ pub async fn direct_chat_stream(
                 usage: None,
                 context_update: None,
             });
-            return Ok(());
+            Ok(())
         }
     }
 }

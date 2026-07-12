@@ -1,9 +1,15 @@
 # Prompt System V2
 
 ThinClaw constructs prompts through the provider-neutral contract in
-`thinclaw-llm-core`. Every prompt-bearing production surface is owned by an
-entry in `docs/prompt-registry.json` and checked by
-`scripts/ci/prompt_audit.py`.
+`thinclaw-llm-core`. Every detected prompt-bearing production file has one
+exact owner in `docs/prompt-registry.json`; broad directory prefixes are
+documentation only and never satisfy `scripts/ci/prompt_audit.py`.
+
+The interactive dispatcher has one final authority path. `PromptStack`
+composes readable policy sections, converts them to a required typed segment,
+and `PromptCompiler` compiles that policy together with workspace identity,
+skills, runtime configuration, and untrusted evidence once per actual LLM
+request. There is no second unbudgeted conversation-prompt append step.
 
 ## Authority
 
@@ -21,6 +27,18 @@ silently truncated. `CompiledPrompt` exposes content-free manifest records,
 stable and turn hashes, a manifest digest, and approximate token totals. Raw
 prompt or evidence content must not be written to telemetry.
 
+Interactive compilation uses the tool schemas that survive routing for the
+actual turn, the current conversation history, and the current output cap.
+Duplicate segment IDs and required-policy overflow fail closed before a
+provider request is sent. The exact content-free manifest is persisted after
+compilation, replacing the source-graph preview used by shadow mode.
+
+Code-owned per-turn directives use `ChatMessage::immutable_policy`; trusted
+runtime/configuration overlays use `ChatMessage::trusted_prompt`. Prompt V2
+consumes these messages into the compiler and removes their standalone system
+roles before transport. Any untyped system message is demoted to user-role
+untrusted evidence rather than gaining authority implicitly.
+
 ## Production rollout
 
 V2 is the default for new sessions. Operators can explicitly select `shadow`
@@ -37,8 +55,9 @@ policy or a human can approve execution.
 
 ## Adding or changing a prompt
 
-Update the registry owner and contract metadata, construct authority through
-the shared compiler, add adversarial parser/authority tests, and run:
+Update the exact `prompt_paths` owner and contract metadata, construct
+interactive authority through `PromptStack` plus the shared compiler, add
+adversarial parser/authority tests, and run:
 
 ```sh
 python3 scripts/ci/prompt_audit.py

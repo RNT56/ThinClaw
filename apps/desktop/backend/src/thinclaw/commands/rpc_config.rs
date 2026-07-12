@@ -492,7 +492,7 @@ pub async fn thinclaw_logs_tail(
 ) -> Result<serde_json::Value, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.logs_recent().await?;
-        let cap = (limit as usize).max(1).min(2000);
+        let cap = (limit as usize).clamp(1, 2000);
         let logs = raw
             .get("logs")
             .and_then(|value| value.as_array())
@@ -528,7 +528,7 @@ pub async fn thinclaw_logs_tail(
 
     let broadcaster = ironclaw.log_broadcaster().await?;
     let entries = broadcaster.recent_entries();
-    let cap = (limit as usize).max(1).min(2000);
+    let cap = (limit as usize).clamp(1, 2000);
     let entries: Vec<_> = entries.into_iter().rev().take(cap).rev().collect();
     // Return BOTH structured `logs` (for rich UI) and flat `lines` (for existing consumers)
     let lines: Vec<String> = entries

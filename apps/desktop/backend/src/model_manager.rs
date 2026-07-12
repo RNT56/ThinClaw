@@ -594,7 +594,7 @@ pub async fn delete_local_model(app: AppHandle, filename: String) -> Result<(), 
     // Determine if we should delete the whole folder
     // Structure: models/{Category}/{ModelFolder}/{Filename}
     // filename segments: ["Category", "ModelFolder", "Filename"] -> length 3
-    let segments: Vec<&str> = filename.split(|c| c == '/' || c == '\\').collect();
+    let segments: Vec<&str> = filename.split(['/', '\\']).collect();
 
     if segments.len() >= 3 {
         // It's in a subfolder of a category (e.g. Diffusion/MyFlux/model.gguf)

@@ -17,18 +17,13 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 /// The operating mode for the file store.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FileStoreMode {
     /// All files stored locally — pass-through to filesystem.
+    #[default]
     Local,
     /// Local is a cache; authoritative copy is in the cloud.
     Cloud,
-}
-
-impl Default for FileStoreMode {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 /// Result type for FileStore operations.

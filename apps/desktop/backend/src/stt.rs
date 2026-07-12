@@ -167,16 +167,17 @@ pub async fn direct_media_transcribe_audio(
 
         println!("[stt] Server not running, falling back to CLI");
 
-        let mut command = app
+        let command = app
             .shell()
             .sidecar("whisper")
             .map_err(|e| format!("Failed to load sidecar: {}", e))?;
 
         // Inject DYLD_LIBRARY_PATH for macOS to find libwhisper.dylib
-        if let Ok(resource_dir) = app.path().resource_dir() {
-            let bin_dir = resource_dir.join("bin");
-            #[cfg(target_os = "macos")]
-            {
+        #[cfg(target_os = "macos")]
+        let command = {
+            let mut command = command;
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let bin_dir = resource_dir.join("bin");
                 let mut lib_path = bin_dir.to_string_lossy().to_string();
                 if let Ok(cwd) = std::env::current_dir() {
                     let dev_bin = cwd.join("backend/bin");
@@ -186,7 +187,8 @@ pub async fn direct_media_transcribe_audio(
                 }
                 command = command.env("DYLD_LIBRARY_PATH", lib_path);
             }
-        }
+            command
+        };
 
         let output = command
             .args([

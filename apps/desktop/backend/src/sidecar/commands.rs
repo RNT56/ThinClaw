@@ -15,6 +15,7 @@ use super::types::{ChatServerConfig, ChatServerOptions, SidecarEvent, SidecarSta
 #[tauri::command]
 #[specta::specta]
 #[allow(unused_variables)] // params are intentionally unused in MLX/vLLM builds that return early
+#[allow(clippy::too_many_arguments)] // Flat Tauri command ABI for generated bindings.
 pub async fn direct_runtime_start_chat_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,

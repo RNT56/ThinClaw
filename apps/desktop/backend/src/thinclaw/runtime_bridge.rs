@@ -315,7 +315,7 @@ impl ThinClawRuntimeState {
                              USER.md) is already loaded in your system prompt — \
                              you know who you are. Greet your user warmly in your \
                              established voice. Read your daily log and MEMORY.md \
-                             for session context ​and mention anything time-sensitive. \
+                             for session context and mention anything time-sensitive. \
                              Keep it brief. Reply NO_REPLY only if the user is \
                              already mid-conversation.",
                         )

@@ -20,6 +20,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  RELEASE_REF: ${{ inputs.tag || github.ref }}
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -46,6 +47,12 @@ on:
   push:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish
+        required: true
+        type: string
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
@@ -53,9 +60,9 @@ jobs:
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
-      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
-      publishing: ${{ !github.event.pull_request }}
+      tag: ${{ inputs.tag || github.ref_name }}
+      tag-flag: ${{ format('--tag={0}', inputs.tag || github.ref_name) }}
+      publishing: true
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -63,6 +70,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -80,7 +88,7 @@ jobs:
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
         run: |
-          dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          dist host --steps=create --tag=${{ inputs.tag || github.ref_name }} --output-format=json > plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -100,6 +108,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -145,6 +154,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
@@ -241,6 +251,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Install cached dist
         uses: actions/download-artifact@v8
         with:
@@ -286,6 +297,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Install Rust toolchain + wasm target
         run: |
           rustup target add wasm32-wasip2
@@ -411,6 +423,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Set lowercase image ref
         id: image
         shell: bash
@@ -473,6 +486,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Set lowercase image ref
         id: image
         shell: bash
@@ -594,6 +608,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Install cached dist
         uses: actions/download-artifact@v8
         with:
@@ -708,6 +723,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -806,6 +822,8 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - name: Fetch WASM checksums
         uses: actions/download-artifact@v8
         with:
@@ -881,3 +899,4 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ env.RELEASE_REF }}

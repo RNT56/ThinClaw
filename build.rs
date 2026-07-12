@@ -49,7 +49,12 @@ fn build_all_wasm_extensions(root: &Path) {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let bundles_dir = out_dir.join("wasm_bundles");
+    // Nested Cargo builds must stay inside the parent build's output tree.
+    // Writing `<extension>/target` pollutes package sources, breaks repository
+    // hygiene checks, and makes test results depend on execution order.
+    let wasm_target_dir = out_dir.join("wasm_target");
     fs::create_dir_all(&bundles_dir).unwrap();
+    fs::create_dir_all(&wasm_target_dir).unwrap();
 
     // Rerun if any extension source changes
     println!("cargo:rerun-if-changed=tools-src");
@@ -131,6 +136,7 @@ fn build_all_wasm_extensions(root: &Path) {
                     "--manifest-path",
                     abs_source_dir.join("Cargo.toml").to_str().unwrap(),
                 ])
+                .env("CARGO_TARGET_DIR", &wasm_target_dir)
                 .current_dir(root)
                 .status()
                 .map(|s| s.success())
@@ -148,8 +154,7 @@ fn build_all_wasm_extensions(root: &Path) {
             let snake_crate = crate_name.replace('-', "_");
             let mut wasm_src = None;
             for triple in &["wasm32-wasip2", "wasm32-wasip1", "wasm32-wasi"] {
-                let candidate = abs_source_dir
-                    .join("target")
+                let candidate = wasm_target_dir
                     .join(triple)
                     .join("release")
                     .join(format!("{}.wasm", snake_crate));
