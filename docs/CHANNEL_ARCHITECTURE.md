@@ -194,7 +194,8 @@ pattern:
   using the default no-op persist their settings but require a channel restart to take effect.
 - **Operator surfaces** (e.g. the ThinClaw Desktop Channel Config panel) render the schema as a
   form and submit values; the desktop `thinclaw_channel_config_submit` command persists each
-  field via settings and forwards to the live channel (embedded-only, LocalOnly-gated).
+  field via settings and forwards it to the live channel. Embedded mode invokes the manager
+  directly; remote mode uses the authenticated gateway config-schema and config-update routes.
 
 ### Channel maturity (`production_status`)
 
@@ -211,13 +212,10 @@ The full (non-shim) packages back their `production` status with native inbound
 auth verified host-side by `WasmChannelRouter`: WhatsApp (`X-Hub-Signature-256`
 HMAC), Discord interactions (Ed25519), and Slack (`slack_v0_signature` — a
 `v0=<hex>` HMAC-SHA256 over `v0:{X-Slack-Request-Timestamp}:{body}` with a
-five-minute replay window). Telegram is a known exception: its webhook secret is
-host-injected at runtime and delivered in the platform's
-`X-Telegram-Bot-Api-Secret-Token` header, but the shipped manifest declares no
-webhook section, so the host cannot yet validate it and an operator who runs
-Telegram without a webhook secret accepts unauthenticated updates. Closing this
-requires coordinating the manifest's declared secret name with the host's
-injected secret and rebuilding the package artifact.
+five-minute replay window). Telegram declares and auto-generates its webhook
+secret, which the host validates against `X-Telegram-Bot-Api-Secret-Token`.
+When no secret is available, runtime configuration refuses public webhook mode
+and keeps Telegram on polling; the guest also rejects any unvalidated HTTP request.
 
 ## Outbound Generated Media
 
@@ -284,7 +282,7 @@ Gateway status and the WebUI setup surfaces expose actionable setup readiness
 for these native surfaces. Missing fields are reported using the provider
 environment variable names:
 
-- Matrix: `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN`, `MATRIX_WEBHOOK_SECRET` (optional; authenticates inbound `/webhook/native/matrix`)
+- Matrix: `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN`, `MATRIX_WEBHOOK_SECRET` (required; authenticates inbound `/webhook/native/matrix`)
 - Voice-call: `VOICE_CALL_RESPONSE_URL`, `VOICE_CALL_WEBHOOK_SECRET`
 - APNs: `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_BUNDLE_ID`, `APNS_PRIVATE_KEY` or `APNS_PRIVATE_KEY_PATH`, `APNS_REGISTRATION_SECRET`
 - Browser push: `BROWSER_PUSH_VAPID_PUBLIC_KEY`, `BROWSER_PUSH_VAPID_PRIVATE_KEY` or `BROWSER_PUSH_VAPID_PRIVATE_KEY_PATH`, `BROWSER_PUSH_VAPID_SUBJECT`, `BROWSER_PUSH_WEBHOOK_SECRET`
@@ -318,14 +316,15 @@ shared webhook server:
 
 - `POST /webhook/native/matrix`: accepts a Matrix room event, an `events` array,
   or a `/sync`-style joined-room timeline response and emits Matrix messages
-  through the shared `IncomingEvent` path. When `MATRIX_WEBHOOK_SECRET` is set it
-  requires a matching `X-ThinClaw-Matrix-Secret` header; leaving it unset accepts
-  events unauthenticated, so set it before exposing the webhook server publicly.
+  through the shared `IncomingEvent` path. The runtime requires
+  `MATRIX_WEBHOOK_SECRET` before registering this channel and requires a matching
+  `X-ThinClaw-Matrix-Secret` header on every request.
 - `POST /webhook/native/voice-call`: accepts call transcript payloads and
-  requires `X-ThinClaw-Voice-Secret` when `VOICE_CALL_WEBHOOK_SECRET` is set.
+  requires `VOICE_CALL_WEBHOOK_SECRET` at registration and a matching
+  `X-ThinClaw-Voice-Secret` header on every request.
 - `POST /webhook/native/browser-push`: accepts notification action/wake payloads
-  and requires `X-ThinClaw-Browser-Push-Secret` when
-  `BROWSER_PUSH_WEBHOOK_SECRET` is set.
+  requires `BROWSER_PUSH_WEBHOOK_SECRET` at registration and a matching
+  `X-ThinClaw-Browser-Push-Secret` header on every request.
 - `POST /webhook/native/apns/register` and
   `DELETE /webhook/native/apns/register`: register or remove APNs device tokens
   for a ThinClaw user. These always require

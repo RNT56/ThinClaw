@@ -120,12 +120,6 @@ async fn register_native_lifecycle_channels(
                 let channel = NativeLifecycleChannel::matrix(client);
                 webhook_config.matrix = Some(channel.ingress());
                 webhook_config.matrix_secret = env_value("MATRIX_WEBHOOK_SECRET");
-                if webhook_config.matrix_secret.is_none() {
-                    tracing::warn!(
-                        "Matrix webhook ingress (/webhook/native/matrix) has no MATRIX_WEBHOOK_SECRET set; \
-                         inbound events are unauthenticated — set it before exposing the webhook server"
-                    );
-                }
                 channels.add(Box::new(channel)).await;
                 channel_names.push("matrix".to_string());
                 tracing::info!("Matrix native lifecycle channel enabled");
@@ -173,26 +167,32 @@ async fn register_native_lifecycle_channels(
     if config.channels.apns_enabled {
         match apns_native_config_from_env() {
             Ok(Some(apns_config)) => {
-                match native_endpoint_registry_from_env("apns", "APNS_ENDPOINT_REGISTRY_PATH").await
-                {
-                    Ok(registry) => {
-                        webhook_config.apns_registry = Some(registry.clone());
-                        webhook_config.apns_registration_secret =
-                            env_value("APNS_REGISTRATION_SECRET");
-                        let client = Arc::new(ApnsNativeClient::with_registry(
-                            apns_config,
-                            Arc::clone(&http),
-                            registry,
-                        ));
-                        channels
-                            .add(Box::new(NativeLifecycleChannel::apns(client)))
-                            .await;
-                        channel_names.push("apns".to_string());
-                        tracing::info!("APNs native lifecycle channel enabled");
+                if let Some(registration_secret) = env_value("APNS_REGISTRATION_SECRET") {
+                    match native_endpoint_registry_from_env("apns", "APNS_ENDPOINT_REGISTRY_PATH")
+                        .await
+                    {
+                        Ok(registry) => {
+                            webhook_config.apns_registry = Some(registry.clone());
+                            webhook_config.apns_registration_secret = Some(registration_secret);
+                            let client = Arc::new(ApnsNativeClient::with_registry(
+                                apns_config,
+                                Arc::clone(&http),
+                                registry,
+                            ));
+                            channels
+                                .add(Box::new(NativeLifecycleChannel::apns(client)))
+                                .await;
+                            channel_names.push("apns".to_string());
+                            tracing::info!("APNs native lifecycle channel enabled");
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "APNs native lifecycle endpoint registry is invalid")
+                        }
                     }
-                    Err(error) => {
-                        tracing::warn!(error = %error, "APNs native lifecycle endpoint registry is invalid")
-                    }
+                } else {
+                    tracing::warn!(
+                        "APNs native lifecycle is enabled but APNS_REGISTRATION_SECRET is missing; refusing to expose an unusable registration endpoint"
+                    );
                 }
             }
             Ok(None) => {
@@ -214,31 +214,36 @@ async fn register_native_lifecycle_channels(
         } else {
             match browser_push_native_config_from_env() {
                 Ok(Some(push_config)) => {
-                    match native_endpoint_registry_from_env(
-                        "browser-push",
-                        "BROWSER_PUSH_ENDPOINT_REGISTRY_PATH",
-                    )
-                    .await
-                    {
-                        Ok(registry) => {
-                            let client = Arc::new(BrowserPushNativeClient::with_registry(
-                                push_config,
-                                Arc::clone(&http),
-                                registry.clone(),
-                            ));
-                            let channel = NativeLifecycleChannel::browser_push(client);
-                            webhook_config.browser_push = Some(channel.ingress());
-                            webhook_config.browser_push_registry = Some(registry);
-                            webhook_config.browser_push_secret =
-                                env_value("BROWSER_PUSH_WEBHOOK_SECRET");
-                            channels.add(Box::new(channel)).await;
-                            channel_names.push("browser-push".to_string());
-                            tracing::info!("Browser-push native lifecycle channel enabled");
-                        }
-                        Err(error) => {
-                            tracing::warn!(error = %error, "Browser-push native lifecycle endpoint registry is invalid")
-                        }
-                    };
+                    if let Some(webhook_secret) = env_value("BROWSER_PUSH_WEBHOOK_SECRET") {
+                        match native_endpoint_registry_from_env(
+                            "browser-push",
+                            "BROWSER_PUSH_ENDPOINT_REGISTRY_PATH",
+                        )
+                        .await
+                        {
+                            Ok(registry) => {
+                                let client = Arc::new(BrowserPushNativeClient::with_registry(
+                                    push_config,
+                                    Arc::clone(&http),
+                                    registry.clone(),
+                                ));
+                                let channel = NativeLifecycleChannel::browser_push(client);
+                                webhook_config.browser_push = Some(channel.ingress());
+                                webhook_config.browser_push_registry = Some(registry);
+                                webhook_config.browser_push_secret = Some(webhook_secret);
+                                channels.add(Box::new(channel)).await;
+                                channel_names.push("browser-push".to_string());
+                                tracing::info!("Browser-push native lifecycle channel enabled");
+                            }
+                            Err(error) => {
+                                tracing::warn!(error = %error, "Browser-push native lifecycle endpoint registry is invalid")
+                            }
+                        };
+                    } else {
+                        tracing::warn!(
+                            "Browser-push native lifecycle is enabled but BROWSER_PUSH_WEBHOOK_SECRET is missing; refusing to expose unauthenticated ingress"
+                        );
+                    }
                 }
                 Ok(None) => {
                     tracing::warn!(
@@ -271,6 +276,11 @@ fn matrix_native_config_from_env() -> Result<Option<MatrixNativeConfig>, String>
     let Some(access_token) = env_value("MATRIX_ACCESS_TOKEN") else {
         return Ok(None);
     };
+    if env_value("MATRIX_WEBHOOK_SECRET").is_none() {
+        return Err(
+            "MATRIX_WEBHOOK_SECRET is required to authenticate Matrix webhook ingress".to_string(),
+        );
+    }
     Ok(Some(MatrixNativeConfig {
         homeserver,
         access_token,
@@ -281,9 +291,12 @@ fn voice_call_native_config_from_env() -> Result<Option<VoiceCallNativeConfig>, 
     let Some(response_url) = env_value("VOICE_CALL_RESPONSE_URL") else {
         return Ok(None);
     };
+    let webhook_secret = env_value("VOICE_CALL_WEBHOOK_SECRET").ok_or_else(|| {
+        "VOICE_CALL_WEBHOOK_SECRET is required to authenticate voice-call ingress".to_string()
+    })?;
     Ok(Some(VoiceCallNativeConfig {
         response_url,
-        webhook_secret: env_value("VOICE_CALL_WEBHOOK_SECRET"),
+        webhook_secret: Some(webhook_secret),
     }))
 }
 

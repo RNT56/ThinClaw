@@ -1425,6 +1425,17 @@ pub async fn start_server(
             "/api/providers/{slug}/key",
             axum::routing::delete(providers_delete_key_handler),
         )
+        // Live channel configuration. These routes intentionally operate on
+        // the runtime-owned ChannelManager so remote Desktop clients configure
+        // the channels that actually deliver messages.
+        .route(
+            "/api/channels/config-schemas",
+            get(channel_config_schemas_handler),
+        )
+        .route(
+            "/api/channels/{channel_id}/config",
+            get(channel_config_schema_handler).put(channel_config_submit_handler),
+        )
         // Device identity (milestone B1). Admin-only (non-device principal):
         // pairing administration and device management. `required_scope`
         // returns `None` for all of these routes, so a device-authenticated
