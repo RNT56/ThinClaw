@@ -62,6 +62,9 @@ def main() -> int:
         f"googleapis/release-please-action@{ACTION_SHA}",
         "config-file: release-please-config.json",
         "manifest-file: .release-please-manifest.json",
+        "if: steps.release.outputs.prs_created == 'true'",
+        "RELEASE_PR: ${{ steps.release.outputs.pr }}",
+        "gh workflow run ci.yml",
         "gh workflow run release.yml",
         "RELEASE_TAG: ${{ steps.release.outputs.tag_name }}",
     ]
@@ -69,7 +72,10 @@ def main() -> int:
     if missing:
         raise SystemExit("release workflow is missing: " + ", ".join(missing))
 
-    print(f"Release automation: root thinclaw v{version}, immutable action, artifact dispatch")
+    print(
+        f"Release automation: root thinclaw v{version}, immutable action, "
+        "protected CI and artifact dispatch"
+    )
     return 0
 
 

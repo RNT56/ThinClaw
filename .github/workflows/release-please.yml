@@ -27,7 +27,21 @@ jobs:
           manifest-file: .release-please-manifest.json
 
       # Events created by GITHUB_TOKEN do not recursively start other
-      # workflows, so dispatch the existing artifact pipeline explicitly.
+      # workflows. Dispatch protected CI explicitly so the generated release
+      # PR remains mergeable without requiring a separate PAT.
+      - name: Trigger protected CI for the release PR
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          set -euo pipefail
+          branch="$(jq -r '.headBranchName // empty' <<<"$RELEASE_PR")"
+          test -n "$branch"
+          gh workflow run ci.yml --ref "$branch"
+
+      # A newly-created release event is suppressed for the same reason, so
+      # dispatch the existing artifact pipeline explicitly.
       - name: Trigger artifact builds for the released tag
         if: steps.release.outputs.release_created == 'true'
         env:
