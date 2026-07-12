@@ -249,6 +249,9 @@ pub struct ChannelManager {
     inject_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
     /// Per-channel message counters (received/sent/errors).
     counters: Arc<RwLock<HashMap<String, Arc<ChannelCounters>>>>,
+    /// Actual runtime lifecycle state. Registration alone does not imply that a
+    /// transport started successfully or remains healthy.
+    runtime_states: Arc<RwLock<HashMap<String, ChannelViewState>>>,
     /// Time when the manager was created (for uptime calculation).
     started_at: Instant,
     /// Optional gateway adapter for channel status change events.
@@ -267,6 +270,7 @@ impl ChannelManager {
             inject_tx,
             inject_rx: tokio::sync::Mutex::new(Some(inject_rx)),
             counters: Arc::new(RwLock::new(HashMap::new())),
+            runtime_states: Arc::new(RwLock::new(HashMap::new())),
             started_at: Instant::now(),
             status_sink: RwLock::new(None),
             stream_forwarders: RwLock::new(HashMap::new()),
@@ -340,6 +344,31 @@ impl ChannelManager {
         if let Ok(mut guard) = counter.last_error_at.write() {
             *guard = None;
         }
+    }
+
+    async fn mark_connecting(&self, name: &str, attempt: u32) {
+        self.runtime_states
+            .write()
+            .await
+            .insert(name.to_string(), ChannelViewState::Connecting { attempt });
+    }
+
+    async fn mark_running(&self, name: &str) {
+        self.runtime_states.write().await.insert(
+            name.to_string(),
+            ChannelViewState::Running { uptime_secs: 0 },
+        );
+    }
+
+    async fn mark_failed(&self, name: &str, error: &ChannelError) {
+        let failed_at = Utc::now().to_rfc3339();
+        self.runtime_states.write().await.insert(
+            name.to_string(),
+            ChannelViewState::Failed {
+                error: error.to_string(),
+                failed_at,
+            },
+        );
     }
 
     fn resolve_channel_name<'a>(
@@ -433,6 +462,7 @@ impl ChannelManager {
             .await
             .insert(name.clone(), Arc::from(channel));
         let _ = self.counter_for(&name).await;
+        self.mark_connecting(&name, 0).await;
         tracing::debug!("Added channel: {}", name);
     }
 
@@ -464,6 +494,7 @@ impl ChannelManager {
             .await
             .insert(name.clone(), Arc::clone(&channel));
         let _ = self.counter_for(&name).await;
+        self.mark_running(&name).await;
 
         self.drain_stream_forwarder(&name).await;
         self.spawn_stream_forwarder(name.clone(), stream, "hot-added")
@@ -494,6 +525,7 @@ impl ChannelManager {
 
             // Clean up counters
             self.counters.write().await.remove(name);
+            self.runtime_states.write().await.remove(name);
 
             self.emit_channel_status_change(
                 name.to_string(),
@@ -525,10 +557,22 @@ impl ChannelManager {
         for (name, channel) in channels {
             match channel.start().await {
                 Ok(stream) => {
+                    let counter = self.counter_for(&name).await;
+                    Self::clear_channel_error(counter.as_ref());
+                    self.mark_running(&name).await;
                     tracing::info!("Started channel: {}", name);
                     streams.push(stream);
                 }
                 Err(e) => {
+                    let counter = self.counter_for(&name).await;
+                    Self::record_channel_error(counter.as_ref(), &e);
+                    self.mark_failed(&name, &e).await;
+                    self.emit_channel_status_change(
+                        name.clone(),
+                        "failed",
+                        Some(format!("Channel '{}' failed to start: {}", name, e)),
+                    )
+                    .await;
                     tracing::error!("Failed to start channel {}: {}", name, e);
                     // Continue with other channels, don't fail completely
                 }
@@ -591,8 +635,10 @@ impl ChannelManager {
         if result.is_ok() {
             counter.sent.fetch_add(1, Ordering::Relaxed);
             Self::clear_channel_error(counter.as_ref());
+            self.mark_running(&resolved_channel_name).await;
         } else if let Err(ref err) = result {
             Self::record_channel_error(counter.as_ref(), err);
+            self.mark_failed(&resolved_channel_name, err).await;
         }
         result
     }
@@ -639,8 +685,11 @@ impl ChannelManager {
         let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
             counter.sent.fetch_add(1, Ordering::Relaxed);
+            Self::clear_channel_error(counter.as_ref());
+            self.mark_running(&resolved_channel_name).await;
         } else if let Err(ref err) = result {
             Self::record_channel_error(counter.as_ref(), err);
+            self.mark_failed(&resolved_channel_name, err).await;
         }
         result
     }
@@ -664,8 +713,11 @@ impl ChannelManager {
             let counter = self.counter_for(&name).await;
             if result.is_ok() {
                 counter.sent.fetch_add(1, Ordering::Relaxed);
+                Self::clear_channel_error(counter.as_ref());
+                self.mark_running(&name).await;
             } else if let Err(ref err) = result {
                 Self::record_channel_error(counter.as_ref(), err);
+                self.mark_failed(&name, err).await;
             }
             results.push((name.clone(), result));
         }
@@ -682,7 +734,19 @@ impl ChannelManager {
         let mut results = HashMap::new();
 
         for (name, channel) in channels {
-            results.insert(name, channel.health_check().await);
+            let result = channel.health_check().await;
+            let counter = self.counter_for(&name).await;
+            match &result {
+                Ok(()) => {
+                    Self::clear_channel_error(counter.as_ref());
+                    self.mark_running(&name).await;
+                }
+                Err(error) => {
+                    Self::record_channel_error(counter.as_ref(), error);
+                    self.mark_failed(&name, error).await;
+                }
+            }
+            results.insert(name, result);
         }
 
         results
@@ -695,9 +759,17 @@ impl ChannelManager {
             guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
         for (name, channel) in channels {
+            self.runtime_states
+                .write()
+                .await
+                .insert(name.clone(), ChannelViewState::Draining);
             if let Err(e) = channel.shutdown().await {
                 tracing::error!("Error shutting down channel {}: {}", name, e);
             }
+            self.runtime_states
+                .write()
+                .await
+                .insert(name, ChannelViewState::Disabled);
         }
         self.drain_all_stream_forwarders().await;
         Ok(())
@@ -748,12 +820,14 @@ impl ChannelManager {
 
     /// Return live `ChannelStatusEntry` list for `openclaw_channel_status_list`.
     ///
-    /// Combines channel names with real atomic counters and uptime.
-    /// State is derived: channels that exist and have been started are "Running".
+    /// Combines channel names with real atomic counters, uptime, and the last
+    /// observed lifecycle state. Merely registering a channel is not reported
+    /// as running before startup succeeds.
     pub async fn status_entries(&self) -> Vec<ChannelStatusEntry> {
         let uptime_secs = self.started_at.elapsed().as_secs();
         let names = self.channel_names().await;
         let counters_guard = self.counters.read().await;
+        let runtime_states = self.runtime_states.read().await;
         let descriptors = self.channel_descriptors().await;
         let mut entries = Vec::with_capacity(names.len() + descriptors.len());
         for name in &names {
@@ -780,12 +854,18 @@ impl ChannelManager {
                 } else {
                     (None, None, None)
                 };
-            let state = if let (Some(error), Some(failed_at)) =
-                (last_error.clone(), last_error_at.clone())
-            {
-                ChannelViewState::Failed { error, failed_at }
-            } else {
-                ChannelViewState::Running { uptime_secs }
+            let state = match runtime_states.get(name).cloned() {
+                Some(ChannelViewState::Running { .. }) => ChannelViewState::Running { uptime_secs },
+                Some(state) => state,
+                None => {
+                    if let (Some(error), Some(failed_at)) =
+                        (last_error.clone(), last_error_at.clone())
+                    {
+                        ChannelViewState::Failed { error, failed_at }
+                    } else {
+                        ChannelViewState::Connecting { attempt: 0 }
+                    }
+                }
             };
 
             entries.push(ChannelStatusEntry {
@@ -938,6 +1018,14 @@ impl ChannelManager {
             });
         };
 
+        self.runtime_states.write().await.insert(
+            name.to_string(),
+            ChannelViewState::Reconnecting {
+                attempt: 1,
+                next_retry_secs: 0,
+            },
+        );
+
         // Shutdown the old transport (best-effort). The read guard is already
         // dropped, so a slow shutdown/start here never blocks other channels.
         if let Err(e) = channel.shutdown().await {
@@ -949,10 +1037,22 @@ impl ChannelManager {
         }
 
         // Re-start to get a fresh stream.
-        let stream = channel.start().await.map_err(|e| {
-            tracing::error!(channel = %name, error = %e, "Failed to restart channel");
-            e
-        })?;
+        let stream = match channel.start().await {
+            Ok(stream) => stream,
+            Err(error) => {
+                let counter = self.counter_for(name).await;
+                Self::record_channel_error(counter.as_ref(), &error);
+                self.mark_failed(name, &error).await;
+                self.emit_channel_status_change(
+                    name.to_string(),
+                    "failed",
+                    Some(format!("Channel '{}' failed to restart: {}", name, error)),
+                )
+                .await;
+                tracing::error!(channel = %name, error = %error, "Failed to restart channel");
+                return Err(error);
+            }
+        };
 
         self.drain_stream_forwarder(name).await;
         self.spawn_stream_forwarder(name.to_string(), stream, "restarted")
@@ -965,8 +1065,10 @@ impl ChannelManager {
         )
         .await;
 
-        // Reset error counter on successful restart.
-        self.counters.write().await.remove(name);
+        // Reset error state on successful restart.
+        let counter = self.counter_for(name).await;
+        Self::clear_channel_error(counter.as_ref());
+        self.mark_running(name).await;
 
         tracing::info!(channel = %name, "Channel restarted successfully");
         Ok(())
@@ -1138,6 +1240,10 @@ mod tests {
         state: Arc<ForwardingChannelState>,
     }
 
+    struct FailingStartChannel {
+        name: String,
+    }
+
     impl MockChannel {
         fn new(name: &str, state: Arc<MockChannelState>) -> Self {
             Self {
@@ -1226,6 +1332,34 @@ mod tests {
 
         async fn health_check(&self) -> Result<(), ChannelError> {
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Channel for FailingStartChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            Err(ChannelError::StartupFailed {
+                name: self.name.clone(),
+                reason: "intentional startup failure".to_string(),
+            })
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Err(ChannelError::HealthCheckFailed {
+                name: self.name.clone(),
+            })
         }
     }
 
@@ -1346,6 +1480,67 @@ mod tests {
             Some("gateway")
         );
         assert_eq!(*state.diagnostics_calls.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn startup_failure_is_reported_as_failed_not_running() {
+        let manager = ChannelManager::new();
+        manager
+            .add(Box::new(MockChannel::new(
+                "healthy",
+                Arc::new(MockChannelState::default()),
+            )))
+            .await;
+        manager
+            .add(Box::new(FailingStartChannel {
+                name: "broken".to_string(),
+            }))
+            .await;
+
+        let _stream = manager
+            .start_all()
+            .await
+            .expect("one healthy channel should keep the runtime available");
+        let entries = manager.status_entries().await;
+        let broken = entries
+            .iter()
+            .find(|entry| entry.name == "broken")
+            .expect("failed channel remains visible for diagnostics");
+
+        assert!(matches!(broken.state, ChannelViewState::Failed { .. }));
+        assert_eq!(broken.errors, 1);
+        assert!(
+            broken
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("intentional startup failure"))
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_add_emits_status_through_gateway_neutral_sink() {
+        let manager = ChannelManager::new();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        manager
+            .set_status_change_sink(move |event| {
+                let _ = event_tx.send(event);
+            })
+            .await;
+
+        manager
+            .hot_add(Box::new(MockChannel::new(
+                "dynamic",
+                Arc::new(MockChannelState::default()),
+            )))
+            .await
+            .expect("hot add succeeds");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("status event should arrive")
+            .expect("status sink remains open");
+        assert_eq!(event.channel, "dynamic");
+        assert_eq!(event.status, "online");
     }
 
     #[tokio::test]

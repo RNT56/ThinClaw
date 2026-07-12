@@ -20,6 +20,16 @@ const WAVE6_CHANNELS: &[&str] = &[
     "twitch",
 ];
 
+const PRODUCTION_WASM_CHANNELS: &[&str] = &[
+    "telegram",
+    "slack",
+    "discord",
+    "whatsapp",
+    "line",
+    "twitch",
+    "twilio_sms",
+];
+
 #[test]
 fn wave6_channel_packages_are_in_real_registry_catalog() {
     let catalog = RegistryCatalog::load(
@@ -164,6 +174,44 @@ fn wave6_channel_setup_descriptors_match_auth_summary() {
 }
 
 #[test]
+fn production_channel_registry_auth_matches_capability_setup() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let catalog =
+        RegistryCatalog::load(root.join("registry").as_path()).expect("real registry should load");
+
+    for name in PRODUCTION_WASM_CHANNELS {
+        let manifest = catalog
+            .get(&format!("channels/{name}"))
+            .expect("production channel manifest should exist");
+        let summarized = manifest
+            .auth_summary
+            .as_ref()
+            .expect("production channel should summarize auth")
+            .secrets
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let caps = thinclaw::channels::wasm::ChannelCapabilitiesFile::from_json(
+            &std::fs::read_to_string(
+                root.join("channels-src")
+                    .join(name)
+                    .join(format!("{name}.capabilities.json")),
+            )
+            .expect("capabilities file should be readable"),
+        )
+        .expect("capabilities should parse");
+
+        for secret in &caps.setup.required_secrets {
+            assert!(
+                summarized.contains(secret.name.as_str()),
+                "{name} registry auth summary is missing {}",
+                secret.name
+            );
+        }
+    }
+}
+
+#[test]
 fn provider_channel_response_shapes_cover_nested_api_payloads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
@@ -256,6 +304,26 @@ fn provider_channel_inbound_hardening_is_declared() {
             .pointer("/capabilities/channel/webhook/secret_validation")
             .and_then(Value::as_str),
         Some("slack_v0_signature")
+    );
+
+    let telegram = load_caps(root, "telegram");
+    assert_eq!(
+        telegram
+            .pointer("/capabilities/channel/webhook/secret_header")
+            .and_then(Value::as_str),
+        Some("X-Telegram-Bot-Api-Secret-Token")
+    );
+    assert_eq!(
+        telegram
+            .pointer("/capabilities/channel/webhook/secret_name")
+            .and_then(Value::as_str),
+        Some("telegram_webhook_secret")
+    );
+    assert_eq!(
+        telegram
+            .pointer("/capabilities/channel/webhook/secret_validation")
+            .and_then(Value::as_str),
+        Some("equals")
     );
 
     for name in ["wecom", "weixin", "feishu_lark"] {

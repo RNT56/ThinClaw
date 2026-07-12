@@ -10,6 +10,12 @@
         "name": "telegram_bot_token",
         "prompt": "Enter your Telegram Bot API token (from @BotFather)",
         "optional": false
+      },
+      {
+        "name": "telegram_webhook_secret",
+        "prompt": "Telegram webhook secret token (generated automatically when webhook delivery is configured)",
+        "optional": true,
+        "auto_generate": { "length": 32 }
       }
     ]
   },
@@ -43,6 +49,11 @@
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Telegram-Bot-Api-Secret-Token",
+        "secret_name": "telegram_webhook_secret",
+        "secret_validation": "equals"
       }
     }
   },

@@ -102,7 +102,9 @@ APNs, and browser push. These write the matching settings/env shape
 and show up in channel status. Runtime registration also requires provider
 credentials such as `MATRIX_HOMESERVER`/`MATRIX_ACCESS_TOKEN`, APNs signing
 keys plus `APNS_REGISTRATION_SECRET`, or VAPID keys plus
-`BROWSER_PUSH_WEBHOOK_SECRET`. Voice-call needs a build with `--features voice`;
+`BROWSER_PUSH_WEBHOOK_SECRET`. Matrix additionally requires
+`MATRIX_WEBHOOK_SECRET`, and voice-call requires `VOICE_CALL_WEBHOOK_SECRET`.
+Voice-call needs a build with `--features voice`;
 browser-push needs a build with `--features browser`.
 APNs and browser-push endpoint registrations persist under
 `$THINCLAW_HOME/native-endpoints/` by default, with

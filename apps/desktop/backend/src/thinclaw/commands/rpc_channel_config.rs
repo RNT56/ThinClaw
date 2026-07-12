@@ -1,12 +1,8 @@
-//! Channel configuration-schema commands (read-only).
+//! Channel configuration-schema and live-update commands.
 //!
 //! Surfaces each channel's `Channel::config_schema()` so a UI can render a
-//! configuration form. Embedded-only: a remote gateway exposes its own channels
-//! and has no equivalent schema endpoint, so remote mode returns an
-//! `available: false` notice rather than an error.
-//!
-//! Applying config changes (submit) is intentionally out of scope here — it
-//! needs a per-channel runtime-config contract that does not exist yet.
+//! configuration form. In remote mode these commands proxy to the gateway's
+//! live channel manager, so settings apply to the runtime that owns delivery.
 
 use serde_json::{json, Value};
 use tauri::State;
@@ -20,11 +16,11 @@ pub async fn thinclaw_channel_config_schema(
     ironclaw: State<'_, ThinClawRuntimeState>,
     channel_id: String,
 ) -> Result<Value, String> {
-    if ironclaw.remote_proxy().await.is_some() {
-        return Ok(json!({
-            "available": false,
-            "reason": "Channel configuration schemas are only available for the embedded runtime.",
-        }));
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let channel_id = urlencoding::encode(&channel_id);
+        return proxy
+            .get_json(&format!("/api/channels/{channel_id}/config"))
+            .await;
     }
     let agent = ironclaw.agent().await?;
     let schema = agent.channels().config_schema_for(&channel_id).await;
@@ -37,12 +33,8 @@ pub async fn thinclaw_channel_config_schema(
 pub async fn thinclaw_channel_config_schemas(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Value, String> {
-    if ironclaw.remote_proxy().await.is_some() {
-        return Ok(json!({
-            "available": false,
-            "reason": "Channel configuration schemas are only available for the embedded runtime.",
-            "schemas": [],
-        }));
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.get_json("/api/channels/config-schemas").await;
     }
     let agent = ironclaw.agent().await?;
     let schemas = agent.channels().config_schemas().await;
@@ -55,7 +47,7 @@ pub async fn thinclaw_channel_config_schemas(
 /// values to the live channel's `update_runtime_config`. WASM channels apply the
 /// change live; native channels (Signal, Discord, …) use the default no-op and
 /// persist but require a channel restart to take effect (reported via the note).
-/// Embedded-only (D-3): a remote gateway owns its own channels.
+/// Remote mode forwards to the gateway because that runtime owns its channels.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_channel_config_submit(
@@ -65,13 +57,19 @@ pub async fn thinclaw_channel_config_submit(
 ) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     use crate::thinclaw::bridge::{gated, RouteMode};
 
-    if ironclaw.remote_proxy().await.is_some() {
-        return Err(gated(
-            "channel config submit",
-            "Applying channel configuration is only available for the embedded runtime.",
-            "switch to the local embedded runtime",
-            RouteMode::LocalOnly,
-        ));
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let channel_id = urlencoding::encode(&channel_id);
+        return proxy
+            .put_json(&format!("/api/channels/{channel_id}/config"), &values)
+            .await
+            .map_err(|error| {
+                gated(
+                    "channel config submit",
+                    error,
+                    "verify the remote gateway is current and the channel is active",
+                    RouteMode::LocalAndRemote,
+                )
+            });
     }
 
     let agent = ironclaw.agent().await.map_err(|e| {
@@ -83,7 +81,46 @@ pub async fn thinclaw_channel_config_submit(
         )
     })?;
 
-    let obj = values.as_object().cloned().unwrap_or_default();
+    let obj = values
+        .as_object()
+        .cloned()
+        .ok_or_else(|| crate::thinclaw::bridge::BridgeError::from("channel config must be a JSON object"))?;
+
+    if let Some(schema) = agent.channels().config_schema_for(&channel_id).await {
+        for (field_id, value) in &obj {
+            let field = schema
+                .fields
+                .iter()
+                .find(|field| field.id == *field_id)
+                .ok_or_else(|| {
+                    crate::thinclaw::bridge::BridgeError::from(format!(
+                        "unknown channel config field: {field_id}"
+                    ))
+                })?;
+            let required_value_missing = field.required
+                && (value.is_null()
+                    || value
+                        .as_str()
+                        .is_some_and(|value| value.trim().is_empty()));
+            let value_valid = (!field.required && value.is_null())
+                || match field.field_type.as_str() {
+                    "text" | "password" | "textarea" => value.is_string(),
+                    "number" => value.is_number(),
+                    "checkbox" => value.is_boolean(),
+                    "select" => value.as_str().is_some_and(|value| {
+                        field.options.as_ref().is_some_and(|options| {
+                            options.iter().any(|option| option.value == value)
+                        })
+                    }),
+                    _ => false,
+                };
+            if required_value_missing || !value_valid {
+                return Err(crate::thinclaw::bridge::BridgeError::from(format!(
+                    "invalid value for channel config field: {field_id}"
+                )));
+            }
+        }
+    }
 
     // Persist each submitted field under channels.{channel_id}_{field}.
     let mut persisted = false;

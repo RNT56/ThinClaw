@@ -779,6 +779,106 @@ fn test_gateway_state(
     }
 }
 
+struct ConfigurableTestChannel {
+    updates: Arc<tokio::sync::Mutex<Option<std::collections::HashMap<String, serde_json::Value>>>>,
+}
+
+#[async_trait]
+impl crate::channels::Channel for ConfigurableTestChannel {
+    fn name(&self) -> &str {
+        "configurable-test"
+    }
+
+    async fn start(&self) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn respond(
+        &self,
+        _msg: &crate::channels::IncomingMessage,
+        _response: crate::channels::OutgoingResponse,
+    ) -> Result<(), crate::error::ChannelError> {
+        Ok(())
+    }
+
+    fn config_schema(&self) -> Option<thinclaw_channels::ConfigSchema> {
+        Some(thinclaw_channels::ConfigSchema {
+            channel_id: self.name().to_string(),
+            channel_name: "Configurable test".to_string(),
+            fields: vec![thinclaw_channels::ConfigField {
+                id: "mode".to_string(),
+                label: "Mode".to_string(),
+                field_type: "text".to_string(),
+                required: true,
+                help_text: None,
+                default_value: None,
+                options: None,
+            }],
+            help: None,
+        })
+    }
+
+    async fn update_runtime_config(
+        &self,
+        updates: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        *self.updates.lock().await = Some(updates);
+    }
+
+    async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates() {
+    let updates = Arc::new(tokio::sync::Mutex::new(None));
+    let manager = Arc::new(crate::channels::ChannelManager::new());
+    manager
+        .add(Box::new(ConfigurableTestChannel {
+            updates: Arc::clone(&updates),
+        }))
+        .await;
+
+    let mut state = test_gateway_state("gateway-user", "gateway-user", None);
+    state.channel_manager = Some(manager);
+    let state = Arc::new(state);
+
+    let axum::Json(schemas) =
+        channel_config_schemas_handler(axum::extract::State(Arc::clone(&state)))
+            .await
+            .expect("schema catalog is available");
+    assert_eq!(schemas["available"], true);
+    assert_eq!(schemas["schemas"][0]["channel_id"], "configurable-test");
+
+    let identity = GatewayRequestIdentity::new(
+        "gateway-user",
+        "gateway-user",
+        GatewayAuthSource::BearerHeader,
+        false,
+    );
+    let axum::Json(result) = channel_config_submit_handler(
+        axum::extract::State(state),
+        identity,
+        axum::extract::Path("configurable-test".to_string()),
+        axum::Json(serde_json::json!({"mode": "fast"})),
+    )
+    .await
+    .expect("live config update succeeds");
+
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["persisted"], false);
+    assert_eq!(result["forwarded"], true);
+    assert_eq!(
+        updates
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|values| values.get("mode")),
+        Some(&serde_json::json!("fast"))
+    );
+}
+
 #[tokio::test]
 async fn test_request_user_id_prefers_non_empty_request_value() {
     let state = test_gateway_state("gateway-default", "gateway-actor", None);

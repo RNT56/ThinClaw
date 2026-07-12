@@ -859,8 +859,10 @@ impl Guest for TelegramChannel {
                 channel_host::LogLevel::Warn,
                 "Webhook request with invalid or missing secret token",
             );
-            // Return 401 but Telegram will keep retrying, so this is just for logging
-            // In practice, the host should reject these before they reach us
+            return json_response(
+                401,
+                serde_json::json!({"error": "Invalid or missing webhook secret token"}),
+            );
         }
 
         // Parse the request body as UTF-8
