@@ -112,16 +112,17 @@ impl SidecarManager {
         }
         let cache_path_str = cache_dir.to_string_lossy().to_string();
 
-        let mut command = app
+        let command = app
             .shell()
             .sidecar("llama-server")
             .map_err(|e| anyhow!("Failed to create sidecar command: {}", e))?;
 
         // Resolve bin dir for libraries (DYLD_LIBRARY_PATH on macOS)
-        if let Ok(resource_dir) = app.path().resource_dir() {
-            let bin_dir = resource_dir.join("bin");
-            #[cfg(target_os = "macos")]
-            {
+        #[cfg(target_os = "macos")]
+        let command = {
+            let mut command = command;
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let bin_dir = resource_dir.join("bin");
                 let mut lib_path = bin_dir.to_string_lossy().to_string();
 
                 // Fallback for dev mode
@@ -135,7 +136,8 @@ impl SidecarManager {
                 println!("[sidecar-chat] Setting DYLD_LIBRARY_PATH: {}", lib_path);
                 command = command.env("DYLD_LIBRARY_PATH", lib_path);
             }
-        }
+            command
+        };
 
         let mut args = vec![
             "--model".to_string(),
@@ -384,16 +386,17 @@ impl SidecarManager {
 
         let (port, token) = Self::generate_config(Some(53756));
 
-        let mut command = app
+        let command = app
             .shell()
             .sidecar("llama-server")
             .map_err(|e| anyhow!("Failed to create sidecar command: {}", e))?;
 
         // Resolve bin dir for libraries (DYLD_LIBRARY_PATH on macOS)
-        if let Ok(resource_dir) = app.path().resource_dir() {
-            let bin_dir = resource_dir.join("bin");
-            #[cfg(target_os = "macos")]
-            {
+        #[cfg(target_os = "macos")]
+        let command = {
+            let mut command = command;
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let bin_dir = resource_dir.join("bin");
                 let mut lib_path = bin_dir.to_string_lossy().to_string();
 
                 // Fallback for dev mode
@@ -407,7 +410,8 @@ impl SidecarManager {
                 println!("[sidecar-embed] Setting DYLD_LIBRARY_PATH: {}", lib_path);
                 command = command.env("DYLD_LIBRARY_PATH", lib_path);
             }
-        }
+            command
+        };
 
         let mut args = vec![
             "--model".to_string(),
@@ -895,16 +899,17 @@ impl SidecarManager {
 
         let (port, token) = Self::generate_config(Some(53757));
 
-        let mut command = app
+        let command = app
             .shell()
             .sidecar("whisper-server")
             .map_err(|e| anyhow!("Failed to create sidecar command: {}", e))?;
 
         // Resolve bin dir for libraries (DYLD_LIBRARY_PATH on macOS)
-        if let Ok(resource_dir) = app.path().resource_dir() {
-            let bin_dir = resource_dir.join("bin");
-            #[cfg(target_os = "macos")]
-            {
+        #[cfg(target_os = "macos")]
+        let command = {
+            let mut command = command;
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let bin_dir = resource_dir.join("bin");
                 let mut lib_path = bin_dir.to_string_lossy().to_string();
 
                 // Fallback for dev mode
@@ -918,7 +923,8 @@ impl SidecarManager {
                 println!("[sidecar-stt] Setting DYLD_LIBRARY_PATH: {}", lib_path);
                 command = command.env("DYLD_LIBRARY_PATH", lib_path);
             }
-        }
+            command
+        };
 
         let args = vec![
             "-m".to_string(),

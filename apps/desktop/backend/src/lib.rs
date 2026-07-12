@@ -37,7 +37,7 @@ fn toggle_spotlight(app: tauri::AppHandle) {
             let _ = window.show();
         }
     } else {
-        let mut win_builder = tauri::WebviewWindowBuilder::new(
+        let win_builder = tauri::WebviewWindowBuilder::new(
             &app,
             "spotlight",
             tauri::WebviewUrl::App("index.html".into()),
@@ -53,12 +53,10 @@ fn toggle_spotlight(app: tauri::AppHandle) {
         .skip_taskbar(true);
 
         #[cfg(target_os = "macos")]
-        {
-            win_builder = win_builder
-                .hidden_title(true)
-                .shadow(false)
-                .visible_on_all_workspaces(true);
-        }
+        let win_builder = win_builder
+            .hidden_title(true)
+            .shadow(false)
+            .visible_on_all_workspaces(true);
 
         if let Ok(window) = win_builder.build() {
             let _ = window.show();
