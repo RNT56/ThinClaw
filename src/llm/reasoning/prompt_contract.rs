@@ -256,3 +256,134 @@ pub(super) fn compact_tool_card(tool: &ToolDefinition) -> String {
         tool.name, tool.description, required_line, fields_text
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn intent_detection_covers_every_authoritative_domain() {
+        let cases = [
+            (
+                "What date is tomorrow?",
+                AuthoritativeIntent::CurrentTime,
+                "current time/date",
+                &["time"][..],
+            ),
+            (
+                "What did I say earlier in this chat?",
+                AuthoritativeIntent::TranscriptHistory,
+                "conversation history",
+                &["session_search"][..],
+            ),
+            (
+                "What do you remember about my preferences?",
+                AuthoritativeIntent::MemoryRecall,
+                "remembered context",
+                &["memory_search", "memory_read", "external_memory_recall"][..],
+            ),
+            (
+                "How much disk space is left on this device?",
+                AuthoritativeIntent::LocalState,
+                "local/device state",
+                &["device_info", "homeassistant"][..],
+            ),
+        ];
+
+        for (message, expected, label, tools) in cases {
+            let detected = detect_authoritative_intent(&[ChatMessage::user(message)]);
+            assert_eq!(detected, Some(expected));
+            assert_eq!(expected.label(), label);
+            assert_eq!(expected.preferred_tools(), tools);
+        }
+    }
+
+    #[test]
+    fn intent_detection_uses_latest_user_message_and_ignores_unrelated_text() {
+        let messages = [
+            ChatMessage::user("What time is it?"),
+            ChatMessage::assistant("I need the time tool."),
+            ChatMessage::user("Deploy the app right now."),
+        ];
+        assert_eq!(detect_authoritative_intent(&messages), None);
+        assert_eq!(detect_authoritative_intent(&[]), None);
+        assert_eq!(
+            detect_authoritative_intent(&[ChatMessage::assistant("What time is it?")]),
+            None
+        );
+    }
+
+    #[test]
+    fn unavailable_instructions_name_the_domain_and_forbid_guessing() {
+        let unavailable =
+            authoritative_unavailable_instruction(AuthoritativeIntent::TranscriptHistory);
+        assert!(unavailable.contains("conversation history"));
+        assert!(unavailable.contains("No authoritative tool"));
+        assert!(unavailable.contains("Do not guess or fabricate"));
+
+        let shortlist =
+            authoritative_shortlist_missing_instruction(AuthoritativeIntent::MemoryRecall);
+        assert!(shortlist.contains("remembered context"));
+        assert!(shortlist.contains("preferred authoritative tool"));
+        assert!(shortlist.contains("do not guess or fabricate"));
+    }
+
+    #[test]
+    fn compact_tool_card_renders_nested_arrays_enums_and_required_fields() {
+        let tool = ToolDefinition {
+            name: "deploy".to_string(),
+            description: "Deploy a service".to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["config", "mode"],
+                "properties": {
+                    "anything": {},
+                    "config": {
+                        "type": "object",
+                        "required": ["enabled"],
+                        "properties": {"enabled": {"type": "boolean"}}
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}}
+                        }
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["a", "b", "c", "d", "e", "f", "g"]
+                    },
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "variant": {"type": ["string", "null"]}
+                }
+            }),
+        };
+
+        let card = compact_tool_card(&tool);
+        assert!(card.starts_with("### deploy\nDeploy a service"));
+        assert!(card.contains("Required fields: config, mode"));
+        assert!(card.contains("anything: any"));
+        assert!(card.contains("config (required): object { enabled (required): boolean }"));
+        assert!(card.contains("items: array of object { name: string }"));
+        assert!(card.contains("mode (required): string [a, b, c, d, e, f]"));
+        assert!(card.contains("tags: array of string"));
+        assert!(card.contains("variant: string|null"));
+        assert!(!card.contains(", g]"));
+    }
+
+    #[test]
+    fn compact_tool_card_handles_schema_without_properties() {
+        let card = compact_tool_card(&ToolDefinition {
+            name: "ping".to_string(),
+            description: "Check availability".to_string(),
+            parameters: json!({"type": "object"}),
+        });
+
+        assert_eq!(
+            card,
+            "### ping\nCheck availability\nRequired fields: none\nFields:\n- none"
+        );
+    }
+}
