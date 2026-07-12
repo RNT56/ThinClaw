@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           branch="$(jq -r '.headBranchName // empty' <<<"$RELEASE_PR")"
           test -n "$branch"
-          gh workflow run ci.yml --ref "$branch"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
 
       # A newly-created release event is suppressed for the same reason, so
       # dispatch the existing artifact pipeline explicitly.
@@ -50,4 +50,4 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$RELEASE_TAG"
-          gh workflow run release.yml --ref main -f tag="$RELEASE_TAG"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$RELEASE_TAG"
