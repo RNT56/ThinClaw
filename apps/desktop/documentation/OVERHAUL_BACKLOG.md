@@ -12,13 +12,13 @@ tree. ✅ = merged to `main`.
 | TDO-001 | `RouteMode` enum + typed `BridgeError` + `gated()` helper | ✅ | `bridge.rs` (`RouteMode`:22, `BridgeError`:35) |
 | TDO-002 | Bridge linter (`ROUTE_TABLE` + `all_gated_commands_are_classified`) | ✅ | `bridge.rs` (`ROUTE_TABLE`:116 + linter tests) |
 | TDO-100 | Real per-thread compaction (`thinclaw_compact_session`) | ✅ | `rpc_extensions.rs` (drives core `ContextCompactor`) |
-| TDO-101/102 | Lifecycle events: compaction + advisor + self-repair → `UiEvent::AgentLifecycleEvent` | ✅ | `event_mapping.rs`, `tool_execution.rs`, `agent_loop` |
+| TDO-102 | Self-repair lifecycle events → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `agent_loop`, `ThinClawEventInspector.tsx` |
 | TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | `rpc_checkpoints.rs`:40/52/65 |
 | TDO-104 | Undo/redo: `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons | ✅ | `commands/sessions.rs`:105/147 |
-| TDO-105 | Session search command + Session Search panel | ✅ | `rpc_session_search.rs` |
+| TDO-105 | Advisor consultation → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `tool_execution.rs`, `ThinClawEventInspector.tsx` |
 | TDO-106 | Trajectory: `stats`/`records` commands + Trajectory panel | ✅ | `rpc_trajectory.rs`:45/58 |
-| TDO-113 | Agent eval: `experiments_list_envs` + `experiments_run_eval` | ✅ | `rpc_experiments_learning.rs`:683/719 |
 | TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | ✅ | `rpc_channel_config.rs`:19/37/61 |
+| Supplemental | Session search command + Session Search panel | ✅ | `rpc_session_search.rs`, `ThinClawSessionSearch.tsx` |
 
 **Deferred / cross-lane (still open):** remote-mode channel-config submit and live-reload for
 native channels remain future work; the eval runtime smoke-test needs a running engine. See
@@ -138,7 +138,7 @@ characterization test added before the split; no behavior change.
 | TDO-050 | CI notarized DMG (hardened runtime + staple); updater signing key in CI | L | P2 | — | CI, `tauri.conf.json` |
 | TDO-051 | Auto-update channel wired to `UpdateChecker.tsx` | M | P2 | TDO-050 | `UpdateChecker.tsx` |
 | TDO-052 | Sidecar bundling + size budget + lazy download; clean-machine `setup:all` validation | L | P2 | — | `scripts/`, `desktop-sidecars/` |
-| TDO-053 | Keep Win/Linux in CI build matrix (compile + core smoke) | M | ∞ | — | CI |
+| TDO-053 ✅ | Keep Win/Linux in CI build matrix (compile + core smoke) | M | ∞ | — | `.github/workflows/ci.yml` |
 
 ---
 
@@ -161,7 +161,7 @@ characterization test added before the split; no behavior change.
 | TDO-110 | Event-triggered routine creation (`Trigger::SystemEvent`) + UI | M | TDO-024 | `rpc_routines.rs:326`, `ThinClawAutomations.tsx` |
 | TDO-111 | `evaluate_outcomes`: embedded evaluator OR honest gate + CTA | M | TDO-001 | `rpc_experiments_learning.rs:394` |
 | TDO-112 | GPU validate/launch: local path OR honest gate | M | TDO-001 | `rpc_experiments_learning.rs:625-661` |
-| TDO-113 ✅ | Eval framework commands `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` (runtime smoke-test is manual QA) | L | TDO-001 | `rpc_experiments_learning.rs` |
+| TDO-113 | Eval framework commands are wired; Benchmarks panel and runtime smoke-test remain | L | TDO-001 | `rpc_experiments_learning.rs`, frontend |
 | TDO-114 | `thinclaw_trajectory_export(format)` (SFT/DPO) + export button | M | TDO-106 | `src/cli/trajectory.rs` |
 | TDO-115 | Profile-evolution viewer + force-run | S | TDO-001 | `profile_evolution.rs` |
 
