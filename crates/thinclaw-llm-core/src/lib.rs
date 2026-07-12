@@ -2,6 +2,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
+pub mod prompt_contract;
 pub mod prompt_stack;
 pub mod provider;
 pub mod routing_policy;
@@ -9,6 +10,11 @@ pub mod smart_routing;
 pub mod streaming;
 pub mod turn_analysis;
 
+pub use prompt_contract::{
+    CompiledPrompt, PROMPT_CONTRACT_VERSION, PromptBudget, PromptCompileError, PromptCompiler,
+    PromptLifetime, PromptManifestEntry, PromptSegment, PromptSegmentStatus, PromptSensitivity,
+    PromptTrust,
+};
 pub use prompt_stack::{PromptLayer, PromptStack};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,

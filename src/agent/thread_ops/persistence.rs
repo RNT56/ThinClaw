@@ -308,6 +308,8 @@ impl Agent {
                     frozen_provider_system_prompt: runtime.frozen_provider_system_prompt.clone(),
                     prompt_snapshot_hash: runtime.prompt_snapshot_hash.clone(),
                     ephemeral_overlay_hash: runtime.ephemeral_overlay_hash.clone(),
+                    prompt_contract_version: runtime.prompt_contract_version.clone(),
+                    prompt_manifest_digest: runtime.prompt_manifest_digest.clone(),
                     prompt_segment_order: runtime.prompt_segment_order.clone(),
                     provider_context_refs: runtime.provider_context_refs.clone(),
                     active_message_row_count: runtime.active_message_row_count,

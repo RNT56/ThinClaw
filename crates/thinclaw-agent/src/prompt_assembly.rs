@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use thinclaw_llm_core::{
+    PromptBudget, PromptCompileError, PromptCompiler, PromptLifetime, PromptManifestEntry,
+    PromptSegment, PromptTrust,
+};
 
 use crate::ports::{SkillContext, SkillSummary, WorkspacePromptMaterials};
 
@@ -29,17 +32,24 @@ pub struct DispatcherPromptMaterials {
 pub struct PromptAssemblyV2 {
     stable_segments: Vec<(String, String)>,
     ephemeral_segments: Vec<(String, String)>,
+    trusted_ephemeral_segments: Vec<(String, String)>,
     provider_context_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptAssemblyResult {
+    pub contract_version: String,
     pub stable_snapshot: String,
+    pub system_preamble: String,
     pub stable_hash: String,
     pub ephemeral_hash: String,
     pub ephemeral_documents: Vec<String>,
+    pub legacy_ephemeral_documents: Vec<String>,
     pub segment_order: Vec<String>,
     pub provider_context_refs: Vec<String>,
+    pub manifest_digest: String,
+    pub manifest: Vec<PromptManifestEntry>,
+    pub estimated_tokens: usize,
 }
 
 impl PromptAssemblyV2 {
@@ -71,40 +81,101 @@ impl PromptAssemblyV2 {
         self
     }
 
+    pub fn push_ephemeral_trusted(
+        mut self,
+        segment_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        let content = content.into();
+        if !content.trim().is_empty() {
+            self.trusted_ephemeral_segments
+                .push((segment_name.into(), content));
+        }
+        self
+    }
+
     pub fn with_provider_context_refs(mut self, refs: Vec<String>) -> Self {
         self.provider_context_refs = refs;
         self
     }
 
     pub fn build(self) -> PromptAssemblyResult {
+        self.build_with_budget(PromptBudget::default())
+            .expect("default prompt budget must compile optional assembly segments")
+    }
+
+    pub fn build_with_budget(
+        self,
+        budget: PromptBudget,
+    ) -> Result<PromptAssemblyResult, PromptCompileError> {
         let stable_snapshot = render_segments(&self.stable_segments);
-        let stable_hash = sha256_hex(&stable_snapshot);
-        let ephemeral_hash = sha256_hex(&render_segments(&self.ephemeral_segments));
-        let ephemeral_documents = self
+        let legacy_ephemeral_documents = self
             .ephemeral_segments
             .iter()
+            .chain(self.trusted_ephemeral_segments.iter())
             .map(|(_, content)| content.clone())
-            .collect();
-        let mut segment_order = Vec::new();
-        segment_order.extend(
-            self.stable_segments
-                .iter()
-                .map(|(name, _)| format!("stable:{name}")),
-        );
-        segment_order.extend(
-            self.ephemeral_segments
-                .iter()
-                .map(|(name, _)| format!("ephemeral:{name}")),
-        );
+            .collect::<Vec<_>>();
 
-        PromptAssemblyResult {
+        let mut compiler = PromptCompiler::new();
+        for (name, content) in &self.stable_segments {
+            compiler = compiler.push(PromptSegment::new(
+                name,
+                "prompt_assembly",
+                PromptTrust::TrustedConfiguration,
+                PromptLifetime::Stable,
+                700,
+                content,
+            ));
+        }
+        for (name, content) in &self.trusted_ephemeral_segments {
+            compiler = compiler.push(PromptSegment::new(
+                name,
+                "prompt_assembly",
+                PromptTrust::TrustedConfiguration,
+                PromptLifetime::Turn,
+                500,
+                content,
+            ));
+        }
+        for (name, content) in &self.ephemeral_segments {
+            compiler = compiler.push(PromptSegment::new(
+                name,
+                "prompt_assembly",
+                PromptTrust::UntrustedData,
+                PromptLifetime::Turn,
+                100,
+                content,
+            ));
+        }
+        let compiled = compiler.compile(budget)?;
+        let ephemeral_documents = compiled
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>();
+        let segment_order = compiled
+            .manifest
+            .iter()
+            .map(|entry| match entry.lifetime {
+                PromptLifetime::Stable => format!("stable:{}", entry.id),
+                PromptLifetime::Turn => format!("ephemeral:{}", entry.id),
+            })
+            .collect();
+
+        Ok(PromptAssemblyResult {
+            contract_version: compiled.contract_version,
             stable_snapshot,
-            stable_hash,
-            ephemeral_hash,
+            system_preamble: compiled.system_preamble,
+            stable_hash: compiled.stable_hash,
+            ephemeral_hash: compiled.ephemeral_hash,
             ephemeral_documents,
+            legacy_ephemeral_documents,
             segment_order,
             provider_context_refs: self.provider_context_refs,
-        }
+            manifest_digest: compiled.manifest_digest,
+            manifest: compiled.manifest,
+            estimated_tokens: compiled.estimated_tokens,
+        })
     }
 }
 
@@ -115,12 +186,6 @@ fn render_segments(segments: &[(String, String)]) -> String {
         .filter(|content| !content.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-fn sha256_hex(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 pub fn render_available_skill_index(skills: &[SkillSummary]) -> Option<String> {
@@ -193,6 +258,15 @@ pub fn assemble_workspace_prompt_materials(
     materials: &WorkspacePromptMaterials,
     skills: &SkillContext,
 ) -> PromptAssemblyResult {
+    assemble_workspace_prompt_materials_with_budget(materials, skills, PromptBudget::default())
+        .expect("default prompt budget must compile workspace prompt materials")
+}
+
+pub fn assemble_workspace_prompt_materials_with_budget(
+    materials: &WorkspacePromptMaterials,
+    skills: &SkillContext,
+    budget: PromptBudget,
+) -> Result<PromptAssemblyResult, PromptCompileError> {
     let skill_index = skills
         .available_index_block
         .as_deref()
@@ -222,21 +296,21 @@ pub fn assemble_workspace_prompt_materials(
             "linked_recall",
             materials.linked_recall_block.clone().unwrap_or_default(),
         )
-        .push_ephemeral(
+        .push_ephemeral_trusted(
             "channel_formatting_hints",
             materials
                 .channel_formatting_hints
                 .clone()
                 .unwrap_or_default(),
         )
-        .push_ephemeral(
+        .push_ephemeral_trusted(
             "runtime_capabilities",
             materials
                 .runtime_capability_hint
                 .clone()
                 .unwrap_or_default(),
         )
-        .push_ephemeral("active_skills", active_skills)
+        .push_ephemeral_trusted("active_skills", active_skills)
         .push_ephemeral(
             "post_compaction_fragment",
             materials
@@ -245,12 +319,20 @@ pub fn assemble_workspace_prompt_materials(
                 .unwrap_or_default(),
         )
         .with_provider_context_refs(materials.provider_context_refs.clone())
-        .build()
+        .build_with_budget(budget)
 }
 
 pub fn assemble_dispatcher_prompt_materials(
     materials: &DispatcherPromptMaterials,
 ) -> PromptAssemblyResult {
+    assemble_dispatcher_prompt_materials_with_budget(materials, PromptBudget::default())
+        .expect("default prompt budget must compile dispatcher prompt materials")
+}
+
+pub fn assemble_dispatcher_prompt_materials_with_budget(
+    materials: &DispatcherPromptMaterials,
+    budget: PromptBudget,
+) -> Result<PromptAssemblyResult, PromptCompileError> {
     PromptAssemblyV2::new()
         .push_stable(
             "workspace_prompt",
@@ -264,7 +346,7 @@ pub fn assemble_dispatcher_prompt_materials(
             "skills_index",
             materials.skill_index_context.clone().unwrap_or_default(),
         )
-        .push_ephemeral("transcript_guidance", CHANNEL_TRANSCRIPT_GUIDANCE)
+        .push_ephemeral_trusted("transcript_guidance", CHANNEL_TRANSCRIPT_GUIDANCE)
         .push_ephemeral(
             "provider_recall",
             materials
@@ -276,28 +358,28 @@ pub fn assemble_dispatcher_prompt_materials(
             "linked_recall",
             materials.linked_recall_context.clone().unwrap_or_default(),
         )
-        .push_ephemeral(
+        .push_ephemeral_trusted(
             "channel_formatting_hints",
             materials
                 .channel_formatting_context
                 .clone()
                 .unwrap_or_default(),
         )
-        .push_ephemeral(
+        .push_ephemeral_trusted(
             "personality_overlay",
             materials
                 .personality_overlay_context
                 .clone()
                 .unwrap_or_default(),
         )
-        .push_ephemeral(
+        .push_ephemeral_trusted(
             "runtime_capabilities",
             materials
                 .runtime_capability_hint
                 .clone()
                 .unwrap_or_default(),
         )
-        .push_ephemeral(
+        .push_ephemeral_trusted(
             "active_skills",
             materials.active_skill_context.clone().unwrap_or_default(),
         )
@@ -309,7 +391,7 @@ pub fn assemble_dispatcher_prompt_materials(
                 .unwrap_or_default(),
         )
         .with_provider_context_refs(materials.provider_context_refs.clone())
-        .build()
+        .build_with_budget(budget)
 }
 
 #[cfg(test)]
@@ -441,6 +523,8 @@ mod tests {
 
         assert!(result.stable_snapshot.contains("You are ThinClaw."));
         assert!(result.stable_snapshot.contains("## Skills"));
+        assert!(result.system_preamble.contains("## Skill Expansion"));
+        assert!(result.system_preamble.contains("Runtime hints"));
         assert!(
             result
                 .ephemeral_documents
@@ -451,7 +535,7 @@ mod tests {
             result
                 .ephemeral_documents
                 .iter()
-                .any(|doc| doc.contains("## Skill Expansion"))
+                .all(|doc| doc.contains("UNTRUSTED CONTEXT DATA"))
         );
         assert_eq!(result.provider_context_refs, vec!["ctx-1"]);
         assert_eq!(
@@ -460,11 +544,11 @@ mod tests {
                 "stable:workspace_prompt".to_string(),
                 "stable:provider_system_prompt".to_string(),
                 "stable:skills_index".to_string(),
-                "ephemeral:provider_recall".to_string(),
-                "ephemeral:linked_recall".to_string(),
                 "ephemeral:channel_formatting_hints".to_string(),
                 "ephemeral:runtime_capabilities".to_string(),
                 "ephemeral:active_skills".to_string(),
+                "ephemeral:provider_recall".to_string(),
+                "ephemeral:linked_recall".to_string(),
                 "ephemeral:post_compaction_fragment".to_string(),
             ]
         );
@@ -489,17 +573,13 @@ mod tests {
         let result = assemble_dispatcher_prompt_materials(&materials);
 
         assert!(result.stable_snapshot.contains("Workspace"));
+        assert!(result.system_preamble.contains(CHANNEL_TRANSCRIPT_GUIDANCE));
+        assert!(result.system_preamble.contains("Temporary Personality"));
         assert!(
             result
                 .ephemeral_documents
                 .iter()
-                .any(|doc| doc == CHANNEL_TRANSCRIPT_GUIDANCE)
-        );
-        assert!(
-            result
-                .ephemeral_documents
-                .iter()
-                .any(|doc| doc.contains("Temporary Personality"))
+                .all(|doc| doc.contains("UNTRUSTED CONTEXT DATA"))
         );
         assert_eq!(result.provider_context_refs, vec!["ctx-1"]);
         assert_eq!(
@@ -509,12 +589,12 @@ mod tests {
                 "stable:provider_system_prompt".to_string(),
                 "stable:skills_index".to_string(),
                 "ephemeral:transcript_guidance".to_string(),
-                "ephemeral:provider_recall".to_string(),
-                "ephemeral:linked_recall".to_string(),
                 "ephemeral:channel_formatting_hints".to_string(),
                 "ephemeral:personality_overlay".to_string(),
                 "ephemeral:runtime_capabilities".to_string(),
                 "ephemeral:active_skills".to_string(),
+                "ephemeral:provider_recall".to_string(),
+                "ephemeral:linked_recall".to_string(),
                 "ephemeral:post_compaction_fragment".to_string(),
             ]
         );

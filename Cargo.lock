@@ -8444,10 +8444,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "hex",
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thinclaw-types",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",

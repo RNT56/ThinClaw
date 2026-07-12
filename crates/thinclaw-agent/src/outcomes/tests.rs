@@ -366,10 +366,10 @@ fn deterministic_scoring_detects_positive_follow_up() {
 }
 
 #[test]
-fn llm_score_parser_normalizes_and_clamps() {
+fn llm_score_parser_normalizes_valid_output_and_rejects_out_of_range_scores() {
     let observations = [observation("explicit_correction", VERDICT_NEGATIVE, 1.0)];
     let score = parse_llm_assisted_score(
-        r#"{"verdict":"NEGATIVE","score":-2.0,"rationale":"bad"}"#,
+        r#"{"verdict":"NEGATIVE","score":-1.0,"rationale":"bad"}"#,
         &observations,
     )
     .expect("score");
@@ -381,6 +381,13 @@ fn llm_score_parser_normalizes_and_clamps() {
             .get("strategy")
             .and_then(|value| value.as_str()),
         Some("llm_assisted")
+    );
+    assert!(
+        parse_llm_assisted_score(
+            r#"{"verdict":"negative","score":-2.0,"rationale":"bad"}"#,
+            &observations,
+        )
+        .is_err()
     );
 }
 

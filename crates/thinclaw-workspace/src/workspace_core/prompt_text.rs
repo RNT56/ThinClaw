@@ -6,19 +6,26 @@
 
 /// Maximum characters per workspace file injected into the system prompt.
 /// Matches openclaw's `bootstrapMaxChars` default (~20k chars ≈ 5k tokens).
-pub(super) const FILE_MAX_CHARS: usize = 4_000;
+pub(super) const FILE_MAX_CHARS: usize = 20_000;
 
 /// Truncate `text` to at most `max` chars, appending a truncation notice.
 pub(super) fn cap_chars(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
-    let cut = text
+    let hard_cut = text
         .char_indices()
         .map(|(i, _)| i)
         .take_while(|&i| i < max)
         .last()
         .unwrap_or(0);
+    let prefix = &text[..hard_cut];
+    let cut = prefix
+        .rfind("\n\n")
+        .or_else(|| prefix.rfind('\n'))
+        .or_else(|| prefix.rfind(char::is_whitespace))
+        .filter(|cut| *cut >= max / 2)
+        .unwrap_or(hard_cut);
     format!(
         "{}\n\n_[... truncated — file exceeds {max} chars. Use `memory_read` to see the rest.]_",
         &text[..cut]
@@ -37,22 +44,25 @@ pub(super) fn extract_essential_instructions(agents_content: &str) -> String {
 
     // Section headers to KEEP in the system prompt (critical operational rules)
     let keep_keywords = [
-        "First Run",
-        "Session Startup",
-        "Memory",
-        "MEMORY.md",
-        "Write It Down",
-        "Mental Notes",
-        "Red Lines",
-        "Protected Repo Boundary Policy",
-        "Feature Parity Update Policy",
-        "External vs Internal",
-        "Group Chats",
-        "Know When to Speak",
-        "Tools",
-        "Platform Formatting",
-        "Heartbeats",
-        "Be Proactive",
+        "first run",
+        "session startup",
+        "memory",
+        "memory.md",
+        "write it down",
+        "mental notes",
+        "red lines",
+        "protected repo boundary policy",
+        "feature parity update policy",
+        "external vs internal",
+        "group chats",
+        "know when to speak",
+        "tools",
+        "platform formatting",
+        "heartbeats",
+        "be proactive",
+        "safety",
+        "permissions",
+        "approval",
     ];
 
     for line in agents_content.lines() {
@@ -66,6 +76,7 @@ pub(super) fn extract_essential_instructions(agents_content: &str) -> String {
                 .trim()
                 .trim_start_matches(|c: char| !c.is_alphabetic())
                 .trim();
+            let header_text = header_text.to_ascii_lowercase();
             in_keep_section = keep_keywords.iter().any(|h| header_text.contains(h));
             if in_keep_section {
                 essential.push(line.to_string());
@@ -85,6 +96,7 @@ pub(super) fn extract_essential_instructions(agents_content: &str) -> String {
                 .trim()
                 .trim_start_matches(|c: char| !c.is_alphabetic())
                 .trim();
+            let header_text = header_text.to_ascii_lowercase();
             in_keep_section = keep_keywords.iter().any(|h| header_text.contains(h));
             if in_keep_section {
                 essential.push(line.to_string());

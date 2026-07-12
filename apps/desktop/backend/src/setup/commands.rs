@@ -1,8 +1,8 @@
-/// Command registry — all Tauri IPC commands in one place.
-///
-/// Extracted from `lib.rs` to keep the entrypoint focused on app lifecycle.
-/// Each command is declared via `tauri_specta::collect_commands!` and grouped
-/// by domain for readability.
+//! Command registry — all Tauri IPC commands in one place.
+//!
+//! Extracted from `lib.rs` to keep the entrypoint focused on app lifecycle.
+//! Each command is declared via `tauri_specta::collect_commands!` and grouped
+//! by domain for readability.
 
 /// Build the Specta builder with all registered commands.
 pub fn specta_builder() -> tauri_specta::Builder {

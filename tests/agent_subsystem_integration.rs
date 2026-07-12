@@ -209,9 +209,10 @@ mod context_monitor {
     }
 
     #[test]
-    fn estimate_text_tokens_two_words() {
-        // "hello world" → 2 words → ⌊2 × 1.3⌋ = 2
-        assert_eq!(estimate_text_tokens("hello world"), 2);
+    fn estimate_text_tokens_uses_conservative_upper_bound() {
+        // The estimator takes the larger of its prose and character estimates.
+        // "hello world" is 11 characters, so ceil(11 / 4) = 3.
+        assert_eq!(estimate_text_tokens("hello world"), 3);
     }
 
     #[test]

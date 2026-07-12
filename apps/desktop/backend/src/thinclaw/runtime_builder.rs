@@ -973,13 +973,6 @@ pub(crate) async fn build_inner(
 
                     match agent_for_sys.handle_message_external(&msg).await {
                         Ok(Some(response)) if !response.is_empty() => {
-                            // Suppress HEARTBEAT_OK — parity with run() loop
-                            if msg.channel == "heartbeat" && response.contains("HEARTBEAT_OK") {
-                                tracing::debug!(
-                                    "[thinclaw-runtime] Heartbeat returned HEARTBEAT_OK — suppressed"
-                                );
-                                continue;
-                            }
 
                             // Deliver via broadcast_all (→ TauriChannel → thinclaw-event)
                             // We use broadcast_all instead of respond() because the

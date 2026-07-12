@@ -857,9 +857,17 @@ async fn run_agentic_loop_uses_channel_formatting_hints_from_channel_manager() {
 
     let requests = primary.requests().await;
     assert!(requests.iter().any(|req| {
+        req.messages.iter().any(|message| {
+            message.role == crate::llm::Role::System
+                && message
+                    .content
+                    .contains("Test channel prefers plain text only.")
+        })
+    }));
+    assert!(requests.iter().all(|req| {
         req.context_documents
             .iter()
-            .any(|doc| doc.contains("Test channel prefers plain text only."))
+            .all(|document| !document.contains("Test channel prefers plain text only."))
     }));
 }
 
