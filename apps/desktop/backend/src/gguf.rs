@@ -270,7 +270,7 @@ fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
             }
         }
         // 10=UINT64 11=FLOAT64 12=INT64 13=INT64 — all 8 bytes
-        10 | 11 | 12 | 13 => {
+        10..=13 => {
             file.seek(SeekFrom::Current(8)).map_err(|e| e.to_string())?;
         }
         _ => return Err(format!("Unknown GGUF type: {}", val_type)),

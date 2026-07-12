@@ -564,21 +564,15 @@ pub(crate) async fn build_inner(
         let oc_config = thinclaw_mgr.get_config().await;
 
         if let Some(ref cfg) = oc_config {
-            let mut providers = thinclaw_core::settings::ProvidersSettings::default();
-
-            // Map enabled cloud providers
-            providers.enabled = cfg.enabled_cloud_providers.clone();
-
-            // Map primary provider + model
-            providers.primary = cfg.selected_cloud_brain.clone();
-            providers.primary_model = cfg.selected_cloud_model.clone();
-
-            // Map per-provider model allowlists
-            providers.allowed_models = cfg.enabled_cloud_models.clone();
-
-            // Fallback chain is auto-generated from enabled providers
-            // (FailoverProvider will use all enabled providers in order)
-            providers.fallback_chain = Vec::new();
+            // Fallback is generated from enabled providers by FailoverProvider.
+            let providers = thinclaw_core::settings::ProvidersSettings {
+                enabled: cfg.enabled_cloud_providers.clone(),
+                primary: cfg.selected_cloud_brain.clone(),
+                primary_model: cfg.selected_cloud_model.clone(),
+                allowed_models: cfg.enabled_cloud_models.clone(),
+                fallback_chain: Vec::new(),
+                ..Default::default()
+            };
 
             if !providers.enabled.is_empty() {
                 tracing::info!(
@@ -822,6 +816,7 @@ pub(crate) async fn build_inner(
         cheap_llm: components.cheap_llm.clone(),
         safety: components.safety.clone(),
         tools: components.tools.clone(),
+        desktop_autonomy_manager: components.desktop_autonomy_manager.clone(),
         workspace: components.workspace.clone(),
         extension_manager: components.extension_manager.clone(),
         skill_registry: components.skill_registry.clone(),
@@ -973,14 +968,6 @@ pub(crate) async fn build_inner(
 
                     match agent_for_sys.handle_message_external(&msg).await {
                         Ok(Some(response)) if !response.is_empty() => {
-                            // Suppress HEARTBEAT_OK — parity with run() loop
-                            if msg.channel == "heartbeat" && response.contains("HEARTBEAT_OK") {
-                                tracing::debug!(
-                                    "[thinclaw-runtime] Heartbeat returned HEARTBEAT_OK — suppressed"
-                                );
-                                continue;
-                            }
-
                             // Deliver via broadcast_all (→ TauriChannel → thinclaw-event)
                             // We use broadcast_all instead of respond() because the
                             // message's channel is "heartbeat" which isn't a registered
@@ -1159,7 +1146,7 @@ pub(crate) async fn build_inner(
                             SseEvent::ToolResult { name, preview, .. } if name == "write_file" => {
                                 // Parse the write_file result JSON to extract path & bytes
                                 let val: serde_json::Value = serde_json::from_str(preview)
-                                    .unwrap_or_else(|_| serde_json::Value::Null);
+                                    .unwrap_or(serde_json::Value::Null);
                                 if let (Some(path), Some(bytes)) = (
                                     val.get("path").and_then(|v| v.as_str()),
                                     val.get("bytes_written").and_then(|v| v.as_u64()),
@@ -1276,95 +1263,6 @@ pub(crate) async fn build_inner(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn desktop_send_route_accepts_local_platform_aliases() {
-        for platform in [
-            "tauri",
-            "desktop",
-            "thinclaw_desktop",
-            "local",
-            "app",
-            "web",
-        ] {
-            let route = desktop_send_route(platform, "agent:main", None, 0)
-                .expect("desktop platform should be accepted");
-            assert_eq!(route.session_key, "agent:main");
-        }
-    }
-
-    #[test]
-    fn desktop_send_route_rejects_external_channel_platforms() {
-        for platform in [
-            "slack",
-            "telegram",
-            "gmail",
-            "email",
-            "apple_mail",
-            "discord",
-        ] {
-            let error = desktop_send_route(platform, "agent:main", None, 0)
-                .expect_err("external channel should not use local desktop route");
-            assert!(error.contains("supports only the Tauri/Desktop event surface"));
-        }
-    }
-
-    #[test]
-    fn desktop_send_route_thread_id_wins_over_recipient() {
-        let route = desktop_send_route("desktop", "agent:wrong", Some("agent:right"), 0)
-            .expect("desktop route should resolve");
-        assert_eq!(route.session_key, "agent:right");
-    }
-
-    #[test]
-    fn desktop_send_route_non_session_recipient_uses_system_session() {
-        let route = desktop_send_route("desktop", "local_user", None, 0)
-            .expect("desktop route should resolve");
-        assert_eq!(route.session_key, "system");
-    }
-
-    #[test]
-    fn desktop_send_route_rejects_attachments() {
-        let error = desktop_send_route("desktop", "agent:main", None, 1)
-            .expect_err("attachments should be explicit unsupported");
-        assert!(error.contains("does not support attachments"));
-    }
-
-    #[test]
-    fn agent_deps_keeps_desktop_runtime_parity_handles_wired() {
-        let source = include_str!("runtime_builder.rs");
-        let deps_block = source
-            .split("let agent_deps = AgentDeps")
-            .nth(1)
-            .expect("desktop AgentDeps construction should stay explicit");
-
-        for required in [
-            "store: components.db.clone()",
-            "tools: components.tools.clone()",
-            "extension_manager: components.extension_manager.clone()",
-            "skill_registry: components.skill_registry.clone()",
-            "cost_tracker: Some(components.cost_tracker.clone())",
-            "response_cache: Some(components.response_cache.clone())",
-            "llm_runtime: Some(components.llm_runtime.clone())",
-            "routing_policy: Some(components.routing_policy.clone())",
-            "sse_sender: Some(sse_tx.clone())",
-            "agent_router: Some(shared_agent_router)",
-            "agent_registry: Some(agent_registry)",
-            "canvas_store: Some(",
-            "subagent_executor: Some(subagent_executor.clone())",
-            "model_override: Some(model_override)",
-        ] {
-            assert!(
-                deps_block.contains(required),
-                "desktop AgentDeps should wire {required}"
-            );
-        }
-    }
-}
-
 /// Build a local Docker sandbox `ContainerJobManager` + orchestrator for the
 /// desktop runtime (mirrors the server path in `src/main.rs`). Returns `None`
 /// when the sandbox is disabled in config. Actual container spawning is further
@@ -1474,4 +1372,94 @@ async fn resolve_desktop_provider_key(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_send_route_accepts_local_platform_aliases() {
+        for platform in [
+            "tauri",
+            "desktop",
+            "thinclaw_desktop",
+            "local",
+            "app",
+            "web",
+        ] {
+            let route = desktop_send_route(platform, "agent:main", None, 0)
+                .expect("desktop platform should be accepted");
+            assert_eq!(route.session_key, "agent:main");
+        }
+    }
+
+    #[test]
+    fn desktop_send_route_rejects_external_channel_platforms() {
+        for platform in [
+            "slack",
+            "telegram",
+            "gmail",
+            "email",
+            "apple_mail",
+            "discord",
+        ] {
+            let error = desktop_send_route(platform, "agent:main", None, 0)
+                .expect_err("external channel should not use local desktop route");
+            assert!(error.contains("supports only the Tauri/Desktop event surface"));
+        }
+    }
+
+    #[test]
+    fn desktop_send_route_thread_id_wins_over_recipient() {
+        let route = desktop_send_route("desktop", "agent:wrong", Some("agent:right"), 0)
+            .expect("desktop route should resolve");
+        assert_eq!(route.session_key, "agent:right");
+    }
+
+    #[test]
+    fn desktop_send_route_non_session_recipient_uses_system_session() {
+        let route = desktop_send_route("desktop", "local_user", None, 0)
+            .expect("desktop route should resolve");
+        assert_eq!(route.session_key, "system");
+    }
+
+    #[test]
+    fn desktop_send_route_rejects_attachments() {
+        let error = desktop_send_route("desktop", "agent:main", None, 1)
+            .expect_err("attachments should be explicit unsupported");
+        assert!(error.contains("does not support attachments"));
+    }
+
+    #[test]
+    fn agent_deps_keeps_desktop_runtime_parity_handles_wired() {
+        let source = include_str!("runtime_builder.rs");
+        let deps_block = source
+            .split("let agent_deps = AgentDeps")
+            .nth(1)
+            .expect("desktop AgentDeps construction should stay explicit");
+
+        for required in [
+            "store: components.db.clone()",
+            "tools: components.tools.clone()",
+            "desktop_autonomy_manager: components.desktop_autonomy_manager.clone()",
+            "extension_manager: components.extension_manager.clone()",
+            "skill_registry: components.skill_registry.clone()",
+            "cost_tracker: Some(components.cost_tracker.clone())",
+            "response_cache: Some(components.response_cache.clone())",
+            "llm_runtime: Some(components.llm_runtime.clone())",
+            "routing_policy: Some(components.routing_policy.clone())",
+            "sse_sender: Some(sse_tx.clone())",
+            "agent_router: Some(shared_agent_router)",
+            "agent_registry: Some(agent_registry)",
+            "canvas_store: Some(",
+            "subagent_executor: Some(subagent_executor.clone())",
+            "model_override: Some(model_override)",
+        ] {
+            assert!(
+                deps_block.contains(required),
+                "desktop AgentDeps should wire {required}"
+            );
+        }
+    }
 }

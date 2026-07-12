@@ -1549,9 +1549,22 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         hot_reload_watchers.channel = Some(watcher);
     }
 
-    // Wire SSE sender into channel manager for ChannelStatusChange events.
+    // Wire the gateway-neutral channel lifecycle sink into SSE. The legacy
+    // `set_sse_sender` compatibility method is intentionally a no-op after the
+    // channel manager moved into its own crate, so adapt the event explicitly.
     if let Some(ref sender) = sse_sender {
-        channels.set_sse_sender(sender.clone()).await;
+        let sender = sender.clone();
+        channels
+            .set_status_change_sink(move |event| {
+                let _ = sender.send(
+                    thinclaw::channels::web::types::SseEvent::ChannelStatusChange {
+                        channel: event.channel,
+                        status: event.status,
+                        message: event.message,
+                    },
+                );
+            })
+            .await;
     }
 
     // Wire SSE sender into extension manager for broadcasting status events.
@@ -1794,6 +1807,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         cheap_llm: components.cheap_llm,
         safety: components.safety,
         tools: components.tools,
+        desktop_autonomy_manager: components.desktop_autonomy_manager,
         workspace: components.workspace,
         extension_manager: components.extension_manager,
         skill_registry: components.skill_registry,

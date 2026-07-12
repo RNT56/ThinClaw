@@ -184,17 +184,43 @@ impl WasmChannelHostConfig {
 
         match channel_name {
             "telegram" => {
+                // Telegram only enters public webhook mode when its platform-native
+                // secret token is available. Without it, keep the public tunnel in
+                // diagnostics but force polling so ingress cannot silently become
+                // unauthenticated.
+                let webhook_secret_available = webhook_secret
+                    .map(str::trim)
+                    .is_some_and(|secret| !secret.is_empty());
+                let host_webhook_capable =
+                    self.telegram_host_webhook_capable && webhook_secret_available;
+                let host_transport_reason = if self.telegram_host_webhook_capable
+                    && !webhook_secret_available
+                {
+                    Some(
+                        "telegram_webhook_secret is required before public webhook delivery can be enabled"
+                            .to_string(),
+                    )
+                } else {
+                    self.telegram_host_transport_reason.clone()
+                };
+                let telegram_tunnel_url =
+                    if host_webhook_capable && self.telegram_transport_mode != "polling" {
+                        self.telegram_tunnel_url.clone()
+                    } else {
+                        None
+                    };
+
                 updates.insert(
                     "transport_preference".to_string(),
                     serde_json::Value::String(self.telegram_transport_mode.clone()),
                 );
                 updates.insert(
                     "host_webhook_capable".to_string(),
-                    serde_json::Value::Bool(self.telegram_host_webhook_capable),
+                    serde_json::Value::Bool(host_webhook_capable),
                 );
                 updates.insert(
                     "host_transport_reason".to_string(),
-                    self.telegram_host_transport_reason
+                    host_transport_reason
                         .clone()
                         .map(serde_json::Value::String)
                         .unwrap_or(serde_json::Value::Null),
@@ -205,8 +231,7 @@ impl WasmChannelHostConfig {
                         "polling" => {
                             serde_json::Value::String("operator forced polling".to_string())
                         }
-                        _ => self
-                            .telegram_host_transport_reason
+                        _ => host_transport_reason
                             .clone()
                             .map(serde_json::Value::String)
                             .unwrap_or(serde_json::Value::Null),
@@ -221,8 +246,7 @@ impl WasmChannelHostConfig {
                 );
                 updates.insert(
                     "tunnel_url".to_string(),
-                    self.telegram_tunnel_url
-                        .clone()
+                    telegram_tunnel_url
                         .map(serde_json::Value::String)
                         .unwrap_or(serde_json::Value::Null),
                 );
@@ -483,6 +507,36 @@ mod tests {
                 .get("transport_reason")
                 .and_then(|value| value.as_str()),
             Some("operator forced polling")
+        );
+    }
+
+    #[test]
+    fn telegram_without_webhook_secret_forces_safe_polling() {
+        let config = WasmChannelHostConfig {
+            tunnel_url: Some("https://agent.example.com".to_string()),
+            telegram_tunnel_url: Some("https://agent.example.com".to_string()),
+            telegram_owner_id: None,
+            telegram_stream_mode: None,
+            telegram_transport_mode: "auto".to_string(),
+            telegram_host_webhook_capable: true,
+            telegram_host_transport_reason: None,
+            discord_stream_mode: None,
+        };
+
+        let updates = config.updates_for_channel("telegram", None);
+
+        assert_eq!(updates.get("tunnel_url"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            updates
+                .get("host_webhook_capable")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(
+            updates
+                .get("transport_reason")
+                .and_then(|value| value.as_str())
+                .is_some_and(|reason| reason.contains("telegram_webhook_secret"))
         );
     }
 

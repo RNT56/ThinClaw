@@ -41,7 +41,7 @@ impl LlamaCppEngine {
 
     /// Get the currently stored port.
     pub fn get_port(&self) -> Option<u16> {
-        self.port.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        *self.port.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get the currently stored API token.

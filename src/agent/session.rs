@@ -69,6 +69,10 @@ pub struct ThreadRuntimeState {
     pub prompt_snapshot_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_overlay_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_contract_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_manifest_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompt_segment_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -144,6 +148,8 @@ impl ThreadRuntimeStateExt for Thread {
             frozen_provider_system_prompt: snapshot.frozen_provider_system_prompt,
             prompt_snapshot_hash: snapshot.prompt_snapshot_hash,
             ephemeral_overlay_hash: snapshot.ephemeral_overlay_hash,
+            prompt_contract_version: snapshot.prompt_contract_version,
+            prompt_manifest_digest: snapshot.prompt_manifest_digest,
             prompt_segment_order: snapshot.prompt_segment_order,
             provider_context_refs: snapshot.provider_context_refs,
             active_message_row_count: snapshot.active_message_row_count,
@@ -173,6 +179,8 @@ impl ThreadRuntimeStateExt for Thread {
             frozen_provider_system_prompt: runtime.frozen_provider_system_prompt,
             prompt_snapshot_hash: runtime.prompt_snapshot_hash,
             ephemeral_overlay_hash: runtime.ephemeral_overlay_hash,
+            prompt_contract_version: runtime.prompt_contract_version,
+            prompt_manifest_digest: runtime.prompt_manifest_digest,
             prompt_segment_order: runtime.prompt_segment_order,
             provider_context_refs: runtime.provider_context_refs,
             active_message_row_count: runtime.active_message_row_count,
@@ -248,6 +256,8 @@ pub(crate) fn thread_runtime_state_from_portable(
         frozen_provider_system_prompt: snapshot.frozen_provider_system_prompt,
         prompt_snapshot_hash: snapshot.prompt_snapshot_hash,
         ephemeral_overlay_hash: snapshot.ephemeral_overlay_hash,
+        prompt_contract_version: snapshot.prompt_contract_version,
+        prompt_manifest_digest: snapshot.prompt_manifest_digest,
         prompt_segment_order: snapshot.prompt_segment_order,
         provider_context_refs: snapshot.provider_context_refs,
         active_message_row_count: snapshot.active_message_row_count,

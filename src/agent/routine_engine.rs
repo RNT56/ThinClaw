@@ -77,6 +77,9 @@ pub struct RoutineEngine {
     event_cache_refreshed_at: Arc<RwLock<Option<chrono::DateTime<Utc>>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
+    /// Runtime-scoped desktop autonomy state. Routine scheduling must not
+    /// depend on a manager installed by an unrelated application instance.
+    desktop_autonomy_manager: Option<Arc<crate::desktop_autonomy::DesktopAutonomyManager>>,
     /// Optional SSE broadcast sender for emitting routine lifecycle events.
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
     /// Optional sender for injecting messages into the main session.
@@ -158,6 +161,7 @@ impl RoutineEngine {
             event_cache_version: Arc::new(RwLock::new(0)),
             event_cache_refreshed_at: Arc::new(RwLock::new(None)),
             scheduler,
+            desktop_autonomy_manager: None,
             sse_tx: None,
             system_event_tx: None,
             subagent_executor: None,
@@ -177,6 +181,15 @@ impl RoutineEngine {
     /// Set the shared observer for routine queue loop metrics.
     pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    /// Bind desktop-autonomy state to this engine's runtime.
+    pub fn with_desktop_autonomy_manager(
+        mut self,
+        manager: Option<Arc<crate::desktop_autonomy::DesktopAutonomyManager>>,
+    ) -> Self {
+        self.desktop_autonomy_manager = manager;
         self
     }
 
@@ -265,7 +278,7 @@ impl RoutineEngine {
         };
         loop_metrics.set_iterations(1);
 
-        if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
+        if let Some(manager) = self.desktop_autonomy_manager.as_ref()
             && manager.emergency_stop_active()
         {
             loop_metrics.stop_with(LoopStopReason::Cancelled);
@@ -299,7 +312,7 @@ impl RoutineEngine {
 
     /// Check all due cron/system routines and fire them. Called by the cron ticker.
     pub async fn check_cron_triggers(&self) -> usize {
-        if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
+        if let Some(manager) = self.desktop_autonomy_manager.as_ref()
             && manager.emergency_stop_active()
         {
             tracing::warn!("Desktop autonomy emergency stop is active; skipping cron routines");
@@ -924,7 +937,7 @@ impl RoutineEngine {
     pub async fn drain_pending_event_queue(&self) -> usize {
         let mut loop_metrics =
             LoopMetricGuard::start(Arc::clone(&self.observer), LoopKind::RoutineEventQueue);
-        if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
+        if let Some(manager) = self.desktop_autonomy_manager.as_ref()
             && manager.emergency_stop_active()
         {
             loop_metrics.stop_with(LoopStopReason::Cancelled);
@@ -1344,6 +1357,7 @@ impl RoutineEngine {
             system_event_tx: self.system_event_tx.clone(),
             subagent_executor: self.subagent_executor.clone(),
             user_timezone: self.user_timezone.clone(),
+            desktop_autonomy_manager: self.desktop_autonomy_manager.clone(),
         };
 
         let routine_name = routine.name.clone();
@@ -1474,6 +1488,8 @@ struct EngineContext {
     subagent_executor: Option<Arc<SubagentExecutor>>,
     /// User timezone (IANA) for active-hours checks.
     user_timezone: Option<String>,
+    /// Runtime-scoped desktop autonomy state inherited from the engine.
+    desktop_autonomy_manager: Option<Arc<crate::desktop_autonomy::DesktopAutonomyManager>>,
 }
 
 impl EngineContext {

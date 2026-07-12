@@ -369,6 +369,9 @@ impl ShellTool {
         working_dir: &Path,
         decision: ApprovalDecision,
     ) {
+        if !matches!(decision, ApprovalDecision::Deny) {
+            return;
+        }
         let key = self.smart_approval_cache_key(mode, cmd, working_dir);
         if let Ok(mut guard) = SMART_APPROVAL_CACHE.lock() {
             guard.insert(key, decision);
@@ -759,9 +762,7 @@ impl Tool for ShellTool {
                         self.cached_smart_decision(SmartApprovalMode::Smart, cmd, &working_dir)
                     {
                         return match cached {
-                            ApprovalDecision::Approve | ApprovalDecision::Deny => {
-                                ApprovalRequirement::Never
-                            }
+                            ApprovalDecision::Deny => ApprovalRequirement::Never,
                             ApprovalDecision::Escalate => ApprovalRequirement::Always,
                         };
                     }
@@ -798,9 +799,7 @@ impl Tool for ShellTool {
                     );
 
                     return match decision {
-                        ApprovalDecision::Approve | ApprovalDecision::Deny => {
-                            ApprovalRequirement::Never
-                        }
+                        ApprovalDecision::Deny => ApprovalRequirement::Never,
                         ApprovalDecision::Escalate => ApprovalRequirement::Always,
                     };
                 }
@@ -993,18 +992,18 @@ mod tests {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
-    async fn test_smart_approval_approves_soft_flag_command() {
+    async fn test_smart_approval_escalates_safe_looking_soft_flag_command() {
         let _env_guard = lock_env();
         unsafe {
             std::env::set_var("SAFETY_SMART_APPROVAL_MODE", "smart");
         }
 
         let tool = ShellTool::new().with_smart_approver(Arc::new(StaticApprover {
-            decision: ApprovalDecision::Approve,
+            decision: ApprovalDecision::Escalate,
         }));
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"command": "sudo echo approve"})),
-            ApprovalRequirement::Never
+            ApprovalRequirement::Always
         );
 
         unsafe {
@@ -1073,7 +1072,7 @@ mod tests {
 
         let tool = ShellTool::new()
             .with_smart_approver(Arc::new(StaticApprover {
-                decision: ApprovalDecision::Approve,
+                decision: ApprovalDecision::Escalate,
             }))
             .with_safety_options(&ShellSafetyOptions {
                 smart_approval_mode: Some(SmartApprovalMode::Smart),
@@ -1087,7 +1086,7 @@ mod tests {
             SmartApprovalMode::Smart,
             command,
             &cwd,
-            ApprovalDecision::Approve,
+            ApprovalDecision::Escalate,
         );
         let scanner_report = tool
             .external_scanner

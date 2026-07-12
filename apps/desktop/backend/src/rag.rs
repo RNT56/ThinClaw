@@ -162,7 +162,7 @@ pub async fn extract_document_content(
         // Ensure browser is closed on all paths (including errors)
         // by using a scope guard pattern.
         let browser_close_result: Result<(), String> = async {
-        let _handle = tokio::spawn(async move { while let Some(_) = handler.next().await {} });
+        let _handle = tokio::spawn(async move { while (handler.next().await).is_some() {} });
 
         let page = browser
             .new_page(&format!("file://{}", file_path))
@@ -298,34 +298,32 @@ pub async fn extract_document_content(
     if is_pdf {
         if let Ok(app_data_dir) = app.path().app_data_dir() {
             let preview_path = app_data_dir.join("previews").join(format!("{}.jpg", hash));
-            if !preview_path.exists() {
-                if !ocr_used {
-                    let (mut browser, mut handler) = Browser::launch(
-                        BrowserConfig::builder()
-                            .viewport(Viewport {
-                                width: 1200,
-                                height: 1600,
-                                ..Default::default()
-                            })
-                            .build()
-                            .map_err(|e| e.to_string())?,
-                    )
+            if !preview_path.exists() && !ocr_used {
+                let (mut browser, mut handler) = Browser::launch(
+                    BrowserConfig::builder()
+                        .viewport(Viewport {
+                            width: 1200,
+                            height: 1600,
+                            ..Default::default()
+                        })
+                        .build()
+                        .map_err(|e| e.to_string())?,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                let _handle =
+                    tokio::spawn(async move { while (handler.next().await).is_some() {} });
+                let page = browser
+                    .new_page(&format!("file://{}", file_path))
                     .await
                     .map_err(|e| e.to_string())?;
-                    let _handle =
-                        tokio::spawn(async move { while let Some(_) = handler.next().await {} });
-                    let page = browser
-                        .new_page(&format!("file://{}", file_path))
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Ok(screenshot) = page.screenshot(chromiumoxide::page::ScreenshotParams::builder().format(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Jpeg).quality(80).build()).await {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Ok(screenshot) = page.screenshot(chromiumoxide::page::ScreenshotParams::builder().format(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Jpeg).quality(80).build()).await {
                         let preview_rel = format!("previews/{}.jpg", hash);
                         let file_store = app.state::<crate::file_store::FileStore>();
                         let _ = file_store.write(&preview_rel, &screenshot).await;
                     }
-                    let _ = browser.close().await;
-                }
+                let _ = browser.close().await;
             }
         }
     }
@@ -345,6 +343,8 @@ pub async fn extract_document_content(
 
 #[tauri::command]
 #[specta::specta]
+// Tauri commands intentionally expose flat arguments for generated bindings.
+#[allow(clippy::too_many_arguments)]
 pub async fn direct_rag_ingest_document(
     app: AppHandle,
     sidecar: State<'_, SidecarManager>,
@@ -766,6 +766,8 @@ pub async fn direct_rag_ingest_document(
 
 #[tauri::command]
 #[specta::specta]
+// Tauri commands intentionally expose flat arguments for generated bindings.
+#[allow(clippy::too_many_arguments)]
 pub async fn direct_rag_retrieve_context(
     app: tauri::AppHandle,
     sidecar: State<'_, SidecarManager>,
@@ -794,6 +796,7 @@ pub async fn direct_rag_retrieve_context(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn retrieve_context_internal(
     app: Option<tauri::AppHandle>,
     sidecar: &SidecarManager,

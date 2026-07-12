@@ -104,7 +104,7 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
     ChannelCheck {
         name: "slack",
         env_key: "SLACK_BOT_TOKEN",
-        description: "Slack bot (WASM tool)",
+        description: "Slack bot (WASM channel)",
     },
     ChannelCheck {
         name: "discord",
@@ -120,6 +120,16 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
         name: "apple_mail",
         env_key: "APPLE_MAIL_ENABLED",
         description: "Apple Mail (macOS only, Envelope Index polling)",
+    },
+    ChannelCheck {
+        name: "gmail",
+        env_key: "GMAIL_PROJECT_ID + GMAIL_SUBSCRIPTION_ID + OAuth credentials",
+        description: "Gmail (Pub/Sub pull + Gmail API replies)",
+    },
+    ChannelCheck {
+        name: "bluebubbles",
+        env_key: "BLUEBUBBLES_SERVER_URL + BLUEBUBBLES_PASSWORD",
+        description: "BlueBubbles iMessage bridge (cross-platform webhook)",
     },
 ];
 
@@ -534,6 +544,8 @@ fn channel_is_configured(config: &crate::config::Config, name: &str) -> bool {
         "telegram" => config.channels.telegram.is_some(),
         "slack" => config.channels.slack.is_some(),
         "discord" => config.channels.discord.is_some(),
+        "gmail" => config.channels.gmail.is_some(),
+        "bluebubbles" => config.channels.bluebubbles.is_some(),
         "imessage" => {
             #[cfg(target_os = "macos")]
             {
@@ -563,6 +575,7 @@ fn native_lifecycle_missing_env(name: &str) -> Vec<String> {
         "matrix" => &[
             ("MATRIX_HOMESERVER", &["MATRIX_HOMESERVER"]),
             ("MATRIX_ACCESS_TOKEN", &["MATRIX_ACCESS_TOKEN"]),
+            ("MATRIX_WEBHOOK_SECRET", &["MATRIX_WEBHOOK_SECRET"]),
         ],
         "voice-call" => &[
             ("VOICE_CALL_RESPONSE_URL", &["VOICE_CALL_RESPONSE_URL"]),

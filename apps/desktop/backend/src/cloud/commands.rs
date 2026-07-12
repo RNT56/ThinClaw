@@ -528,7 +528,7 @@ async fn dir_size(path: &std::path::Path) -> u64 {
             let metadata = entry.metadata().await.unwrap_or_else(|_| {
                 std::fs::metadata(entry.path()).unwrap_or_else(|_| {
                     // Fallback: skip
-                    return std::fs::metadata("/dev/null").unwrap();
+                    std::fs::metadata("/dev/null").unwrap()
                 })
             });
             if metadata.is_file() {

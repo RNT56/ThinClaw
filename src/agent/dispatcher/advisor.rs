@@ -197,7 +197,10 @@ impl Agent {
                 stop_reason
             )
         };
-        context_messages.push(ChatMessage::system(directive));
+        context_messages.push(ChatMessage::immutable_policy(
+            "advisor_stop_directive",
+            directive,
+        ));
     }
 
     pub(super) fn build_auto_advisor_arguments(

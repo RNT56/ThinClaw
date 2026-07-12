@@ -20,7 +20,7 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use hkdf::Hkdf;
-use rand::{RngCore, rngs::OsRng};
+use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 use zeroize::Zeroize;
 
@@ -252,8 +252,11 @@ pub fn decrypt(
 // ── Keychain Integration (macOS) ─────────────────────────────────────────────
 
 /// Keychain service names for the cloud encryption master key.
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "com.thinclaw.desktop.cloud-key";
+#[cfg(target_os = "macos")]
 const LEGACY_KEYCHAIN_SERVICE: &str = "com.scrappy.cloud-key";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "master-key";
 
 /// Load the master key from macOS Keychain.

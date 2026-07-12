@@ -1,4 +1,4 @@
-#![cfg(all(feature = "postgres", feature = "libsql"))]
+#![cfg(feature = "schema-divergence")]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -116,16 +116,14 @@ async fn schema_columns_match_with_allowlist() {
         serde_json::from_str(include_str!("schema_divergence_allowlist.json"))
             .expect("allowlist JSON must be valid");
 
-    // This test is gated behind `all(feature = "postgres", feature = "libsql")`
-    // (see the crate-level cfg above), so it only compiles in the dual-feature
-    // build CI uses for the `schema-divergence` job. A plain local
-    // `cargo test` does not build it. The only place it runs is that CI job,
-    // which always provisions Postgres — so a missing DATABASE_URL there is a
-    // real failure, not a reason to silently pass. (WS-13 owns keeping the job
-    // provisioned; see the WS-02 hand-off note.)
+    // This test is gated behind the explicit `schema-divergence` integration
+    // feature, which enables both database backends but is intentionally not
+    // part of the default `light` profile. Plain local `cargo test` therefore
+    // remains self-contained, while the dedicated CI job provisions Postgres
+    // and treats a missing DATABASE_URL as a real configuration failure.
     let base_url = std::env::var("DATABASE_URL").expect(
         "schema_divergence requires DATABASE_URL; this test is gated behind the \
-         postgres+libsql features and only runs in the schema-divergence CI job, \
+         schema-divergence feature and only runs in the dedicated CI job, \
          which always provisions Postgres",
     );
 

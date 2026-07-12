@@ -39,6 +39,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check MSRV and toolchain synchronization
         run: scripts/ci/check-msrv-sync.py
+      - name: Check release automation contract
+        run: python3 scripts/ci/check-release-automation.py
       - name: Check crate boundaries
         run: |
           set -euo pipefail
@@ -64,6 +66,8 @@ jobs:
           fi
       - name: Check file sizes (god-file guard)
         run: scripts/ci/check-file-sizes.sh
+      - name: Audit Prompt System V2 registry and safety invariants
+        run: python3 scripts/ci/prompt_audit.py
       - name: Check lints (cargo clippy)
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Guard Linux deploy port
@@ -200,11 +204,16 @@ jobs:
       - name: Frontend tests
         working-directory: apps/desktop
         run: npm test
+      - name: Frontend browser E2E
+        working-directory: apps/desktop
+        run: npm run test:e2e:browser
       - name: Frontend build smoke
         working-directory: apps/desktop
         run: npm run build
       - name: Backend cargo check
         run: cargo check --manifest-path apps/desktop/backend/Cargo.toml --locked
+      - name: Backend strict lints
+        run: cargo clippy --manifest-path apps/desktop/backend/Cargo.toml --locked --all-targets -- -D warnings
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       - name: Backend dependency policy (licenses + bans + sources)
@@ -752,7 +761,7 @@ jobs:
       - name: Enable pgvector extension
         run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
       - name: Run schema divergence test
-        run: cargo test --locked --test schema_divergence --no-default-features --features "postgres libsql" -- --nocapture --test-threads=1
+        run: cargo test --locked --test schema_divergence --no-default-features --features schema-divergence -- --nocapture --test-threads=1
 
   channel-crates:
     name: "Channel Crate: ${{ matrix.name }}"
@@ -870,6 +879,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -884,6 +895,8 @@ jobs:
       - name: Run tests with coverage
         run: cargo llvm-cov --all-features --lib --lcov --output-path coverage.lcov -- --nocapture
       - name: Validate coverage report
+        env:
+          BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -898,6 +911,10 @@ jobs:
               raise SystemExit("coverage.lcov does not look like an LCOV report")
           print(f"Validated {report} ({report.stat().st_size} bytes)")
           PY
+          python3 scripts/ci/check-coverage.py coverage.lcov \
+            --base "$BASE_REVISION" \
+            --project-min 38 \
+            --patch-min 70
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
         with:

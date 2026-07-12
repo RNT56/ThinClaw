@@ -3,6 +3,7 @@
 //! Each module groups related endpoint handlers by domain.
 
 pub mod autonomy;
+pub mod channels;
 pub mod chat;
 pub mod devices;
 pub mod experiments;
@@ -26,6 +27,7 @@ pub mod settings;
 pub mod skills;
 
 pub(crate) use autonomy::*;
+pub(crate) use channels::*;
 pub(crate) use chat::*;
 pub(crate) use devices::*;
 pub(crate) use experiments::*;

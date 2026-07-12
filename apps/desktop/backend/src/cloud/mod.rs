@@ -73,20 +73,16 @@ const CLOUD_CREDENTIAL_KEY_PREFIX: &str = "cloud_provider";
 /// The global storage mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum StorageMode {
     /// All data stored locally on this device (default).
+    #[default]
     Local,
     /// Data encrypted and stored in the cloud. Local is a cache.
     Cloud {
         provider_type: String,
         provider_name: String,
     },
-}
-
-impl Default for StorageMode {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 /// Status returned to the frontend.
@@ -608,7 +604,7 @@ impl CloudManager {
         match encryption::load_master_key_from_keychain() {
             Ok(Some(key)) => {
                 inner.master_key = Some(key);
-                return Ok(());
+                Ok(())
             }
             Ok(None) => {
                 // Generate new key

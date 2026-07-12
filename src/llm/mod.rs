@@ -24,6 +24,7 @@ pub mod llms_txt;
 pub mod model_guidance;
 pub mod model_metadata_sync;
 pub mod pricing_sync;
+pub mod prompt_contract;
 pub mod prompt_stack;
 mod provider;
 pub(crate) mod provider_factory;
@@ -51,6 +52,11 @@ pub use failover::{
     CooldownConfig, CredentialPoolHealthSnapshot, FailoverProvider, LeaseConfig,
     LeaseSelectionStrategy, ProviderLeaseEntry,
 };
+pub use prompt_contract::{
+    CompiledPrompt, PROMPT_CONTRACT_VERSION, PromptBudget, PromptCompileError, PromptCompiler,
+    PromptLifetime, PromptManifestEntry, PromptSegment, PromptSegmentStatus, PromptSensitivity,
+    PromptTrust,
+};
 pub use prompt_stack::{PromptLayer, PromptStack};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
@@ -60,8 +66,8 @@ pub use provider::{
 };
 pub use provider_factory::{build_provider_chain, create_llm_provider};
 pub use reasoning::{
-    ActionPlan, PlannedAction, Reasoning, ReasoningContext, RespondOutput, RespondResult,
-    SILENT_REPLY_TOKEN, TokenUsage, ToolSelection, is_silent_reply,
+    ActionPlan, PlannedAction, PromptCompilationTelemetry, Reasoning, ReasoningContext,
+    RespondOutput, RespondResult, SILENT_REPLY_TOKEN, TokenUsage, ToolSelection, is_silent_reply,
 };
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};

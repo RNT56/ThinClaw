@@ -363,10 +363,12 @@ impl OAuthManager {
 
     // ── Keychain Storage ─────────────────────────────────────────────────
 
+    #[cfg(target_os = "macos")]
     fn keychain_service(&self) -> String {
         format!("com.thinclaw.desktop.oauth.{}", self.config.provider_name)
     }
 
+    #[cfg(target_os = "macos")]
     fn legacy_keychain_service(&self) -> String {
         format!("com.scrappy.oauth.{}", self.config.provider_name)
     }

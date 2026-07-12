@@ -119,14 +119,15 @@ pub async fn direct_media_tts_synthesize(
     );
 
     // Build piper command
-    let mut command = app
+    let command = app
         .shell()
         .sidecar("bin/tts")
         .map_err(|e| format!("TTS binary not found: {e}. Expected at backend/bin/tts-aarch64-apple-darwin — replace with the Piper binary."))?;
 
     // Set DYLD_LIBRARY_PATH on macOS so the binary can find bundled shared libs
     #[cfg(target_os = "macos")]
-    {
+    let command = {
+        let mut command = command;
         if let Ok(resource_dir) = app.path().resource_dir() {
             let bin_dir = resource_dir.join("bin");
             let mut lib_path = bin_dir.to_string_lossy().to_string();
@@ -139,7 +140,8 @@ pub async fn direct_media_tts_synthesize(
             }
             command = command.env("DYLD_LIBRARY_PATH", lib_path);
         }
-    }
+        command
+    };
 
     // Piper arguments:
     //   -m <model.onnx>   — ONNX voice model

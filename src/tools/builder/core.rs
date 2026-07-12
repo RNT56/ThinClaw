@@ -115,14 +115,7 @@ impl LlmSoftwareBuilder {
 
     /// Create the system prompt for the build agent.
     fn build_system_prompt(&self, requirement: &BuildRequirement) -> String {
-        let mut prompt = format!(
-            r#"You are a software developer building a program.
-
-## Task
-Build: {name}
-Description: {description}
-Type: {software_type:?}
-Language: {language:?}
+        let mut prompt = r#"You are a software developer building a program from the user-role requirement supplied separately.
 
 ## Process
 1. Create the project structure with necessary files
@@ -144,12 +137,8 @@ Language: {language:?}
 - write_file: Create new files
 - apply_patch: Edit existing files surgically
 - list_dir: Explore project structure
-"#,
-            name = requirement.name,
-            description = requirement.description,
-            software_type = requirement.software_type,
-            language = requirement.language,
-        );
+"#
+        .to_string();
 
         // Add tool-specific context when building WASM tools
         if requirement.software_type == SoftwareType::WasmTool {
@@ -360,11 +349,13 @@ Create alongside the .wasm file to grant capabilities:
         // Add initial user message - directive to force immediate tool use
         reason_ctx.messages.push(ChatMessage::user(format!(
             "Build the {} in directory: {}\n\n\
-             Requirements:\n- {}\n\n\
+             Type: {:?}\nLanguage: {:?}\nRequirements:\n- {}\n\n\
              IMPORTANT: Use the write_file tool NOW to create Cargo.toml. \
              Do not explain, plan, or output JSON—immediately call write_file.",
             requirement.name,
             project_dir.display(),
+            requirement.software_type,
+            requirement.language,
             requirement.description
         )));
 

@@ -905,12 +905,8 @@ pub fn render_subagent_system_prompt(sections: SubagentSystemPromptSections<'_>)
         sections.base_system_prompt
     ));
     rendered.push(format!(
-        "## Task Packet\n\n{}",
-        render_task_packet(sections.task_packet)
-    ));
-    rendered.push(format!(
         "## Operating Contract\n\n\
-         - Use the supplied task packet as the primary source of truth.\n\
+         - Use the user-role task packet supplied separately as the primary source of truth.\n\
          - Do not assume access to the parent agent's broader memory, transcript history, or personal context.\n\
          - Do not browse or search for additional context unless the parent explicitly granted the necessary tools.\n\
          - If the packet is insufficient, ask the parent for what is missing instead of widening scope.\n\
@@ -1601,7 +1597,8 @@ mod tests {
         });
 
         assert!(prompt.contains("Workspace prompt"));
-        assert!(prompt.contains("Objective: Inspect the adapter"));
+        assert!(!prompt.contains("Objective: Inspect the adapter"));
+        assert!(render_task_packet(&packet).contains("Objective: Inspect the adapter"));
         assert!(prompt.contains("Explicit tool grants: read_file"));
         assert!(prompt.contains("Explicit skill grants: none"));
     }

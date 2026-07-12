@@ -93,6 +93,7 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     let setup = repo_file("deploy/setup.sh");
     let readme = repo_file("README.md");
     let deployment_docs = repo_file("docs/DEPLOYMENT.md");
+    let pi_deployment_docs = repo_file("docs/deploy/raspberry-pi-os-lite.md");
     let build_profiles = repo_file("docs/BUILD_PROFILES.md");
     let external_deps = repo_file("docs/EXTERNAL_DEPENDENCIES.md");
     let cli_reference = repo_file("docs/CLI_REFERENCE.md");
@@ -108,7 +109,11 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(setup.contains("THINCLAW_HEADLESS=true"));
     assert!(setup.contains("dotenv_quote"));
     assert!(setup.contains("CHROMIUM_IMAGE=chromedp/headless-shell:latest"));
-    assert!(readme.contains("deploy-setup.sh --mode native --binary ./thinclaw"));
+    assert!(readme.contains("docs/DEPLOYMENT.md"));
+    assert!(
+        pi_deployment_docs.contains("deploy-setup.sh --mode native --profile edge"),
+        "Pi OS Lite guide should document the supported native edge install"
+    );
     assert!(deployment_docs.contains("thinclaw doctor --profile pi-os-lite-64"));
     assert!(deployment_docs.contains("aarch64-unknown-linux-gnu"));
     assert!(deployment_docs.contains("docker compose pull thinclaw"));
@@ -123,7 +128,7 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(ci.contains("linux/arm64"));
     assert!(ci.contains("workflow_dispatch"));
     assert!(ci.contains("Verify ARM64 runner"));
-    assert!(ci.contains("cargo build --release --features full --bin thinclaw"));
+    assert!(ci.contains("cargo build --locked --release --features full --bin thinclaw"));
     assert!(ci.contains("./target/release/thinclaw doctor --profile pi-os-lite-64"));
     assert!(ci.contains("THINCLAW_LINUX_READINESS_OS_RELEASE"));
     assert!(ci.contains("http://127.0.0.1:$port/api/health"));

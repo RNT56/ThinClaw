@@ -429,20 +429,18 @@ pub async fn thinclaw_agents_list(
     let cfg = state.get_config().await.ok_or("Config not loaded")?;
     let mut profiles = cfg.profiles.clone();
 
-    if ironclaw.is_initialized() {
-        if !profiles.iter().any(|p| p.id == "local-core") {
-            profiles.insert(
-                0,
-                AgentProfile {
-                    id: "local-core".to_string(),
-                    name: "Local Core".to_string(),
-                    url: "embedded://thinclaw-runtime".to_string(),
-                    token: None,
-                    mode: "embedded".to_string(),
-                    auto_connect: true,
-                },
-            );
-        }
+    if ironclaw.is_initialized() && !profiles.iter().any(|p| p.id == "local-core") {
+        profiles.insert(
+            0,
+            AgentProfile {
+                id: "local-core".to_string(),
+                name: "Local Core".to_string(),
+                url: "embedded://thinclaw-runtime".to_string(),
+                token: None,
+                mode: "embedded".to_string(),
+                auto_connect: true,
+            },
+        );
     }
 
     Ok(profiles)

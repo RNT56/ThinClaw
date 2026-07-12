@@ -144,7 +144,7 @@ impl GDriveProvider {
 
         let resp = self
             .http
-            .post(&format!("{}/files", DRIVE_API))
+            .post(format!("{}/files", DRIVE_API))
             .bearer_auth(&token)
             .json(&metadata)
             .send()

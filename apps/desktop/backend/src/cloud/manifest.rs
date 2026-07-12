@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(groups.get(&FileType::Document).unwrap().len(), 2);
         assert_eq!(groups.get(&FileType::ChatImage).unwrap().len(), 1);
         assert_eq!(groups.get(&FileType::Database).unwrap().len(), 1);
-        assert!(groups.get(&FileType::VectorIndex).is_none());
+        assert!(!groups.contains_key(&FileType::VectorIndex));
     }
 
     #[test]

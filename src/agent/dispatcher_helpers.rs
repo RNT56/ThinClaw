@@ -244,6 +244,7 @@ mod tests {
                 external_scanner_require_verified: false,
             })),
             tools: Arc::new(ToolRegistry::new()),
+            desktop_autonomy_manager: None,
             workspace: None,
             extension_manager: None,
             skill_registry: None,

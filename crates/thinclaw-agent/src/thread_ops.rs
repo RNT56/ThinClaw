@@ -255,6 +255,8 @@ pub fn runtime_snapshot_for_persistence(
         runtime.frozen_provider_system_prompt = existing.frozen_provider_system_prompt.clone();
         runtime.prompt_snapshot_hash = existing.prompt_snapshot_hash.clone();
         runtime.ephemeral_overlay_hash = existing.ephemeral_overlay_hash.clone();
+        runtime.prompt_contract_version = existing.prompt_contract_version.clone();
+        runtime.prompt_manifest_digest = existing.prompt_manifest_digest.clone();
         runtime.prompt_segment_order = existing.prompt_segment_order.clone();
         runtime.provider_context_refs = existing.provider_context_refs.clone();
         runtime.undo_checkpoints = existing.undo_checkpoints.clone();
@@ -645,6 +647,8 @@ pub async fn clear_thread_runtime_transients(
         runtime.frozen_provider_system_prompt = None;
         runtime.prompt_snapshot_hash = None;
         runtime.ephemeral_overlay_hash = None;
+        runtime.prompt_contract_version = None;
+        runtime.prompt_manifest_digest = None;
         runtime.prompt_segment_order.clear();
         runtime.provider_context_refs.clear();
         if runtime.state == PortableThreadState::AwaitingApproval {

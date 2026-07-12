@@ -37,8 +37,22 @@ struct TestLlm {
 
 impl TestLlm {
     fn reply(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let content = if serde_json::from_str::<serde_json::Value>(&text)
+            .is_ok_and(|value| value.is_object())
+        {
+            text
+        } else {
+            serde_json::json!({
+                "status": "attention",
+                "summary": text,
+                "actions": [],
+                "artifacts": []
+            })
+            .to_string()
+        };
         Self {
-            mode: TestLlmMode::Reply(text.into()),
+            mode: TestLlmMode::Reply(content),
         }
     }
 

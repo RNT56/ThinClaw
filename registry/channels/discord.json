@@ -3,7 +3,7 @@
   "display_name": "Discord",
   "kind": "channel",
   "version": "0.1.0",
-  "description": "Discord Gateway/Webhook channel for slash commands, buttons, and messages",
+  "description": "Discord interactions webhook channel for slash commands and interaction responses",
   "keywords": [
     "messaging",
     "chat",
@@ -25,7 +25,8 @@
     "method": "manual",
     "provider": "Discord",
     "secrets": [
-      "discord_bot_token"
+      "discord_bot_token",
+      "discord_public_key"
     ],
     "shared_auth": null,
     "setup_url": "https://discord.com/developers/applications"

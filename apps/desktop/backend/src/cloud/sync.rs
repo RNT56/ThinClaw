@@ -63,6 +63,12 @@ pub struct FileTracker {
     last_sync: Option<DateTime<Utc>>,
 }
 
+impl Default for FileTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileTracker {
     pub fn new() -> Self {
         Self {
@@ -110,7 +116,7 @@ impl FileTracker {
         }
 
         // Detect deletions: files in known_hashes but not seen on disk
-        for (rel_path, _hash) in &self.known_hashes {
+        for rel_path in self.known_hashes.keys() {
             if !seen_paths.contains(rel_path) {
                 let abs_path = root.join(rel_path);
                 if !abs_path.exists() {

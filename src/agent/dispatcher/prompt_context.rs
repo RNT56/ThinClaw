@@ -1,5 +1,12 @@
 use super::*;
 
+fn frozen_prompt_contract_version(
+    explicit_version: Option<&str>,
+    has_pre_v2_snapshot: bool,
+) -> Option<&str> {
+    explicit_version.or_else(|| has_pre_v2_snapshot.then_some("legacy"))
+}
+
 pub(super) struct PreparedPromptContext {
     pub(super) identity: crate::identity::ResolvedIdentity,
     pub(super) routed_agent: Option<crate::agent::agent_router::AgentWorkspace>,
@@ -427,7 +434,42 @@ impl Agent {
                 ))
             }
         };
-        let prompt_assembly = assemble_dispatcher_prompt_materials(&DispatcherPromptMaterials {
+        let history_tokens = {
+            let session = session.lock().await;
+            session
+                .threads
+                .get(&thread_id)
+                .map(|thread| {
+                    thread
+                        .messages()
+                        .iter()
+                        .map(crate::llm::ChatMessage::estimated_chars)
+                        .sum::<usize>()
+                        .div_ceil(4)
+                })
+                .unwrap_or_default()
+        };
+        let tool_schema_tokens = self
+            .tools()
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|tool| {
+                (tool.name.chars().count()
+                    + tool.description.chars().count()
+                    + tool.parameters.to_string().chars().count())
+                .div_ceil(4)
+            })
+            .sum();
+        let prompt_budget = thinclaw_llm_core::PromptBudget {
+            context_window_tokens: prompt_settings.context_window_tokens,
+            tool_schema_tokens,
+            history_tokens,
+            output_reserve_tokens: prompt_settings.output_reserve_tokens,
+            safety_margin_percent: prompt_settings.safety_margin_percent,
+            prompt_cap_tokens: Some(prompt_settings.max_total_tokens),
+        };
+        let prompt_materials = DispatcherPromptMaterials {
             workspace_prompt: workspace_prompt.clone(),
             provider_system_prompt: provider_system_prompt.clone(),
             skill_index_context,
@@ -442,12 +484,68 @@ impl Agent {
                 .as_ref()
                 .map(|ctx| ctx.context_refs.clone())
                 .unwrap_or_default(),
+        };
+        let prompt_source_segments =
+            dispatcher_prompt_assembly(&prompt_materials).into_prompt_segments();
+        let prompt_assembly = assemble_dispatcher_prompt_materials_with_budget(
+            &prompt_materials,
+            prompt_budget,
+        ).unwrap_or_else(|error| {
+            tracing::error!(thread = %thread_id, %error, "Prompt V2 compilation failed; using the bounded default compiler budget");
+            assemble_dispatcher_prompt_materials(&DispatcherPromptMaterials {
+                workspace_prompt: workspace_prompt.clone(),
+                provider_system_prompt: provider_system_prompt.clone(),
+                skill_index_context: None,
+                provider_recall_context: None,
+                linked_recall_context: None,
+                channel_formatting_context: None,
+                personality_overlay_context: None,
+                runtime_capability_hint: None,
+                active_skill_context: None,
+                post_compaction_fragment: None,
+                provider_context_refs: Vec::new(),
+            })
         });
+        let frozen_contract_version = existing_runtime.as_ref().and_then(|runtime| {
+            frozen_prompt_contract_version(
+                runtime.prompt_contract_version.as_deref(),
+                runtime.prompt_snapshot_hash.is_some()
+                    || runtime.frozen_workspace_prompt.is_some()
+                    || runtime.frozen_provider_system_prompt.is_some(),
+            )
+        });
+        let effective_rollout_mode = prompt_settings.rollout_mode.effective_for_session(
+            prompt_settings.session_freeze_enabled,
+            frozen_contract_version,
+        );
+        if matches!(
+            effective_rollout_mode,
+            crate::settings::PromptRolloutMode::Shadow
+        ) {
+            tracing::info!(
+                thread = %thread_id,
+                contract_version = %prompt_assembly.contract_version,
+                manifest_digest = %prompt_assembly.manifest_digest,
+                estimated_tokens = prompt_assembly.estimated_tokens,
+                segment_count = prompt_assembly.manifest.len(),
+                "Prompt V2 shadow compilation completed"
+            );
+        }
         if let Some(store) = self.store().map(Arc::clone) {
+            let exact_v2_telemetry_is_deferred = matches!(
+                effective_rollout_mode,
+                crate::settings::PromptRolloutMode::V2
+            );
             let stable_hash = prompt_assembly.stable_hash.clone();
             let ephemeral_hash = prompt_assembly.ephemeral_hash.clone();
             let segment_order = prompt_assembly.segment_order.clone();
             let provider_context_refs = prompt_assembly.provider_context_refs.clone();
+            let active_contract_version = match effective_rollout_mode {
+                crate::settings::PromptRolloutMode::V2 => prompt_assembly.contract_version.clone(),
+                crate::settings::PromptRolloutMode::Legacy
+                | crate::settings::PromptRolloutMode::Shadow => "legacy".to_string(),
+            };
+            let manifest_digest = prompt_assembly.manifest_digest.clone();
             let prior_stable_hash = existing_runtime
                 .as_ref()
                 .and_then(|runtime| runtime.prompt_snapshot_hash.clone());
@@ -464,13 +562,18 @@ impl Agent {
                         .clone()
                         .or(frozen_provider_system_prompt.clone());
                 }
-                runtime.prompt_snapshot_hash = Some(stable_hash.clone());
-                runtime.ephemeral_overlay_hash = Some(ephemeral_hash.clone());
-                runtime.prompt_segment_order = segment_order.clone();
+                runtime.prompt_contract_version = Some(active_contract_version.clone());
+                if !exact_v2_telemetry_is_deferred {
+                    runtime.prompt_snapshot_hash = Some(stable_hash.clone());
+                    runtime.ephemeral_overlay_hash = Some(ephemeral_hash.clone());
+                    runtime.prompt_manifest_digest = Some(manifest_digest.clone());
+                    runtime.prompt_segment_order = segment_order.clone();
+                }
                 runtime.provider_context_refs = provider_context_refs.clone();
             })
             .await;
-            if let Some(previous) = prior_stable_hash
+            if !exact_v2_telemetry_is_deferred
+                && let Some(previous) = prior_stable_hash
                 && previous != stable_hash
             {
                 tracing::info!(
@@ -513,10 +616,20 @@ impl Agent {
             reasoning = reasoning.with_response_cache(Arc::clone(cache));
         }
 
-        if !prompt_assembly.stable_snapshot.trim().is_empty() {
-            reasoning = reasoning.with_system_prompt(prompt_assembly.stable_snapshot.clone());
-        }
-        let prompt_context_documents = prompt_assembly.ephemeral_documents.clone();
+        let prompt_context_documents = match effective_rollout_mode {
+            crate::settings::PromptRolloutMode::V2 => {
+                reasoning = reasoning.with_prompt_contract(prompt_source_segments, prompt_budget);
+                Vec::new()
+            }
+            crate::settings::PromptRolloutMode::Legacy
+            | crate::settings::PromptRolloutMode::Shadow => {
+                let system_prompt = prompt_assembly.stable_snapshot.clone();
+                if !system_prompt.trim().is_empty() {
+                    reasoning = reasoning.with_system_prompt(system_prompt);
+                }
+                prompt_assembly.legacy_ephemeral_documents.clone()
+            }
+        };
 
         PreparedPromptContext {
             identity,
@@ -529,5 +642,17 @@ impl Agent {
             reasoning,
             prompt_context_documents,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frozen_prompt_contract_version;
+
+    #[test]
+    fn pre_v2_frozen_session_stays_legacy_until_session_boundary() {
+        assert_eq!(frozen_prompt_contract_version(None, true), Some("legacy"));
+        assert_eq!(frozen_prompt_contract_version(None, false), None);
+        assert_eq!(frozen_prompt_contract_version(Some("v2"), true), Some("v2"));
     }
 }

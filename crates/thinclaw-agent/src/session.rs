@@ -475,6 +475,8 @@ impl Thread {
             frozen_provider_system_prompt: None,
             prompt_snapshot_hash: None,
             ephemeral_overlay_hash: None,
+            prompt_contract_version: None,
+            prompt_manifest_digest: None,
             prompt_segment_order: Vec::new(),
             provider_context_refs: Vec::new(),
             active_message_row_count: None,
@@ -1307,6 +1309,8 @@ mod tests {
             frozen_provider_system_prompt: None,
             prompt_snapshot_hash: None,
             ephemeral_overlay_hash: None,
+            prompt_contract_version: None,
+            prompt_manifest_digest: None,
             prompt_segment_order: Vec::new(),
             provider_context_refs: Vec::new(),
             active_message_row_count: None,
@@ -1337,6 +1341,8 @@ mod tests {
             frozen_provider_system_prompt: Some("provider".to_string()),
             prompt_snapshot_hash: Some("sha256:stable".to_string()),
             ephemeral_overlay_hash: Some("sha256:ephemeral".to_string()),
+            prompt_contract_version: Some("v2".to_string()),
+            prompt_manifest_digest: Some("sha256:manifest".to_string()),
             prompt_segment_order: vec![
                 "stable:identity".to_string(),
                 "ephemeral:provider_recall".to_string(),
@@ -1352,6 +1358,14 @@ mod tests {
             serde_json::from_str(&encoded).expect("deserialize runtime");
 
         assert_eq!(decoded.prompt_snapshot_hash, runtime.prompt_snapshot_hash);
+        assert_eq!(
+            decoded.prompt_contract_version,
+            runtime.prompt_contract_version
+        );
+        assert_eq!(
+            decoded.prompt_manifest_digest,
+            runtime.prompt_manifest_digest
+        );
         assert_eq!(
             decoded.frozen_workspace_prompt,
             runtime.frozen_workspace_prompt

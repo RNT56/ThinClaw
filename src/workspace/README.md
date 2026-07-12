@@ -96,7 +96,7 @@ Proactive periodic execution (default: 30 minutes):
    `chat` delivers to the default surface, and a channel name overrides the
    delivery channel; `include_reasoning` retains the reasoning chain in the
    emitted summary
-4. If nothing needs attention, the agent replies `HEARTBEAT_OK` (no delivery)
+4. If nothing needs attention, the run completes without user delivery
 
 Heartbeat scheduling is owned by the **routine engine**, not a standalone
 loop. The agent loop registers a heartbeat routine at startup via

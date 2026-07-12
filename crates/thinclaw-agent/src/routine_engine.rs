@@ -939,17 +939,26 @@ pub fn build_routine_notification(
     })
 }
 
-pub const LIGHTWEIGHT_ROUTINE_OK_SENTINEL: &str = "ROUTINE_OK";
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LightweightRoutineDecision {
+    status: RunStatus,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    actions: Vec<String>,
+    #[serde(default)]
+    artifacts: Vec<String>,
+}
 
 /// Default heartbeat prompt body.
 pub const DEFAULT_HEARTBEAT_PROMPT: &str = "\
 Read the HEARTBEAT.md checklist below and follow it strictly. \
 Do not infer or repeat old tasks from prior chats. Check each item and report findings.\n\
 \n\
-If nothing needs attention, reply EXACTLY with: HEARTBEAT_OK\n\
-\n\
-If something needs attention, provide a short, specific summary of what needs action. \
-Do NOT echo these instructions back — give real findings only. \
+Return a structured result through the worker completion contract. If something needs \
+attention, provide a short, specific summary of what needs action. Do not echo these \
+instructions back — give real findings only. \
 Use `emit_user_message` to deliver your findings to the user.\n\
 \n\
 You may edit HEARTBEAT.md to add, remove, or update checklist items as needed.";
@@ -1002,8 +1011,10 @@ pub fn build_lightweight_routine_prompt(
     }
 
     full_prompt.push_str(
-        "\n\n---\n\nIf nothing needs attention, reply EXACTLY with: ROUTINE_OK\n\
-         If something needs attention, provide a concise summary.",
+        "\n\n---\n\nReturn exactly one JSON object with this shape: \
+         {\"status\":\"ok|attention|failed\",\"summary\":null,\"actions\":[],\"artifacts\":[]}. \
+         Use `ok` only when nothing needs attention. For `attention` or `failed`, include a concise summary. \
+         Do not add prose outside the JSON.",
     );
     full_prompt
 }
@@ -1046,13 +1057,39 @@ pub fn classify_lightweight_routine_response(
         };
     }
 
-    if content == LIGHTWEIGHT_ROUTINE_OK_SENTINEL
-        || content.contains(LIGHTWEIGHT_ROUTINE_OK_SENTINEL)
-    {
+    let decision =
+        serde_json::from_str::<LightweightRoutineDecision>(content).map_err(|error| {
+            RoutineError::ExecutionFailed {
+                reason: format!("invalid structured routine response: {error}"),
+            }
+        })?;
+    if decision.status == RunStatus::Running {
+        return Err(RoutineError::ExecutionFailed {
+            reason: "routine response cannot remain in running state".to_string(),
+        });
+    }
+    let summary = decision.summary.filter(|value| !value.trim().is_empty());
+    if decision.status == RunStatus::Ok {
+        if summary.is_some() || !decision.actions.is_empty() || !decision.artifacts.is_empty() {
+            return Err(RoutineError::ExecutionFailed {
+                reason: "ok routine response unexpectedly contained findings".to_string(),
+            });
+        }
         return Ok((RunStatus::Ok, None, tokens_used));
     }
-
-    Ok((RunStatus::Attention, Some(content.to_string()), tokens_used))
+    let Some(summary) = summary else {
+        return Err(RoutineError::ExecutionFailed {
+            reason: format!("{} routine response omitted its summary", decision.status),
+        });
+    };
+    let mut sections = vec![summary];
+    if !decision.actions.is_empty() {
+        sections.push(format!("Actions:\n- {}", decision.actions.join("\n- ")));
+    }
+    if !decision.artifacts.is_empty() {
+        sections.push(format!("Artifacts:\n- {}", decision.artifacts.join("\n- ")));
+    }
+    Ok((decision.status, Some(sections.join("\n\n")), tokens_used))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1183,7 +1220,7 @@ pub fn build_heartbeat_prompt(
     let logs_note = if daily_context.is_empty() {
         "\n\nNote: No daily logs exist yet (no conversations recorded). \
          Any checklist items that reference daily logs are automatically satisfied. \
-         If all items depend on daily logs, reply HEARTBEAT_OK."
+         If all items depend on daily logs, complete successfully without reporting findings."
     } else {
         ""
     };
@@ -1807,7 +1844,7 @@ mod tests {
     }
 
     #[test]
-    fn lightweight_prompt_includes_context_state_and_sentinel() {
+    fn lightweight_prompt_includes_context_state_and_schema() {
         let prompt = build_lightweight_routine_prompt(
             "Do work",
             &["## file.md\n\nbody".to_string()],
@@ -1817,13 +1854,13 @@ mod tests {
         assert!(prompt.contains("Do work"));
         assert!(prompt.contains("# Context"));
         assert!(prompt.contains("# Previous State"));
-        assert!(prompt.contains(LIGHTWEIGHT_ROUTINE_OK_SENTINEL));
+        assert!(prompt.contains("\"status\":\"ok|attention|failed\""));
     }
 
     #[test]
     fn lightweight_response_classifies_ok_and_empty() {
         let ok = classify_lightweight_routine_response(
-            LIGHTWEIGHT_ROUTINE_OK_SENTINEL,
+            r#"{"status":"ok","summary":null,"actions":[],"artifacts":[]}"#,
             FinishReason::Stop,
             1,
             2,
@@ -1834,6 +1871,18 @@ mod tests {
         let empty =
             classify_lightweight_routine_response("", FinishReason::Length, 1, 2).unwrap_err();
         assert!(matches!(empty, RoutineError::TruncatedResponse));
+    }
+
+    #[test]
+    fn lightweight_response_rejects_sentinel_collision_and_extra_prose() {
+        for response in [
+            "ROUTINE_OK",
+            r#"prefix {"status":"ok","summary":null,"actions":[],"artifacts":[]}"#,
+        ] {
+            assert!(
+                classify_lightweight_routine_response(response, FinishReason::Stop, 1, 2,).is_err()
+            );
+        }
     }
 
     #[test]

@@ -28,6 +28,8 @@ impl RunThreadRuntimeLookup for RootRunThreadRuntimeLookup {
             runtime.map(|runtime| thinclaw_agent::ports::ThreadRuntimeSnapshot {
                 prompt_snapshot_hash: runtime.prompt_snapshot_hash,
                 ephemeral_overlay_hash: runtime.ephemeral_overlay_hash,
+                prompt_contract_version: runtime.prompt_contract_version,
+                prompt_manifest_digest: runtime.prompt_manifest_digest,
                 provider_context_refs: runtime.provider_context_refs,
                 ..Default::default()
             }),

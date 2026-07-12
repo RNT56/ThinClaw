@@ -436,7 +436,7 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() {
+    if let Some(manager) = ctx.desktop_autonomy_manager.as_ref() {
         if routine_requests_desktop_capabilities(allowed_tools) {
             manager
                 .ensure_can_run()
@@ -449,7 +449,7 @@ async fn execute_full_job(
         }
     }
 
-    let desktop = crate::desktop_autonomy::desktop_autonomy_manager().map(|manager| {
+    let desktop = ctx.desktop_autonomy_manager.as_ref().map(|manager| {
         serde_json::json!({
             "desktop_session": manager.default_session_id(),
             "deployment_mode": manager.config().deployment_mode.as_str(),
@@ -588,7 +588,7 @@ async fn execute_heartbeat(
             tracing::debug!(routine = %routine.name, "HEARTBEAT.md is empty or missing — skipping");
             return Ok((
                 RunStatus::Ok,
-                Some("HEARTBEAT_OK — checklist empty".to_string()),
+                Some("Checklist empty; no action required.".to_string()),
                 None,
             ));
         }

@@ -1,8 +1,5 @@
-import { ChatLayout } from "./components/chat/ChatLayout";
 import { Toaster } from "sonner";
-import { useState, useEffect } from "react";
-import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
-import { SpotlightBar } from "./components/chat/SpotlightBar";
+import { lazy, Suspense, useState, useEffect } from "react";
 import * as thinclaw from "./lib/thinclaw";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { ExperimentalBadge } from "./components/ExperimentalBadge";
@@ -13,6 +10,26 @@ import { ThemeProvider } from "./components/theme-provider";
 import { ModelProvider } from "./components/model-context";
 import { ChatProvider } from "./components/chat/chat-context";
 import { ConfigProvider } from "./components/config-context";
+
+const ChatLayout = lazy(() =>
+  import("./components/chat/ChatLayout").then((module) => ({ default: module.ChatLayout })),
+);
+const OnboardingWizard = lazy(() =>
+  import("./components/onboarding/OnboardingWizard").then((module) => ({
+    default: module.OnboardingWizard,
+  })),
+);
+const SpotlightBar = lazy(() =>
+  import("./components/chat/SpotlightBar").then((module) => ({ default: module.SpotlightBar })),
+);
+
+function AppLoadingScreen() {
+  return (
+    <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
+      Loading ThinClaw…
+    </div>
+  );
+}
 
 function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -91,7 +108,9 @@ function App() {
         <ConfigProvider>
           <ModelProvider>
             <ChatProvider>
-              <SpotlightBar />
+              <Suspense fallback={null}>
+                <SpotlightBar />
+              </Suspense>
               <Toaster closeButton position="top-right" />
             </ChatProvider>
           </ModelProvider>
@@ -105,11 +124,13 @@ function App() {
       <ConfigProvider>
         <ModelProvider>
           <ChatProvider>
-            {showOnboarding ? (
-              <OnboardingWizard onComplete={() => setShowOnboarding(false)} />
-            ) : (
-              <ChatLayout />
-            )}
+            <Suspense fallback={<AppLoadingScreen />}>
+              {showOnboarding ? (
+                <OnboardingWizard onComplete={() => setShowOnboarding(false)} />
+              ) : (
+                <ChatLayout />
+              )}
+            </Suspense>
             <Toaster closeButton position="top-right" richColors expand={true} />
             <UpdateChecker />
             <ExperimentalBadge />

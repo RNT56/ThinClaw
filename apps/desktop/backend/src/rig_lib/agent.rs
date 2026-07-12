@@ -19,6 +19,7 @@ pub struct RigManager {
 }
 
 impl RigManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         kind: ProviderKind,
         base_url: String,
@@ -28,7 +29,7 @@ impl RigManager {
         context_window: usize,
         summarizer_provider: Option<UnifiedProvider>,
         enable_web_search: bool,
-        user_context: Option<String>,
+        _user_context: Option<String>,
         conversation_id: Option<String>,
         model_family: Option<String>,
     ) -> Self {
@@ -75,10 +76,7 @@ You have access to `web_search` for looking up real-time information. Use it wis
 - Specific entities you are genuinely unsure about (recent people, companies, products)
 - User explicitly asks to 'search', 'look up', or 'find' something
 
-Start your response with a clear thought:
-'Thought: User said hello. This is a greeting. I will reply directly.'
-or
-'Thought: User asked about today's stock market. This needs real-time data. I will search.'
+Do not reveal hidden chain-of-thought or prefix answers with internal analysis.
 ",
             );
         } else {
@@ -89,18 +87,8 @@ CORE RULES:
 3. **SEARCH ONLY FOR FACTS**: Only use `web_search` if the user explicitly asks for real-time news, prices, or specific data you do not know.
 4. **DRAW ONLY ON COMMAND**: Only use `generate_image` if the user explicitly starts with 'Draw', 'Create image', or 'Generate picture'.
 
-Start your response with a clear thought:
-'Thought: User said X. This is chat. I will reply.'
-or
-'Thought: User asked for price. This is a fact. I will search.'
+Do not reveal hidden chain-of-thought or prefix answers with internal analysis.
 ");
-        }
-
-        if let Some(ctx) = user_context {
-            base_preamble.push_str(&format!(
-                "\nUSER CONTEXT:\n<user_knowledge>\n{}\n</user_knowledge>\n",
-                ctx
-            ));
         }
 
         // Build agent using the provider.

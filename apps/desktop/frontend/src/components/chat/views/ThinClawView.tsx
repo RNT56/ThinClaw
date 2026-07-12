@@ -1,37 +1,42 @@
-import { useState, useEffect, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { useChatLayout } from '../ChatProvider';
-import { ThinClawChatView } from '../../thinclaw/ThinClawChatView';
-import { ThinClawDashboard } from '../../thinclaw/ThinClawDashboard';
-import { ThinClawChannels } from '../../thinclaw/ThinClawChannels';
-import { ThinClawChannelStatus } from '../../thinclaw/ThinClawChannelStatus';
-import { ThinClawChannelConfig } from '../../thinclaw/ThinClawChannelConfig';
-import { ThinClawPresence } from '../../thinclaw/ThinClawPresence';
-import { ThinClawAutomations } from '../../thinclaw/ThinClawAutomations';
-import { ThinClawJobs } from '../../thinclaw/ThinClawJobs';
-import { ThinClawAutonomy } from '../../thinclaw/ThinClawAutonomy';
-import { ThinClawRoutineAudit } from '../../thinclaw/ThinClawRoutineAudit';
-import { ThinClawSkills } from '../../thinclaw/ThinClawSkills';
-import { ThinClawHooks } from '../../thinclaw/ThinClawHooks';
-import { ThinClawPlugins } from '../../thinclaw/ThinClawPlugins';
-import { ThinClawConfig } from '../../thinclaw/ThinClawConfig';
-import { ThinClawDoctor } from '../../thinclaw/ThinClawDoctor';
-import { ThinClawEventInspector } from '../../thinclaw/ThinClawEventInspector';
-import { ThinClawToolPolicies } from '../../thinclaw/ThinClawToolPolicies';
-import { ThinClawPairing } from '../../thinclaw/ThinClawPairing';
-import { ThinClawSystemControl } from '../../thinclaw/ThinClawSystemControl';
-import { ThinClawBrain } from '../../thinclaw/ThinClawBrain';
-import { ThinClawMemory } from '../../thinclaw/ThinClawMemory';
-import { FleetCommandCenter } from '../../thinclaw/fleet/FleetCommandCenter';
-import { ThinClawCostDashboard } from '../../thinclaw/ThinClawCostDashboard';
-import { ThinClawCacheStats } from '../../thinclaw/ThinClawCacheStats';
-import { ThinClawTrajectory } from '../../thinclaw/ThinClawTrajectory';
-import { ThinClawRollback } from '../../thinclaw/ThinClawRollback';
-import { ThinClawSessionSearch } from '../../thinclaw/ThinClawSessionSearch';
-import { ThinClawRouting } from '../../thinclaw/ThinClawRouting';
-import { ThinClawExperiments } from '../../thinclaw/ThinClawExperiments';
-import { ThinClawLearning } from '../../thinclaw/ThinClawLearning';
-import { ThinClawRepoProjects } from '../../thinclaw/ThinClawRepoProjects';
 import * as thinclaw from '../../../lib/thinclaw';
+
+const ThinClawChatView = lazy(() => import('../../thinclaw/ThinClawChatView').then((module) => ({ default: module.ThinClawChatView })));
+const ThinClawDashboard = lazy(() => import('../../thinclaw/ThinClawDashboard').then((module) => ({ default: module.ThinClawDashboard })));
+const ThinClawChannels = lazy(() => import('../../thinclaw/ThinClawChannels').then((module) => ({ default: module.ThinClawChannels })));
+const ThinClawChannelStatus = lazy(() => import('../../thinclaw/ThinClawChannelStatus').then((module) => ({ default: module.ThinClawChannelStatus })));
+const ThinClawChannelConfig = lazy(() => import('../../thinclaw/ThinClawChannelConfig').then((module) => ({ default: module.ThinClawChannelConfig })));
+const ThinClawPresence = lazy(() => import('../../thinclaw/ThinClawPresence').then((module) => ({ default: module.ThinClawPresence })));
+const ThinClawAutomations = lazy(() => import('../../thinclaw/ThinClawAutomations').then((module) => ({ default: module.ThinClawAutomations })));
+const ThinClawJobs = lazy(() => import('../../thinclaw/ThinClawJobs').then((module) => ({ default: module.ThinClawJobs })));
+const ThinClawAutonomy = lazy(() => import('../../thinclaw/ThinClawAutonomy').then((module) => ({ default: module.ThinClawAutonomy })));
+const ThinClawRoutineAudit = lazy(() => import('../../thinclaw/ThinClawRoutineAudit').then((module) => ({ default: module.ThinClawRoutineAudit })));
+const ThinClawSkills = lazy(() => import('../../thinclaw/ThinClawSkills').then((module) => ({ default: module.ThinClawSkills })));
+const ThinClawHooks = lazy(() => import('../../thinclaw/ThinClawHooks').then((module) => ({ default: module.ThinClawHooks })));
+const ThinClawPlugins = lazy(() => import('../../thinclaw/ThinClawPlugins').then((module) => ({ default: module.ThinClawPlugins })));
+const ThinClawConfig = lazy(() => import('../../thinclaw/ThinClawConfig').then((module) => ({ default: module.ThinClawConfig })));
+const ThinClawDoctor = lazy(() => import('../../thinclaw/ThinClawDoctor').then((module) => ({ default: module.ThinClawDoctor })));
+const ThinClawEventInspector = lazy(() => import('../../thinclaw/ThinClawEventInspector').then((module) => ({ default: module.ThinClawEventInspector })));
+const ThinClawToolPolicies = lazy(() => import('../../thinclaw/ThinClawToolPolicies').then((module) => ({ default: module.ThinClawToolPolicies })));
+const ThinClawPairing = lazy(() => import('../../thinclaw/ThinClawPairing').then((module) => ({ default: module.ThinClawPairing })));
+const ThinClawSystemControl = lazy(() => import('../../thinclaw/ThinClawSystemControl').then((module) => ({ default: module.ThinClawSystemControl })));
+const ThinClawBrain = lazy(() => import('../../thinclaw/ThinClawBrain').then((module) => ({ default: module.ThinClawBrain })));
+const ThinClawMemory = lazy(() => import('../../thinclaw/ThinClawMemory').then((module) => ({ default: module.ThinClawMemory })));
+const FleetCommandCenter = lazy(() => import('../../thinclaw/fleet/FleetCommandCenter').then((module) => ({ default: module.FleetCommandCenter })));
+const ThinClawCostDashboard = lazy(() => import('../../thinclaw/ThinClawCostDashboard').then((module) => ({ default: module.ThinClawCostDashboard })));
+const ThinClawCacheStats = lazy(() => import('../../thinclaw/ThinClawCacheStats').then((module) => ({ default: module.ThinClawCacheStats })));
+const ThinClawTrajectory = lazy(() => import('../../thinclaw/ThinClawTrajectory').then((module) => ({ default: module.ThinClawTrajectory })));
+const ThinClawRollback = lazy(() => import('../../thinclaw/ThinClawRollback').then((module) => ({ default: module.ThinClawRollback })));
+const ThinClawSessionSearch = lazy(() => import('../../thinclaw/ThinClawSessionSearch').then((module) => ({ default: module.ThinClawSessionSearch })));
+const ThinClawRouting = lazy(() => import('../../thinclaw/ThinClawRouting').then((module) => ({ default: module.ThinClawRouting })));
+const ThinClawExperiments = lazy(() => import('../../thinclaw/ThinClawExperiments').then((module) => ({ default: module.ThinClawExperiments })));
+const ThinClawLearning = lazy(() => import('../../thinclaw/ThinClawLearning').then((module) => ({ default: module.ThinClawLearning })));
+const ThinClawRepoProjects = lazy(() => import('../../thinclaw/ThinClawRepoProjects').then((module) => ({ default: module.ThinClawRepoProjects })));
+
+function ThinClawPageSkeleton() {
+    return <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">Loading control surface…</div>;
+}
 
 export function ThinClawView() {
     const {
@@ -119,34 +124,38 @@ export function ThinClawView() {
                 className="flex-1 flex flex-col h-full overflow-hidden"
                 style={{ display: activeThinClawPage === 'chat' ? undefined : 'none' }}
             >
-                <ThinClawChatView
-                    sessionKey={selectedThinClawSession}
-                    gatewayRunning={thinclawGatewayRunning}
-                    bootstrapNeeded={bootstrapNeeded ?? false}
-                    onBootstrapComplete={() => setBootstrapNeeded(false)}
-                    onFactoryReset={() => {
-                        // Backend has reset bootstrap_completed=false in identity.json.
-                        // Re-check so button label and auto-trigger update immediately.
-                        bootstrapCheckedRef.current = false;
-                        checkBootstrap();
+                <Suspense fallback={<ThinClawPageSkeleton />}>
+                    <ThinClawChatView
+                        sessionKey={selectedThinClawSession}
+                        gatewayRunning={thinclawGatewayRunning}
+                        bootstrapNeeded={bootstrapNeeded ?? false}
+                        onBootstrapComplete={() => setBootstrapNeeded(false)}
+                        onFactoryReset={() => {
+                            // Backend has reset bootstrap_completed=false in identity.json.
+                            // Re-check so button label and auto-trigger update immediately.
+                            bootstrapCheckedRef.current = false;
+                            checkBootstrap();
 
-                        // Auto-restart the gateway so the bootstrap ritual kicks off
-                        // without requiring the user to manually click "Start Gateway".
-                        // Small delay gives the DB deletion time to finish.
-                        setTimeout(() => {
-                            thinclaw.startThinClawGateway().catch(() => { });
-                        }, 2000);
-                    }}
-                    onNavigateToSettings={(page) => setActiveTab(page as any)}
-                    onViewSession={(key) => {
-                        setSelectedThinClawSession(key);
-                        setActiveThinClawPage('chat');
-                    }}
-                />
+                            // Auto-restart the gateway so the bootstrap ritual kicks off
+                            // without requiring the user to manually click "Start Gateway".
+                            // Small delay gives the DB deletion time to finish.
+                            setTimeout(() => {
+                                thinclaw.startThinClawGateway().catch(() => { });
+                            }, 2000);
+                        }}
+                        onNavigateToSettings={(page) => setActiveTab(page as any)}
+                        onViewSession={(key) => {
+                            setSelectedThinClawSession(key);
+                            setActiveThinClawPage('chat');
+                        }}
+                    />
+                </Suspense>
             </div>
 
             {/* Other sub-pages — conditionally rendered (no critical state to preserve) */}
-            {activeThinClawPage !== 'chat' && renderSubPage()}
+            {activeThinClawPage !== 'chat' && (
+                <Suspense fallback={<ThinClawPageSkeleton />}>{renderSubPage()}</Suspense>
+            )}
         </div>
     );
 }

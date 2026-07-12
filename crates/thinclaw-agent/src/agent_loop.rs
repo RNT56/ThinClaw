@@ -12,12 +12,10 @@ use crate::routine::{
 
 pub const INTERRUPTED_RESPONSE_TEXT: &str = "Interrupted.";
 pub const RESTART_NOTICE_TEXT: &str = "Restarting ThinClaw agent… I’ll relaunch shortly.";
-pub const HEARTBEAT_OK_TOKEN: &str = "HEARTBEAT_OK";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundResponsePolicy {
     Send,
-    SuppressHeartbeatOk,
 }
 
 pub fn inbound_rejected_response(reason: &str) -> String {
@@ -28,19 +26,12 @@ pub fn inbound_blocked_response(error: &str) -> String {
     format!("[Message blocked by hook policy: {}]", error)
 }
 
-pub fn outbound_response_policy(channel: &str, content: &str) -> OutboundResponsePolicy {
-    if channel == "heartbeat" && content.contains(HEARTBEAT_OK_TOKEN) {
-        OutboundResponsePolicy::SuppressHeartbeatOk
-    } else {
-        OutboundResponsePolicy::Send
-    }
+pub fn outbound_response_policy(_channel: &str, _content: &str) -> OutboundResponsePolicy {
+    OutboundResponsePolicy::Send
 }
 
-pub fn should_suppress_outbound_response(channel: &str, content: &str) -> bool {
-    matches!(
-        outbound_response_policy(channel, content),
-        OutboundResponsePolicy::SuppressHeartbeatOk
-    )
+pub fn should_suppress_outbound_response(_channel: &str, _content: &str) -> bool {
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,17 +218,13 @@ mod tests {
     }
 
     #[test]
-    fn outbound_policy_suppresses_heartbeat_ok_only_for_heartbeat_channel() {
+    fn outbound_policy_does_not_use_text_sentinels() {
         assert_eq!(
-            outbound_response_policy("heartbeat", "Nothing to do. HEARTBEAT_OK"),
-            OutboundResponsePolicy::SuppressHeartbeatOk
-        );
-        assert_eq!(
-            outbound_response_policy("web", "Nothing to do. HEARTBEAT_OK"),
+            outbound_response_policy("heartbeat", "arbitrary text"),
             OutboundResponsePolicy::Send
         );
         assert_eq!(
-            outbound_response_policy("heartbeat", "Needs attention"),
+            outbound_response_policy("web", "arbitrary text"),
             OutboundResponsePolicy::Send
         );
     }

@@ -265,6 +265,8 @@ pub async fn direct_history_get_messages(
 
 #[tauri::command]
 #[specta::specta]
+// Tauri commands intentionally expose flat arguments for generated bindings.
+#[allow(clippy::too_many_arguments)]
 pub async fn direct_history_save_message(
     state: State<'_, SqlitePool>,
     conversation_id: String,
