@@ -39,6 +39,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check MSRV and toolchain synchronization
         run: scripts/ci/check-msrv-sync.py
+      - name: Check release automation contract
+        run: python3 scripts/ci/check-release-automation.py
       - name: Check crate boundaries
         run: |
           set -euo pipefail
