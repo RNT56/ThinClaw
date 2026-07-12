@@ -64,8 +64,8 @@ def main() -> int:
         "manifest-file: .release-please-manifest.json",
         "if: steps.release.outputs.prs_created == 'true'",
         "RELEASE_PR: ${{ steps.release.outputs.pr }}",
-        "gh workflow run ci.yml",
-        "gh workflow run release.yml",
+        'gh workflow run ci.yml --repo "$GITHUB_REPOSITORY"',
+        'gh workflow run release.yml --repo "$GITHUB_REPOSITORY"',
         "RELEASE_TAG: ${{ steps.release.outputs.tag_name }}",
     ]
     missing = [item for item in required_workflow_fragments if item not in workflow]
