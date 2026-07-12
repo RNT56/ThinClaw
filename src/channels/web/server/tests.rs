@@ -780,7 +780,7 @@ fn test_gateway_state(
 }
 
 struct ConfigurableTestChannel {
-    updates: Arc<tokio::sync::Mutex<Option<HashMap<String, serde_json::Value>>>>,
+    updates: Arc<tokio::sync::Mutex<Option<std::collections::HashMap<String, serde_json::Value>>>>,
 }
 
 #[async_trait]
@@ -818,7 +818,10 @@ impl crate::channels::Channel for ConfigurableTestChannel {
         })
     }
 
-    async fn update_runtime_config(&self, updates: HashMap<String, serde_json::Value>) {
+    async fn update_runtime_config(
+        &self,
+        updates: std::collections::HashMap<String, serde_json::Value>,
+    ) {
         *self.updates.lock().await = Some(updates);
     }
 
