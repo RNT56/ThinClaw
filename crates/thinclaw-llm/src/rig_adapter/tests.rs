@@ -165,7 +165,7 @@ fn test_convert_messages_multiple_systems_concatenated() {
 }
 
 #[test]
-fn build_rig_request_merges_context_documents_into_preamble() {
+fn build_rig_request_keeps_context_documents_out_of_preamble() {
     let request = build_rig_request(
         Some("Stable preamble".to_string()),
         vec![RigMessage::user("hello")],
@@ -183,8 +183,12 @@ fn build_rig_request_merges_context_documents_into_preamble() {
 
     let preamble = request.preamble.as_deref().unwrap_or_default();
     assert!(preamble.contains("Stable preamble"));
-    assert!(preamble.contains("External Memory Recall"));
-    assert!(preamble.contains("Skill Expansion"));
+    assert!(!preamble.contains("External Memory Recall"));
+    assert!(!preamble.contains("Skill Expansion"));
+    let history = format!("{:?}", request.chat_history);
+    assert!(history.contains("UNTRUSTED CONTEXT DATA"));
+    assert!(history.contains("External Memory Recall"));
+    assert!(history.contains("Skill Expansion"));
     assert!(request.documents.is_empty());
 }
 

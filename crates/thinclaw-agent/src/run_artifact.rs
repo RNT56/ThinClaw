@@ -95,6 +95,10 @@ pub struct AgentRunArtifact {
     pub prompt_snapshot_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_overlay_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_contract_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_manifest_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_context_refs: Vec<String>,
     #[serde(default)]
@@ -134,6 +138,8 @@ impl AgentRunArtifact {
             network_isolation: None,
             prompt_snapshot_hash: None,
             ephemeral_overlay_hash: None,
+            prompt_contract_version: None,
+            prompt_manifest_digest: None,
             provider_context_refs: Vec::new(),
             metadata: serde_json::json!({}),
         }
@@ -187,6 +193,16 @@ impl AgentRunArtifact {
         self
     }
 
+    pub fn with_prompt_contract(
+        mut self,
+        contract_version: Option<String>,
+        manifest_digest: Option<String>,
+    ) -> Self {
+        self.prompt_contract_version = contract_version;
+        self.prompt_manifest_digest = manifest_digest;
+        self
+    }
+
     pub fn with_chat_turn_snapshot(
         mut self,
         session: &Session,
@@ -227,6 +243,8 @@ impl AgentRunArtifact {
                 "execution_backend": self.execution_backend,
                 "prompt_snapshot_hash": self.prompt_snapshot_hash,
                 "ephemeral_overlay_hash": self.ephemeral_overlay_hash,
+                "prompt_contract_version": self.prompt_contract_version,
+                "prompt_manifest_digest": self.prompt_manifest_digest,
                 "provider_context_refs": self.provider_context_refs,
                 "metadata": self.metadata,
             })

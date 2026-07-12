@@ -342,14 +342,14 @@ fn conversation_prompt_includes_consult_advisor_guidance_when_available() {
 }
 
 #[test]
-fn conversation_prompt_includes_model_guidance_for_gpt_family() {
+fn conversation_prompt_does_not_inject_model_name_heuristics() {
     let reasoning = Reasoning::new(Arc::new(StubLlm::new("done").with_model_name("gpt-4o")))
         .with_model_name("gpt-4o");
 
     let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
-    assert!(prompt.contains("## Model-Specific Guidance"));
-    assert!(prompt.contains("GPT-family models:"));
+    assert!(!prompt.contains("## Model-Specific Guidance"));
+    assert!(!prompt.contains("GPT-family models:"));
 }
 
 #[test]
@@ -383,7 +383,7 @@ fn conversation_prompt_matches_identity_tool_paths() {
     let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
     assert!(prompt.contains(
-        "For identity/personality updates to SOUL.md, SOUL.local.md, USER.md, or AGENTS.md, use `prompt_manage`."
+        "Use `memory_write` for approved memory targets and `prompt_manage` for identity/personality instruction files"
     ));
     assert!(
         prompt.contains(
@@ -496,7 +496,7 @@ async fn respond_omits_prompt_cache_hint_when_provider_does_not_support_it() {
 }
 
 #[tokio::test]
-async fn respond_prompt_keeps_channel_hints_model_guidance_and_cache_hint_together() {
+async fn respond_prompt_keeps_channel_hints_and_cache_hint_without_model_heuristics() {
     let last_request = Arc::new(tokio::sync::Mutex::new(None));
     let reasoning = Reasoning::new(Arc::new(PromptCachingCaptureLlm {
         last_request: Arc::clone(&last_request),
@@ -521,7 +521,7 @@ async fn respond_prompt_keeps_channel_hints_model_guidance_and_cache_hint_togeth
         .first()
         .expect("system message should be present");
 
-    assert!(system.content.contains("## Model-Specific Guidance"));
+    assert!(!system.content.contains("## Model-Specific Guidance"));
     assert!(system.content.contains("## Platform Formatting (telegram)"));
     assert!(
         system

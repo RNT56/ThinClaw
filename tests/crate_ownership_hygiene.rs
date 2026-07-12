@@ -27,7 +27,7 @@ const EXTRACTED_FACADES: &[(&str, &str)] = &[
     ),
     (
         "src/channels/wasm/wrapper.rs",
-        "crates/thinclaw-channels/src/wasm/wrapper.rs",
+        "crates/thinclaw-channels/src/wasm/wrapper/mod.rs",
     ),
     (
         "src/document_extraction/mod.rs",
@@ -85,7 +85,7 @@ const EXTRACTED_FACADES: &[(&str, &str)] = &[
     ),
     (
         "src/workspace/workspace_core.rs",
-        "crates/thinclaw-workspace/src/workspace_core.rs",
+        "crates/thinclaw-workspace/src/workspace_core/mod.rs",
     ),
 ];
 

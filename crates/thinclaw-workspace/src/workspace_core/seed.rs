@@ -22,7 +22,7 @@ pub(super) const HEARTBEAT_SEED: &str = "\
 # Heartbeat Checklist
 
 <!-- Add, edit, or remove items below. The agent checks this every 30 minutes.
-     If nothing needs attention, it stays silent (HEARTBEAT_OK).
+     If nothing needs attention, it completes without sending a notification.
      If something does, it proactively sends you a message.
      Daily logs are injected below the checklist automatically. -->
 
@@ -257,7 +257,7 @@ impl Workspace {
                  - **Discord links:** Wrap multiple links in `<>` to suppress embeds\n\
                  - **WhatsApp:** No headers — use **bold** or CAPS for emphasis\n\n\
                  ## 💓 Heartbeats - Be Proactive!\n\
-                 When you receive a heartbeat poll, don't just reply `HEARTBEAT_OK` every time. Use heartbeats productively!\n\n\
+                 When you receive a heartbeat poll, check for real findings and complete quietly when there are none. Use heartbeats productively!\n\n\
                  You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it small to limit token burn.\n\n\
                  **Proactive work you can do without asking:**\n\
                  - Read and organize memory files\n\
@@ -267,7 +267,7 @@ impl Workspace {
                  - Important event coming up (<2h)\n\
                  - Something interesting you found\n\
                  - It's been >8h since you said anything\n\n\
-                 **When to stay quiet (HEARTBEAT_OK):**\n\
+                 **When to complete quietly:**\n\
                  - Late night (23:00-08:00) unless urgent\n\
                  - Nothing new since last check\n\n\
                  ## Make It Yours\n\

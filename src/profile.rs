@@ -832,7 +832,7 @@ impl PsychographicProfile {
             "# Heartbeat Checklist\n\n\
              {}\n\n\
              Stay quiet during 23:00-08:00 unless urgent.\n\
-             If nothing needs attention, reply HEARTBEAT_OK.",
+             If nothing needs attention, complete successfully without reporting findings.",
             items.join("\n")
         )
     }

@@ -24,6 +24,7 @@ pub mod llms_txt;
 pub mod model_guidance;
 pub mod model_metadata_sync;
 pub mod pricing_sync;
+pub mod prompt_contract;
 pub mod prompt_stack;
 mod provider;
 pub(crate) mod provider_factory;
@@ -50,6 +51,11 @@ pub use credential_sync::{
 pub use failover::{
     CooldownConfig, CredentialPoolHealthSnapshot, FailoverProvider, LeaseConfig,
     LeaseSelectionStrategy, ProviderLeaseEntry,
+};
+pub use prompt_contract::{
+    CompiledPrompt, PROMPT_CONTRACT_VERSION, PromptBudget, PromptCompileError, PromptCompiler,
+    PromptLifetime, PromptManifestEntry, PromptSegment, PromptSegmentStatus, PromptSensitivity,
+    PromptTrust,
 };
 pub use prompt_stack::{PromptLayer, PromptStack};
 pub use provider::{

@@ -588,7 +588,7 @@ async fn execute_heartbeat(
             tracing::debug!(routine = %routine.name, "HEARTBEAT.md is empty or missing — skipping");
             return Ok((
                 RunStatus::Ok,
-                Some("HEARTBEAT_OK — checklist empty".to_string()),
+                Some("Checklist empty; no action required.".to_string()),
                 None,
             ));
         }

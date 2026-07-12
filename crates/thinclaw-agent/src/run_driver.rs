@@ -84,6 +84,10 @@ impl AgentRunDriver {
         {
             artifact = artifact
                 .with_prompt_hashes(runtime.prompt_snapshot_hash, runtime.ephemeral_overlay_hash)
+                .with_prompt_contract(
+                    runtime.prompt_contract_version,
+                    runtime.prompt_manifest_digest,
+                )
                 .with_provider_context_refs(runtime.provider_context_refs);
         }
 

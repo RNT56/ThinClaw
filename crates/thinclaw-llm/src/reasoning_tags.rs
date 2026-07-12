@@ -39,6 +39,7 @@ static PIPE_REASONING_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Result of success evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SuccessEvaluation {
     pub success: bool,
     pub confidence: f64,

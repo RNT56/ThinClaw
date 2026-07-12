@@ -148,16 +148,16 @@ impl WorkerRuntime {
         // Build initial context
         let mut reason_ctx = ReasoningContext::new().with_job(&job.description);
 
-        reason_ctx.messages.push(ChatMessage::system(format!(
-            r#"You are an autonomous agent running inside a Docker container.
-
-Job: {}
-Description: {}
-
-You have tools for shell commands, file operations, and code editing.
-Work independently to complete this job. Report when done."#,
-            job.title, job.description
-        )));
+        reason_ctx.messages.push(ChatMessage::system(
+            "You are an autonomous agent running inside a Docker container. You have tools for shell commands, file operations, and code editing. Work independently on the user-role job packet and report completion through the runtime contract.",
+        ));
+        reason_ctx.messages.push(ChatMessage::user(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "job_title": job.title,
+                "job_description": job.description,
+            }))
+            .unwrap_or_default(),
+        ));
 
         // Run with timeout
         let result = tokio::time::timeout(self.config.timeout, async {

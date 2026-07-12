@@ -1,5 +1,6 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 21
 expression: settings
 ---
 {
@@ -102,6 +103,7 @@ expression: settings
     "gateway_host": null,
     "gateway_port": null,
     "gateway_auth_token": null,
+    "gateway_principals": [],
     "cli_enabled": null,
     "wasm_channels": [],
     "wasm_channels_enabled": true,
@@ -109,7 +111,13 @@ expression: settings
   },
   "prompt": {
     "session_freeze_enabled": true,
-    "project_context_max_tokens": 8000
+    "project_context_max_tokens": 8000,
+    "rollout_mode": "v2",
+    "contract_version": "v2",
+    "context_window_tokens": 32000,
+    "max_total_tokens": 16000,
+    "output_reserve_tokens": 4096,
+    "safety_margin_percent": 10
   },
   "comfyui": {
     "enabled": false,
@@ -198,6 +206,7 @@ expression: settings
     "main_tool_profile": "standard",
     "worker_tool_profile": "restricted",
     "subagent_tool_profile": "explicit_only",
+    "subagent_max_per_principal": 0,
     "workspace_mode": null,
     "model_guidance_enabled": true,
     "cli_skin": "cockpit",
@@ -344,6 +353,27 @@ expression: settings
     "allow_remote_runners": true,
     "ui_visibility": "hidden_until_enabled",
     "default_promotion_mode": "branch_pr_draft"
+  },
+  "repo_projects": {
+    "enabled": false,
+    "max_concurrent_projects": 1,
+    "max_concurrent_tasks_per_project": 1,
+    "default_coding_backend": "worker",
+    "default_write_mode": "fork_pr",
+    "auto_merge_default": false,
+    "watchdog_interval_secs": 60,
+    "workspace_base_dir": null,
+    "github_app": {
+      "app_id": null,
+      "installation_id": null,
+      "private_key_secret": null,
+      "webhook_secret_secret": null,
+      "app_slug": null
+    }
+  },
+  "discovery": {
+    "enabled": false,
+    "service_name": null
   },
   "tool_policies": {
     "default_policy": {

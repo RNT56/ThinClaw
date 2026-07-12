@@ -1219,7 +1219,6 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
 
                                                     // Hide clearly internal agent states
                                                     if (msg.text.includes('🧠')) return false;
-                                                    if (msg.text.trim() === 'HEARTBEAT_OK') return false;
                                                     if (msg.text.includes('HEARTBEAT_POLL')) return false;
                                                     if (msg.text.includes('SYSTEM_CONTEXT_REFRESH')) return false;
                                                     if (msg.text.includes('[SYSTEM_CONTEXT_UPDATE]')) return false;

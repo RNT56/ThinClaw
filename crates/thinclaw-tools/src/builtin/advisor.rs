@@ -318,7 +318,10 @@ async fn request_advisor_decision(
             system_prompt.trim(),
             ADVISOR_RESPONSE_SCHEMA
         )),
-        ChatMessage::user(prompt.to_string()),
+        ChatMessage::user(
+            "Review the bounded executor consultation evidence and return the required decision JSON.",
+        ),
+        ChatMessage::untrusted_context("advisor_evidence", "executor", prompt),
     ])
     .with_max_tokens(ADVISOR_MAX_TOKENS)
     .with_temperature(0.1);
@@ -340,10 +343,14 @@ async fn request_advisor_decision(
                     system_prompt.trim(),
                     ADVISOR_RESPONSE_SCHEMA
                 )),
-                ChatMessage::user(format!(
-                    "Repair the previous answer into valid JSON only.\n\nPrevious answer:\n{}\n\nReturn only the corrected JSON object.",
-                    response.content
-                )),
+                ChatMessage::user(
+                    "Repair the previous answer into the required JSON schema. Return only the corrected JSON object.",
+                ),
+                ChatMessage::untrusted_context(
+                    "invalid_advisor_answer",
+                    "advisor_model",
+                    response.content,
+                ),
             ])
             .with_max_tokens(ADVISOR_MAX_TOKENS)
             .with_temperature(0.0);

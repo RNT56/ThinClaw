@@ -56,7 +56,6 @@ use crate::workspace::Workspace;
 
 use thinclaw_agent::agent_loop::{
     RESTART_NOTICE_TEXT, inbound_blocked_response, inbound_rejected_response,
-    should_suppress_outbound_response,
 };
 pub(crate) use thinclaw_agent::dispatcher_helpers::truncate_for_preview;
 use thinclaw_agent::startup_hooks::{GatewayStartupThreadTarget, telegram_startup_thread_id};
@@ -1624,7 +1623,7 @@ impl Agent {
     // Extraction note (CLAUDE.md architecture hygiene): this block is a
     // cohesive phase that belongs in its own submodule, but it is left here
     // for now because it is tightly coupled to `run()`'s locals and to
-    // private helpers in this file (`should_suppress_outbound_response`,
+    // private helpers in this file (`validate_output`,
     // shutdown plumbing) whose visibility a move would have to widen mid-
     // stabilization. Extract to `src/agent/conversation_dispatch.rs` once
     // the dispatch protocol has settled (tracked follow-up).
@@ -1857,12 +1856,6 @@ impl Agent {
             .await
         {
             Ok(Some(mut response)) if !response.is_empty() => {
-                // Suppress HEARTBEAT_OK responses from heartbeat messages
-                if should_suppress_outbound_response(&message.channel, &response.content) {
-                    tracing::debug!("Heartbeat returned HEARTBEAT_OK — suppressing response");
-                    return false;
-                }
-
                 // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
                 let event = crate::hooks::HookEvent::Outbound {
                     user_id: message.user_id.clone(),

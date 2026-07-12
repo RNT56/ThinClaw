@@ -189,6 +189,10 @@ pub struct ThreadRuntimeSnapshot {
     pub prompt_snapshot_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_overlay_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_contract_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_manifest_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompt_segment_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

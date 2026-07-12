@@ -346,11 +346,9 @@ impl Worker {
             None
         };
 
-        // Create reasoning engine with identity
+        // The worker system message below owns identity and mission. Do not
+        // inject the same identity into Reasoning as a second system layer.
         let mut reasoning = Reasoning::new(self.llm().clone());
-        if let Some(ref prompt) = identity_block {
-            reasoning = reasoning.with_system_prompt(prompt.clone());
-        }
         // Wire cost tracker so worker LLM calls appear in the Cost Dashboard
         if let Some(ref tracker) = self.deps.cost_tracker {
             reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
@@ -701,18 +699,9 @@ impl Worker {
                             ));
                         }
 
-                        // Heartbeat jobs: any text response (HEARTBEAT_OK or findings)
-                        // means the heartbeat is done. The LLM either found nothing
-                        // (HEARTBEAT_OK already caught above) or reported its findings.
-                        // Don't loop — the report IS the deliverable.
-                        if is_heartbeat {
-                            self.set_last_output(&response);
-                            self.mark_completed().await?;
-                            return Ok(WorkerLoopOutcome::new(
-                                LoopStopReason::Completed,
-                                iteration,
-                            ));
-                        }
+                        // Heartbeat jobs use the same authoritative complete_job
+                        // tool contract as every other worker job. Plain text is
+                        // never interpreted as a completion sentinel.
 
                         // Add assistant response to context
                         reason_ctx.messages.push(ChatMessage::assistant(&response));

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use thinclaw_llm_core::{ChatMessage, CompletionRequest};
 use thinclaw_workspace::Workspace;
 use thinclaw_workspace::hygiene::HygieneConfig;
@@ -67,6 +68,23 @@ pub enum HeartbeatResult {
     Skipped,
     /// Heartbeat failed.
     Failed(String),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HeartbeatStatus {
+    NoAction,
+    Attention,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HeartbeatDecision {
+    status: HeartbeatStatus,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    actions: Vec<String>,
 }
 
 /// LLM behavior required by heartbeat.
@@ -155,7 +173,7 @@ impl HeartbeatRunner {
         let logs_note = if daily_context.is_empty() {
             "\n\nNote: No daily logs exist yet (no conversations recorded). \
              Any checklist items that reference daily logs are automatically satisfied. \
-             If all items depend on daily logs, reply HEARTBEAT_OK."
+             If all items depend on daily logs, return status `no_action`."
         } else {
             ""
         };
@@ -171,10 +189,11 @@ impl HeartbeatRunner {
             "Read the HEARTBEAT.md checklist below and follow it strictly. \
              Do not infer or repeat old tasks. Check each item and report findings.\n\
              \n\
-             If nothing needs attention, reply EXACTLY with: HEARTBEAT_OK\n\
-             \n\
-             If something needs attention, provide a short, specific summary of what \
-             needs action. Do NOT echo these instructions back - give real findings only.\n\
+             Return exactly one JSON object with this shape:\n\
+             {{\"status\":\"no_action|attention\",\"summary\":null,\"actions\":[]}}\n\
+             Use `no_action` only when nothing needs attention. For `attention`, provide a \
+             short, specific summary and zero or more concrete actions. Do not add prose \
+             outside the JSON and do not echo these instructions.\n\
              \n\
              ## HEARTBEAT.md\n\
              \n\
@@ -227,11 +246,46 @@ impl HeartbeatRunner {
             return HeartbeatResult::Failed("LLM returned empty content.".to_string());
         }
 
-        if content == "HEARTBEAT_OK" || content.contains("HEARTBEAT_OK") {
-            return HeartbeatResult::Ok;
+        let decision = match serde_json::from_str::<HeartbeatDecision>(content) {
+            Ok(decision) => decision,
+            Err(error) => {
+                return HeartbeatResult::Failed(format!(
+                    "LLM returned an invalid heartbeat result: {error}"
+                ));
+            }
+        };
+        match decision.status {
+            HeartbeatStatus::NoAction
+                if decision.summary.as_deref().is_none_or(str::is_empty)
+                    && decision.actions.is_empty() =>
+            {
+                HeartbeatResult::Ok
+            }
+            HeartbeatStatus::NoAction => HeartbeatResult::Failed(
+                "Heartbeat no_action result unexpectedly contained findings".to_string(),
+            ),
+            HeartbeatStatus::Attention => {
+                let Some(summary) = decision.summary.filter(|value| !value.trim().is_empty())
+                else {
+                    return HeartbeatResult::Failed(
+                        "Heartbeat attention result omitted its summary".to_string(),
+                    );
+                };
+                let actions = decision
+                    .actions
+                    .into_iter()
+                    .filter(|value| !value.trim().is_empty())
+                    .collect::<Vec<_>>();
+                if actions.is_empty() {
+                    HeartbeatResult::NeedsAttention(summary)
+                } else {
+                    HeartbeatResult::NeedsAttention(format!(
+                        "{summary}\n\nActions:\n- {}",
+                        actions.join("\n- ")
+                    ))
+                }
+            }
         }
-
-        HeartbeatResult::NeedsAttention(content.to_string())
     }
 }
 

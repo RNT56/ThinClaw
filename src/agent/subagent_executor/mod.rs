@@ -38,16 +38,17 @@ use thinclaw_agent::subagent::{
     SUBAGENT_RUN_ORPHANED_REASON, SubagentCompletionOutcome, SubagentConcurrency,
     SubagentJobMetadataInput, SubagentLearningRiskTier, SubagentRunRecord, SubagentSpawnAdmission,
     SubagentSystemPromptSections, extract_subagent_message, llm_metadata_from_json,
-    normalize_subagent_progress_category, render_subagent_system_prompt, resolve_parent_thread_id,
-    should_cancel_subagent, should_emit_subagent_heartbeat, should_force_subagent_text,
-    should_reinject_subagent_result, subagent_activity_category, subagent_allows_skill,
-    subagent_cancelled_status, subagent_completion_status_response, subagent_default_system_prompt,
-    subagent_execution_grants, subagent_heartbeat_message, subagent_identity_defaults,
-    subagent_iteration_limit_reason, subagent_job_metadata, subagent_learning_completion,
-    subagent_learning_risk_tier, subagent_parent_message, subagent_result_from_completion,
-    subagent_routine_actor, subagent_routine_completion, subagent_run_status_for_completion,
-    subagent_spawned_response, subagent_status_from_result, subagent_tool_activity_message,
-    subagent_tool_warning_message, subagent_warning_category, with_subagent_thread_metadata,
+    normalize_subagent_progress_category, render_subagent_system_prompt, render_task_packet,
+    resolve_parent_thread_id, should_cancel_subagent, should_emit_subagent_heartbeat,
+    should_force_subagent_text, should_reinject_subagent_result, subagent_activity_category,
+    subagent_allows_skill, subagent_cancelled_status, subagent_completion_status_response,
+    subagent_default_system_prompt, subagent_execution_grants, subagent_heartbeat_message,
+    subagent_identity_defaults, subagent_iteration_limit_reason, subagent_job_metadata,
+    subagent_learning_completion, subagent_learning_risk_tier, subagent_parent_message,
+    subagent_result_from_completion, subagent_routine_actor, subagent_routine_completion,
+    subagent_run_status_for_completion, subagent_spawned_response, subagent_status_from_result,
+    subagent_tool_activity_message, subagent_tool_warning_message, subagent_warning_category,
+    with_subagent_thread_metadata,
 };
 pub use thinclaw_types::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
@@ -1214,7 +1215,11 @@ async fn run_subagent_loop(
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
     cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
 ) -> Result<(String, usize), Error> {
-    let mut context_messages = vec![ChatMessage::user(task.to_string())];
+    let mut context_messages = vec![ChatMessage::user(format!(
+        "## Delegated Task Packet\n\n{}\n\n## Original Delegated Task\n\n{}",
+        render_task_packet(task_packet),
+        task
+    ))];
 
     let identity_defaults = subagent_identity_defaults(principal_id, actor_id);
     let principal_id = identity_defaults.principal_id;
