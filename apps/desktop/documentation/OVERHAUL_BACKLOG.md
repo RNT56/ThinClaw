@@ -243,7 +243,7 @@ characterization test added before the split; no behavior change.
 | TDO-302 ✅ | Onboarding overhaul: one adaptive local/remote flow covers appearance, deployment, shared agent identity/personality, engine, inference, models/keys, permissions, and an explicit channel handoff | L | `OnboardingWizard.tsx`, setup wizard |
 | TDO-303 ✅ | Accessibility pass: persistent keyboard navigation, focus-safe sidebar/dialogs, screen-reader names/live states, visible focus, forced colors, and reduced motion | L | design system, `accessibility.md` |
 | TDO-304 ✅ | Frontend i18n: complete core catalogs, generated local catalog command, locale normalization/persistence/window sync, and translated shared shell/settings | M | `src/i18n.rs`, `i18n-provider.tsx`, frontend |
-| TDO-305 | Polish: empty/loading/error states, progress, micro-interactions, density | M | components |
+| TDO-305 ✅ | Polish: shared loading/empty/error/progress states, applied shell/chat/control-surface feedback, bounded motion, and migrated compact/comfortable density | M | shared UI, theme provider, components |
 
 ---
 

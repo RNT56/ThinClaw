@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { useChatLayout } from '../ChatProvider';
 import * as thinclaw from '../../../lib/thinclaw';
+import { AsyncState } from '../../ui';
 
 const ThinClawChatView = lazy(() => import('../../thinclaw/ThinClawChatView').then((module) => ({ default: module.ThinClawChatView })));
 const ThinClawDashboard = lazy(() => import('../../thinclaw/ThinClawDashboard').then((module) => ({ default: module.ThinClawDashboard })));
@@ -36,7 +37,7 @@ const ThinClawRepoProjects = lazy(() => import('../../thinclaw/ThinClawRepoProje
 const ThinClawRemoteAccess = lazy(() => import('../../thinclaw/ThinClawRemoteAccess').then((module) => ({ default: module.ThinClawRemoteAccess })));
 
 function ThinClawPageSkeleton() {
-    return <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">Loading control surface…</div>;
+    return <AsyncState kind="loading" title="Loading control surface" className="flex-1" />;
 }
 
 export function ThinClawView() {
@@ -111,9 +112,7 @@ export function ThinClawView() {
             case 'learning': return <ThinClawLearning />;
             case 'remote-access': return <ThinClawRemoteAccess />;
             default: return (
-                <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                    Select a page from the sidebar.
-                </div>
+                <AsyncState kind="empty" title="Select a control surface" description="Choose a page from the Agent Cockpit sidebar." className="flex-1" />
             );
         }
     };

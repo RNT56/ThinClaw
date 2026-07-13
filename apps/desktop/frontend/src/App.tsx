@@ -13,6 +13,7 @@ import { ConfigProvider } from "./components/config-context";
 import { ServicesProvider } from "./components/services-context";
 import { recordRendererReady } from "./lib/performance-budgets";
 import { I18nProvider, useI18n } from "./components/i18n-provider";
+import { AsyncState } from "./components/ui";
 
 const ChatLayout = lazy(() =>
   import("./components/chat/ChatLayout").then((module) => ({ default: module.ChatLayout })),
@@ -29,8 +30,8 @@ const SpotlightBar = lazy(() =>
 function AppLoadingScreen() {
   const { t } = useI18n();
   return (
-    <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-      {t("common.loading")}
+    <div className="flex h-screen items-center justify-center bg-background">
+      <AsyncState kind="loading" title={t("common.loading")} compact />
     </div>
   );
 }

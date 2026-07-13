@@ -7,6 +7,7 @@ import { CanvasProviderWrapper } from '../thinclaw/canvas/CanvasProvider';
 import { CanvasToolbar } from '../thinclaw/canvas/CanvasToolbar';
 import { CommandPalette } from '../navigation/CommandPalette';
 import { useI18n } from '../i18n-provider';
+import { AsyncState } from '../ui';
 
 const ChatView = lazy(() => import('./views/ChatView').then((module) => ({ default: module.ChatView })));
 const ThinClawView = lazy(() => import('./views/ThinClawView').then((module) => ({ default: module.ThinClawView })));
@@ -15,7 +16,7 @@ const SettingsView = lazy(() => import('./views/SettingsView').then((module) => 
 
 function ViewSkeleton() {
     const { t } = useI18n();
-    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t("common.loading_view")}</div>;
+    return <AsyncState kind="loading" title={t("common.loading_view")} className="h-full" />;
 }
 
 // ---------------------------------------------------------------------------

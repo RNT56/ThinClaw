@@ -5,11 +5,13 @@ import { APP_THEMES } from "../lib/app-themes"
 
 export type Theme = "dark" | "light" | "system"
 export type EffectiveTheme = Exclude<Theme, "system">
+export type InterfaceDensity = "comfortable" | "compact"
 
 export interface ThemePreferences {
-    version: 1
+    version: 2
     mode: Theme
     appThemeId: string
+    density: InterfaceDensity
     syntaxTheme: {
         dark: string
         light: string
@@ -30,6 +32,8 @@ type ThemeProviderState = {
     setSyntaxTheme: (type: EffectiveTheme, themeId: string) => void
     appThemeId: string
     setAppThemeId: (themeId: string) => void
+    density: InterfaceDensity
+    setDensity: (density: InterfaceDensity) => void
 }
 
 export const THEME_PREFERENCES_KEY = "thinclaw-ui-theme"
@@ -39,9 +43,10 @@ const LEGACY_DARK_SYNTAX_KEY = "syntax-theme-dark"
 const LEGACY_LIGHT_SYNTAX_KEY = "syntax-theme-light"
 
 const DEFAULT_PREFERENCES: ThemePreferences = {
-    version: 1,
+    version: 2,
     mode: "system",
     appThemeId: "zinc",
+    density: "comfortable",
     syntaxTheme: {
         dark: "tokyo-night",
         light: "atom-one-light",
@@ -64,6 +69,10 @@ function validAppThemeId(value: unknown): string {
         : DEFAULT_PREFERENCES.appThemeId
 }
 
+function validDensity(value: unknown): InterfaceDensity {
+    return value === "compact" || value === "comfortable" ? value : DEFAULT_PREFERENCES.density
+}
+
 function validSyntaxThemeId(value: unknown, mode: EffectiveTheme): string {
     const fallback = DEFAULT_PREFERENCES.syntaxTheme[mode]
     if (typeof value !== "string") return fallback
@@ -81,9 +90,10 @@ export function normalizeThemePreferences(
     const syntax = isRecord(input.syntaxTheme) ? input.syntaxTheme : {}
 
     return {
-        version: 1,
+        version: 2,
         mode: validThemeMode(input.mode, defaultTheme),
         appThemeId: validAppThemeId(input.appThemeId),
+        density: validDensity(input.density),
         syntaxTheme: {
             dark: validSyntaxThemeId(syntax.dark, "dark"),
             light: validSyntaxThemeId(syntax.light, "light"),
@@ -202,6 +212,7 @@ export function applyThemeTokens(
     root.classList.add(colorScheme)
     root.dataset.colorScheme = colorScheme
     root.dataset.appTheme = appTheme.id
+    root.dataset.density = preferences.density
     root.style.colorScheme = colorScheme
 
     Object.entries(appColors).forEach(([key, value]) => {
@@ -291,6 +302,10 @@ export function ThemeProvider({
                 ...current,
                 appThemeId: validAppThemeId(themeId),
             }))
+        },
+        density: preferences.density,
+        setDensity: (density) => {
+            updatePreferences((current) => ({ ...current, density: validDensity(density) }))
         },
     }
 

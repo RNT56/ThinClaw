@@ -91,7 +91,9 @@ export function AppearanceSettings() {
         lightSyntaxTheme,
         setSyntaxTheme,
         appThemeId,
-        setAppThemeId
+        setAppThemeId,
+        density,
+        setDensity,
     } = useTheme();
 
     const [config, setConfig] = useState<UserConfig | null>(null);
@@ -130,6 +132,29 @@ export function AppearanceSettings() {
                         ))}
                     </select>
                 </label>
+            </div>
+
+            <div className="p-6 border rounded-2xl bg-card/50 border-border/50 flex items-center justify-between gap-6">
+                <div className="space-y-1">
+                    <h3 className="font-bold text-lg">{t("settings.density")}</h3>
+                    <p className="text-sm text-muted-foreground">Choose roomier controls or fit more operational detail on screen.</p>
+                </div>
+                <div role="radiogroup" aria-label={t("settings.density")} className="flex rounded-lg border border-border bg-muted/30 p-1">
+                    {(['comfortable', 'compact'] as const).map((option) => (
+                        <button
+                            key={option}
+                            role="radio"
+                            aria-checked={density === option}
+                            onClick={() => setDensity(option)}
+                            className={cn(
+                                "h-8 rounded-md px-3 text-xs font-medium capitalize transition-colors",
+                                density === option ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                            )}
+                        >
+                            {option}
+                        </button>
+                    ))}
+                </div>
             </div>
             {/* UI Theme Group */}
             <div className="p-8 border rounded-2xl bg-linear-to-br from-card to-background shadow-xl border-border/30 flex items-center justify-between">
