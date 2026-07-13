@@ -418,15 +418,15 @@ pub fn run() {
             let secret_store = secret_store::SecretStore::new();
             // All consumers share the same grant state and keychain access
             // path; cloning the service does not construct another store.
-            let secret_store_for_router = std::sync::Arc::new(secret_store.clone());
+            let shared_secret_store = std::sync::Arc::new(secret_store.clone());
             handle.manage(secret_store);
 
-            // ── Inference Router — routes all AI modalities to backends ───
-            let inference_router = inference::InferenceRouter::new(secret_store_for_router.clone());
+            // ── Shared model/provider registry + inference router ───
+            // The router clone shares this registry's discovery cache and key vault.
+            let model_registry =
+                inference::ModelProviderRegistry::new(shared_secret_store);
+            let inference_router = inference::InferenceRouter::new(model_registry.clone());
             handle.manage(inference_router);
-
-            // ── Cloud Model Discovery Registry ───
-            let model_registry = inference::CloudModelRegistry::new(secret_store_for_router);
             handle.manage(model_registry);
 
             // Engine Manager — singleton inference engine instance

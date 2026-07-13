@@ -286,6 +286,7 @@ pub async fn thinclaw_sync_local_llm(
     state: State<'_, ThinClawManager>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
+    models: State<'_, crate::inference::ModelProviderRegistry>,
 ) -> Result<(), String> {
     let cfg = if let Some(c) = state.get_config().await {
         c
@@ -293,7 +294,9 @@ pub async fn thinclaw_sync_local_llm(
         state.init_config().await?
     };
 
-    let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+    let snapshot = models
+        .local_runtime_snapshot(&sidecar, &engine_manager)
+        .await;
     let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
     if local_llm.is_none() {
         return Err(format!(

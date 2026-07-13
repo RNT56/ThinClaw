@@ -163,7 +163,14 @@ fn display_size(path: &std::path::Path) -> u64 {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn list_models(app: AppHandle) -> Result<Vec<ModelFile>, String> {
+pub async fn list_models(
+    app: AppHandle,
+    registry: State<'_, crate::inference::ModelProviderRegistry>,
+) -> Result<Vec<ModelFile>, String> {
+    registry.list_local_models(&app)
+}
+
+pub(crate) fn list_local_models(app: &AppHandle) -> Result<Vec<ModelFile>, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     let models_dir = app_data_dir.join("models");

@@ -9,7 +9,7 @@ use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
 
 use crate::config::ConfigManager;
-use crate::inference::{CloudModelRegistry, InferenceRouter};
+use crate::inference::{InferenceRouter, ModelProviderRegistry};
 use crate::secret_store::SecretStore;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 use crate::thinclaw::ThinClawManager;
@@ -44,8 +44,8 @@ impl SharedServices {
         self.app.state::<InferenceRouter>()
     }
 
-    pub fn models(&self) -> State<'_, CloudModelRegistry> {
-        self.app.state::<CloudModelRegistry>()
+    pub fn models(&self) -> State<'_, ModelProviderRegistry> {
+        self.app.state::<ModelProviderRegistry>()
     }
 
     pub fn direct_history(&self) -> State<'_, SqlitePool> {
