@@ -99,6 +99,9 @@ Primary user surfaces:
 - Repo Projects keeps its command/state orchestration in
   `components/thinclaw/repo-projects/use-repo-projects.ts`; its public panel is a
   composition surface, not a second runtime or persistence owner.
+- Lifecycle Hooks follows the same boundary: `components/thinclaw/hooks/use-hooks.ts`
+  owns generated-command interactions while cards, the custom editor, and the
+  built-in template catalog remain presentation modules.
 
 Primary backend ownership:
 
