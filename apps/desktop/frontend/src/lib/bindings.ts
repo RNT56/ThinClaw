@@ -4326,6 +4326,10 @@ export type UiEvent =
  */
 { kind: "AgentLifecycleEvent"; session_key: string; run_id: string | null; phase: string; label: string; detail: string | null } |
 /**
+ * Metadata-only core observer event/metric forwarded by Desktop.
+ */
+{ kind: "ObserverRecord"; record: UiObserverRecord } |
+/**
  * Structured plan/progress update from the ThinClaw agent loop.
  */
 { kind: "PlanUpdate"; session_key: string; run_id: string | null; message_id: string; entries: JsonValue[] } |
@@ -4421,6 +4425,22 @@ export type UiEvent =
  * Message in chat history
  */
 export type UiMessage = { id: string; role: string; ts_ms: number; text: string; source: string | null }
+/**
+ * Privacy-safe observer metadata surfaced to the Desktop Event Inspector.
+ */
+export type UiObserverRecord = {
+/**
+ * `event` or `metric`.
+ */
+record_type: string;
+/**
+ * Stable machine name such as `llm_response` or `loop_run`.
+ */
+name: string; success: boolean | null; duration_ms: number | null;
+/**
+ * Redacted, bounded metadata. Prompt/message bodies are never included.
+ */
+attributes: { [key in string]: string } }
 /**
  * Session metadata for session list
  */

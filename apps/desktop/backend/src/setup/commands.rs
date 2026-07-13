@@ -454,6 +454,7 @@ mod tests {
             "PlanUpdate",
             "UsageUpdate",
             "LifecycleUpdate",
+            "ObserverRecord",
             "ApprovalRequested",
             "CredentialPrompt",
             "WebLogin",

@@ -162,7 +162,11 @@ Triggered on-touch, but schedule the worst offenders:
   WebDriver coverage for the top 10 user journeys: onboarding navigation and
   appearance, Chat, Dashboard, Channels, Automations, Jobs, Models, Secrets,
   and Appearance. The same suite separately checks deterministic Tauri IPC.
-- Runtime telemetry: wire the core `Observer` (currently `NoopObserver`) to a desktop sink + crash reporter; surface context-pressure / self-repair / advisor as `UiEvent`s (also closes §5 parity gaps).
+- ✅ Runtime telemetry: Desktop now decorates the operator-selected core
+  `Observer` backend with an always-on, metadata-only typed event sink. Redacted
+  observer errors and process panics are persisted locally as private `0600`
+  reports with a 20-file retention cap; nothing is uploaded. Context-pressure,
+  self-repair, and advisor-specific `UiEvent`s remain TDO-033.
 
 ### WS-5 — Security & Secrets
 - Single encrypted secret path (AES-256-GCM core store ↔ macOS Keychain); grant checks enforced (contract test covers denial).

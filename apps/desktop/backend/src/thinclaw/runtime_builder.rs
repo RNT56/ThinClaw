@@ -24,6 +24,7 @@ use thinclaw_core::channels::ChannelManager;
 use thinclaw_core::extensions::clawhub::CatalogCache;
 use thinclaw_core::extensions::manifest_validator::ManifestValidator;
 
+use super::desktop_observer::DesktopObserver;
 use super::runtime_bridge::ThinClawRuntimeInner;
 use super::tauri_channel::TauriChannel;
 use super::tool_bridge::TauriToolBridge;
@@ -266,7 +267,30 @@ pub(crate) async fn build_inner(
         }
     }
 
-    let components = builder.build_all().await?;
+    let mut components = builder.build_all().await?;
+
+    // Preserve the operator-selected core backend (log/Prometheus/noop) while
+    // adding Desktop's typed event sink and bounded local crash reports.
+    let crash_reporter = {
+        use tauri::Manager as _;
+        app_handle
+            .state::<super::desktop_observer::DesktopCrashReporter>()
+            .inner()
+            .clone()
+    };
+    let desktop_observer = Arc::new(DesktopObserver::new(
+        Arc::clone(&components.observer),
+        app_handle.clone(),
+        crash_reporter,
+    ));
+    // AppBuilder emitted the core startup record before the Desktop adapter
+    // existed. Mirror it to the Desktop sink without double-counting it in the
+    // selected core backend.
+    desktop_observer.emit_desktop_event(&thinclaw_core::observability::ObserverEvent::AgentStart {
+        provider: components.config.llm.backend.to_string(),
+        model: components.llm.model_name().to_string(),
+    });
+    components.observer = desktop_observer;
 
     // ── 5. Create channel manager and register TauriChannel ─────────
     let channel_manager = Arc::new(ChannelManager::new());

@@ -387,6 +387,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error building tauri application");
 
+    let crash_reporter = thinclaw::desktop_observer::DesktopCrashReporter::new(
+        app.handle()
+            .path()
+            .app_data_dir()
+            .expect("failed to get app data dir for crash reporter")
+            .join("crash-reports"),
+    );
+    crash_reporter.install_panic_hook();
+    app.manage(crash_reporter);
+
     app.manage(SidecarManager::new());
     app.manage(model_manager::DownloadManager::new());
     app.manage(config::ConfigManager::new(app.handle()));

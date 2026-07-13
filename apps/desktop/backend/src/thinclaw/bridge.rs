@@ -879,10 +879,17 @@ mod tests {
 
         for (command, expected_mode) in representative_routes {
             let actual = route_mode(command);
-            assert_eq!(actual, Some(expected_mode), "unexpected fixture route for {command}");
+            assert_eq!(
+                actual,
+                Some(expected_mode),
+                "unexpected fixture route for {command}"
+            );
             assert_eq!(
                 expected_mode != RouteMode::RemoteOnly,
-                matches!(actual, Some(RouteMode::LocalOnly | RouteMode::LocalAndRemote)),
+                matches!(
+                    actual,
+                    Some(RouteMode::LocalOnly | RouteMode::LocalAndRemote)
+                ),
                 "local availability mismatch for {command}"
             );
         }
