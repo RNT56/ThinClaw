@@ -4,14 +4,16 @@
 > **Scope:** End-to-end overhaul of ThinClaw Desktop (`apps/desktop/`).
 > **Companion:** executable backlog in [`OVERHAUL_BACKLOG.md`](OVERHAUL_BACKLOG.md).
 >
-> **Progress (verified 2026-07-10):** the first parity-closure batch is **merged to `main`**:
+> **Progress (verified 2026-07-13):** the first parity-closure batch is **merged to `main`**:
 > the dual-mode bridge contract (`RouteMode`/`BridgeError`/`ROUTE_TABLE` in
 > `apps/desktop/backend/src/thinclaw/bridge.rs`), real per-thread compaction
 > (`thinclaw_compact_session` in `rpc_extensions.rs`), checkpoints/rollback, session search,
 > trajectory viewer, undo/redo, agent eval, lifecycle events
 > (compaction/advisor/self-repair → `UiEvent::AgentLifecycleEvent`), and the channel-config
 > framework. The §5a "invisible agent internals" gaps and the §5c channel-config gap listed
-> below as landed are done; the rest of the roadmap (shared-services unification, packaging,
+> below as landed are done. Shared services now cover secrets, models/providers, and
+> local conversation history (including the one-time legacy SQLite merge); settings and
+> theming remain. The rest of the roadmap (packaging,
 > the remaining §5 breadth items) stays open. See the completion-status table in
 > [`OVERHAUL_BACKLOG.md`](OVERHAUL_BACKLOG.md) and
 > [`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md) for per-item state.
@@ -95,7 +97,7 @@ runtime is dual-mode: embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridg
 | **CLI-only (no command)** | SFT/DPO trajectory export (`src/cli/trajectory.rs`), tunnel, Claude-Code/Codex bridge job modes (the eval framework now has `thinclaw_experiments_run_eval`) |
 | **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); only cron routines creatable (not event); no `/personality`, profile-evolution, or external-memory UI |
 | **Partial flows** | Fleet and Cloud-Brain config |
-| **Duplication** | secrets, models, history, settings, theming exist twice (Workbench vs Cockpit) |
+| **Duplication** | settings and theming still exist twice (Workbench vs Cockpit); secrets, models/providers, and local conversation history are unified |
 | **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `desktop_api.rs`, and several `ThinClaw*` panel components (the root Tauri facade is retired) |
 
 ---
@@ -118,7 +120,7 @@ hand-written `lib/thinclaw.ts`, and generated `bindings.ts`.
 |---|---|---|
 | Secrets | One app-wide `SecretStore`; its grant-aware `SecretsStore` implementation feeds the Cockpit while host methods feed Workbench | Unified; one keychain cache, live shared grants, one `SecretsTab` |
 | Models / providers | `model_manager.rs`, `inference/router.rs` (Workbench) + ThinClaw provider catalog (Cockpit) | One model registry + one provider-key vault; `thinclaw_sync_local_llm` is the canonical bridge |
-| History | `backend/src/history.rs` SQLite (Workbench) + ThinClaw session store (Cockpit) | Shared conversation store with a `surface` discriminator |
+| History | One `SharedHistoryStore` opens `thinclaw-runtime.db`; Direct commands use a SQLx adapter and the embedded agent receives the same runtime handle | Unified; `direct_workbench` and `agent_cockpit` rows are isolated by `surface`, with deterministic legacy merge |
 | Settings / config | `backend/src/config.rs` UserConfig (Workbench) + `thinclaw_config_*` (Cockpit) | One settings schema, two views |
 | Theming | `theme-provider.tsx` + per-mode styles | One design-system token set (feeds WS / Phase 3) |
 
@@ -129,8 +131,9 @@ once both modes use the seam. Data-merging migrations modeled on `cloud/migratio
 
 The adapter seam is implemented in `backend/src/shared_services.rs` and
 `frontend/src/components/services-context.tsx`. It delegates to the existing
-managed singletons and generated transport; TDO-011 through TDO-015 migrate
-domain consumers through it without changing product-mode ownership.
+managed singletons and generated transport. TDO-011 through TDO-013 have migrated
+secrets, models/providers, and history; TDO-014 and TDO-015 remain without changing
+product-mode ownership.
 
 ### WS-3 — Architecture Hygiene (god-file decomposition)
 Triggered on-touch, but schedule the worst offenders:

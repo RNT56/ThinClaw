@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     actor_id TEXT,
     conversation_scope_id TEXT,
     conversation_kind TEXT NOT NULL DEFAULT 'direct',
+    surface TEXT NOT NULL DEFAULT 'agent_cockpit',
     thread_id TEXT,
     stable_external_conversation_key TEXT,
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -47,6 +48,8 @@ CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_actor ON conversations(actor_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations(conversation_scope_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity);
+CREATE INDEX IF NOT EXISTS idx_conversations_surface_activity
+    ON conversations(surface, last_activity DESC);
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY,
@@ -1869,6 +1872,17 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         description: "Index active tool failure incidents",
         sql: "CREATE INDEX IF NOT EXISTS idx_tool_failures_active_incident ON tool_failures(tool_name) WHERE repaired_at IS NULL AND quarantined_at IS NULL",
     },
+    // -- V30: shared Desktop conversation surfaces -------------------------
+    LibsqlColumnUpgrade {
+        version: 30,
+        description: "Add conversation surface discriminator",
+        sql: "ALTER TABLE conversations ADD COLUMN surface TEXT NOT NULL DEFAULT 'agent_cockpit'",
+    },
+    LibsqlColumnUpgrade {
+        version: 30,
+        description: "Index conversation surface activity",
+        sql: "CREATE INDEX IF NOT EXISTS idx_conversations_surface_activity ON conversations(surface, last_activity DESC)",
+    },
 ];
 
 /// Idempotent data repairs for legacy libSQL databases.
@@ -1879,6 +1893,11 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
 /// every startup after `SCHEMA` so null/empty legacy identity fields are
 /// repaired in place.
 pub const DATA_REPAIRS: &[&str] = &[
+    r#"
+    UPDATE conversations
+    SET surface = 'agent_cockpit'
+    WHERE surface IS NULL OR surface = ''
+    "#,
     r#"
     UPDATE conversations
     SET actor_id = COALESCE(NULLIF(actor_id, ''), user_id),
@@ -1959,7 +1978,7 @@ pub const DATA_REPAIRS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{DATA_REPAIRS, SCHEMA};
+    use super::{DATA_REPAIRS, SCHEMA, UPGRADES};
 
     #[test]
     fn schema_includes_learning_tables() {
@@ -1967,6 +1986,23 @@ mod tests {
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS learning_code_proposals"));
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS outcome_contracts"));
         assert!(SCHEMA.contains("conversation_messages_fts"));
+        assert!(SCHEMA.contains("surface TEXT NOT NULL DEFAULT 'agent_cockpit'"));
+        assert!(SCHEMA.contains("idx_conversations_surface_activity"));
+    }
+
+    #[test]
+    fn upgrades_and_repairs_cover_conversation_surfaces() {
+        assert!(UPGRADES.iter().any(|upgrade| {
+            upgrade.version == 30
+                && upgrade
+                    .sql
+                    .contains("ADD COLUMN surface TEXT NOT NULL DEFAULT 'agent_cockpit'")
+        }));
+        assert!(
+            DATA_REPAIRS
+                .iter()
+                .any(|statement| statement.contains("SET surface = 'agent_cockpit'"))
+        );
     }
 
     #[test]

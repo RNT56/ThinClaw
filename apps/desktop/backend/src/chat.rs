@@ -681,36 +681,20 @@ pub async fn direct_chat_stream(
 #[tauri::command]
 #[specta::specta]
 pub async fn direct_chat_count_tokens(
-    app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
+    history: State<'_, crate::history::SharedHistoryStore>,
     conversation_id: String,
 ) -> Result<TokenUsage, String> {
-    use tauri::Manager;
-
-    // 1. Fetch Messages from DB
-    let pool = app.state::<sqlx::SqlitePool>();
-
-    #[derive(sqlx::FromRow)]
-    struct DbMessage {
-        role: String,
-        content: String,
-    }
-
-    let messages = sqlx::query_as::<_, DbMessage>(
-        "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
-    )
-    .bind(conversation_id)
-    .fetch_all(pool.inner())
-    .await
-    .map_err(|e| format!("DB Error: {}", e))?;
+    // 1. Fetch messages from the shared conversation store.
+    let messages = history.message_texts(&conversation_id).await?;
 
     // 2. Try precise count via the shared local runtime snapshot when available.
     let snapshot = crate::engine::local_runtime_snapshot(&state, &engine_manager).await;
     if let Some(endpoint) = snapshot.endpoint {
         let mut check_history: Vec<serde_json::Value> = Vec::new();
-        for msg in &messages {
-            check_history.push(serde_json::json!({ "role": msg.role, "content": msg.content }));
+        for (role, content) in &messages {
+            check_history.push(serde_json::json!({ "role": role, "content": content }));
         }
 
         let base_url = endpoint.base_url.trim_end_matches('/').to_string();
@@ -735,7 +719,10 @@ pub async fn direct_chat_count_tokens(
     }
 
     // 3. Fallback: heuristic estimate (chars / 4) for MLX, Ollama, cloud
-    let total_chars: u32 = messages.iter().map(|m| m.content.len() as u32).sum();
+    let total_chars: u32 = messages
+        .iter()
+        .map(|(_, content)| content.len() as u32)
+        .sum();
     let estimate = total_chars / 4;
     tracing::debug!(
         "[direct_chat_count_tokens] Using heuristic estimate (chars/4): {} chars → ~{} tokens",

@@ -185,6 +185,16 @@ impl AppBuilder {
         self
     }
 
+    /// Inject a pre-built database shared with the embedding host.
+    ///
+    /// The host is responsible for applying migrations before injection. The
+    /// builder still performs config reload and startup housekeeping against
+    /// this exact handle, so the agent and host do not open competing stores.
+    pub fn with_database(mut self, database: Arc<dyn Database>) -> Self {
+        self.db = Some(database);
+        self
+    }
+
     /// Inject multi-provider cloud intelligence settings.
     ///
     /// When set, `init_llm()` will create a multi-provider chain with
@@ -278,69 +288,74 @@ impl AppBuilder {
             return Ok(());
         }
 
-        let db: Arc<dyn Database> = match self.config.database.backend {
-            #[cfg(feature = "libsql")]
-            crate::config::DatabaseBackend::LibSql => {
-                use crate::db::Database as _;
-                use crate::db::libsql::LibSqlBackend;
-                use secrecy::ExposeSecret as _;
-
-                let default_path = crate::config::default_libsql_path();
-                let db_path = self
-                    .config
-                    .database
-                    .libsql_path
-                    .as_deref()
-                    .unwrap_or(&default_path);
-
-                let backend = if let Some(ref url) = self.config.database.libsql_url {
-                    let token =
-                        self.config
-                            .database
-                            .libsql_auth_token
-                            .as_ref()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set"
-                                )
-                            })?;
-                    LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret()).await?
-                } else {
-                    LibSqlBackend::new_local(db_path).await?
-                };
-                backend.run_migrations().await?;
-                tracing::info!("libSQL database connected and migrations applied");
-
+        let db: Arc<dyn Database> = if let Some(database) = self.db.take() {
+            tracing::info!("Using host-provided shared database");
+            database
+        } else {
+            match self.config.database.backend {
                 #[cfg(feature = "libsql")]
-                {
-                    self.libsql_db = Some(backend.shared_db());
+                crate::config::DatabaseBackend::LibSql => {
+                    use crate::db::Database as _;
+                    use crate::db::libsql::LibSqlBackend;
+                    use secrecy::ExposeSecret as _;
+
+                    let default_path = crate::config::default_libsql_path();
+                    let db_path = self
+                        .config
+                        .database
+                        .libsql_path
+                        .as_deref()
+                        .unwrap_or(&default_path);
+
+                    let backend =
+                        if let Some(ref url) = self.config.database.libsql_url {
+                            let token =
+                                self.config.database.libsql_auth_token.as_ref().ok_or_else(
+                                    || {
+                                        anyhow::anyhow!(
+                                            "LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set"
+                                        )
+                                    },
+                                )?;
+                            LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                                .await?
+                        } else {
+                            LibSqlBackend::new_local(db_path).await?
+                        };
+                    backend.run_migrations().await?;
+                    tracing::info!("libSQL database connected and migrations applied");
+
+                    #[cfg(feature = "libsql")]
+                    {
+                        self.libsql_db = Some(backend.shared_db());
+                    }
+
+                    Arc::new(backend) as Arc<dyn Database>
                 }
-
-                Arc::new(backend) as Arc<dyn Database>
-            }
-            #[cfg(feature = "postgres")]
-            _ => {
-                use crate::db::Database as _;
-                let pg = crate::db::postgres::PgBackend::new(&self.config.database)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-                pg.run_migrations()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-                tracing::info!("PostgreSQL database connected and migrations applied");
-
                 #[cfg(feature = "postgres")]
-                {
-                    self.pg_pool = Some(pg.pool());
-                }
+                _ => {
+                    use crate::db::Database as _;
+                    let pg = crate::db::postgres::PgBackend::new(&self.config.database)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    pg.run_migrations()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    tracing::info!("PostgreSQL database connected and migrations applied");
 
-                Arc::new(pg) as Arc<dyn Database>
-            }
-            #[cfg(not(feature = "postgres"))]
-            _ => {
-                anyhow::bail!(
-                    "No database backend available. Enable 'postgres' or 'libsql' feature."
-                );
+                    #[cfg(feature = "postgres")]
+                    {
+                        self.pg_pool = Some(pg.pool());
+                    }
+
+                    Arc::new(pg) as Arc<dyn Database>
+                }
+                #[cfg(not(feature = "postgres"))]
+                _ => {
+                    anyhow::bail!(
+                        "No database backend available. Enable 'postgres' or 'libsql' feature."
+                    );
+                }
             }
         };
 

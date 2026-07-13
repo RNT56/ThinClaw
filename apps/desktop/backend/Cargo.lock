@@ -10572,6 +10572,7 @@ dependencies = [
  "tempfile",
  "thinclaw",
  "thinclaw-config",
+ "thinclaw-db",
  "thinclaw-desktop-tools",
  "thinclaw-runtime-contracts",
  "thiserror 2.0.17",

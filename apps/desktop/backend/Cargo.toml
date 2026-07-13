@@ -69,7 +69,7 @@ tokenizers = "0.22.2"
 ndarray = "0.16.1"
 image = { version = "0.25.9", features = ["jpeg", "png", "webp"] }
 base64 = "0.22.1"
-uuid = { version = "1.19.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
+uuid = { version = "1.19.0", features = ["v4", "v5", "fast-rng", "macro-diagnostics"] }
 sysinfo = "0.38"
 tempfile = "3.24.0"
 scraper = "0.25.0"
@@ -110,6 +110,7 @@ zstd = "0.13"
 # ThinClaw agent engine (root crate; runtime DB backend is selected by features)
 thinclaw_core = { path = "../../..", package = "thinclaw", default-features = false }
 thinclaw-config = { path = "../../../crates/thinclaw-config" }
+thinclaw-db = { path = "../../../crates/thinclaw-db", features = ["libsql"] }
 thinclaw-runtime-contracts = { path = "../../../crates/thinclaw-runtime-contracts", features = ["specta"] }
 
 # macOS Keychain — secure encrypted storage for API keys

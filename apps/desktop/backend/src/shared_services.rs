@@ -5,7 +5,6 @@
 //! already managed by Tauri so consumers can migrate one domain at a time
 //! without constructing duplicate stores or reaching through unrelated state.
 
-use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager, State};
 
 use crate::config::ConfigManager;
@@ -48,8 +47,8 @@ impl SharedServices {
         self.app.state::<ModelProviderRegistry>()
     }
 
-    pub fn direct_history(&self) -> State<'_, SqlitePool> {
-        self.app.state::<SqlitePool>()
+    pub fn history(&self) -> State<'_, crate::history::SharedHistoryStore> {
+        self.app.state::<crate::history::SharedHistoryStore>()
     }
 
     pub fn agent_config(&self) -> State<'_, ThinClawManager> {
@@ -74,6 +73,7 @@ mod tests {
             "handle.manage(secret_store);",
             "handle.manage(inference_router);",
             "handle.manage(model_registry);",
+            "handle.manage(shared_history);",
             "handle.manage(pool);",
             "handle.manage(ironclaw_state);",
         ] {

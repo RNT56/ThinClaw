@@ -548,6 +548,15 @@ pub(crate) async fn build_inner(
         log_broadcaster.clone(),
     );
 
+    // The embedded libSQL runtime receives the exact store already opened by
+    // Desktop, so the Agent Cockpit and Direct Workbench cannot diverge.
+    #[cfg(feature = "runtime-libsql")]
+    {
+        use tauri::Manager;
+        let history = app_handle.state::<crate::history::SharedHistoryStore>();
+        builder = builder.with_database(history.runtime_store());
+    }
+
     if let Some(store) = secrets_store {
         builder = builder.with_secrets_store(store);
     }

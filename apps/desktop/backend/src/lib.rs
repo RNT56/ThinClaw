@@ -479,6 +479,13 @@ pub fn run() {
                 .await
                 .expect("failed to run migrations");
 
+            // Direct Workbench and the embedded agent share the canonical
+            // conversation database. Import the legacy Direct history once,
+            // then expose one app-wide service to every conversation consumer.
+            let shared_history = history::SharedHistoryStore::open(&app_data_dir, &pool)
+                .await
+                .expect("failed to initialize shared history store");
+            handle.manage(shared_history);
             handle.manage(pool);
 
             // Cloud Storage Manager
