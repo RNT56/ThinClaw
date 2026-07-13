@@ -84,6 +84,7 @@ export function ModeNavigator({
                         <motion.button
                             ref={(node) => { modeRefs.current[index] = node; }}
                             key={mode.id}
+                            data-mode-id={mode.id}
                             role="tab"
                             aria-selected={isActive}
                             aria-label={sidebarOpen ? undefined : label}

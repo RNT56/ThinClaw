@@ -9,13 +9,13 @@ async function expandSidebar() {
   );
 }
 
-async function selectMode(mode: "Chat" | "ThinClaw") {
+async function selectMode(mode: "chat" | "thinclaw") {
   await expandSidebar();
-  await $(`button[title="${mode}"]`).click();
+  await $(`button[data-mode-id="${mode}"]`).click();
 }
 
 async function openThinClawPage(label: string, heading: string) {
-  await selectMode("ThinClaw");
+  await selectMode("thinclaw");
   await expandSidebar();
   await $(`button=${label}`).click();
   await $(`h1=${heading}`).waitForDisplayed();
@@ -42,7 +42,7 @@ describe("ThinClaw Desktop top journeys", () => {
   });
 
   it("opens the primary chat workspace", async () => {
-    await selectMode("Chat");
+    await selectMode("chat");
     await $("textarea").waitForDisplayed();
   });
 
