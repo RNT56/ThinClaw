@@ -735,29 +735,10 @@ impl ChannelsConfig {
         let allow_from = settings
             .channels
             .apple_mail_allow_from
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                optional_env("APPLE_MAIL_ALLOW_FROM")
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    .map(|_| "")
-            })
-            .map(|_| {
-                // Re-read from whichever source had the value
-                let raw = settings
-                    .channels
-                    .apple_mail_allow_from
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| optional_env("APPLE_MAIL_ALLOW_FROM").ok().flatten())
-                    .unwrap_or_default();
-                raw.split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .or(optional_env("APPLE_MAIL_ALLOW_FROM")?)
+            .map(|raw| split_channel_list(&raw))
             .unwrap_or_default();
 
         let poll_interval_secs: u64 = settings
@@ -771,16 +752,14 @@ impl ChannelsConfig {
             })
             .unwrap_or(10);
 
-        let unread_only = if settings.channels.apple_mail_unread_only {
-            true
-        } else {
-            parse_bool_env("APPLE_MAIL_UNREAD_ONLY", true)?
-        };
-        let mark_as_read = if settings.channels.apple_mail_mark_as_read {
-            true
-        } else {
-            parse_bool_env("APPLE_MAIL_MARK_AS_READ", true)?
-        };
+        let unread_only = parse_bool_env(
+            "APPLE_MAIL_UNREAD_ONLY",
+            settings.channels.apple_mail_unread_only,
+        )?;
+        let mark_as_read = parse_bool_env(
+            "APPLE_MAIL_MARK_AS_READ",
+            settings.channels.apple_mail_mark_as_read,
+        )?;
 
         Ok(Some(AppleMailChannelConfig {
             allow_from,
@@ -838,12 +817,7 @@ impl ChannelsConfig {
 
         let allow_from = optional_env("BLUEBUBBLES_ALLOW_FROM")?
             .or(settings.channels.bluebubbles_allow_from.clone())
-            .map(|s| {
-                s.split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|raw| split_channel_list(&raw))
             .unwrap_or_default();
 
         let send_read_receipts = optional_env("BLUEBUBBLES_SEND_READ_RECEIPTS")?

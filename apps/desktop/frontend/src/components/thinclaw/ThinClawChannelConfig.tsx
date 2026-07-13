@@ -145,7 +145,7 @@ export function ThinClawChannelConfig() {
                         {schema.help && <p className="text-[11px] text-muted-foreground mt-0.5">{schema.help}</p>}
                     </div>
 
-                    <div className="space-y-3">
+                    {schema.fields.length > 0 && <div className="space-y-3">
                         {schema.fields.map((field) => {
                             const val = fieldValue(schema, field);
                             const inputId = `channel-config-${schema.channel_id}-${field.id}`;
@@ -208,9 +208,9 @@ export function ThinClawChannelConfig() {
                                 </div>
                             );
                         })}
-                    </div>
+                    </div>}
 
-                    <button
+                    {schema.fields.length > 0 && <button
                         type="button"
                         onClick={() => submit(schema)}
                         disabled={saving === schema.channel_id}
@@ -221,7 +221,7 @@ export function ThinClawChannelConfig() {
                     >
                         {saving === schema.channel_id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                         Save
-                    </button>
+                    </button>}
                 </div>
             ))}
         </motion.div>

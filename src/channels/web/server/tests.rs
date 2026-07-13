@@ -805,15 +805,26 @@ impl crate::channels::Channel for ConfigurableTestChannel {
         Some(thinclaw_channels::ConfigSchema {
             channel_id: self.name().to_string(),
             channel_name: "Configurable test".to_string(),
-            fields: vec![thinclaw_channels::ConfigField {
-                id: "mode".to_string(),
-                label: "Mode".to_string(),
-                field_type: "text".to_string(),
-                required: true,
-                help_text: None,
-                default_value: None,
-                options: None,
-            }],
+            fields: vec![
+                thinclaw_channels::ConfigField {
+                    id: "mode".to_string(),
+                    label: "Mode".to_string(),
+                    field_type: "text".to_string(),
+                    required: true,
+                    help_text: None,
+                    default_value: None,
+                    options: None,
+                },
+                thinclaw_channels::ConfigField {
+                    id: "test_token".to_string(),
+                    label: "Token".to_string(),
+                    field_type: "password".to_string(),
+                    required: true,
+                    help_text: None,
+                    default_value: None,
+                    options: None,
+                },
+            ],
             help: None,
         })
     }
@@ -832,6 +843,15 @@ impl crate::channels::Channel for ConfigurableTestChannel {
 
 #[tokio::test]
 async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates() {
+    use secrecy::SecretString;
+
+    let crypto = Arc::new(
+        crate::secrets::SecretsCrypto::new(SecretString::from(
+            "0123456789abcdef0123456789abcdef".to_string(),
+        ))
+        .unwrap(),
+    );
+    let secrets = Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
     let updates = Arc::new(tokio::sync::Mutex::new(None));
     let manager = Arc::new(crate::channels::ChannelManager::new());
     manager
@@ -842,6 +862,7 @@ async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates(
 
     let mut state = test_gateway_state("gateway-user", "gateway-user", None);
     state.channel_manager = Some(manager);
+    state.secrets_store = Some(secrets.clone());
     let state = Arc::new(state);
 
     let axum::Json(schemas) =
@@ -877,7 +898,7 @@ async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates(
         axum::extract::State(state),
         identity,
         axum::extract::Path("configurable-test".to_string()),
-        axum::Json(serde_json::json!({"mode": "fast"})),
+        axum::Json(serde_json::json!({"mode": "fast", "test_token": "s3cret"})),
     )
     .await
     .expect("live config update succeeds");
@@ -885,6 +906,7 @@ async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates(
     assert_eq!(result["ok"], true);
     assert_eq!(result["persisted"], false);
     assert_eq!(result["forwarded"], true);
+    assert_eq!(result["secrets_updated"], 1);
     assert_eq!(
         updates
             .lock()
@@ -893,6 +915,18 @@ async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates(
             .and_then(|values| values.get("mode")),
         Some(&serde_json::json!("fast"))
     );
+    assert!(
+        !updates
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|values| values.contains_key("test_token"))
+    );
+    let decrypted =
+        crate::secrets::SecretsStore::get_decrypted(secrets.as_ref(), "gateway-user", "test_token")
+            .await
+            .unwrap();
+    assert_eq!(decrypted.expose(), "s3cret");
 }
 
 #[tokio::test]

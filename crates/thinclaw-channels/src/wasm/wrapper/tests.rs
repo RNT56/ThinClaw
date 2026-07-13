@@ -9,6 +9,7 @@ use crate::pairing::PairingStore;
 use crate::wasm::capabilities::ChannelCapabilities;
 use crate::wasm::host::ChannelWorkspaceStore;
 use crate::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
+use crate::wasm::schema::{SecretSetupSchema, SetupSchema};
 use thinclaw_channels_core::Channel;
 
 fn create_test_channel() -> WasmChannel {
@@ -33,6 +34,30 @@ fn create_test_channel() -> WasmChannel {
 fn test_channel_name() {
     let channel = create_test_channel();
     assert_eq!(channel.name(), "test");
+}
+
+#[test]
+fn test_channel_maps_manifest_setup_to_secret_only_config_schema() {
+    let channel = create_test_channel().with_setup_schema(SetupSchema {
+        required_secrets: vec![SecretSetupSchema {
+            name: "test_bot_token".to_string(),
+            prompt: "Bot token".to_string(),
+            validation: None,
+            optional: false,
+            auto_generate: None,
+        }],
+        validation_endpoint: None,
+    });
+
+    let schema = channel
+        .config_schema()
+        .expect("setup schema should surface");
+    assert_eq!(schema.channel_id, "test");
+    assert_eq!(schema.fields.len(), 1);
+    assert_eq!(schema.fields[0].id, "test_bot_token");
+    assert_eq!(schema.fields[0].field_type, "password");
+    assert!(schema.fields[0].required);
+    assert!(schema.fields[0].default_value.is_none());
 }
 
 #[test]

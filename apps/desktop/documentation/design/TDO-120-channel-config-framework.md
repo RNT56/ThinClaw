@@ -1,6 +1,6 @@
 # Design — Channel-Config Framework (TDO-120…123)
 
-> **Status:** design draft v1 · **Created:** 2026-06-27 · Epic: TDO-EP7 (Phase 1 parity)
+> **Status:** implemented 2026-07-13 · **Created:** 2026-06-27 · Epic: TDO-EP7 (Phase 1 parity)
 > **Parent:** [`../OVERHAUL_PLAN.md`](../OVERHAUL_PLAN.md) §5c · **Backlog:** [`../OVERHAUL_BACKLOG.md`](../OVERHAUL_BACKLOG.md)
 > Largest single parity item (XL). Depends on TDO-001 (RouteBehavior).
 

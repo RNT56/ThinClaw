@@ -232,7 +232,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 ### 5c. Channels (breadth) — largest item
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| Many channels lack config UI (framework **DONE**, long tail pending) | **Schema-driven channel-config framework**: each native/WASM channel declares a config schema; UI renders generically (mirrors MCP/extension setup-schema). Framework + `thinclaw_channel_config_schema`/`_schemas`/`_submit` + Signal/Discord shipped; iMessage/Nostr and the long tail remain | `rpc_channel_config.rs`, `ThinClawChannelConfig` panel, channel manifests | **XL** |
+| ~~Many channels lack config UI~~ **DONE** | Schema-driven local/remote forms cover the first native set, Apple Mail, BlueBubbles, manifest-backed long-tail WASM adapters, and explicit host-managed lifecycle states. Credential fields are opaque and encrypted-store-only. | `rpc_channel_config.rs`, `ThinClawChannelConfig` panel, channel manifests | **XL** |
 | ~~Pairing/web-login parity~~ **DONE** | One accessible pairing surface covers every adapter that actually emits DM pairing codes and explains each real credential path; unused web-login commands that only returned errors were removed | `ThinClawPairing.tsx`, `pairing/catalog.ts` | S |
 
 ### 5d. Identity / memory / personality
@@ -324,7 +324,7 @@ panel wired or honestly gated; contract suite green.
 1. WS-1 bridge linter + `RouteMode` enum — make the contract enforceable first. (`RouteMode`/`BridgeError`/`ROUTE_TABLE` in `bridge.rs` and the linter test have landed.)
 2. Generate route-matrix & `UiEvent` union from code; start the `lib/thinclaw.ts` split.
 3. ~~Fix the compaction stub~~ **done**; `thinclaw_compact_session` now drives the core `ContextCompactor`.
-4. Channel-config schema framework spike — de-risk the largest parity item early. (Framework + Signal/Discord landed; long tail pending.)
+4. ~~Channel-config schema framework spike~~ **done** — native current-value forms, WASM manifest mapping, encrypted credential routing, and honest host-managed states are implemented.
 5. Split `runtime_builder.rs` + `lib/thinclaw.ts` as their first consumers are touched.
 6. Stand up fixture acceptance in CI so every subsequent PR is gated.
 

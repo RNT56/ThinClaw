@@ -7,6 +7,8 @@
 use serde_json::{json, Value};
 use tauri::State;
 
+use super::ThinClawManager;
+use crate::secret_store::SecretStore;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 /// Return the configuration schema for a single channel, if it exposes one.
@@ -52,6 +54,8 @@ pub async fn thinclaw_channel_config_schemas(
 #[specta::specta]
 pub async fn thinclaw_channel_config_submit(
     ironclaw: State<'_, ThinClawRuntimeState>,
+    manager: State<'_, ThinClawManager>,
+    secret_store: State<'_, SecretStore>,
     channel_id: String,
     values: Value,
 ) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
@@ -94,7 +98,11 @@ pub async fn thinclaw_channel_config_submit(
                 "channel '{channel_id}' does not expose a configuration schema"
             ))
         })?;
-    for field in schema.fields.iter().filter(|field| field.required) {
+    for field in schema
+        .fields
+        .iter()
+        .filter(|field| field.required && field.field_type != "password")
+    {
         if !obj.contains_key(&field.id) {
             return Err(crate::thinclaw::bridge::BridgeError::from(format!(
                 "missing required channel config field: {}",
@@ -113,10 +121,12 @@ pub async fn thinclaw_channel_config_submit(
                 ))
             })?;
         let required_value_missing = field.required
+            && field.field_type != "password"
             && (value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()));
         let value_valid = (!field.required && value.is_null())
             || match field.field_type.as_str() {
-                "text" | "password" | "textarea" => value.is_string(),
+                "password" => value.is_null() || value.is_string(),
+                "text" | "textarea" => value.is_string(),
                 "number" => value.is_number(),
                 "checkbox" => value.is_boolean(),
                 "select" => value.as_str().is_some_and(|value| {
@@ -134,10 +144,38 @@ pub async fn thinclaw_channel_config_submit(
         }
     }
 
-    // Persist each submitted field under channels.{channel_id}_{field}.
+    let mut setting_values = obj.clone();
+    let mut secrets_updated = 0usize;
+    for field in schema
+        .fields
+        .iter()
+        .filter(|field| field.field_type == "password")
+    {
+        setting_values.remove(&field.id);
+        let Some(value) = obj
+            .get(&field.id)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        super::keys::upsert_granted_channel_secret(
+            &manager,
+            &secret_store,
+            &channel_id,
+            &field.id,
+            value,
+        )
+        .await
+        .map_err(crate::thinclaw::bridge::BridgeError::from)?;
+        secrets_updated += 1;
+    }
+
+    // Persist non-secret fields under channels.{channel_id}_{field}.
     let mut persisted = false;
     if let Some(store) = agent.store() {
-        for (field, val) in &obj {
+        for (field, val) in &setting_values {
             let key = format!("channels.{channel_id}_{field}");
             thinclaw_core::api::config::set_setting(store, "local_user", &key, val)
                 .await
@@ -151,7 +189,7 @@ pub async fn thinclaw_channel_config_submit(
     }
 
     // Forward to the live channel (no-op for native channels that don't override).
-    let updates: std::collections::HashMap<String, Value> = obj.into_iter().collect();
+    let updates: std::collections::HashMap<String, Value> = setting_values.into_iter().collect();
     agent
         .channels()
         .update_channel_runtime_config(&channel_id, updates)
@@ -167,6 +205,7 @@ pub async fn thinclaw_channel_config_submit(
         "channel_id": channel_id,
         "persisted": persisted,
         "forwarded": true,
-        "note": "Settings saved and forwarded to the channel. Native channels may require a channel restart to take effect.",
+        "secrets_updated": secrets_updated,
+        "note": "Settings were saved without exposing credentials. Restart or reactivate native and WASM channels after replacing startup-only fields.",
     }))
 }

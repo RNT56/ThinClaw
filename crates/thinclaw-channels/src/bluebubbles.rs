@@ -35,7 +35,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::util::floor_char_boundary;
 use thinclaw_channels_core::{
-    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    Channel, ConfigField, ConfigSchema, IncomingMessage, MessageStream, OutgoingResponse,
+    StatusUpdate,
 };
 use thinclaw_types::error::ChannelError;
 
@@ -860,6 +861,73 @@ impl Channel for BlueBubblesChannel {
         NAME
     }
 
+    fn config_schema(&self) -> Option<ConfigSchema> {
+        Some(ConfigSchema {
+            channel_id: NAME.to_string(),
+            channel_name: "BlueBubbles".to_string(),
+            fields: vec![
+                ConfigField {
+                    id: "server_url".to_string(),
+                    label: "Server URL".to_string(),
+                    field_type: "text".to_string(),
+                    required: true,
+                    help_text: Some("BlueBubbles server, for example http://192.168.1.50:1234.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.server_url)),
+                    options: None,
+                },
+                ConfigField {
+                    id: "webhook_host".to_string(),
+                    label: "Webhook host".to_string(),
+                    field_type: "text".to_string(),
+                    required: true,
+                    help_text: Some("Local address that accepts BlueBubbles callbacks.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.webhook_host)),
+                    options: None,
+                },
+                ConfigField {
+                    id: "webhook_port".to_string(),
+                    label: "Webhook port".to_string(),
+                    field_type: "number".to_string(),
+                    required: true,
+                    help_text: Some("Local callback port (1-65535).".to_string()),
+                    default_value: Some(serde_json::json!(self.config.webhook_port)),
+                    options: None,
+                },
+                ConfigField {
+                    id: "webhook_path".to_string(),
+                    label: "Webhook path".to_string(),
+                    field_type: "text".to_string(),
+                    required: true,
+                    help_text: Some("Callback path, beginning with /.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.webhook_path)),
+                    options: None,
+                },
+                ConfigField {
+                    id: "allow_from".to_string(),
+                    label: "Allowed senders".to_string(),
+                    field_type: "textarea".to_string(),
+                    required: false,
+                    help_text: Some("Phone numbers or email addresses, one per line or comma-separated; empty allows all.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.allow_from.join("\n"))),
+                    options: None,
+                },
+                ConfigField {
+                    id: "send_read_receipts".to_string(),
+                    label: "Send read receipts".to_string(),
+                    field_type: "checkbox".to_string(),
+                    required: false,
+                    help_text: Some("Requires the BlueBubbles Private API.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.send_read_receipts)),
+                    options: None,
+                },
+            ],
+            help: Some(
+                "The server password remains on the dedicated BlueBubbles setup path and is never returned by this form."
+                    .to_string(),
+            ),
+        })
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         // Clear any prior shutdown flag so the (re)spawned listener serves and
         // does not immediately hit its graceful-shutdown path.
@@ -1565,6 +1633,30 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn config_schema_exposes_nonsecret_values_and_never_password() {
+        let channel = BlueBubblesChannel::new(BlueBubblesConfig::new(
+            "http://127.0.0.1:1234".to_string(),
+            SecretString::from("do-not-expose".to_string()),
+            "127.0.0.1".to_string(),
+            8645,
+            "/callback".to_string(),
+            vec!["+12025550100".to_string()],
+            false,
+        ))
+        .await
+        .unwrap();
+
+        let schema = channel.config_schema().unwrap();
+        assert_eq!(schema.fields.len(), 6);
+        assert!(schema.fields.iter().all(|field| field.id != "password"));
+        assert!(
+            !serde_json::to_string(&schema)
+                .unwrap()
+                .contains("do-not-expose")
+        );
+    }
 
     #[test]
     fn seen_guids_dedupes_and_evicts() {

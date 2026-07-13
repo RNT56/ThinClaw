@@ -186,7 +186,12 @@ filters, stream mode, …) describe them with a typed schema, mirroring the form
 pattern:
 
 - **Native channels** override `Channel::config_schema()` (returns `Option<ConfigSchema>`,
-  default `None`) to return their `ConfigField` list. Signal and Discord implement it today.
+  default `None`) to return current non-secret values. Signal, Discord, iMessage, Nostr,
+  Apple Mail, and BlueBubbles implement this; startup-only native lifecycle transports return
+  a fieldless schema with exact host-managed setup instructions.
+- **WASM channels** map `setup.required_secrets` from the installed capabilities sidecar to
+  opaque password fields. Blank values preserve the current credential; replacements are
+  written only to encrypted secret storage and are never persisted as settings or returned.
 - **DTOs** (`ConfigSchema`/`ConfigField`/`ConfigOption`) live in `thinclaw-channels-core`; the
   canonical lookup seams are `ChannelManager::config_schema_for()` and `config_schemas()`.
 - **Applying changes** flows through `ChannelManager::update_channel_runtime_config()` →
@@ -196,6 +201,7 @@ pattern:
   form and submit values; the desktop `thinclaw_channel_config_submit` command persists each
   field via settings and forwards it to the live channel. Embedded mode invokes the manager
   directly; remote mode uses the authenticated gateway config-schema and config-update routes.
+  Required fields, types, select values, and unknown keys are rejected consistently on both paths.
 
 ### Channel maturity (`production_status`)
 

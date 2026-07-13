@@ -19,6 +19,61 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 type BedrockCredentials = (Option<String>, Option<String>, Option<String>);
 
+/// Create or replace a channel credential as an explicitly granted custom
+/// secret. The value stays in Keychain; identity.json stores only metadata.
+pub(crate) async fn upsert_granted_channel_secret(
+    state: &ThinClawManager,
+    secret_store: &SecretStore,
+    channel_id: &str,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut cfg = if let Some(config) = state.get_config().await {
+        config
+    } else {
+        state.init_config().await?
+    };
+    if let Some(secret) = cfg
+        .custom_secrets
+        .iter_mut()
+        .find(|secret| secret.name == name)
+    {
+        crate::thinclaw::config::keychain::set_key(&secret.id, Some(value))
+            .map_err(|error| format!("Keychain error: {error}"))?;
+        secret.value = value.to_string();
+        secret.granted = true;
+        secret.description = Some(format!("{channel_id} channel credential"));
+    } else {
+        let id = format!("custom-{}", uuid::Uuid::new_v4());
+        crate::thinclaw::config::keychain::set_key(&id, Some(value))
+            .map_err(|error| format!("Keychain error: {error}"))?;
+        cfg.custom_secrets.push(CustomSecret {
+            id,
+            name: name.to_string(),
+            value: value.to_string(),
+            description: Some(format!("{channel_id} channel credential")),
+            granted: true,
+        });
+    }
+
+    cfg.save_identity().map_err(|error| error.to_string())?;
+    let existing_engine = cfg.load_config().ok();
+    let local_llm = existing_engine
+        .as_ref()
+        .and_then(|model| model.get_local_llm_config());
+    let engine = cfg.generate_config(None, None, local_llm.clone());
+    cfg.write_config(&engine, local_llm)
+        .map_err(|error| error.to_string())?;
+
+    secret_store.apply_thinclaw_config(&cfg);
+    *state.config.write().await = Some(cfg);
+    Ok(())
+}
+
 async fn remote_secret_reads_are_opaque(ironclaw: &ThinClawRuntimeState) -> bool {
     ironclaw.remote_proxy().await.is_some()
 }

@@ -65,4 +65,57 @@ describe('ThinClawChannelConfig', () => {
             });
         });
     });
+
+    it('renders host-managed channels without a misleading save action', async () => {
+        commands.thinclawChannelConfigSchemas.mockResolvedValue({
+            status: 'ok',
+            data: {
+                available: true,
+                schemas: [{
+                    channel_id: 'apns',
+                    channel_name: 'Apns',
+                    fields: [],
+                    help: 'APNs signing identity is host-managed with APNS_PRIVATE_KEY.',
+                }],
+            },
+        });
+
+        render(<ThinClawChannelConfig />);
+
+        expect(await screen.findByText(/APNS_PRIVATE_KEY/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    });
+
+    it('keeps manifest credentials opaque and submits replacements explicitly', async () => {
+        commands.thinclawChannelConfigSchemas.mockResolvedValue({
+            status: 'ok',
+            data: {
+                available: true,
+                schemas: [{
+                    channel_id: 'line',
+                    channel_name: 'Line',
+                    fields: [{
+                        id: 'line_channel_secret',
+                        label: 'Channel secret',
+                        field_type: 'password',
+                        required: true,
+                        default_value: null,
+                    }],
+                }],
+            },
+        });
+
+        render(<ThinClawChannelConfig />);
+        const credential = await screen.findByLabelText(/Channel secret/);
+        expect(credential).toHaveAttribute('type', 'password');
+        expect(credential).toHaveValue('');
+        fireEvent.change(credential, { target: { value: 'replacement' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => {
+            expect(commands.thinclawChannelConfigSubmit).toHaveBeenCalledWith('line', {
+                line_channel_secret: 'replacement',
+            });
+        });
+    });
 });

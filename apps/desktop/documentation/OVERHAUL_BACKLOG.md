@@ -29,14 +29,16 @@ and locally verified; GitHub merge state remains authoritative until each PR lan
 | TDO-106/114 | Trajectory viewer plus bounded SFT/DPO export command and explicit download controls | ✅ | `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` |
 | TDO-111/112 | Outcome evaluation and GPU operations return typed, actionable gateway gates in local mode | ✅ | `rpc_experiments_learning.rs`:394/631/654 |
 | TDO-113 | Agent-eval commands + interactive Benchmarks panel; real-engine runtime smoke remains manual | ◐ | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` |
-| TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | ✅ | `rpc_channel_config.rs`:19/37/61 |
+| TDO-120 | Channel-config framework: native/WASM schemas, encrypted credential routing, validated local/remote submit commands, and Channel Config panel | ✅ | `rpc_channel_config.rs`, `handlers/channels.rs`, `wasm/wrapper/mod.rs` |
+| TDO-121 | Signal, Discord, iMessage, and Nostr schemas preserve current non-secret values and resolve persisted settings on restart | ✅ | first-party channel adapters, `channel_config.rs` |
+| TDO-122 | Long-tail schemas cover manifest-backed WASM channels, Apple Mail, BlueBubbles, and honest host-managed lifecycle adapters | ✅ | WASM loader/wrapper, native channel adapters |
 | TDO-132 | Inline Memory Editor reads and saves the canonical memory document | ✅ | `MemoryEditor.tsx`, `commands/sessions.rs`:732/750 |
 | TDO-140 | Repo-projects enroll→plan→merge-gate flow + readiness surface | ✅ | `rpc_repo_projects.rs`, `ThinClawRepoProjects.tsx`, `src/repo_projects` |
 | TDO-143 | Local/remote session subscription activates live event routing | ✅ | `commands/sessions.rs`:675, `runtime_bridge.rs`:648 |
 | Supplemental | Session search command + Session Search panel | ✅ | `rpc_session_search.rs`, `ThinClawSessionSearch.tsx` |
 
-**Deferred / cross-lane (still open):** remote-mode channel-config submit and live-reload for
-native channels remain future work; the eval runtime smoke-test needs a running engine. See
+**Deferred / cross-lane (still open):** live-reload for startup-only native channel fields
+remains future work; the eval runtime smoke-test needs a running engine. See
 [`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md).
 
 ---
@@ -198,7 +200,7 @@ characterization test added before the split; no behavior change.
 |---|---|---|---|---|
 | TDO-120 ✅ | **Channel-config schema framework** (`thinclaw_channel_config_schema`/`_schemas`/`_submit` commands + generic renderer in the `ThinClawChannelConfig` panel) | XL | TDO-001 | `rpc_channel_config.rs`, channel manifests |
 | TDO-121 ✅ | Signal, Discord, iMessage, and Nostr expose validated non-secret config schemas with current values; persisted settings resolve on restart | L | TDO-120 | channel adapters |
-| TDO-122 | Long-tail channel configs (Matrix, Teams, LINE, SMS, BlueBubbles, Apple Mail, …) | L | TDO-120 | channel adapters |
+| TDO-122 ✅ | WASM manifests declare encrypted credential forms for Matrix, Teams, LINE, SMS, WeCom, Feishu, Twitch, and peers; Apple Mail/BlueBubbles expose current non-secret values; native Matrix/voice/APNs/browser-push show explicit host-managed instructions | L | TDO-120 | channel adapters |
 | TDO-123 ✅ | Pairing parity covers every adapter that enforces DM codes (Telegram, Slack, Discord, WhatsApp, Signal); unsupported web-login stubs removed | S | TDO-120 | `ThinClawPairing.tsx`, `pairing/catalog.ts` |
 
 ### Identity / memory / personality
