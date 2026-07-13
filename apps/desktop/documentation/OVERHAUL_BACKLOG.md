@@ -128,7 +128,7 @@ app palette without changing status-color meaning.
 | TDO-022 ✅ | Split `ThinClawRepoProjects.tsx` into fixtures, sub-panels, hook, and utilities | M | P1 | — | `ThinClawRepoProjects.tsx`, `thinclaw/repo-projects/*` |
 | TDO-023 ✅ | Split `ThinClawHooks.tsx` into catalog, cards, modal, and data hook | M | ∞ | — | `ThinClawHooks.tsx`, `thinclaw/hooks/*` |
 | TDO-024 ✅ | Split `ThinClawAutomations.tsx` into job card, create modal, schedule helpers, and data hook | M | P1 | — | `ThinClawAutomations.tsx`, `thinclaw/automations/*` |
-| TDO-025 | Split `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` | M | ∞ | — | components |
+| TDO-025 ✅ | Split `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` into focused rows/cards, catalogs, and data hooks | M | ∞ | — | components |
 
 **Split acceptance:** public import paths preserved via `pub use` / barrel re-exports;
 characterization test added before the split; no behavior change.
