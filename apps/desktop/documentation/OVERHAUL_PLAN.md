@@ -225,7 +225,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | ~~Event-triggered routines uncreatable~~ **DONE** | Local and remote `routine_create` wire `Trigger::SystemEvent`; the creation modal has an accessible trigger-type selector | `rpc_routines.rs`, `automations/CreateJobModal.tsx` | M |
 | ~~`evaluate_outcomes` failed opaquely in local mode~~ **DONE** | Typed remote-only gate explains that a gateway is required | `rpc_experiments_learning.rs:394` | M |
 | ~~GPU validate/launch failed opaquely in local mode~~ **DONE** | Typed remote-only gates explain the gateway credential boundary | `rpc_experiments_learning.rs:631-675` | M |
-| Eval framework partially exposed | Commands are wired; add the Benchmarks panel and runtime smoke-test | `rpc_experiments_learning.rs`, frontend | L |
+| Eval framework exposed; live acceptance pending | Commands and Benchmarks panel are wired; complete the real-engine runtime smoke-test | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` | L |
 | ~~SFT/DPO export CLI-only~~ **DONE** | CLI and Desktop share the canonical validated exporter; Desktop adds a bounded local command and explicit SFT/DPO download controls | `src/cli/trajectory.rs`, `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` | M |
 | ~~Profile-evolution no panel~~ **DONE** | Dedicated Learning Review panel shows bounded parsed profile/routine state and can explicitly upsert + run the reserved routine | `rpc_profile_evolution.rs`, `learning/ProfileEvolutionPanel.tsx` | S |
 

@@ -28,6 +28,7 @@ and locally verified; GitHub merge state remains authoritative until each PR lan
 | TDO-105 | Advisor consultation → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `tool_execution.rs`, `ThinClawEventInspector.tsx` |
 | TDO-106/114 | Trajectory viewer plus bounded SFT/DPO export command and explicit download controls | ✅ | `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` |
 | TDO-111/112 | Outcome evaluation and GPU operations return typed, actionable gateway gates in local mode | ✅ | `rpc_experiments_learning.rs`:394/631/654 |
+| TDO-113 | Agent-eval commands + interactive Benchmarks panel; real-engine runtime smoke remains manual | ◐ | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` |
 | TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | ✅ | `rpc_channel_config.rs`:19/37/61 |
 | TDO-132 | Inline Memory Editor reads and saves the canonical memory document | ✅ | `MemoryEditor.tsx`, `commands/sessions.rs`:732/750 |
 | TDO-140 | Repo-projects enroll→plan→merge-gate flow + readiness surface | ✅ | `rpc_repo_projects.rs`, `ThinClawRepoProjects.tsx`, `src/repo_projects` |
@@ -188,7 +189,7 @@ characterization test added before the split; no behavior change.
 | TDO-110 ✅ | Event-triggered routine creation (`Trigger::SystemEvent`) + UI | M | TDO-024 | `rpc_routines.rs`, `automations/CreateJobModal.tsx` |
 | TDO-111 ✅ | `evaluate_outcomes`: typed remote-only gate with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:394` |
 | TDO-112 ✅ | GPU validate/launch: typed remote-only gates with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:631-675` |
-| TDO-113 | Eval framework commands are wired; Benchmarks panel and runtime smoke-test remain | L | TDO-001 | `rpc_experiments_learning.rs`, frontend |
+| TDO-113 | Eval framework commands and Benchmarks panel are wired; real-engine runtime smoke-test remains | L | TDO-001 | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` |
 | TDO-114 ✅ | `thinclaw_trajectory_export(format)` (SFT/DPO) + export button | M | TDO-106 | `src/cli/trajectory.rs`, `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` |
 | TDO-115 ✅ | Profile-evolution viewer + force-run | S | TDO-001 | `rpc_profile_evolution.rs`, `learning/ProfileEvolutionPanel.tsx` |
 

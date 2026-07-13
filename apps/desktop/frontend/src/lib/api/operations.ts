@@ -858,3 +858,50 @@ export async function validateExperimentGpuCloud(provider: string): Promise<Thin
 export async function launchExperimentGpuCloudTest(provider: string): Promise<ThinClawJson> {
     return compatibilityCommands.thinclawExperimentsGpuLaunchTest(provider);
 }
+
+export interface ExperimentEnvironment {
+    id: string;
+    name: string;
+    description: string;
+    runnable: boolean;
+}
+
+export interface ExperimentEnvironmentCatalog {
+    available: boolean;
+    environments: ExperimentEnvironment[];
+}
+
+export interface ExperimentEvalSummary {
+    env_names: string[];
+    episode_count: number;
+    step_count: number;
+    score: number;
+    exact_tokens_supported: boolean;
+    logprobs_supported: boolean;
+    token_capture_steps: number;
+    captured_token_ids: number;
+    captured_logprobs: number;
+}
+
+export interface ExperimentEvalResult {
+    available: boolean;
+    env_id: string;
+    episodes: number;
+    summary: ExperimentEvalSummary;
+    trajectories: ThinClawJson[];
+}
+
+/** Discover the local evaluator environments exposed by the embedded runtime. */
+export async function getExperimentEnvironments(): Promise<ExperimentEnvironmentCatalog> {
+    return compatibilityCommands.thinclawExperimentsListEnvs();
+}
+
+/** Run a bounded evaluation in throwaway sessions owned by the evaluator. */
+export async function runExperimentEvaluation(
+    envId: string,
+    prompt: string,
+    nEpisodes: number,
+    maxSteps: number,
+): Promise<ExperimentEvalResult> {
+    return compatibilityCommands.thinclawExperimentsRunEval(envId, prompt, nEpisodes, maxSteps);
+}

@@ -46,10 +46,10 @@ Renders the schema (`thinclaw_channel_config_schemas`) as a dynamic form and sub
 item 4; surfaces the backend `restart_required` note as a toast.
 
 ## 6. Eval runtime smoke-test — ⏳ (needs running app)
-Not a code change. With an embedded engine running, call
-`thinclaw_experiments_run_eval("agent_loop", "<prompt>", 1, 4)` and confirm a scored
-trajectory in a throwaway `agent-env:` session. **Cannot be executed in a headless dev
-environment** — left as a manual QA step rather than faked.
+Not a code change. With an embedded engine running, use the Experiments Benchmarks panel
+to call `thinclaw_experiments_run_eval("agent_loop", "<prompt>", 1, 4)` and confirm a
+scored trajectory in a throwaway `agent-env:` session. **Cannot be executed in a headless
+dev environment** — left as a manual QA step rather than faked.
 
 ## 7. More channels implement `config_schema` — ⏳ additive
 Signal (#119) and Discord (#122) are done. Gmail/Nostr/BlueBubbles (native, mirror Signal)

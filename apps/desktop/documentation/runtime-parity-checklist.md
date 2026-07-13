@@ -34,7 +34,7 @@ This checklist maps ThinClaw root runtime surfaces to Desktop support status. St
 | Checkpoints / rollback | wired | `list`/`diff`/`restore` commands + Rollback panel (filesystem shadow-git checkpoints). |
 | Trajectory viewer and export | tested | `stats`/`records` commands plus the Trajectory panel. `thinclaw_trajectory_export` reuses the canonical CLI SFT/DPO validation over legacy and durable run-artifact records, bounds IPC to 5,000 examples, and downloads only after an explicit user action. |
 | Profile evolution | tested | Learning Review displays the parsed local profile, confidence/evidence metadata, schedule, run history, and failures. The explicit run command upserts the reserved weekly routine from first-party profile material and starts it through the live routine engine; profile display is capped at 512 KiB and invalid JSON is reported without reflecting raw content. |
-| Agent eval | wired | `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` (AgentLoopEnv, LocalOnly). Runtime smoke-test pending a running engine. |
+| Agent eval | wired | `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` (AgentLoopEnv, LocalOnly) feed an interactive Benchmarks panel with bounded prompt/episode/step controls and scored summaries. Runtime smoke-test pending a running engine. |
 | Channel config | wired | `Channel::config_schema()` + DTOs; read commands + `thinclaw_channel_config_submit` (LocalOnly; WASM live, native restart-required); Signal/Discord impls + Channel Config panel. |
 | Tool policy | gated | `disabled_tools` deny-list enforced in the dispatcher tool-execution preflight. |
 

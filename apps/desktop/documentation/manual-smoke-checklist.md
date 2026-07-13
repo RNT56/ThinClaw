@@ -171,6 +171,9 @@ set in the report.
 
 - Open Experiments and verify projects, campaigns, runners, trials, targets,
   model usage, opportunities, GPU cloud validation, and test launch controls.
+- In the Benchmarks panel, run one `agent_loop` episode with a four-step cap;
+  verify a scored summary appears, terminal/skill case suites remain visibly
+  CLI-only, and no normal chat thread is created or modified.
 - Open Learning and verify status, history, candidates, outcomes, proposals,
   reviews, and rollbacks.
 - Mutations must be enabled only when the root ThinClaw APIs and config allow
