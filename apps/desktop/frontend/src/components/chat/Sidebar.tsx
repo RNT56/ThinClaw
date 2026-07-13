@@ -22,6 +22,7 @@ export function Sidebar() {
 
     return (
         <div
+            data-testid="app-sidebar"
             className={cn(
                 "border-r border-border bg-card/50 backdrop-blur-sm flex flex-col transition-all duration-300 relative z-20 overflow-hidden h-full",
                 sidebarOpen ? "w-64 p-4" : "w-16 p-2"

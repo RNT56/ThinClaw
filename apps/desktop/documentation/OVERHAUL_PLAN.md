@@ -158,7 +158,10 @@ Triggered on-touch, but schedule the worst offenders:
 ### WS-4 — Test/QA & Observability
 - Contract tests per command (route-behavior matrix, bindings coverage, `Channel<T>`/reserved-arg sanitizer — extend the existing test).
 - ✅ Executable **fixture acceptance** for local + remote modes now runs representative bridge/gating checks and an authenticated loopback gateway across chat, jobs, autonomy, learning, experiments, MCP, skills, providers, costs, and cache surfaces in Desktop CI.
-- Frontend: Vitest component tests (`frontend/src/tests/`) + Playwright/WebDriver E2E for the top 10 flows.
+- Frontend: Vitest component tests (`frontend/src/tests/`) plus ✅ browser-mode
+  WebDriver coverage for the top 10 user journeys: onboarding navigation and
+  appearance, Chat, Dashboard, Channels, Automations, Jobs, Models, Secrets,
+  and Appearance. The same suite separately checks deterministic Tauri IPC.
 - Runtime telemetry: wire the core `Observer` (currently `NoopObserver`) to a desktop sink + crash reporter; surface context-pressure / self-repair / advisor as `UiEvent`s (also closes §5 parity gaps).
 
 ### WS-5 — Security & Secrets
@@ -272,7 +275,7 @@ panel wired or honestly gated; contract suite green.
 | Command contracts | Rust tests + bridge linter | Every command: binding+wrapper+route-behavior |
 | Dual-mode behavior | Fixture acceptance (local+remote) | Per route-matrix row |
 | Frontend units | Vitest (`frontend/src/tests/`) | Components + lib |
-| E2E flows | Playwright/WebDriver | Top 10 flows green |
+| E2E flows | WebdriverIO browser mode | ✅ Top 10 flows + IPC contract green |
 | Clean-machine smoke | Manual checklist + dated report | Each phase gate |
 | Security | Secret-grant denial, sanitizer, SSRF | CI |
 | Packaging | Notarization/staple, updater signature | Release |
