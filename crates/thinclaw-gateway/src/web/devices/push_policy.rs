@@ -261,7 +261,8 @@ fn event_thread_id(event: &SseEvent) -> Option<&str> {
         SseEvent::Response { thread_id, .. } => Some(thread_id.as_str()),
         SseEvent::ApprovalNeeded { thread_id, .. }
         | SseEvent::ToolStarted { thread_id, .. }
-        | SseEvent::Status { thread_id, .. } => thread_id.as_deref(),
+        | SseEvent::Status { thread_id, .. }
+        | SseEvent::AgentLifecycle { thread_id, .. } => thread_id.as_deref(),
         _ => None,
     }
 }
@@ -346,6 +347,7 @@ pub fn can_produce_push(event: &SseEvent) -> bool {
             | SseEvent::JobSessionResult { .. }
             | SseEvent::ToolStarted { .. }
             | SseEvent::Status { .. }
+            | SseEvent::AgentLifecycle { .. }
     )
 }
 
@@ -422,7 +424,7 @@ pub fn decide(
             let thread_id = event_thread_id(event)?;
             live_activity_update(state, thread_id, now_secs, "runningTool", None)
         }
-        SseEvent::Status { .. } => {
+        SseEvent::Status { .. } | SseEvent::AgentLifecycle { .. } => {
             let thread_id = event_thread_id(event)?;
             live_activity_update(state, thread_id, now_secs, "thinking", None)
         }

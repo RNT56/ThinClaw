@@ -541,7 +541,8 @@ fn event_thread_id(event: &SseEvent) -> Option<&str> {
         SseEvent::Response { thread_id, .. } => Some(thread_id.as_str()),
         SseEvent::ApprovalNeeded { thread_id, .. }
         | SseEvent::ToolStarted { thread_id, .. }
-        | SseEvent::Status { thread_id, .. } => thread_id.as_deref(),
+        | SseEvent::Status { thread_id, .. }
+        | SseEvent::AgentLifecycle { thread_id, .. } => thread_id.as_deref(),
         _ => None,
     }
 }
@@ -554,7 +555,7 @@ fn event_thread_id(event: &SseEvent) -> Option<&str> {
 fn is_run_progress_event(event: &SseEvent) -> bool {
     matches!(
         event,
-        SseEvent::ToolStarted { .. } | SseEvent::Status { .. }
+        SseEvent::ToolStarted { .. } | SseEvent::Status { .. } | SseEvent::AgentLifecycle { .. }
     )
 }
 

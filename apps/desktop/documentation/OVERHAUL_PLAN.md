@@ -165,8 +165,12 @@ Triggered on-touch, but schedule the worst offenders:
 - ✅ Runtime telemetry: Desktop now decorates the operator-selected core
   `Observer` backend with an always-on, metadata-only typed event sink. Redacted
   observer errors and process panics are persisted locally as private `0600`
-  reports with a 20-file retention cap; nothing is uploaded. Context-pressure,
-  self-repair, and advisor-specific `UiEvent`s remain TDO-033.
+  reports with a 20-file retention cap; nothing is uploaded.
+- ✅ Internal lifecycle telemetry: context compaction, advisor consultation,
+  and self-repair start/completion preserve phase, label, and detail as typed
+  `AgentLifecycleEvent`s in both embedded and remote modes. The standalone
+  client consumes the same structured gateway SSE contract. The earlier
+  context-pressure header indicator remains the separate TDO-101 scope.
 
 ### WS-5 — Security & Secrets
 - Single encrypted secret path (AES-256-GCM core store ↔ macOS Keychain); grant checks enforced (contract test covers denial).

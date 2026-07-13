@@ -142,7 +142,7 @@ characterization test added before the split; no behavior change.
 | TDO-030 ✅ | Executable fixture acceptance for local + remote modes (make parity tiers runnable) | L | ∞ | TDO-002 | `scripts/ci/desktop-fixture-acceptance.sh`, bridge/proxy fixtures |
 | TDO-031 ✅ | Playwright/WebDriver E2E for top 10 flows | L | P2 | — | `e2e/`, `wdio.browser.conf.ts` |
 | TDO-032 ✅ | Wire core `Observer` → desktop sink + crash reporter | M | P2 | — | `thinclaw/desktop_observer.rs`, typed event bus |
-| TDO-033 | Surface internal events as `UiEvent`s (context-pressure, self-repair, advisor) | M | P1 | TDO-005 | `ui_types.rs` |
+| TDO-033 ✅ | Surface internal events as `UiEvent`s (context compaction, self-repair, advisor) in local and remote modes | M | P1 | TDO-005 | `ui_types.rs`, `event_mapping.rs`, gateway SSE |
 | TDO-034 | Expand contract/sanitizer tests (`Channel<T>`, reserved args, every command) | M | ∞ | TDO-002 | `setup/commands.rs` test |
 
 ---

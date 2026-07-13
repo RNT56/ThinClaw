@@ -534,7 +534,7 @@ First parity-closure batch (merged or in-flight; see `OVERHAUL_BACKLOG.md` for p
 | Checkpoints / rollback | merged | `list`/`diff`/`restore` commands + Rollback panel |
 | Trajectory viewer | merged | `stats`/`records` commands + Trajectory panel |
 | Agent eval | in-flight | `thinclaw_experiments_list_envs`/`run_eval` |
-| Lifecycle events (context compaction, advisor, self-repair) | in-flight | new `StatusUpdate` variants → `UiEvent::AgentLifecycleEvent` |
+| Lifecycle events (context compaction, advisor, self-repair) | implemented — embedded status forwarding and remote gateway SSE both preserve typed phase, label, detail, thread, and run routing as `UiEvent::AgentLifecycleEvent`; the standalone client models the structured `agent_lifecycle` wire event and the Event Inspector receives it through the shared bus | `StatusUpdate` → gateway/client `SseEvent::AgentLifecycle` → `UiEvent::AgentLifecycleEvent` |
 | Channel runtime config | in-flight | `Channel::config_schema()` + DTOs + read/submit commands + Channel Config panel |
 | Honest sidecar status | in-flight | `image_configured`/`tts_configured` (CLI tools — availability, not process state) |
 | Tool-policy enforcement | in-flight | `disabled_tools` deny-list enforced in dispatcher preflight |
