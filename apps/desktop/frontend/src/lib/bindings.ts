@@ -3414,8 +3414,7 @@ async directRuntimeDownloadHfModelFiles(repoId: string, filesToDownload: string[
 },
 /**
  * Discover the embedding dimension of a HuggingFace model by fetching its
- * `config.json` from the API and extracting `hidden_size`, `d_model`, or
- * `embedding_dim`.
+ * `config.json` and inspecting common sentence-transformer and model fields.
  *
  * Returns `None` for GGUF single-file models or repos without a `config.json`.
  * This is used by the onboarding wizard to pre-configure the vector store

@@ -178,8 +178,9 @@ pub async fn start_embedding_server_core(
     vector_manager: &crate::vector_store::VectorStoreManager,
     model_path: String,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    // Probe the actual embedding dimension from the model's config.json
-    let actual_dim: Option<usize> = (|| -> Option<usize> {
+    // Config metadata is a useful hint, but is not authoritative enough to
+    // purge an existing index. The live server response is probed below.
+    let config_dimension: Option<usize> = (|| -> Option<usize> {
         let p = std::path::Path::new(&model_path);
         let cfg_path = if p.is_dir() {
             p.join("config.json")
@@ -188,34 +189,8 @@ pub async fn start_embedding_server_core(
         };
         let content = std::fs::read_to_string(&cfg_path).ok()?;
         let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-        v.get("hidden_size")
-            .or_else(|| v.get("d_model"))
-            .or_else(|| v.get("embedding_dim"))
-            .and_then(|x| x.as_u64())
-            .map(|n| n as usize)
+        crate::hf_hub::embedding_dimension_from_config(&v)
     })();
-
-    if let Some(dim) = actual_dim {
-        let current_dim = vector_manager.dimensions();
-        if dim != current_dim {
-            eprintln!(
-                "[embedding] Dimension changed: {} → {}. Purging stale vector indices.",
-                current_dim, dim
-            );
-            vector_manager.purge_by_dimension(current_dim);
-            vector_manager
-                .reinit(dim)
-                .map_err(|e| format!("Failed to reinit vector store: {}", e))?;
-            let config_mgr = app.state::<crate::config::ConfigManager>();
-            let mut cfg = config_mgr.get_config();
-            cfg.vector_dimensions = dim as u32;
-            config_mgr.save_config(&cfg).await?;
-            println!(
-                "[embedding] Vector store reinitialized at dimension {}.",
-                dim
-            );
-        }
-    }
 
     #[cfg(feature = "mlx")]
     {
@@ -224,6 +199,37 @@ pub async fn start_embedding_server_core(
             .await
             .map(|_| ())
             .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    }
+
+    let (port, token) = state.get_embedding_config().ok_or_else(|| {
+        crate::thinclaw::bridge::BridgeError::from(
+            "Embedding server started without publishing its connection configuration",
+        )
+    })?;
+    let live_dimension = match probe_embedding_dimension(port, &token).await {
+        Ok(dimension) => dimension,
+        Err(error) => {
+            stop_failed_embedding_server(state);
+            return Err(error);
+        }
+    };
+    if config_dimension.is_some_and(|hint| hint != live_dimension) {
+        tracing::warn!(
+            config_dimension,
+            live_dimension,
+            "embedding model config disagrees with live server output; using live output"
+        );
+    }
+    if let Err(error) = crate::inference::reconcile_embedding_dimensions(
+        app,
+        vector_manager,
+        live_dimension,
+        "local embedding server",
+    )
+    .await
+    {
+        stop_failed_embedding_server(state);
+        return Err(error);
     }
     #[cfg(not(feature = "mlx"))]
     {
@@ -241,6 +247,78 @@ pub async fn start_embedding_server_core(
     )
     .ok();
     Ok(())
+}
+
+fn stop_failed_embedding_server(state: &SidecarManager) {
+    let mut process = state
+        .embedding_process
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(process) = process.take() {
+        let _ = process.kill();
+    }
+}
+
+async fn probe_embedding_dimension(
+    port: u16,
+    token: &str,
+) -> Result<usize, crate::thinclaw::bridge::BridgeError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("Failed to construct embedding probe client: {error}"))?;
+    let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+    let mut last_error = "embedding server did not become ready".to_string();
+
+    for _ in 0..120 {
+        match client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&serde_json::json!({
+                "input": "ThinClaw dimension probe",
+                "model": "default"
+            }))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                let body: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|error| format!("Invalid embedding probe response: {error}"))?;
+                let embedding = body
+                    .get("data")
+                    .and_then(|data| data.as_array())
+                    .and_then(|data| data.first())
+                    .and_then(|item| item.get("embedding"))
+                    .and_then(|embedding| embedding.as_array())
+                    .ok_or_else(|| "Embedding probe returned no vector".to_string())?;
+                let dimensions = embedding.len();
+                if !(1..=crate::inference::embedding::MAX_EMBEDDING_DIMENSIONS)
+                    .contains(&dimensions)
+                {
+                    return Err(
+                        format!("Embedding probe returned invalid dimension {dimensions}").into(),
+                    );
+                }
+                if embedding
+                    .iter()
+                    .any(|value| value.as_f64().is_none_or(|value| !value.is_finite()))
+                {
+                    return Err("Embedding probe returned a non-finite vector".into());
+                }
+                return Ok(dimensions);
+            }
+            Ok(response) => {
+                last_error = format!("embedding server returned HTTP {}", response.status());
+            }
+            Err(error) => last_error = error.to_string(),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    Err(format!("Embedding server readiness probe failed: {last_error}").into())
 }
 
 #[tauri::command]

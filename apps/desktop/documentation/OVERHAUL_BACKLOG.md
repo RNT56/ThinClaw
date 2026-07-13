@@ -230,7 +230,7 @@ characterization test added before the split; no behavior change.
 | TDO-203 ✅ | Current Claude family: Fable 5, Opus 4.8 default, Sonnet 5 balanced slot, Haiku 4.5 fast slot across catalog, discovery fallback, onboarding, Bedrock, and cost metadata | M | provider catalog, onboarding |
 | TDO-204 ✅ | Reproducible engine matrix: verified llama.cpp/uv assets, exact MLX/vLLM pins with versioned upgrades, Ollama version reporting, and fail-closed bounded GGUF/quant validation | L | `engine-compatibility.md`, `engine/*`, sidecars |
 | TDO-205 ✅ | Window-isolated Tauri v2 capabilities + npm/Cargo refresh + enabled-graph advisory sweep with no RustSec ignores | M | `security-and-dependencies.md`, `capabilities/*.json`, manifests |
-| TDO-206 | RAG/inference upgrades: reranker refresh, embedding-dim auto-detect hardening | M | `rag.rs`, `reranker.rs`, `hf_hub.rs` |
+| TDO-206 ✅ | RAG/inference upgrades: verified reranker artifacts, live embedding-dim authority, current provider defaults, and safe index migration | M | `rag-inference-compatibility.md`, `rag.rs`, `reranker.rs`, `hf_hub.rs` |
 
 ---
 

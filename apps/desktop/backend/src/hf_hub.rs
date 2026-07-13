@@ -638,9 +638,40 @@ pub async fn direct_runtime_download_hf_model_files(
     Ok(dest_dir.to_string_lossy().to_string())
 }
 
+const MAX_EMBEDDING_DIMENSION: u64 = 65_536;
+
+/// Extract a bounded sentence-embedding dimension from common Hugging Face
+/// configuration shapes. Sentence/projection-specific fields take precedence
+/// over a transformer's hidden size, and nested text configs are supported.
+pub(crate) fn embedding_dimension_from_config(config: &serde_json::Value) -> Option<usize> {
+    const KEYS: &[&str] = &[
+        "sentence_embedding_dimension",
+        "word_embedding_dimension",
+        "embedding_dimension",
+        "embedding_dim",
+        "projection_dim",
+        "hidden_size",
+        "d_model",
+        "word_embed_proj_dim",
+    ];
+
+    let candidates = std::iter::once(config)
+        .chain(config.get("text_config"))
+        .chain(config.get("sentence_bert_config"));
+    for candidate in candidates {
+        for key in KEYS {
+            if let Some(value) = candidate.get(key).and_then(|value| value.as_u64()) {
+                if (1..=MAX_EMBEDDING_DIMENSION).contains(&value) {
+                    return usize::try_from(value).ok();
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Discover the embedding dimension of a HuggingFace model by fetching its
-/// `config.json` from the API and extracting `hidden_size`, `d_model`, or
-/// `embedding_dim`.
+/// `config.json` and inspecting common sentence-transformer and model fields.
 ///
 /// Returns `None` for GGUF single-file models or repos without a `config.json`.
 /// This is used by the onboarding wizard to pre-configure the vector store
@@ -683,16 +714,7 @@ pub async fn direct_runtime_discover_embedding_dimension(
         .await
         .map_err(|e| format!("Failed to parse config.json for {}: {}", repo_id, e))?;
 
-    // Try the common keys in priority order:
-    //   hidden_size — most common (BERT, Nomic, BGE, GTE, etc.)
-    //   d_model     — used by some sentence-transformers
-    //   embedding_dim — occasionally used
-    let dim = config
-        .get("hidden_size")
-        .or_else(|| config.get("d_model"))
-        .or_else(|| config.get("embedding_dim"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
+    let dim = embedding_dimension_from_config(&config).and_then(|value| u32::try_from(value).ok());
 
     if let Some(d) = dim {
         println!(
@@ -734,6 +756,35 @@ mod tests {
         assert_eq!(engine_to_hf_tag("vllm"), Some("awq"));
         assert_eq!(engine_to_hf_tag("ollama"), Some("gguf"));
         assert_eq!(engine_to_hf_tag("unknown"), None);
+    }
+
+    #[test]
+    fn embedding_dimension_prefers_projection_and_supports_nested_configs() {
+        assert_eq!(
+            embedding_dimension_from_config(&serde_json::json!({
+                "hidden_size": 1024,
+                "sentence_embedding_dimension": 768
+            })),
+            Some(768)
+        );
+        assert_eq!(
+            embedding_dimension_from_config(&serde_json::json!({
+                "text_config": { "projection_dim": 1152, "hidden_size": 2048 }
+            })),
+            Some(1152)
+        );
+    }
+
+    #[test]
+    fn embedding_dimension_rejects_zero_and_unbounded_values() {
+        assert_eq!(
+            embedding_dimension_from_config(&serde_json::json!({ "hidden_size": 0 })),
+            None
+        );
+        assert_eq!(
+            embedding_dimension_from_config(&serde_json::json!({ "embedding_dimension": 65_537 })),
+            None
+        );
     }
 
     #[test]

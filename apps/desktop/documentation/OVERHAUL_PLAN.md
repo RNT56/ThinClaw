@@ -278,7 +278,11 @@ panel wired or honestly gated; contract suite green.
   audit-clean; Tauri/ORT/OpenDAL and the compatible Cargo graph are refreshed;
   the enabled Rust graph passes without advisory ignores. See
   [`security-and-dependencies.md`](security-and-dependencies.md).
-- **RAG/inference:** reranker model refresh; embedding-dimension auto-detect hardening.
+- **[DONE] RAG/inference:** the bounded ONNX reranker is revision/checksum
+  verified and fails soft; provider outputs and query/document semantics are
+  validated; current Gemini/Voyage defaults restore on launch; live local
+  output is authoritative for restart-safe vector-dimension migration. See
+  [`rag-inference-compatibility.md`](rag-inference-compatibility.md).
 
 **Phase 2 exit gate:** clean-machine smoke passes; notarized auto-updating build; telemetry live.
 

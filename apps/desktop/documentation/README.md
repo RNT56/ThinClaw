@@ -12,6 +12,7 @@ This directory is the current contract surface for ThinClaw Desktop. Keep these 
 - [Remote Gateway Route Matrix](remote-gateway-route-matrix.md): every desktop command group, its local behavior, remote route, and explicit unavailable behavior.
 - [Security Posture](security-posture.md): sources, retention, mode boundaries, and deliberate limits of the read-only Security panel.
 - [Bridge Threat Model](threat-model.md): untrusted runtime output, React rendering, remote bearer transport, profile-token storage, and SSH deployment controls.
+- [RAG And Embedding Compatibility](rag-inference-compatibility.md): provider defaults, query/document semantics, live dimension authority, index migration, and pinned reranker artifacts.
 
 ## Operations
 

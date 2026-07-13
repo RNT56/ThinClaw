@@ -574,10 +574,21 @@ pub fn run() {
             // Vector Store Manager Init (per-scope index files)
             // Use the dimension stored in user config (updated whenever a new
             // embedding model with a different hidden_size is loaded).
-            let dims = handle
+            let configured_dims = handle
                 .state::<config::ConfigManager>()
                 .get_config()
                 .vector_dimensions as usize;
+            let dims = if (1..=inference::embedding::MAX_EMBEDDING_DIMENSIONS)
+                .contains(&configured_dims)
+            {
+                configured_dims
+            } else {
+                tracing::warn!(
+                    configured_dims,
+                    "invalid persisted vector dimension; recovering to 384"
+                );
+                384
+            };
             println!("[main] Initializing vector store with dimension {}.", dims);
             let vectors_dir = app_data_dir.join("vectors");
             let vector_manager = vector_store::VectorStoreManager::new(vectors_dir, dims)
@@ -624,6 +635,44 @@ pub fn run() {
                 .attach_database(shared_history.runtime_store())
                 .await
                 .expect("failed to initialize canonical settings store");
+
+            // Restore persisted cloud inference selections only after the
+            // canonical settings database has replaced the recovery-file
+            // snapshot. The router starts empty by design.
+            let mut inference_config = handle.state::<config::ConfigManager>().get_config();
+            if inference::migrate_retired_embedding_selection(&mut inference_config) {
+                handle
+                    .state::<config::ConfigManager>()
+                    .save_config(&inference_config)
+                    .await
+                    .expect("failed to persist embedding model migration");
+            }
+            let reconfigured = handle
+                .state::<inference::InferenceRouter>()
+                .reconfigure(&inference_config)
+                .await;
+            let desired_dimensions = if reconfigured.new_embedding_dims > 0 {
+                reconfigured.new_embedding_dims
+            } else {
+                let configured = inference_config.vector_dimensions as usize;
+                if (1..=inference::embedding::MAX_EMBEDDING_DIMENSIONS).contains(&configured) {
+                    configured
+                } else {
+                    384
+                }
+            };
+            let vector_manager = handle.state::<vector_store::VectorStoreManager>();
+            inference::reconcile_embedding_dimensions(
+                &handle,
+                &vector_manager,
+                desired_dimensions,
+                inference_config
+                    .embedding_backend
+                    .as_deref()
+                    .unwrap_or("configured backend"),
+            )
+            .await
+            .expect("failed to reconcile configured embedding dimensions");
             handle.manage(shared_history);
             handle.manage(pool);
 

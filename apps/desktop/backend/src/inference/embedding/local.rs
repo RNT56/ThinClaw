@@ -1,6 +1,6 @@
 //! Local embedding backend — wraps existing llama-server / MLX embed server.
 
-use crate::inference::embedding::EmbeddingBackend;
+use crate::inference::embedding::{validate_embedding_batch, EmbeddingBackend};
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use async_trait::async_trait;
 
@@ -31,6 +31,7 @@ impl EmbeddingBackend for LocalEmbeddingBackend {
     }
 
     async fn embed_batch(&self, texts: Vec<String>) -> InferenceResult<Vec<Vec<f32>>> {
+        let expected_count = texts.len();
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{}/v1/embeddings", self.port);
 
@@ -68,7 +69,12 @@ impl EmbeddingBackend for LocalEmbeddingBackend {
             .await
             .map_err(|e| InferenceError::provider(format!("Failed to parse embedding: {}", e)))?;
 
-        Ok(result.data.into_iter().map(|d| d.embedding).collect())
+        validate_embedding_batch(
+            result.data.into_iter().map(|d| d.embedding).collect(),
+            expected_count,
+            self.dimensions,
+            "local embedding server",
+        )
     }
 
     fn dimensions(&self) -> usize {

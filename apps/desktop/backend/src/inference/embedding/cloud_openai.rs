@@ -2,7 +2,7 @@
 //!
 //! Supports `text-embedding-3-small` (1536 dims) and `text-embedding-3-large` (3072 dims).
 
-use crate::inference::embedding::EmbeddingBackend;
+use crate::inference::embedding::{validate_embedding_batch, EmbeddingBackend};
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use async_trait::async_trait;
 
@@ -45,6 +45,7 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
     }
 
     async fn embed_batch(&self, texts: Vec<String>) -> InferenceResult<Vec<Vec<f32>>> {
+        let expected_count = texts.len();
         let client = reqwest::Client::new();
 
         let response = client
@@ -88,7 +89,12 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
             .await
             .map_err(|e| InferenceError::provider(format!("Failed to parse: {}", e)))?;
 
-        Ok(result.data.into_iter().map(|d| d.embedding).collect())
+        validate_embedding_batch(
+            result.data.into_iter().map(|d| d.embedding).collect(),
+            expected_count,
+            self.dims,
+            "OpenAI",
+        )
     }
 
     fn dimensions(&self) -> usize {
