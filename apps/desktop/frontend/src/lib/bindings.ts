@@ -2051,6 +2051,17 @@ async thinclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Dispatch an event from the Canvas UI back to the agent session
+ */
+async thinclawCanvasDispatchEvent(sessionKey: string, runId: string | null, eventType: string, payload: JsonValue) : Promise<Result<ThinClawRpcResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_dispatch_event", { sessionKey, runId, eventType, payload }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * List all active canvas panels.
  */
 async thinclawCanvasPanelsList() : Promise<Result<JsonValue, string>> {
@@ -3934,7 +3945,7 @@ export type ModelDiscoveryResult = { providers: ProviderDiscoveryResult[]; total
  */
 export type ModelDownloadInfo = { repo_id: string; is_multi_file: boolean; files: HfFileInfo[]; mmproj_file: HfFileInfo | null; total_size: number; total_size_display: string }
 export type ModelFile = { name: string; size: number; path: string }
-export type ModelPricing = { inputPerMillion: number | null; outputPerMillion: number | null; perImage: number | null; perMinute: number | null; per1KChars: number | null }
+export type ModelPricing = { inputPerMillion: number | null; outputPerMillion: number | null; perImage: number | null; perMinute: number | null; per1kChars: number | null }
 /**
  * OAuth flow start result for the frontend.
  */

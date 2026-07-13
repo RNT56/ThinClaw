@@ -1,6 +1,6 @@
 # Design — Bridge & Command-Surface Normalization (TDO-001…006)
 
-> **Status:** design draft v1 · **Created:** 2026-06-27 · Epic: TDO-EP1 (WS-1)
+> **Status:** TDO-001–004 implemented; TDO-005–006 pending · **Created:** 2026-06-27 · Epic: TDO-EP1 (WS-1)
 > **Parent:** [`../OVERHAUL_PLAN.md`](../OVERHAUL_PLAN.md) §4 WS-1 · **Backlog:** [`../OVERHAUL_BACKLOG.md`](../OVERHAUL_BACKLOG.md)
 > This is the foundation issue — TDO-EP2/EP3 and most of Phase 1 depend on it.
 

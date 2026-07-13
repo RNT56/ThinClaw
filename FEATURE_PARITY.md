@@ -512,6 +512,7 @@ First parity-closure batch (merged or in-flight; see `OVERHAUL_BACKLOG.md` for p
 | Capability | Status | Surface |
 |---|---|---|
 | Dual-mode bridge contract: `RouteMode`, typed `BridgeError`, `gated()`, `ROUTE_TABLE` linter | in-flight — `ROUTE_TABLE` classifies **all** registered commands, generates the committed per-command route matrix with a drift guard, and enforces total coverage; per-command `BridgeError` error-type migration still pending | `thinclaw/bridge.rs`, `remote-gateway-route-matrix.md` |
+| Generated frontend command client | implemented — 224 compatibility calls and 43 direct consumers delegate through generated `commands.*`; raw `invoke`/string commands are contract-test forbidden across production frontend source | `lib/command-client.ts`, `lib/thinclaw.ts`, `setup/commands.rs` |
 | Undo / redo | in-flight | `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons |
 | Session search | merged | `thinclaw_session_search` + Session Search panel |
 | Checkpoints / rollback | merged | `list`/`diff`/`restore` commands + Rollback panel |

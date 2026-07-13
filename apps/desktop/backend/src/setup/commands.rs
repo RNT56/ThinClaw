@@ -231,6 +231,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_agents_list,
         crate::thinclaw::commands::thinclaw_canvas_push,
         crate::thinclaw::commands::thinclaw_canvas_navigate,
+        crate::thinclaw::commands::thinclaw_canvas_dispatch_event,
         crate::thinclaw::commands::thinclaw_canvas_panels_list,
         crate::thinclaw::commands::thinclaw_canvas_panel_get,
         crate::thinclaw::commands::thinclaw_canvas_panel_dismiss,
@@ -416,6 +417,7 @@ mod tests {
             "thinclawPairingList",
             "thinclawRoutingPoolsSave",
             "thinclawMemorySearch",
+            "thinclawCanvasDispatchEvent",
             "thinclawCanvasPanelsList",
             "thinclawCanvasPanelGet",
             "thinclawJobsList",
@@ -466,5 +468,67 @@ mod tests {
                 "UiEvent binding should include {event_variant}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_frontend_api_delegates_to_generated_bindings() {
+        let compatibility_api = include_str!("../../../frontend/src/lib/thinclaw.ts");
+        let command_client = include_str!("../../../frontend/src/lib/command-client.ts");
+
+        assert!(
+            !compatibility_api.contains("@tauri-apps/api/core"),
+            "lib/thinclaw.ts must not bypass the generated binding surface"
+        );
+        assert!(
+            !compatibility_api.contains("safeInvoke"),
+            "the handwritten string-command bridge must stay retired"
+        );
+        assert!(
+            command_client.contains("import { commands, type Result } from './bindings'"),
+            "the frontend command client must derive from generated bindings.ts"
+        );
+    }
+
+    #[test]
+    fn production_frontend_has_one_command_calling_convention() {
+        fn inspect(directory: &std::path::Path, violations: &mut Vec<String>) {
+            for entry in std::fs::read_dir(directory).expect("read frontend source directory") {
+                let path = entry.expect("read frontend source entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "tests") {
+                        continue;
+                    }
+                    inspect(&path, violations);
+                    continue;
+                }
+
+                if !matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("ts" | "tsx")
+                ) || path.file_name().is_some_and(|name| name == "bindings.ts")
+                {
+                    continue;
+                }
+
+                let source = std::fs::read_to_string(&path).expect("read frontend source file");
+                let imports_raw_invoke = source
+                    .lines()
+                    .any(|line| line.contains("@tauri-apps/api/core") && line.contains("invoke"));
+                if imports_raw_invoke
+                    || source.contains("invoke(")
+                    || source.contains("invoke<")
+                {
+                    violations.push(path.display().to_string());
+                }
+            }
+        }
+
+        let frontend = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../frontend/src");
+        let mut violations = Vec::new();
+        inspect(&frontend, &mut violations);
+        assert!(
+            violations.is_empty(),
+            "production frontend files must call Rust through commandClient/generated adapters: {violations:?}"
+        );
     }
 }

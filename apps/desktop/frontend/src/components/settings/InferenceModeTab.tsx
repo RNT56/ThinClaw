@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import {
     MessageSquare, Database, Volume2, Mic, ImageIcon, CheckCircle2,
     Cloud, Monitor, Loader2, ChevronDown, Info, AlertTriangle, RefreshCw
@@ -8,24 +7,10 @@ import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useCloudModels, type CloudModelEntry } from '../../hooks/use-cloud-models';
+import { commandClient } from '../../lib/command-client';
+import type { Modality, ModalityBackends, VoiceInfo } from '../../lib/bindings';
 
 // ─── Types (mirroring Rust inference module) ─────────────────────────────────
-
-interface BackendInfo {
-    id: string;
-    displayName: string;
-    isLocal: boolean;
-    modelId: string | null;
-    available: boolean;
-}
-
-type Modality = 'chat' | 'embedding' | 'tts' | 'stt' | 'diffusion';
-
-interface ModalityBackends {
-    modality: Modality;
-    active: BackendInfo | null;
-    available: BackendInfo[];
-}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -77,14 +62,6 @@ const MODALITY_ORDER: Modality[] = ['chat', 'embedding', 'tts', 'stt', 'diffusio
 
 // ─── TTS Voice Selector ──────────────────────────────────────────────────────
 
-interface VoiceInfo {
-    id: string;
-    name: string;
-    language: string | null;
-    gender: string | null;
-    isDefault: boolean;
-}
-
 function TtsVoiceSelector() {
     const [expanded, setExpanded] = useState(false);
     const [voices, setVoices] = useState<VoiceInfo[]>([]);
@@ -95,7 +72,7 @@ function TtsVoiceSelector() {
     useEffect(() => {
         (async () => {
             try {
-                const config = await invoke<any>('get_user_config');
+                const config = await commandClient.getUserConfig();
                 const saved = config?.inference_models?.tts_voice;
                 if (saved) setSelectedVoice(saved);
             } catch { /* ignore */ }
@@ -106,7 +83,7 @@ function TtsVoiceSelector() {
         if (voices.length > 0) return; // already loaded
         setLoading(true);
         try {
-            const data = await invoke<VoiceInfo[]>('direct_media_tts_list_voices');
+            const data = await commandClient.directMediaTtsListVoices();
             setVoices(data);
             // Auto-select the default if nothing is saved
             if (!selectedVoice) {
@@ -124,12 +101,9 @@ function TtsVoiceSelector() {
     const handleSelect = async (voiceId: string) => {
         setSelectedVoice(voiceId);
         try {
-            const config = await invoke<any>('get_user_config');
-            const models = config?.inference_models ?? {};
-            models.tts_voice = voiceId;
-            await invoke('update_user_config', {
-                config: { ...config, inference_models: models }
-            });
+            const config = await commandClient.getUserConfig();
+            const models = { ...(config.inference_models ?? {}), tts_voice: voiceId };
+            await commandClient.updateUserConfig({ ...config, inference_models: models });
             toast.success(`Voice set: ${voices.find(v => v.id === voiceId)?.name ?? voiceId}`);
         } catch (e) {
             toast.error('Failed to save voice selection');
@@ -475,7 +449,7 @@ export function InferenceModeTab() {
 
     const load = useCallback(async () => {
         try {
-            const data = await invoke<ModalityBackends[]>('direct_inference_get_backends');
+            const data = await commandClient.directInferenceGetBackends();
             setBackends(data);
             setError(null);
         } catch (e) {
@@ -493,7 +467,7 @@ export function InferenceModeTab() {
     const handleSwitch = async (modality: Modality, backendId: string) => {
         setSwitching(modality);
         try {
-            await invoke('direct_inference_update_backend', { modality, backendId });
+            await commandClient.directInferenceUpdateBackend(modality, backendId);
             toast.success(`${MODALITY_META[modality].label} switched to ${backendId === 'local' ? 'Local' : backendId}`);
             // Reload to reflect changes
             await load();

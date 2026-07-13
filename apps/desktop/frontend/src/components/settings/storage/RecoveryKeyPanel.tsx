@@ -2,7 +2,6 @@
  * RecoveryKeyPanel — shows / copies / imports the encryption recovery key.
  */
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import {
     Shield, Loader2, AlertTriangle,
     Copy, Eye, EyeOff, Key
@@ -10,6 +9,7 @@ import {
 import { toast } from 'sonner';
 import { cn } from '../../../lib/utils';
 import { AnimatePresence, motion } from 'framer-motion';
+import { commandClient } from '../../../lib/command-client';
 
 export function RecoveryKeyPanel() {
     const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
@@ -22,7 +22,7 @@ export function RecoveryKeyPanel() {
     const handleGetKey = async () => {
         setLoading(true);
         try {
-            const key = await invoke<string>('cloud_get_recovery_key');
+            const key = await commandClient.cloudGetRecoveryKey();
             setRecoveryKey(key);
             setShowKey(true);
         } catch (e) {
@@ -46,7 +46,7 @@ export function RecoveryKeyPanel() {
         if (!importKey.trim()) return;
         setImporting(true);
         try {
-            await invoke('cloud_import_recovery_key', { recoveryKey: importKey.trim() });
+            await commandClient.cloudImportRecoveryKey(importKey.trim());
             toast.success('Recovery key imported successfully');
             setImportKey('');
             setShowImport(false);

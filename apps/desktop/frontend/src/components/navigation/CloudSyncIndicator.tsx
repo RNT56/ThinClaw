@@ -4,11 +4,11 @@
  * Shows: connected/local mode, a pulsing dot when migrating, and migration progress.
  */
 import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Cloud, Loader2 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
+import { commandClient } from '../../lib/command-client';
 
 interface CloudSyncState {
     mode: string;
@@ -28,10 +28,7 @@ export function CloudSyncIndicator({ sidebarOpen }: { sidebarOpen: boolean }) {
         let mounted = true;
         const poll = async () => {
             try {
-                const s = await invoke<{
-                    mode: string;
-                    migration_in_progress: boolean;
-                }>('cloud_get_status');
+                const s = await commandClient.cloudGetStatus();
                 if (mounted) {
                     setState(prev => ({
                         ...prev,

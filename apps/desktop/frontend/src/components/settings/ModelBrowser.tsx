@@ -1,7 +1,7 @@
 import { Trash2, RefreshCw, Download, Search, CheckCircle2, FolderOpen, Globe, Loader2 } from "lucide-react";
 import * as Progress from '@radix-ui/react-progress';
 import { cn } from "../../lib/utils";
-import { invoke } from "@tauri-apps/api/core";
+import { commandClient } from "../../lib/command-client";
 import { useModelContext } from "../model-context";
 import { useEffect, useMemo, useState } from "react";
 import { commands } from "../../lib/bindings";
@@ -973,7 +973,7 @@ export function ModelBrowser() {
                                                 onClick={() => {
                                                     if (model.isCurated && (model as any).manual_download) {
                                                         const url = (model as any).info_url || (model as any).url;
-                                                        if (url) invoke('open_url', { url });
+                                                        if (url) commandClient.openUrl(url);
                                                     } else if (model.isCurated && (model as any).variants?.length > 1) {
                                                         setSelectedModelVariants({ model, isOpen: true });
                                                     } else if (model.isCurated && (model as any).variants?.length === 1) {

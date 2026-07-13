@@ -4,7 +4,6 @@
  * config forms for all 7 providers, migration progress, recovery key.
  */
 import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
     Cloud, HardDrive, CheckCircle2, XCircle,
@@ -25,6 +24,7 @@ import {
 } from '../../hooks/use-cloud-status';
 import { MigrationProgressDialog } from './storage/MigrationProgressDialog';
 import { RecoveryKeyPanel } from './storage/RecoveryKeyPanel';
+import { commandClient } from '../../lib/command-client';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -263,7 +263,7 @@ function OAuthProviderCard({
         setLoading(true);
         try {
             // Step 1: Start OAuth flow — get auth URL + code verifier
-            const startResult = await invoke<OAuthStartResult>('cloud_oauth_start', { provider });
+            const startResult: OAuthStartResult = await commandClient.cloudOauthStart(provider);
 
             // Step 2: Open auth URL in system browser
             try {
@@ -288,11 +288,11 @@ function OAuthProviderCard({
             }
 
             // Step 4: Exchange code for tokens + test connection
-            const result = await invoke<ConnectionTestResult>('cloud_oauth_complete', {
+            const result: ConnectionTestResult = await commandClient.cloudOauthComplete(
                 provider,
-                code: code.trim(),
-                codeVerifier: startResult.code_verifier,
-            });
+                code.trim(),
+                startResult.code_verifier,
+            );
 
             onResult(result);
 
@@ -348,7 +348,7 @@ function ICloudConnectCard({
     const handleConnect = async () => {
         setLoading(true);
         try {
-            const result = await invoke<ConnectionTestResult>('cloud_test_icloud');
+            const result: ConnectionTestResult = await commandClient.cloudTestIcloud();
             onResult(result);
             if (result.connected) {
                 toast.success('Connected to iCloud Drive!');
@@ -578,7 +578,7 @@ export function StorageTab() {
         setTesting(true);
         setTestResult(null);
         try {
-            const result = await invoke<ConnectionTestResult>('cloud_test_connection', { config });
+            const result: ConnectionTestResult = await commandClient.cloudTestConnection(config);
             setTestResult(result);
             if (result.connected) {
                 toast.success(`Connected to ${result.provider_name}!`);
@@ -596,7 +596,7 @@ export function StorageTab() {
         setTesting(true);
         setTestResult(null);
         try {
-            const result = await invoke<ConnectionTestResult>('cloud_test_webdav', { config });
+            const result: ConnectionTestResult = await commandClient.cloudTestWebdav(config);
             setTestResult(result);
             if (result.connected) {
                 toast.success(`Connected to ${result.provider_name}!`);
@@ -614,7 +614,7 @@ export function StorageTab() {
         setTesting(true);
         setTestResult(null);
         try {
-            const result = await invoke<ConnectionTestResult>('cloud_test_sftp', { config });
+            const result: ConnectionTestResult = await commandClient.cloudTestSftp(config);
             setTestResult(result);
             if (result.connected) {
                 toast.success(`Connected to ${result.provider_name}!`);
@@ -635,7 +635,7 @@ export function StorageTab() {
     const handleMigrateToCloud = async () => {
         try {
             setShowMigrationDialog(true);
-            await invoke('cloud_migrate_to_cloud');
+            await commandClient.cloudMigrateToCloud();
         } catch (e) {
             toast.error('Migration failed: ' + String(e));
         }
@@ -644,7 +644,7 @@ export function StorageTab() {
     const handleMigrateToLocal = async () => {
         try {
             setShowMigrationDialog(true);
-            await invoke('cloud_migrate_to_local');
+            await commandClient.cloudMigrateToLocal();
         } catch (e) {
             toast.error('Migration failed: ' + String(e));
         }
@@ -653,7 +653,7 @@ export function StorageTab() {
     const handleCancelMigration = async () => {
         setCancelling(true);
         try {
-            await invoke('cloud_cancel_migration');
+            await commandClient.cloudCancelMigration();
             toast.info('Migration cancellation requested');
         } catch (e) {
             toast.error('Failed to cancel: ' + String(e));

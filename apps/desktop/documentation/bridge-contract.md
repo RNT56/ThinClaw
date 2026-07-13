@@ -6,7 +6,7 @@ the `thinclaw_*` prefix, and frontend events are emitted on `thinclaw-event`.
 It covers the ThinClaw Agent Cockpit only. For the two-system Desktop split and
 the non-agent Direct AI Workbench, read `runtime-boundaries.md` first.
 
-Last updated: 2026-05-15
+Last updated: 2026-07-13
 
 Related docs:
 
@@ -102,6 +102,20 @@ The frontend and existing automation scripts depend on the current Tauri command
 - Do not rename `thinclaw-desktop-tools` unless the migration is explicitly planned.
 - Regenerate `apps/desktop/frontend/src/lib/bindings.ts` from Rust after command/type changes. Do not hand-edit generated bindings.
 
+### Frontend Calling Convention
+
+`apps/desktop/frontend/src/lib/bindings.ts` is the only source of command names,
+parameter lists, and generated result types. `lib/command-client.ts` derives a
+runtime-guarded client from `commands`, unwraps the generated transport `Result`,
+and preserves typed `BridgeError::Unavailable` detail in thrown errors.
+
+`lib/thinclaw.ts` is a compatibility surface for existing component-friendly
+names and richer legacy views over JSON-valued commands. It may delegate through
+`compatibilityCommands`, but it must not import Tauri `invoke`, spell raw command
+strings, or establish a second IPC path. Production frontend source is guarded
+against raw `invoke` imports and calls; new code must use `commandClient` or a
+purpose-built adapter that is itself derived from generated `commands`.
+
 ### Command Surface Groups
 
 The command registry lives in `apps/desktop/backend/src/setup/commands.rs`.
@@ -117,7 +131,13 @@ The command registry lives in `apps/desktop/backend/src/setup/commands.rs`.
 
 ## Binding Generation
 
-Bindings are exported by the debug Tauri startup path in `apps/desktop/backend/src/lib.rs`. For standalone regeneration without launching the app, create a temporary backend example that calls `tauri_app_lib::setup::commands::specta_builder().export(...)`, run it, and delete the example before committing. This is the same flow used during the P2-W4 checkpoint.
+Bindings are exported by the committed `apps/desktop/backend/examples/export_bindings.rs`
+entry point. Run the official exporter instead of creating a temporary example:
+
+```bash
+cd apps/desktop/backend
+cargo run --locked --example export_bindings
+```
 
 After regeneration, run:
 

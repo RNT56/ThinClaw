@@ -9,23 +9,8 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
-
-export interface BackendInfo {
-    id: string;
-    displayName: string;
-    isLocal: boolean;
-    modelId: string | null;
-    available: boolean;
-}
-
-export type Modality = "chat" | "embedding" | "tts" | "stt" | "diffusion";
-
-interface ModalityBackends {
-    modality: Modality;
-    active: BackendInfo | null;
-    available: BackendInfo[];
-}
+import { commandClient } from "../lib/command-client";
+import type { BackendInfo, Modality } from "../lib/bindings";
 
 export function useInferenceBackends() {
     const [backends, setBackends] = useState<Record<Modality, BackendInfo | null>>({
@@ -46,7 +31,7 @@ export function useInferenceBackends() {
 
     const load = useCallback(async () => {
         try {
-            const data = await invoke<ModalityBackends[]>("direct_inference_get_backends");
+            const data = await commandClient.directInferenceGetBackends();
             const map: Record<string, BackendInfo | null> = {};
             const availableMap: Record<string, BackendInfo[]> = {};
             for (const mb of data) {

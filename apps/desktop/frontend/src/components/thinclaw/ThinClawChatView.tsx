@@ -1,5 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
-
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronDown, Brain, Loader2, Zap, Trash2, Download, Sliders, FileDown, PanelRight, ListChecks, CircleDollarSign, Cpu, ShieldCheck } from 'lucide-react';
@@ -8,6 +6,7 @@ import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import * as thinclaw from '../../lib/thinclaw';
 import { ThinClawMessage } from '../../lib/thinclaw';
+import { commandClient } from '../../lib/command-client';
 import { listen } from '@tauri-apps/api/event';
 
 
@@ -264,7 +263,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             });
 
             // Sync local LLM config first
-            try { await invoke('thinclaw_sync_local_llm'); } catch { /* non-fatal */ }
+            try { await commandClient.thinclawSyncLocalLlm(); } catch { /* non-fatal */ }
 
             const now = new Date();
             const dateStr = now.toISOString().split('T')[0];
