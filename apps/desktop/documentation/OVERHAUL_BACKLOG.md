@@ -152,7 +152,7 @@ characterization test added before the split; no behavior change.
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
 | TDO-040 ✅ | Single encrypted secret path (AES-256-GCM ↔ Keychain), grant enforcement | M | ∞ | TDO-011 | `config/keychain.rs`, `secret_store.rs`, `secrets_adapter.rs` |
-| TDO-041 | "Security" panel: surface sanitizer hits, sandbox allowlist, dangerous-tool tracker (read-only + reasons) | M | P2 | TDO-033 | new panel |
+| TDO-041 ✅ | "Security" panel: surface sanitizer decisions, effective sandbox allowlist, and live tool approval metadata (read-only + reasons) | M | P2 | TDO-033 | `SecurityPosturePanel.tsx`, `rpc_security.rs`, `security-posture.md` |
 | TDO-042 | Master-key rotation + recovery-key in Settings (reuse cloud recovery-key UI) | M | P2 | TDO-040 | `RecoveryKeyPanel.tsx` |
 | TDO-043 | Threat-model: untrusted runtime output → React; remote-proxy auth | S | P2 | — | doc + hardening |
 

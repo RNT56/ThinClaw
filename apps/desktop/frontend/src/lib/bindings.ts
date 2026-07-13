@@ -2471,6 +2471,14 @@ async thinclawDiagnostics() : Promise<Result<DiagnosticsResponse, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async thinclawSecurityPosture() : Promise<Result<SecurityPosture, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_security_posture") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async thinclawToolsList() : Promise<Result<ToolsListResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_tools_list") };
@@ -4096,6 +4104,10 @@ export type RuntimeReadiness = "ready" | "starting" | "setup_required" | "unavai
  * S3 provider configuration input from the frontend.
  */
 export type S3ConfigInput = { endpoint: string | null; bucket: string; region: string | null; access_key_id: string; secret_access_key: string; root: string | null }
+export type SandboxSecurityPosture = { enabled: boolean; policy: string; network_allowlist: string[]; timeout_secs: number; memory_limit_mb: number }
+export type SecurityPosture = { runtime_mode: string; evidence_available: boolean; unavailable_reason: string | null; telemetry: SecurityTelemetrySummary; sandbox: SandboxSecurityPosture | null; tools: ToolSecuritySummary }
+export type SecurityTelemetryEvent = { occurred_at_ms: number; action: string; source: string; reason: string; severity: string }
+export type SecurityTelemetrySummary = { sanitized: number; redacted: number; blocked: number; warned: number; recent_events: SecurityTelemetryEvent[] }
 /**
  * Session export response
  */
@@ -4234,6 +4246,8 @@ export type ThinkingConfig = { enabled: boolean; budget_tokens: number | null }
  * Info about a registered tool
  */
 export type ToolInfoItem = { name: string; description: string; enabled: boolean; source: string }
+export type ToolSecurityPosture = { name: string; side_effect: string; approval_class: string; empty_params_requirement: string; sanitizes_output: boolean; reason: string }
+export type ToolSecuritySummary = { registered: number; write_capable: number; always_approval: number; conditional_approval: number; write_without_coarse_approval: number; auto_approve_enabled: boolean; reviewed_tools: ToolSecurityPosture[] }
 /**
  * Tool-execution status carried by [`UiEvent::ToolUpdate`].
  *

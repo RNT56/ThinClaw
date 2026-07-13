@@ -646,6 +646,7 @@ First parity-closure batch (merged or in-flight; see `OVERHAUL_BACKLOG.md` for p
 | Prompt-surface PII redaction | ✅ | ✅ | System prompt assembly now hashes actor/conversation identifiers for non-Discord channels and replaces raw actor-private path labels with prompt-safe aliases ([`crates/thinclaw-safety/src/pii_redactor.rs`](crates/thinclaw-safety/src/pii_redactor.rs), [`src/workspace/workspace_core.rs`](src/workspace/workspace_core.rs), [`src/agent/dispatcher/prompt_context.rs`](src/agent/dispatcher/prompt_context.rs)) |
 | Leak detection | ✅ | ✅ | Secret exfiltration |
 | Dangerous tool re-enable warning | ✅ | ❌ | Not implemented; the never-wired `DangerousToolTracker` was removed as orphaned dead code. |
+| Desktop security posture panel | ❌ | ✅ | Read-only live view of metadata-only sanitizer/policy decisions, effective sandbox/network policy, and current tool descriptor/approval metadata. Remote and stopped modes are explicitly unavailable; the removed `DangerousToolTracker` is not treated as enforcement ([`apps/desktop/documentation/security-posture.md`](apps/desktop/documentation/security-posture.md)). |
 | OS governance env vars | ❌ | ✅ | ThinClaw Desktop live-checks macOS permissions and passes to ThinClaw: `ACCESSIBILITY_GRANTED` (AXIsProcessTrusted), `SCREEN_RECORDING_GRANTED` (CGPreflightScreenCaptureAccess), `SCREEN_CAPTURE_ENABLED` (user toggle) |
 
 ### Owner: ThinClaw Agent

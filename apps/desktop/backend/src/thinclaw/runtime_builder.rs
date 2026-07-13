@@ -615,6 +615,7 @@ pub(crate) async fn build_inner(
     };
 
     let response_cache = components.response_cache.clone();
+    let sandbox_config = components.config.sandbox.clone();
     // Use AppComponents' audit hook — this is the one ThinClaw's extension
     // lifecycle system actually writes events to.
     let audit_log_hook = components.audit_hook.clone();
@@ -635,6 +636,7 @@ pub(crate) async fn build_inner(
         manifest_validator,
         oauth_credential_sync: components.oauth_credential_sync,
         llm_runtime: components.llm_runtime.clone(),
+        sandbox_config,
         auxiliary_tasks,
     })
 }

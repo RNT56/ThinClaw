@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
-export type SettingsPage = 'models' | 'inference' | 'inference-mode' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'thinclaw-slack' | 'thinclaw-telegram' | 'thinclaw-gateway' | 'secrets' | 'mcp' | 'cloud-storage';
+export type SettingsPage = 'models' | 'inference' | 'inference-mode' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'thinclaw-slack' | 'thinclaw-telegram' | 'thinclaw-gateway' | 'secrets' | 'security' | 'mcp' | 'cloud-storage';
 
 interface SettingsSidebarProps {
     activePage: SettingsPage;
@@ -35,6 +35,7 @@ const NAV_ITEMS = [
             { id: 'inference', label: 'Chat Provider', icon: Radio },
             { id: 'inference-mode', label: 'Inference Mode', icon: Sparkles },
             { id: 'secrets', label: 'Secrets', icon: KeyRound },
+            { id: 'security', label: 'Security', icon: ShieldAlert },
             { id: 'mcp', label: 'MCP Server', icon: Plug },
             { id: 'appearance', label: 'Appearance', icon: Palette },
         ]

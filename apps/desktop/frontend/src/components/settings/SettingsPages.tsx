@@ -15,6 +15,7 @@ import { AppearanceSettings } from './AppearanceSettings';
 const ModelBrowser = lazy(() => import('./ModelBrowser').then(m => ({ default: m.ModelBrowser })));
 const GatewayTab = lazy(() => import('./GatewayTab').then(m => ({ default: m.GatewayTab })));
 const SecretsTab = lazy(() => import('./SecretsTab').then(m => ({ default: m.SecretsTab })));
+const SecurityPosturePanel = lazy(() => import('./SecurityPosturePanel').then(m => ({ default: m.SecurityPosturePanel })));
 const McpTab = lazy(() => import('./McpTab').then(m => ({ default: m.McpTab })));
 const InferenceModeTab = lazy(() => import('./InferenceModeTab').then(m => ({ default: m.InferenceModeTab })));
 const StorageTab = lazy(() => import('./StorageTab').then(m => ({ default: m.StorageTab })));
@@ -59,6 +60,7 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                         {activePage === 'thinclaw-telegram' && <TelegramTab />}
                         {activePage === 'thinclaw-gateway' && <Suspense fallback={<TabSkeleton />}><GatewayTab /></Suspense>}
                         {activePage === 'secrets' && <Suspense fallback={<TabSkeleton />}><SecretsTab /></Suspense>}
+                        {activePage === 'security' && <Suspense fallback={<TabSkeleton />}><SecurityPosturePanel /></Suspense>}
                         {activePage === 'inference' && <ChatProviderTab />}
                         {activePage === 'inference-mode' && <Suspense fallback={<TabSkeleton />}><InferenceModeTab /></Suspense>}
                         {activePage === 'mcp' && <Suspense fallback={<TabSkeleton />}><McpTab /></Suspense>}
@@ -137,6 +139,11 @@ function PageHeader({ page }: { page: SettingsPage }) {
             title: "API Secrets",
             description: "Manage API keys for cloud providers.",
             icon: KeyRound
+        },
+        'security': {
+            title: "Security Posture",
+            description: "Inspect live sanitizer, sandbox, network, and tool-approval controls without exposing sensitive content.",
+            icon: ShieldAlert
         },
         'inference-mode': {
             title: "Inference Mode",

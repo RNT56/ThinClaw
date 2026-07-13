@@ -402,6 +402,12 @@ impl Agent {
         &self.deps.tools
     }
 
+    /// Metadata-only safety counters for host diagnostics. Raw tool output is
+    /// never retained by the telemetry source.
+    pub fn safety_telemetry_snapshot(&self) -> crate::safety::SafetyTelemetrySnapshot {
+        self.deps.safety.telemetry_snapshot()
+    }
+
     /// Get the workspace (public for Tauri/API integration).
     pub fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.deps.workspace.as_ref()

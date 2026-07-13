@@ -5,6 +5,64 @@
 
 use super::super::config::{AgentProfile, CustomSecret};
 
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SecurityTelemetryEvent {
+    pub occurred_at_ms: i64,
+    pub action: String,
+    pub source: String,
+    pub reason: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, specta::Type)]
+pub struct SecurityTelemetrySummary {
+    pub sanitized: u64,
+    pub redacted: u64,
+    pub blocked: u64,
+    pub warned: u64,
+    pub recent_events: Vec<SecurityTelemetryEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SandboxSecurityPosture {
+    pub enabled: bool,
+    pub policy: String,
+    pub network_allowlist: Vec<String>,
+    pub timeout_secs: u64,
+    pub memory_limit_mb: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ToolSecurityPosture {
+    pub name: String,
+    pub side_effect: String,
+    pub approval_class: String,
+    pub empty_params_requirement: String,
+    pub sanitizes_output: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, specta::Type)]
+pub struct ToolSecuritySummary {
+    pub registered: u64,
+    pub write_capable: u64,
+    pub always_approval: u64,
+    pub conditional_approval: u64,
+    pub write_without_coarse_approval: u64,
+    pub auto_approve_enabled: bool,
+    pub reviewed_tools: Vec<ToolSecurityPosture>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SecurityPosture {
+    pub runtime_mode: String,
+    pub evidence_available: bool,
+    pub unavailable_reason: Option<String>,
+    pub telemetry: SecurityTelemetrySummary,
+    pub sandbox: Option<SandboxSecurityPosture>,
+    pub tools: ToolSecuritySummary,
+}
+
 /// ThinClaw status response
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct ThinClawStatus {

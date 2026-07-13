@@ -140,6 +140,12 @@ Security boundary:
 
 - ThinClaw agent tools are governed by ThinClaw policy, grant checks, and
   approval flow.
+- The Desktop Security panel is observational only. In local mode it reads the
+  active agent's bounded metadata-only safety telemetry, effective sandbox
+  configuration, and current tool descriptor/approval metadata. It never
+  receives prompts, tool parameters, tool outputs, or secrets. Remote and
+  stopped modes report that evidence is unavailable instead of synthesizing a
+  healthy posture.
 - Raw provider secrets must not be returned in remote mode.
 - Host-executing behavior such as autonomy, shell, browser, local filesystem
   writes, and arbitrary skill install must remain gated.

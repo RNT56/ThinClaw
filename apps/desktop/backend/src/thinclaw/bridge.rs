@@ -335,6 +335,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_save_gateway_settings", RouteMode::LocalOnly),
     ("thinclaw_save_slack_config", RouteMode::LocalOnly),
     ("thinclaw_save_telegram_config", RouteMode::LocalOnly),
+    ("thinclaw_security_posture", RouteMode::LocalOnly),
     ("thinclaw_session_search", RouteMode::LocalOnly),
     ("thinclaw_set_autonomy_mode", RouteMode::LocalOnly),
     ("thinclaw_set_bootstrap_completed", RouteMode::LocalOnly),

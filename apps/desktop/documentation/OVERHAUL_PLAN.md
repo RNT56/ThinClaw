@@ -179,7 +179,11 @@ Triggered on-touch, but schedule the worst offenders:
   migration, fail-closed reads, a rotation seam, and live grant enforcement on
   every runtime operation. Contract tests cover ciphertext, tamper rejection,
   key-version rotation, canonical aliases, and grant denial.
-- Surface (read-only, with reasons) core safety internals — sanitizer hits, sandbox network-allowlist, dangerous-tool tracker — in a "Security" panel.
+- ✅ Read-only Security panel now reports metadata-only sanitizer/policy decisions,
+  the effective local sandbox and network allowlist, and live tool descriptor /
+  approval metadata with human-readable reasons. It explicitly reports local,
+  stopped, and remote evidence availability. The never-wired dangerous-tool
+  tracker remains retired and is not presented as an enforcement control.
 - Wire master-key rotation + recovery-key into Settings (reuse the cloud-sync recovery-key UI).
 - Threat-model the bridge (untrusted runtime output → React) and the remote-proxy auth.
 
