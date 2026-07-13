@@ -21,6 +21,19 @@ def cargo_version() -> str:
     return match.group(1)
 
 
+def locked_package_version(path: Path, name: str) -> str:
+    content = path.read_text(encoding="utf-8")
+    for package in content.split("[[package]]")[1:]:
+        package_name = re.search(r'^name\s*=\s*"([^"]+)"', package, re.MULTILINE)
+        if package_name is None or package_name.group(1) != name:
+            continue
+        version = re.search(r'^version\s*=\s*"([^"]+)"', package, re.MULTILINE)
+        if version is None:
+            raise SystemExit(f"{path.relative_to(ROOT)} package {name} has no version")
+        return version.group(1)
+    raise SystemExit(f"{path.relative_to(ROOT)} has no {name} package")
+
+
 def main() -> int:
     config = json.loads(
         (ROOT / "release-please-config.json").read_text(encoding="utf-8")
@@ -43,6 +56,13 @@ def main() -> int:
         "changelog-path": "CHANGELOG.md",
         "include-component-in-tag": False,
         "include-v-in-tag": True,
+        "extra-files": [
+            {
+                "type": "toml",
+                "path": "apps/desktop/backend/Cargo.lock",
+                "jsonpath": '$.package[?(@.name.value=="thinclaw")].version',
+            }
+        ],
     }
     mismatches = [
         f"{key}={root.get(key)!r} (expected {value!r})"
@@ -57,6 +77,14 @@ def main() -> int:
         raise SystemExit(
             f"release manifest {manifest!r} must match root Cargo version {version}"
         )
+
+    for lockfile in [ROOT / "Cargo.lock", ROOT / "apps/desktop/backend/Cargo.lock"]:
+        locked_version = locked_package_version(lockfile, "thinclaw")
+        if locked_version != version:
+            raise SystemExit(
+                f"{lockfile.relative_to(ROOT)} thinclaw version {locked_version} "
+                f"must match root Cargo version {version}"
+            )
 
     required_workflow_fragments = [
         f"googleapis/release-please-action@{ACTION_SHA}",
