@@ -214,6 +214,8 @@ jobs:
         run: cargo check --manifest-path apps/desktop/backend/Cargo.toml --locked
       - name: Backend strict lints
         run: cargo clippy --manifest-path apps/desktop/backend/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Desktop local and remote fixture acceptance
+        run: scripts/ci/desktop-fixture-acceptance.sh
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       - name: Backend dependency policy (licenses + bans + sources)

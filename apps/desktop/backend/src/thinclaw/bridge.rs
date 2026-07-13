@@ -862,6 +862,48 @@ mod tests {
     }
 
     #[test]
+    fn fixture_acceptance_local_route_contract() {
+        let representative_routes = [
+            ("thinclaw_send_message", RouteMode::LocalAndRemote),
+            ("thinclaw_jobs_list", RouteMode::LocalAndRemote),
+            ("thinclaw_job_detail", RouteMode::LocalAndRemote),
+            ("thinclaw_job_cancel", RouteMode::LocalAndRemote),
+            ("thinclaw_cost_summary", RouteMode::LocalAndRemote),
+            ("thinclaw_routing_status", RouteMode::LocalAndRemote),
+            ("thinclaw_experiments_projects", RouteMode::LocalAndRemote),
+            ("thinclaw_learning_status", RouteMode::LocalAndRemote),
+            ("thinclaw_autonomy_status", RouteMode::LocalAndRemote),
+            ("thinclaw_job_restart", RouteMode::RemoteOnly),
+            ("thinclaw_session_search", RouteMode::LocalOnly),
+        ];
+
+        for (command, expected_mode) in representative_routes {
+            let actual = route_mode(command);
+            assert_eq!(actual, Some(expected_mode), "unexpected fixture route for {command}");
+            assert_eq!(
+                expected_mode != RouteMode::RemoteOnly,
+                matches!(actual, Some(RouteMode::LocalOnly | RouteMode::LocalAndRemote)),
+                "local availability mismatch for {command}"
+            );
+        }
+
+        let remote_gate = gated(
+            "job restart",
+            "the embedded runtime cannot restart remote sandbox jobs",
+            "connect a remote gateway",
+            RouteMode::RemoteOnly,
+        );
+        assert!(matches!(
+            remote_gate,
+            BridgeError::Unavailable {
+                satisfied_by: RouteMode::RemoteOnly,
+                remediation: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn route_mode_unknown_command_returns_none() {
         assert_eq!(route_mode("nope"), None);
     }

@@ -111,6 +111,11 @@ fn find_headers_end(buffer: &[u8]) -> Option<usize> {
 
 fn fixture_response(method: &str, path: &str, body: &str) -> String {
     match (method, path) {
+        ("POST", "/api/chat/send") => serde_json::json!({
+            "accepted": true,
+            "thread_id": "thread-1",
+            "echo": body
+        }),
         ("POST", "/api/chat/abort") => serde_json::json!({ "aborted": true }),
         ("POST", "/api/chat/thread/thread-1/reset") => serde_json::json!({ "reset": true }),
         ("POST", "/api/chat/thread/thread-1/compact") => {
@@ -254,10 +259,15 @@ async fn raw_secret_injection_is_unavailable_in_remote_mode() {
 }
 
 #[tokio::test]
-async fn fixture_gateway_covers_recent_remote_route_family() {
-    let (base_url, recorded, server) = start_fixture_gateway(10).await;
+async fn fixture_acceptance_remote_chat_and_session_routes() {
+    let (base_url, recorded, server) = start_fixture_gateway(11).await;
     let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token");
 
+    let sent = proxy
+        .send_message("thread-1", "fixture message")
+        .await
+        .expect("send message");
+    assert_eq!(sent["accepted"], true);
     proxy.abort_chat("thread-1").await.expect("abort chat");
     proxy
         .reset_session("thread-1")
@@ -303,6 +313,7 @@ async fn fixture_gateway_covers_recent_remote_route_family() {
     assert_eq!(
         route_pairs,
         vec![
+            ("POST", "/api/chat/send"),
             ("POST", "/api/chat/abort"),
             ("POST", "/api/chat/thread/thread-1/reset"),
             ("POST", "/api/chat/thread/thread-1/compact"),
@@ -321,13 +332,14 @@ async fn fixture_gateway_covers_recent_remote_route_family() {
             .all(|request| request.authorization.as_deref() == Some("Bearer fixture-token")),
         "every fixture request should carry bearer auth"
     );
-    assert!(recorded[0].body.contains("\"thread_id\":\"thread-1\""));
-    assert!(recorded[4].body.contains("\"path\":\"notes/one.md\""));
-    assert!(recorded[8].body.contains("\"source\":\"fixture\""));
+    assert!(recorded[0].body.contains("\"content\":\"fixture message\""));
+    assert!(recorded[1].body.contains("\"thread_id\":\"thread-1\""));
+    assert!(recorded[5].body.contains("\"path\":\"notes/one.md\""));
+    assert!(recorded[9].body.contains("\"source\":\"fixture\""));
 }
 
 #[tokio::test]
-async fn fixture_gateway_covers_management_surface_routes() {
+async fn fixture_acceptance_remote_management_routes() {
     let (base_url, recorded, server) = start_fixture_gateway(39).await;
     let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token");
 

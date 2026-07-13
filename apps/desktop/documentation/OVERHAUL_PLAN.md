@@ -157,7 +157,7 @@ Triggered on-touch, but schedule the worst offenders:
 
 ### WS-4 — Test/QA & Observability
 - Contract tests per command (route-behavior matrix, bindings coverage, `Channel<T>`/reserved-arg sanitizer — extend the existing test).
-- Executable **fixture acceptance** for local + remote modes (make the parity-checklist tiers runnable, not manual).
+- ✅ Executable **fixture acceptance** for local + remote modes now runs representative bridge/gating checks and an authenticated loopback gateway across chat, jobs, autonomy, learning, experiments, MCP, skills, providers, costs, and cache surfaces in Desktop CI.
 - Frontend: Vitest component tests (`frontend/src/tests/`) + Playwright/WebDriver E2E for the top 10 flows.
 - Runtime telemetry: wire the core `Observer` (currently `NoopObserver`) to a desktop sink + crash reporter; surface context-pressure / self-repair / advisor as `UiEvent`s (also closes §5 parity gaps).
 
