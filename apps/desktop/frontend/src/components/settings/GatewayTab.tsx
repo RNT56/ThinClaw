@@ -814,8 +814,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             onClick={async () => {
                                 if (status.stateDir) {
                                     try {
-                                        const baseDir = status.stateDir.replace(/\/state$/, '');
-                                        await thinclaw.revealPath(`${baseDir}/workspace`);
+                                        await thinclaw.revealWorkspace();
                                     } catch (e) { toast.error('Directory access denied'); }
                                 }
                             }}

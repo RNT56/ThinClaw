@@ -100,9 +100,8 @@ impl S3Provider {
 
         builder = builder.root(root);
 
-        Ok(Operator::new(builder)
-            .map_err(|e| CloudError::Provider(format!("Failed to create S3 operator: {}", e)))?
-            .finish())
+        Operator::new(builder)
+            .map_err(|e| CloudError::Provider(format!("Failed to create S3 operator: {}", e)))
     }
 
     async fn read_key(operator: &Operator, key: &str) -> Result<Vec<u8>, CloudError> {

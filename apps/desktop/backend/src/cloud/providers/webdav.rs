@@ -91,9 +91,8 @@ impl WebDavProvider {
             builder = builder.password(password);
         }
 
-        Ok(Operator::new(builder)
-            .map_err(|e| CloudError::Provider(format!("Failed to create WebDAV operator: {}", e)))?
-            .finish())
+        Operator::new(builder)
+            .map_err(|e| CloudError::Provider(format!("Failed to create WebDAV operator: {}", e)))
     }
 
     async fn read_key(operator: &Operator, key: &str) -> Result<Vec<u8>, CloudError> {

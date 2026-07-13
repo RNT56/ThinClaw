@@ -281,6 +281,15 @@ pub const SECRET_POLICIES: &[SecretPolicy] = &[
         grant: GrantFlag::RemoteToken,
     },
     SecretPolicy {
+        thinclaw_names: &["gateway_auth_token"],
+        provider_slug: "desktop_gateway",
+        env_vars: &["GATEWAY_AUTH_TOKEN"],
+        keychain_key: "gateway_auth_token",
+        // This token authenticates callers to the local gateway. It is host
+        // infrastructure, never an agent-readable runtime credential.
+        grant: GrantFlag::Unsupported,
+    },
+    SecretPolicy {
         thinclaw_names: &["gmail_oauth_token"],
         provider_slug: "gmail_oauth",
         env_vars: &["GMAIL_OAUTH_TOKEN"],
@@ -813,6 +822,14 @@ mod tests {
             map_key_name("llm_bedrock_proxy_api_key"),
             "bedrock_proxy_api_key"
         );
+    }
+
+    #[test]
+    fn gateway_tokens_never_enter_agent_grants() {
+        let store = test_store(&test_config());
+        assert!(!store.is_granted("gateway_auth_token"));
+        assert!(!store.is_granted("GATEWAY_AUTH_TOKEN"));
+        assert!(!store.is_granted("remote_token"));
     }
 
     #[test]

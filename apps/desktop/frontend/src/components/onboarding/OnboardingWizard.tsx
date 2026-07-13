@@ -12,7 +12,6 @@ import { APP_THEMES } from '../../lib/app-themes';
 import { toast } from 'sonner';
 // model-library no longer used directly — all models discovered via HF Hub
 import { useModelContext } from '../model-context';
-import { openPath } from '../../lib/thinclaw';
 import { commands } from '../../lib/bindings';
 import { listen } from '@tauri-apps/api/event';
 import { useEngineSetup } from '../../hooks/use-engine-setup';
@@ -1275,7 +1274,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             Setup will finish immediately. You can check progress in Settings &gt; Models.
                                             <br />
                                             <button
-                                                onClick={() => modelsDir && openPath(modelsDir)}
+                                                onClick={() => modelsDir && void commands.openModelsFolder()}
                                                 className="underline hover:text-blue-300 mt-1 inline-flex items-center gap-1"
                                             >
                                                 Open Models Folder <HardDrive className="w-3 h-3" />

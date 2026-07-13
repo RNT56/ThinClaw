@@ -273,7 +273,11 @@ panel wired or honestly gated; contract suite green.
   Haiku 4.5 catalog; Opus 4.8 is the complex-agent default, Sonnet 5 the balanced
   routing slot, and current IDs/context/pricing flow through onboarding and Bedrock.
 - **[DONE] Engines:** llama.cpp `b9988` and uv `0.11.28` assets are checksum/version verified; MLX/vLLM direct packages are exact and version-marker upgraded; Ollama reports its external daemon version; GGUF metadata and the b9988 quant matrix fail closed before spawn. See [`engine-compatibility.md`](engine-compatibility.md).
-- **Tauri/deps:** v2 capabilities audit (`backend/capabilities/default.json`); npm + Cargo refresh; advisory sweep — fix at source, no `deny`-ignore; no heavy deps for off-by-default features without sign-off.
+- **[DONE] Tauri/deps:** main and Spotlight renderer capabilities are isolated
+  and least-privilege; file reveal is a canonicalized Rust boundary; npm is
+  audit-clean; Tauri/ORT/OpenDAL and the compatible Cargo graph are refreshed;
+  the enabled Rust graph passes without advisory ignores. See
+  [`security-and-dependencies.md`](security-and-dependencies.md).
 - **RAG/inference:** reranker model refresh; embedding-dimension auto-detect hardening.
 
 **Phase 2 exit gate:** clean-machine smoke passes; notarized auto-updating build; telemetry live.

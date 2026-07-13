@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
-use ndarray::Array2;
 use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::value::Tensor;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
@@ -73,10 +73,16 @@ impl Reranker {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow!("Failed to load tokenizer: {}", e))?;
 
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
-            .commit_from_file(model_path)?;
+        let builder = Session::builder().map_err(|e| anyhow!(e.to_string()))?;
+        let builder = builder
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let mut builder = builder
+            .with_intra_threads(1)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let session = builder
+            .commit_from_file(model_path)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         Ok(Self {
             session: Mutex::new(session),
@@ -113,7 +119,7 @@ impl Reranker {
             return Ok(Vec::new());
         }
 
-        let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
 
         // Tokenize all query-document pairs
         // MS-MARCO MiniLM expects: [CLS] query [SEP] document [SEP]
@@ -148,21 +154,35 @@ impl Reranker {
             }
         }
 
-        // Shape: [BatchSize, MaxSeqLen]
-        let input_ids_array = Array2::from_shape_vec((batch_size, max_len), input_ids)?;
-        let attention_mask_array = Array2::from_shape_vec((batch_size, max_len), attention_mask)?;
-        let token_type_ids_array = Array2::from_shape_vec((batch_size, max_len), token_type_ids)?;
+        // Shape: [BatchSize, MaxSeqLen]. Construct ORT-owned tensors directly
+        // so the boundary is independent of the ndarray version used by ORT.
+        let input_ids_tensor = Tensor::from_array(([batch_size, max_len], input_ids))?;
+        let attention_mask_tensor = Tensor::from_array(([batch_size, max_len], attention_mask))?;
+        let token_type_ids_tensor = Tensor::from_array(([batch_size, max_len], token_type_ids))?;
 
         // Single forward pass for the entire batch
         let outputs = session.run(ort::inputs![
-            "input_ids" => input_ids_array,
-            "attention_mask" => attention_mask_array,
-            "token_type_ids" => token_type_ids_array,
-        ]?)?;
+            "input_ids" => input_ids_tensor,
+            "attention_mask" => attention_mask_tensor,
+            "token_type_ids" => token_type_ids_tensor,
+        ])?;
 
         // Output shape: [BatchSize, 1] — one logit per candidate
-        let logits = outputs["logits"].try_extract_tensor::<f32>()?;
-        let mut results: Vec<(usize, f32)> = (0..batch_size).map(|i| (i, logits[[i, 0]])).collect();
+        let (shape, logits) = outputs["logits"].try_extract_tensor::<f32>()?;
+        if logits.len() < batch_size {
+            return Err(anyhow!(
+                "Reranker returned {} logits with shape {:?} for a batch of {}",
+                logits.len(),
+                shape,
+                batch_size
+            ));
+        }
+        let mut results: Vec<(usize, f32)> = logits
+            .iter()
+            .copied()
+            .take(batch_size)
+            .enumerate()
+            .collect();
 
         // Sort descending (highest relevance first)
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

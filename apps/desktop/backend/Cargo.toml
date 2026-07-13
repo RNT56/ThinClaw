@@ -51,7 +51,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "sqlite"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-native-tls", "sqlite", "derive", "migrate"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = "0.3"
@@ -64,9 +64,8 @@ specta = { version = "2.0.0-rc", features = ["derive", "serde", "serde_json"] }
 specta-typescript = "0.0.7"
 usearch = "2.23.0"
 pdf-extract = "0.12"
-ort = { version = "=2.0.0-rc.9", features = ["download-binaries"] }
+ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
 tokenizers = "0.22.2"
-ndarray = "0.16.1"
 image = { version = "0.25.9", features = ["jpeg", "png", "webp"] }
 base64 = "0.22.1"
 uuid = { version = "1.19.0", features = ["v4", "v5", "fast-rng", "macro-diagnostics"] }
@@ -102,7 +101,7 @@ zeroize = { version = "1", features = ["derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 
 # Cloud storage (Work Stream A)
-opendal = { version = "0.55", features = ["services-s3", "services-webdav", "services-sftp"] }
+opendal = { version = "0.58", features = ["services-s3", "services-webdav", "services-sftp"] }
 aes-gcm = "0.11"
 hkdf = "0.13"
 zstd = "0.13"

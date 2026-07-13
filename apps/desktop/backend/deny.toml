@@ -11,24 +11,6 @@
 [advisories]
 unmaintained = "workspace"
 yanked = "deny"
-# Documented, web-verified risk-acceptances for advisories with NO fix available
-# to us (same convention as the root deny.toml). Revisit whenever dependencies
-# are bumped.
-#
-# RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml < 0.41 DoS (quadratic
-# duplicate-attribute check / unbounded namespace allocation on a single start
-# tag). Both quick-xml copies here are transitive and pinned below the patched
-# range: 0.37.5 via reqsign 0.16 <- opendal 0.55, and 0.38.4 via plist 1.8 <-
-# tauri 2.11 (plist 1.9 still requires ^0.39). No parent releases on
-# quick-xml >= 0.41 exist yet. Exposure is CPU/memory DoS only, and the
-# backend's quick-xml inputs are trusted-local plist files (tauri) and XML
-# responses from operator-configured object storage (opendal) — not arbitrary
-# untrusted XML. Drop these once tauri/plist/opendal/reqsign adopt
-# quick-xml 0.41.
-ignore = [
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
-]
 
 [licenses]
 version = 2

@@ -5,7 +5,6 @@
  * Command names, parameters, and result data are owned by bindings.ts.
  */
 
-import { openPath as tauriOpenPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { compatibilityCommands } from '../command-client';
 // ============================================================================
 // Types (matching Rust types from commands.rs)
@@ -433,15 +432,4 @@ export async function writeThinClawFile(path: string, content: string): Promise<
  */
 export async function deleteThinClawFile(path: string): Promise<void> {
     return compatibilityCommands.thinclawDeleteFile(path);
-}
-
-/**
- * Open a path in the system file manager
- */
-export async function openPath(path: string): Promise<void> {
-    return tauriOpenPath(path);
-}
-
-export async function revealPath(path: string): Promise<void> {
-    return revealItemInDir(path);
 }

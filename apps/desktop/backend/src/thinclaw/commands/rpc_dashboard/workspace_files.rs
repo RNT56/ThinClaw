@@ -1,7 +1,7 @@
 //! Local agent-workspace dashboard RPC commands: path resolution, Finder/
 //! Explorer reveal, file listing, and file writes.
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use tracing::{info, warn};
 
 use crate::thinclaw::commands::ThinClawManager;
@@ -179,17 +179,28 @@ pub async fn thinclaw_list_agent_workspace_files(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_reveal_file(
+    app: AppHandle,
+    manager: State<'_, ThinClawManager>,
     path: String,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    // Security: prevent path traversal
     let p = std::path::Path::new(&path);
-    if path.contains("..") {
-        return Err(("Invalid path: traversal not allowed".to_string()).into());
-    }
 
     // Only reveal files that exist
     if !p.exists() {
         return Err((format!("File not found: {}", path)).into());
+    }
+
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {e}"))?;
+    let workspace = workspace_root_for_commands(&manager).await;
+    if !path_is_within_roots(p, &[app_data, workspace]) {
+        return Err(
+            "Refusing to reveal a path outside ThinClaw app data or the active workspace"
+                .to_string()
+                .into(),
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -212,6 +223,16 @@ pub async fn thinclaw_reveal_file(
         .map_err(|e| format!("Failed to open folder: {}", e))?;
 
     Ok(())
+}
+
+fn path_is_within_roots(path: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+    let Ok(candidate) = path.canonicalize() else {
+        return false;
+    };
+    roots.iter().any(|root| {
+        root.canonicalize()
+            .is_ok_and(|canonical_root| candidate.starts_with(canonical_root))
+    })
 }
 
 /// Write content to a file in the agent's local `agent_workspace` directory.
@@ -290,4 +311,53 @@ async fn workspace_root_for_commands(manager: &ThinClawManager) -> std::path::Pa
                 .join("agent_workspace")
         })
         .unwrap_or_else(|_| std::path::PathBuf::from("agent_workspace"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_is_within_roots;
+
+    #[test]
+    fn reveal_scope_accepts_owned_files_and_rejects_other_roots() {
+        let owned = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let owned_file = owned.path().join("result.txt");
+        let outside_file = outside.path().join("secret.txt");
+        let dotted_file = owned.path().join("release..notes.txt");
+        std::fs::write(&owned_file, "ok").unwrap();
+        std::fs::write(&outside_file, "no").unwrap();
+        std::fs::write(&dotted_file, "valid").unwrap();
+
+        assert!(path_is_within_roots(
+            &owned_file,
+            &[owned.path().to_path_buf()]
+        ));
+        assert!(!path_is_within_roots(
+            &outside_file,
+            &[owned.path().to_path_buf()]
+        ));
+        assert!(path_is_within_roots(
+            &dotted_file,
+            &[owned.path().to_path_buf()]
+        ));
+        assert!(!path_is_within_roots(
+            &owned.path().join("missing.txt"),
+            &[owned.path().to_path_buf()]
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reveal_scope_rejects_symlinks_that_escape_an_owned_root() {
+        use std::os::unix::fs::symlink;
+
+        let owned = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        let link = owned.path().join("looks-owned.txt");
+        std::fs::write(&outside_file, "secret").unwrap();
+        symlink(&outside_file, &link).unwrap();
+
+        assert!(!path_is_within_roots(&link, &[owned.path().to_path_buf()]));
+    }
 }

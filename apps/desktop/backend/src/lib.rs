@@ -1,6 +1,121 @@
 use sqlx::sqlite::SqlitePoolOptions;
+use std::borrow::Cow;
 use std::fs;
 use std::sync::OnceLock;
+
+fn embedded_migrator() -> sqlx::migrate::Migrator {
+    use sqlx::migrate::{Migration, MigrationType, Migrator};
+
+    macro_rules! migration {
+        ($version:literal, $description:literal, $file:literal) => {
+            Migration::new(
+                $version,
+                Cow::Borrowed($description),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!(concat!("../migrations/", $file))),
+                false,
+            )
+        };
+    }
+
+    let migrations = vec![
+        migration!(20240101000000, "init", "20240101000000_init.sql"),
+        migration!(20240101000001, "fts", "20240101000001_fts.sql"),
+        migration!(
+            20240115000001,
+            "add images to messages",
+            "20240115000001_add_images_to_messages.sql"
+        ),
+        migration!(
+            20260116000000,
+            "add chat id to documents",
+            "20260116000000_add_chat_id_to_documents.sql"
+        ),
+        migration!(
+            20260116205500,
+            "add attached docs",
+            "20260116205500_add_attached_docs.sql"
+        ),
+        migration!(
+            20260117000000,
+            "add projects",
+            "20260117000000_add_projects.sql"
+        ),
+        migration!(
+            20260119000000,
+            "add web search results",
+            "20260119000000_add_web_search_results.sql"
+        ),
+        migration!(
+            20260127000000,
+            "add reordering",
+            "20260127000000_add_reordering.sql"
+        ),
+        migration!(
+            20260208000000,
+            "model catalog",
+            "20260208000000_model_catalog.sql"
+        ),
+        migration!(
+            20260209000000,
+            "generated images",
+            "20260209000000_generated_images.sql"
+        ),
+        migration!(
+            20260224000000,
+            "add messages index",
+            "20260224000000_add_messages_index.sql"
+        ),
+        migration!(
+            20260225000000,
+            "normalize timestamps",
+            "20260225000000_normalize_timestamps.sql"
+        ),
+        migration!(
+            20260301000000,
+            "cloud storage",
+            "20260301000000_cloud_storage.sql"
+        ),
+        migration!(
+            20260301000001,
+            "direct assets",
+            "20260301000001_direct_assets.sql"
+        ),
+        migration!(
+            20260302000000,
+            "message assets",
+            "20260302000000_message_assets.sql"
+        ),
+    ];
+
+    Migrator {
+        migrations: Cow::Owned(migrations),
+        ..Migrator::DEFAULT
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    #[tokio::test]
+    async fn embedded_migrations_apply_to_a_clean_database() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite");
+
+        super::embedded_migrator()
+            .run(&pool)
+            .await
+            .expect("apply embedded migrations");
+
+        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .expect("read applied migration count");
+        assert_eq!(applied, 15);
+    }
+}
 
 /// Global log broadcaster — shared between the tracing subscriber (WebLogLayer)
 /// and the ThinClaw bridge so all tracing::* events reach the UI Logs panel.
@@ -492,7 +607,7 @@ pub fn run() {
                 .await
                 .expect("failed to connect to database");
 
-            sqlx::migrate!("./migrations")
+            embedded_migrator()
                 .run(&pool)
                 .await
                 .expect("failed to run migrations");
