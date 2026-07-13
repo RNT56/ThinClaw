@@ -35,7 +35,7 @@ function AppLoadingScreen() {
 function AppProviders({ children }: { children: ReactNode }) {
   return (
     <ServicesProvider>
-      <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">
+      <ThemeProvider defaultTheme="system">
         <ConfigProvider>
           <ModelProvider>
             <ChatProvider>{children}</ChatProvider>

@@ -381,7 +381,7 @@ export function ThinClawSystemControl() {
                             initial={{ opacity: 0, scale: 0.98 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.98 }}
-                            className="flex-1 bg-zinc-950 dark:bg-[#040404] rounded-2xl border border-border/40 shadow-2xl flex flex-col overflow-hidden"
+                            className="flex-1 bg-surface-elevated rounded-2xl border border-border/40 shadow-2xl flex flex-col overflow-hidden"
                         >
                             {/* Toolbar */}
                             <div className="p-3 border-b border-border/30 bg-muted/10 flex items-center gap-3 flex-wrap">

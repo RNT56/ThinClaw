@@ -117,7 +117,10 @@ export function ThinClawView() {
     };
 
     return (
-        <div className="flex-1 flex flex-col h-full overflow-hidden">
+        <div
+            className="flex-1 flex flex-col h-full overflow-hidden bg-surface-canvas text-content-primary"
+            data-product-surface="agent-cockpit"
+        >
             {/* Chat view — always mounted to preserve messages, event listeners,
                 and active run state. Hidden via CSS when another sub-page is active. */}
             <div

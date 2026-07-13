@@ -384,7 +384,7 @@ export function FleetCommandCenter() {
     const approvalCount = agents.filter(a => getEffectiveStatus(a) === 'waiting_approval').length;
 
     return (
-        <div className="flex flex-col h-full bg-[#050505] text-zinc-100 overflow-hidden">
+        <div className="flex flex-col h-full bg-surface-canvas text-content-primary overflow-hidden">
             {/* Top Bar */}
             <div className="h-14 border-b border-white/10 bg-zinc-900/50 backdrop-blur-sm flex items-center justify-between px-6 z-10">
                 <div className="flex items-center gap-4">
