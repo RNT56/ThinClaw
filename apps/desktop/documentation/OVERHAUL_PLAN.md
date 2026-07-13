@@ -246,7 +246,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
 | ~~Repo-projects partial~~ **DONE** | Enroll→plan→merge-gate flow and readiness gates are wired end to end | `ThinClawRepoProjects.tsx`, `rpc_repo_projects.rs`, `src/repo_projects` | L |
-| Fleet partial | Define fleet model (multi-agent A2A) → real status + broadcast | `thinclaw/fleet.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
+| ~~Fleet partial~~ **DONE** | Saved remote profiles are probed through authenticated gateway status, task assignment routes to the selected agent's gateway, and broadcast targets each local/remote node once with per-node delivery receipts | `thinclaw/fleet.rs`, `rpc_orchestration.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
 | Tunnel/Tailscale no UI | `thinclaw_tunnel_*` + Remote-access panel | `src/tunnel/` | M |
 | ~~`subscribe_session` stub~~ **DONE** | Activates local/remote live-event routing with real subscription semantics | `thinclaw/commands/sessions.rs`, `runtime_bridge.rs` | S |
 

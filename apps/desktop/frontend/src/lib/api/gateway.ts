@@ -307,7 +307,21 @@ export async function switchToProfile(profileId: string): Promise<void> {
     return compatibilityCommands.thinclawSwitchToProfile(profileId);
 }
 
-export async function broadcastCommand(command: string): Promise<void> {
+export interface FleetBroadcastDelivery {
+    agent_id: string;
+    agent_name: string;
+    delivered: boolean;
+    error: string | null;
+}
+
+export interface FleetBroadcastResult {
+    attempted: number;
+    delivered: number;
+    failed: number;
+    deliveries: FleetBroadcastDelivery[];
+}
+
+export async function broadcastCommand(command: string): Promise<FleetBroadcastResult> {
     return compatibilityCommands.thinclawBroadcastCommand(command);
 }
 

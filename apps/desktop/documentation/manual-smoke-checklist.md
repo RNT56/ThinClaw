@@ -142,6 +142,16 @@ set in the report.
   list, and file read.
 - Expected events: subagent and job lifecycle events on `thinclaw-event`.
 
+### Fleet Command
+
+- Add two credentialed remote agent profiles and open Fleet Command.
+- Verify each remote node reports authenticated gateway latency, active model,
+  connection count, and any runtime error without exposing its bearer token.
+- Assign a task to one remote node and verify the resulting thread is created on
+  that gateway, not in the local runtime.
+- Broadcast a harmless instruction and verify the receipt attempts each local or
+  remote node exactly once, including a named failure when one node is offline.
+
 ### Routines And Channels
 
 - Open Routines and verify list, create, toggle, run, history, audit, and clear

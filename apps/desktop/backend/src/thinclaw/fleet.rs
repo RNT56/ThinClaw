@@ -1,14 +1,14 @@
 //! Fleet status and orchestration commands.
 //!
-//! **Phase 4 migration**: Uses ThinClawRuntimeState for local core status instead of
-//! WS handle polling. Fleet broadcast uses ThinClaw's chat API.
+//! Uses authenticated gateway status for remote profiles and the embedded
+//! runtime for the local node. Fleet broadcast targets each configured agent
+//! exactly once and returns a per-node delivery receipt.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
 use tokio::time::Instant;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 use crate::thinclaw::ThinClawManager;
@@ -36,112 +36,145 @@ pub struct AgentStatusSummary {
     pub model: Option<String>,
 }
 
-/// Check status of a single agent profile
-async fn check_agent(profile: crate::thinclaw::config::AgentProfile) -> AgentStatusSummary {
-    let start = Instant::now();
-    let timeout_duration = Duration::from_secs(3);
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct FleetBroadcastDelivery {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub delivered: bool,
+    pub error: Option<String>,
+}
 
-    // Basic URL validation
-    if profile.url.trim().is_empty() || profile.url.starts_with("embedded://") {
-        return AgentStatusSummary {
-            id: profile.id.clone(),
-            name: profile.name.clone(),
-            url: profile.url.clone(),
-            online: false,
-            latency_ms: None,
-            version: None,
-            stats: None,
-            current_task: None,
-            progress: None,
-            logs: None,
-            parent_id: None,
-            children_ids: None,
-            active_session_id: None,
-            active: false,
-            capabilities: None,
-            run_status: None,
-            model: None,
-        };
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct FleetBroadcastResult {
+    pub attempted: u32,
+    pub delivered: u32,
+    pub failed: u32,
+    pub deliveries: Vec<FleetBroadcastDelivery>,
+}
+
+fn offline_agent(
+    profile: crate::thinclaw::config::AgentProfile,
+    active: bool,
+    reason: impl Into<String>,
+) -> AgentStatusSummary {
+    let reason = reason.into();
+    AgentStatusSummary {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        url: profile.url.clone(),
+        online: false,
+        latency_ms: None,
+        version: None,
+        stats: Some(serde_json::json!({ "error": reason })),
+        current_task: Some(reason),
+        progress: None,
+        logs: None,
+        parent_id: Some("main".to_string()),
+        children_ids: None,
+        active_session_id: None,
+        active,
+        capabilities: Some(vec!["remote_gateway".to_string()]),
+        run_status: Some("offline".to_string()),
+        model: None,
+    }
+}
+
+fn remote_agent_from_status(
+    profile: crate::thinclaw::config::AgentProfile,
+    active: bool,
+    latency_ms: u32,
+    status: serde_json::Value,
+) -> AgentStatusSummary {
+    let connection_count = status
+        .get("total_connections")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let runtime_error = status
+        .get("runtime_reload_error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let mut capabilities = vec![
+        "remote_gateway".to_string(),
+        "chat".to_string(),
+        "inference".to_string(),
+    ];
+    if status
+        .get("channel_setup")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|channels| {
+            channels.values().any(|channel| {
+                channel
+                    .get("configured")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            })
+        })
+    {
+        capabilities.push("channels".to_string());
     }
 
-    let mut request = match profile.url.clone().into_client_request() {
-        Ok(r) => r,
-        Err(_) => {
-            return AgentStatusSummary {
-                id: profile.id.clone(),
-                name: profile.name.clone(),
-                url: profile.url.clone(),
-                online: false,
-                latency_ms: None,
-                version: None,
-                stats: None,
-                current_task: None,
-                progress: None,
-                logs: None,
-                parent_id: None,
-                children_ids: None,
-                active_session_id: None,
-                active: false,
-                capabilities: None,
-                run_status: None,
-                model: None,
-            }
-        }
+    AgentStatusSummary {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        url: profile.url.clone(),
+        online: true,
+        latency_ms: Some(latency_ms),
+        version: status
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        stats: Some(status.clone()),
+        current_task: Some(if connection_count == 0 {
+            "Ready".to_string()
+        } else {
+            format!("{connection_count} live control connection(s)")
+        }),
+        progress: None,
+        logs: None,
+        parent_id: Some("main".to_string()),
+        children_ids: None,
+        active_session_id: None,
+        active,
+        capabilities: Some(capabilities),
+        run_status: Some(if runtime_error.is_some() {
+            "error".to_string()
+        } else {
+            "idle".to_string()
+        }),
+        model: status
+            .get("active_model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+/// Check authenticated status of a single remote agent profile.
+async fn check_agent(
+    profile: crate::thinclaw::config::AgentProfile,
+    active: bool,
+) -> AgentStatusSummary {
+    let Some(token) = profile
+        .token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+    else {
+        return offline_agent(profile, active, "Missing stored gateway credential");
     };
-
-    if let Some(token) = &profile.token {
-        if !token.trim().is_empty() {
-            let headers = request.headers_mut();
-            if let Ok(val) = format!("Bearer {}", token).parse() {
-                headers.insert("Authorization", val);
-            }
-        }
-    }
-
-    // Attempt connection
-    match tokio::time::timeout(timeout_duration, tokio_tungstenite::connect_async(request)).await {
-        Ok(Ok((_ws_stream, _))) => {
-            let latency = start.elapsed().as_millis() as u32;
-
-            AgentStatusSummary {
-                id: profile.id.clone(),
-                name: profile.name.clone(),
-                url: profile.url.clone(),
-                online: true,
-                latency_ms: Some(latency),
-                version: None,
-                stats: None,
-                current_task: Some("Idle".to_string()),
-                progress: None,
-                logs: None,
-                parent_id: None,
-                children_ids: None,
-                active_session_id: None,
-                active: false,
-                capabilities: None,
-                run_status: Some("idle".to_string()),
-                model: None,
-            }
-        }
-        _ => AgentStatusSummary {
-            id: profile.id.clone(),
-            name: profile.name.clone(),
-            url: profile.url.clone(),
-            online: false,
-            latency_ms: None,
-            version: None,
-            stats: None,
-            current_task: None,
-            progress: None,
-            logs: None,
-            parent_id: None,
-            children_ids: None,
-            active_session_id: None,
-            active: false,
-            capabilities: None,
-            run_status: Some("offline".to_string()),
-            model: None,
-        },
+    let proxy = match crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&profile.url, token) {
+        Ok(proxy) => proxy,
+        Err(error) => return offline_agent(profile, active, error),
+    };
+    let start = Instant::now();
+    match tokio::time::timeout(Duration::from_secs(6), proxy.get_status()).await {
+        Ok(Ok(status)) => remote_agent_from_status(
+            profile,
+            active,
+            start.elapsed().as_millis().min(u32::MAX as u128) as u32,
+            status,
+        ),
+        Ok(Err(error)) => offline_agent(profile, active, error),
+        Err(_) => offline_agent(profile, active, "Gateway status timed out after 6 seconds"),
     }
 }
 
@@ -203,10 +236,16 @@ pub async fn thinclaw_get_fleet_status(
         state.init_config().await?
     };
 
+    let active_remote_url = (cfg.gateway_mode == "remote")
+        .then(|| cfg.remote_url.as_deref())
+        .flatten();
     let profiles = cfg.profiles.clone();
 
     // Run checks in parallel for remote agents
-    let futures = profiles.into_iter().map(check_agent);
+    let futures = profiles.into_iter().map(|profile| {
+        let active = active_remote_url == Some(profile.url.as_str());
+        check_agent(profile, active)
+    });
     let mut results = futures::future::join_all(futures).await;
 
     let local_capabilities = get_capabilities(&cfg);
@@ -221,8 +260,11 @@ pub async fn thinclaw_get_fleet_status(
             online: true,
             latency_ms: Some(0),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            stats: None,
-            current_task: Some("Gateway Orchestration".to_string()),
+            stats: Some(serde_json::json!({
+                "runtime": "embedded",
+                "configured_remote_agents": results.len(),
+            })),
+            current_task: Some("Ready".to_string()),
             progress: None,
             logs: None,
             parent_id: None,
@@ -234,11 +276,11 @@ pub async fn thinclaw_get_fleet_status(
             model: Some(active_model),
         };
 
-        // Set parent_id for other agents
-        for agent in &mut results {
-            agent.parent_id = Some("main".to_string());
-        }
         results.insert(0, local_summary);
+    } else {
+        for agent in &mut results {
+            agent.parent_id = None;
+        }
     }
 
     Ok(results)
@@ -247,44 +289,165 @@ pub async fn thinclaw_get_fleet_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_broadcast_command(
+    state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     command: String,
-) -> Result<(), String> {
-    tracing::info!("Broadcasting fleet command: {}", command);
+) -> Result<FleetBroadcastResult, String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("Fleet broadcast command must not be empty".to_string());
+    }
+    if command.chars().count() > 4_000 {
+        return Err("Fleet broadcast command must not exceed 4,000 characters".to_string());
+    }
+    tracing::info!(
+        command_chars = command.chars().count(),
+        "Broadcasting fleet command"
+    );
 
-    // Get sessions from ThinClaw
-    let agent = ironclaw.agent().await?;
-    let thread_list = thinclaw_core::api::sessions::list_threads(
-        agent.session_manager(),
-        agent.store(),
-        "local_user",
-        "tauri",
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let cfg = if let Some(config) = state.get_config().await {
+        config
+    } else {
+        state.init_config().await?
+    };
+    let broadcast_message = format!("[FLEET BROADCAST]\n{command}");
+    let mut deliveries = Vec::new();
 
-    let broadcast_msg = format!("[FLEET BROADCAST] {}", command);
+    if ironclaw.is_initialized() {
+        let local_delivery = match ironclaw.agent().await {
+            Ok(agent) => match thinclaw_core::api::chat::send_message(
+                Arc::clone(&agent),
+                "agent:main",
+                &broadcast_message,
+                true,
+            )
+            .await
+            {
+                Ok(_) => FleetBroadcastDelivery {
+                    agent_id: "main".to_string(),
+                    agent_name: "Local Core".to_string(),
+                    delivered: true,
+                    error: None,
+                },
+                Err(error) => FleetBroadcastDelivery {
+                    agent_id: "main".to_string(),
+                    agent_name: "Local Core".to_string(),
+                    delivered: false,
+                    error: Some(error.to_string()),
+                },
+            },
+            Err(error) => FleetBroadcastDelivery {
+                agent_id: "main".to_string(),
+                agent_name: "Local Core".to_string(),
+                delivered: false,
+                error: Some(error),
+            },
+        };
+        deliveries.push(local_delivery);
+    }
 
-    // Send to all threads
-    for thread in &thread_list.threads {
-        let session_key = thread.id.to_string();
-        if let Err(e) = thinclaw_core::api::chat::send_message(
-            Arc::clone(&agent),
-            &session_key,
-            &broadcast_msg,
-            true,
-        )
-        .await
-        {
-            tracing::warn!(
-                "[fleet] Failed to broadcast to session {}: {}",
-                session_key,
-                e
-            );
-        } else {
-            tracing::info!("[fleet] Broadcast sent to session: {}", session_key);
+    let remote_deliveries =
+        futures::future::join_all(cfg.profiles.clone().into_iter().map(|profile| {
+            let message = broadcast_message.clone();
+            async move {
+                let result = async {
+                    let token = profile
+                        .token
+                        .as_deref()
+                        .filter(|token| !token.trim().is_empty())
+                        .ok_or_else(|| "Missing stored gateway credential".to_string())?;
+                    let proxy = crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(
+                        &profile.url,
+                        token,
+                    )?;
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        proxy.send_message("agent:main", &message),
+                    )
+                    .await
+                    .map_err(|_| "Gateway delivery timed out after 10 seconds".to_string())??;
+                    Ok::<(), String>(())
+                }
+                .await;
+                FleetBroadcastDelivery {
+                    agent_id: profile.id.clone(),
+                    agent_name: profile.name.clone(),
+                    delivered: result.is_ok(),
+                    error: result.err(),
+                }
+            }
+        }))
+        .await;
+    deliveries.extend(remote_deliveries);
+
+    if deliveries.is_empty() {
+        return Err(
+            "No local runtime or remote agent profiles are available for broadcast".to_string(),
+        );
+    }
+    let delivered = deliveries
+        .iter()
+        .filter(|delivery| delivery.delivered)
+        .count() as u32;
+    let attempted = deliveries.len() as u32;
+    Ok(FleetBroadcastResult {
+        attempted,
+        delivered,
+        failed: attempted.saturating_sub(delivered),
+        deliveries,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remote_profile() -> crate::thinclaw::config::AgentProfile {
+        crate::thinclaw::config::AgentProfile {
+            id: "remote-1".to_string(),
+            name: "Remote One".to_string(),
+            url: "https://agent.example.com".to_string(),
+            token: Some("secret".to_string()),
+            mode: "remote".to_string(),
+            auto_connect: false,
         }
     }
 
-    Ok(())
+    #[test]
+    fn authenticated_gateway_status_populates_real_fleet_fields() {
+        let summary = remote_agent_from_status(
+            remote_profile(),
+            true,
+            42,
+            serde_json::json!({
+                "total_connections": 3,
+                "active_model": "openai/gpt-5",
+                "runtime_reload_error": null,
+                "channel_setup": {
+                    "telegram": { "configured": true }
+                }
+            }),
+        );
+
+        assert!(summary.online);
+        assert!(summary.active);
+        assert_eq!(summary.latency_ms, Some(42));
+        assert_eq!(summary.model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(
+            summary.current_task.as_deref(),
+            Some("3 live control connection(s)")
+        );
+        assert!(summary
+            .capabilities
+            .unwrap()
+            .contains(&"channels".to_string()));
+    }
+
+    #[test]
+    fn offline_status_never_serializes_the_profile_credential() {
+        let summary = offline_agent(remote_profile(), false, "credential rejected");
+        let encoded = serde_json::to_string(&summary).expect("serialize status");
+        assert!(encoded.contains("credential rejected"));
+        assert!(!encoded.contains("secret"));
+    }
 }

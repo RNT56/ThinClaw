@@ -177,12 +177,69 @@ mod sub_agent_registry_tests {
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_spawn_session(
+    state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     agent_id: String,
     task: String,
     parent_session: Option<String>,
 ) -> Result<SpawnSessionResponse, String> {
+    let agent_id = agent_id.trim();
+    let task = task.trim();
+    if agent_id.is_empty() {
+        return Err("Agent ID must not be empty".to_string());
+    }
+    if task.is_empty() {
+        return Err("Task must not be empty".to_string());
+    }
+    if task.chars().count() > 8_000 {
+        return Err("Task must not exceed 8,000 characters".to_string());
+    }
     let child_key = format!("agent:{}:task-{}", agent_id, uuid::Uuid::new_v4());
+
+    // A saved remote fleet node owns its own session. Route the task through
+    // that profile's authenticated gateway rather than creating a misleading
+    // local session whose key merely contains the remote agent ID.
+    if !matches!(agent_id, "main" | "local-core") {
+        let cfg = if let Some(config) = state.get_config().await {
+            config
+        } else {
+            state.init_config().await?
+        };
+        if let Some(profile) = cfg
+            .profiles
+            .iter()
+            .find(|profile| profile.id == agent_id)
+            .cloned()
+        {
+            let token = profile
+                .token
+                .as_deref()
+                .filter(|token| !token.trim().is_empty())
+                .ok_or_else(|| {
+                    format!("Agent '{}' has no stored gateway credential", profile.name)
+                })?;
+            let proxy =
+                crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&profile.url, token)?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                proxy.send_message(&child_key, task),
+            )
+            .await
+            .map_err(|_| {
+                format!(
+                    "Task delivery to '{}' timed out after 10 seconds",
+                    profile.name
+                )
+            })??;
+            return Ok(SpawnSessionResponse {
+                session_key: child_key,
+                parent_session,
+                task: task.to_string(),
+            });
+        }
+        return Err(format!("Fleet agent '{agent_id}' is not configured"));
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -195,7 +252,7 @@ pub async fn thinclaw_spawn_session(
     if let Some(ref parent) = parent_session {
         let child_info = ChildSessionInfo {
             session_key: child_key.clone(),
-            task: task.clone(),
+            task: task.to_string(),
             status: "running".to_string(),
             spawned_at: now,
             result_summary: None,
@@ -205,7 +262,7 @@ pub async fn thinclaw_spawn_session(
         let event = crate::thinclaw::ui_types::UiEvent::SubAgentUpdate {
             parent_session: parent.clone(),
             child_session: child_key.clone(),
-            task: task.clone(),
+            task: task.to_string(),
             status: crate::thinclaw::ui_types::SubAgentStatus::from_wire("running"),
             progress: Some(0.0),
             result_preview: None,
@@ -218,7 +275,7 @@ pub async fn thinclaw_spawn_session(
     let app_handle = ironclaw.app_handle().clone();
     let parent_bg = parent_session.clone();
     let child_bg = child_key.clone();
-    let task_bg = task.clone();
+    let task_bg = task.to_string();
 
     // ── Non-blocking: full agent turn runs in a background task ──────────
     tokio::spawn(async move {
@@ -318,7 +375,7 @@ pub async fn thinclaw_spawn_session(
     Ok(SpawnSessionResponse {
         session_key: child_key,
         parent_session,
-        task,
+        task: task.to_string(),
     })
 }
 
