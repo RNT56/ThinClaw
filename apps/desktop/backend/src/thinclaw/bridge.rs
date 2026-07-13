@@ -230,6 +230,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("direct_imagine_toggle_favorite", RouteMode::LocalOnly),
     ("direct_inference_get_backends", RouteMode::LocalOnly),
     ("direct_inference_update_backend", RouteMode::LocalOnly),
+    ("direct_i18n_get_catalog", RouteMode::LocalOnly),
     ("direct_media_generate_image", RouteMode::LocalOnly),
     ("direct_media_transcribe_audio", RouteMode::LocalOnly),
     ("direct_media_tts_list_voices", RouteMode::LocalOnly),

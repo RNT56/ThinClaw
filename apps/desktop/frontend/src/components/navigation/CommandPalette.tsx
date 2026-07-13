@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/utils";
 import type { SettingsPage } from "../settings/SettingsSidebar";
 import type { ProductMode } from "./ModeNavigator";
+import { useI18n } from "../i18n-provider";
 
 interface PaletteCommand {
     id: string;
@@ -23,6 +24,7 @@ interface CommandPaletteProps {
 }
 
 export function CommandPalette({ open, onOpenChange, onModeChange, onSettingsChange }: CommandPaletteProps) {
+    const { t } = useI18n();
     const [query, setQuery] = useState("");
     const inputRef = useRef<HTMLInputElement>(null);
 
@@ -32,14 +34,14 @@ export function CommandPalette({ open, onOpenChange, onModeChange, onSettingsCha
             action();
         };
         return [
-            { id: "workbench", label: "Open Workbench", description: "Direct chat, projects, and local models", keywords: "chat direct local", shortcut: "⌘1", icon: MessageSquare, run: () => closeAndRun(() => onModeChange("chat")) },
-            { id: "cockpit", label: "Open Agent Cockpit", description: "Sessions, tools, channels, and operations", keywords: "agent thinclaw runtime dashboard", shortcut: "⌘2", icon: Bot, run: () => closeAndRun(() => onModeChange("thinclaw")) },
-            { id: "imagine", label: "Open Imagine", description: "Create and manage generated images", keywords: "image generation media", shortcut: "⌘3", icon: Image, run: () => closeAndRun(() => onModeChange("imagine")) },
+            { id: "workbench", label: t("nav.workbench"), description: "Direct chat, projects, and local models", keywords: "chat direct local", shortcut: "⌘1", icon: MessageSquare, run: () => closeAndRun(() => onModeChange("chat")) },
+            { id: "cockpit", label: t("nav.cockpit"), description: "Sessions, tools, channels, and operations", keywords: "agent thinclaw runtime dashboard", shortcut: "⌘2", icon: Bot, run: () => closeAndRun(() => onModeChange("thinclaw")) },
+            { id: "imagine", label: t("nav.imagine"), description: "Create and manage generated images", keywords: "image generation media", shortcut: "⌘3", icon: Image, run: () => closeAndRun(() => onModeChange("imagine")) },
             { id: "models", label: "Manage models", description: "Download and select local models", keywords: "settings llm inference", icon: SlidersHorizontal, run: () => closeAndRun(() => onSettingsChange("models")) },
             { id: "appearance", label: "Appearance and language", description: "Theme, density, language, and shortcuts", keywords: "settings theme locale accessibility", icon: Settings, run: () => closeAndRun(() => onSettingsChange("appearance")) },
             { id: "secrets", label: "Manage secrets", description: "API credentials and recovery controls", keywords: "settings keys credentials security", icon: Settings, run: () => closeAndRun(() => onSettingsChange("secrets")) },
         ];
-    }, [onModeChange, onOpenChange, onSettingsChange]);
+    }, [onModeChange, onOpenChange, onSettingsChange, t]);
 
     const normalizedQuery = query.trim().toLowerCase();
     const filtered = commands.filter((command) => !normalizedQuery ||
@@ -64,7 +66,7 @@ export function CommandPalette({ open, onOpenChange, onModeChange, onSettingsCha
                         "data-[state=open]:animate-in data-[state=closed]:animate-out",
                     )}
                 >
-                    <Dialog.Title className="sr-only">Command palette</Dialog.Title>
+                    <Dialog.Title className="sr-only">{t("command.palette")}</Dialog.Title>
                     <Dialog.Description id="command-palette-description" className="sr-only">
                         Search actions or switch between ThinClaw product modes.
                     </Dialog.Description>
@@ -77,7 +79,7 @@ export function CommandPalette({ open, onOpenChange, onModeChange, onSettingsCha
                             onKeyDown={(event) => {
                                 if (event.key === "Enter" && filtered[0]) filtered[0].run();
                             }}
-                            placeholder="Search modes and settings…"
+                            placeholder={t("command.search")}
                             aria-label="Search commands"
                             className="h-12 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                         />
@@ -88,7 +90,7 @@ export function CommandPalette({ open, onOpenChange, onModeChange, onSettingsCha
 
                     <div className="max-h-[min(24rem,60vh)] overflow-y-auto p-2">
                         {filtered.length === 0 ? (
-                            <p role="status" className="px-3 py-8 text-center text-sm text-muted-foreground">No matching commands</p>
+                            <p role="status" className="px-3 py-8 text-center text-sm text-muted-foreground">{t("command.empty")}</p>
                         ) : filtered.map((command) => (
                             <button key={command.id} onClick={command.run} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-accent focus-visible:bg-accent">
                                 <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">

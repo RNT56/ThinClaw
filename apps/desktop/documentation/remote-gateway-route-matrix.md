@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (196)
+### Local only (197)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -76,6 +76,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `direct_history_update_conversation_project` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_history_update_conversation_title` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_history_update_conversations_order` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_i18n_get_catalog` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_imagine_delete_image` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_imagine_generate` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_imagine_get_stats` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |

@@ -9,7 +9,7 @@ describe("CommandPalette", () => {
         const onOpenChange = vi.fn();
         render(<CommandPalette open onOpenChange={onOpenChange} onModeChange={onModeChange} onSettingsChange={vi.fn()} />);
         await userEvent.type(screen.getByRole("textbox", { name: "Search commands" }), "cockpit");
-        await userEvent.click(screen.getByRole("button", { name: /Open Agent Cockpit/i }));
+        await userEvent.click(screen.getByRole("button", { name: /Agent Cockpit/i }));
         expect(onOpenChange).toHaveBeenCalledWith(false);
         expect(onModeChange).toHaveBeenCalledWith("thinclaw");
     });

@@ -8,6 +8,9 @@ export const commands = {
 async greet(name: string) : Promise<string> {
     return await TAURI_INVOKE("greet", { name });
 },
+async directI18nGetCatalog(locale: string) : Promise<DesktopI18nCatalog> {
+    return await TAURI_INVOKE("direct_i18n_get_catalog", { locale });
+},
 async directChatStream(payload: DirectChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_chat_stream", { payload, onEvent }) };
@@ -3858,6 +3861,10 @@ export type CreateProjectRequest = { name: string; description: string | null }
 export type CustomLlmConfigInput = { url: string | null; key: string | null; model: string | null; enabled: boolean }
 export type CustomPersona = { id: string; name: string; description: string; instructions: string }
 export type CustomSecret = { id: string; name: string; description: string | null; granted: boolean }
+/**
+ * Complete translation payload consumed by every Desktop webview.
+ */
+export type DesktopI18nCatalog = { locale: string; default_locale: string; available_locales: string[]; messages: { [key in string]: string } }
 /**
  * A single diagnostic check result
  */

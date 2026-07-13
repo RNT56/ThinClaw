@@ -10,6 +10,7 @@ import { cn } from '../../lib/utils';
 import { ThemeToggle, useTheme } from '../theme-provider';
 import { DARK_SYNTAX_THEMES, LIGHT_SYNTAX_THEMES, SyntaxTheme } from '../../lib/syntax-themes';
 import { APP_THEMES, AppTheme } from '../../lib/app-themes';
+import { LOCALE_LABELS, useI18n } from '../i18n-provider';
 
 function SyntaxThemeOption({ theme, isActive, onClick }: { theme: SyntaxTheme, isActive: boolean, onClick: () => void }) {
     return (
@@ -83,6 +84,7 @@ function AppThemeOption({ theme, isActive, onClick, currentMode }: { theme: AppT
 }
 
 export function AppearanceSettings() {
+    const { locale, availableLocales, setLocale, t } = useI18n();
     const {
         theme,
         darkSyntaxTheme,
@@ -111,6 +113,24 @@ export function AppearanceSettings() {
 
     return (
         <div className="space-y-10">
+            <div className="p-6 border rounded-2xl bg-card/50 border-border/50 flex items-center justify-between gap-6">
+                <div className="space-y-1">
+                    <h3 className="font-bold text-lg">{t("settings.appearance")}</h3>
+                    <p className="text-sm text-muted-foreground">Interface language updates every Desktop window immediately.</p>
+                </div>
+                <label className="grid gap-1 text-xs font-medium text-muted-foreground">
+                    {t("settings.language")}
+                    <select
+                        value={locale}
+                        onChange={(event) => setLocale(event.currentTarget.value)}
+                        className="h-10 min-w-44 rounded-lg border border-border bg-background px-3 text-sm text-foreground"
+                    >
+                        {availableLocales.map((code) => (
+                            <option key={code} value={code}>{LOCALE_LABELS[code] ?? code}</option>
+                        ))}
+                    </select>
+                </label>
+            </div>
             {/* UI Theme Group */}
             <div className="p-8 border rounded-2xl bg-linear-to-br from-card to-background shadow-xl border-border/30 flex items-center justify-between">
                 <div className="space-y-1">

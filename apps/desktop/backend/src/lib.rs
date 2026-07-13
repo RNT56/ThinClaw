@@ -191,6 +191,7 @@ pub mod hf_hub;
 mod history;
 pub mod image_gen;
 pub mod images;
+pub mod i18n;
 pub mod imagine;
 pub mod inference;
 pub mod model_manager;

@@ -5,6 +5,7 @@ import { cn } from "../../lib/utils";
 import { Button } from "../ui";
 import { ChatModeIcon, ImagineModeIcon, ThinClawModeIcon } from "../icons/ModeIcons";
 import { CloudSyncIndicator } from "./CloudSyncIndicator";
+import { useI18n } from "../i18n-provider";
 
 export type AppMode = "chat" | "thinclaw" | "imagine" | "settings";
 export type ProductMode = Exclude<AppMode, "settings">;
@@ -20,6 +21,7 @@ interface ModeNavigatorProps {
 export const PRODUCT_MODES = [
     {
         id: "chat" as const,
+        labelKey: "nav.workbench",
         label: "Workbench",
         description: "Direct chat, projects, and local models",
         shortcut: "⌘1",
@@ -27,6 +29,7 @@ export const PRODUCT_MODES = [
     },
     {
         id: "thinclaw" as const,
+        labelKey: "nav.cockpit",
         label: "Agent Cockpit",
         description: "Sessions, tools, channels, and operations",
         shortcut: "⌘2",
@@ -34,6 +37,7 @@ export const PRODUCT_MODES = [
     },
     {
         id: "imagine" as const,
+        labelKey: "nav.imagine",
         label: "Imagine",
         description: "Create and manage generated images",
         shortcut: "⌘3",
@@ -48,6 +52,7 @@ export function ModeNavigator({
     sidebarOpen,
     gatewayRunning,
 }: ModeNavigatorProps) {
+    const { t } = useI18n();
     const modeRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
     const handleModeKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -72,6 +77,7 @@ export function ModeNavigator({
         <nav aria-label="Product modes" className="space-y-2 border-t border-border/50 pt-3">
             <div role="tablist" aria-label="Switch workspace" className="space-y-1">
                 {PRODUCT_MODES.map((mode, index) => {
+                    const label = t(mode.labelKey);
                     const isActive = activeMode === mode.id;
                     const showGatewayStatus = mode.id === "thinclaw" && gatewayRunning;
                     return (
@@ -80,7 +86,7 @@ export function ModeNavigator({
                             key={mode.id}
                             role="tab"
                             aria-selected={isActive}
-                            aria-label={sidebarOpen ? undefined : mode.label}
+                            aria-label={sidebarOpen ? undefined : label}
                             tabIndex={isActive || (activeMode === "settings" && index === 0) ? 0 : -1}
                             onKeyDown={(event) => handleModeKeyDown(event, index)}
                             onClick={() => onModeChange(mode.id)}
@@ -92,7 +98,7 @@ export function ModeNavigator({
                                     ? "bg-accent text-foreground shadow-sm ring-1 ring-primary/20"
                                     : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
                             )}
-                            title={!sidebarOpen ? mode.label : undefined}
+                            title={!sidebarOpen ? label : undefined}
                         >
                             <span className="relative shrink-0">
                                 <mode.Icon isActive={isActive} size={22} />
@@ -106,7 +112,7 @@ export function ModeNavigator({
                             {sidebarOpen && (
                                 <span className="min-w-0 flex-1">
                                     <span className="flex items-center justify-between gap-2">
-                                        <span className="truncate text-sm font-semibold">{mode.label}</span>
+                                        <span className="truncate text-sm font-semibold">{label}</span>
                                         <kbd className="text-[10px] font-normal text-muted-foreground">{mode.shortcut}</kbd>
                                     </span>
                                     <span className="block truncate text-[10px] text-muted-foreground">
@@ -132,7 +138,7 @@ export function ModeNavigator({
                 <Command className="size-4" aria-hidden="true" />
                 {sidebarOpen && (
                     <>
-                        <span className="flex-1 text-left">Commands</span>
+                        <span className="flex-1 text-left">{t("nav.commands")}</span>
                         <kbd className="text-[10px] text-muted-foreground">⌘K</kbd>
                     </>
                 )}
@@ -144,10 +150,10 @@ export function ModeNavigator({
                 onClick={() => onModeChange("settings")}
                 className={cn(sidebarOpen ? "w-full justify-start px-3" : "mx-auto flex")}
                 aria-current={activeMode === "settings" ? "page" : undefined}
-                aria-label="Settings"
+                aria-label={t("nav.settings")}
             >
                 <Settings className="size-4" aria-hidden="true" />
-                {sidebarOpen && <span>Settings</span>}
+                {sidebarOpen && <span>{t("nav.settings")}</span>}
             </Button>
         </nav>
     );

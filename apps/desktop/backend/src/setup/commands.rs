@@ -10,6 +10,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
     builder.commands(tauri_specta::collect_commands![
         // ── Core ────────────────────────────────────────────────────────
         crate::greet,
+        crate::i18n::direct_i18n_get_catalog,
         // ── Chat ────────────────────────────────────────────────────────
         crate::chat::direct_chat_stream,
         crate::chat::direct_chat_completion,
