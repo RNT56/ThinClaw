@@ -1226,6 +1226,57 @@ mod tests {
         )
     }
 
+    fn send_message_request(client_message_id: Option<String>) -> SendMessageRequest {
+        SendMessageRequest {
+            content: "hello from a retry-safe client".to_string(),
+            thread_id: None,
+            user_id: None,
+            actor_id: None,
+            client_message_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_send_rejects_malformed_client_message_id_before_submission() {
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let state = test_gateway_state(session_manager, None);
+
+        let error = chat_send_handler(
+            State(state),
+            HeaderMap::new(),
+            device_identity(),
+            Json(send_message_request(Some("not-a-uuid".to_string()))),
+        )
+        .await
+        .expect_err("malformed client message IDs must be rejected");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1, "client_message_id must be a UUID");
+    }
+
+    #[tokio::test]
+    async fn chat_send_returns_the_original_acceptance_for_an_idempotent_retry() {
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let state = test_gateway_state(session_manager, None);
+        let client_message_id = Uuid::new_v4();
+        let accepted_message_id = Uuid::new_v4();
+        let key = format!("gateway-user::{client_message_id}");
+        remember_client_message(key, accepted_message_id);
+
+        let (status, Json(response)) = chat_send_handler(
+            State(state),
+            HeaderMap::new(),
+            device_identity(),
+            Json(send_message_request(Some(client_message_id.to_string()))),
+        )
+        .await
+        .expect("an idempotent retry should return the first acceptance");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(response.message_id, accepted_message_id);
+        assert_eq!(response.status, "accepted");
+    }
+
     #[tokio::test]
     async fn watch_companion_high_risk_approve_is_forbidden() {
         let session_manager = Arc::new(crate::agent::SessionManager::new());
