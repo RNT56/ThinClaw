@@ -252,14 +252,14 @@ impl InferenceRouter {
         let embed_id = config.embedding_backend.as_deref().unwrap_or("local");
         tracing::info!("[inference_router] Embedding backend: {}", embed_id);
 
-        if embed_id != "local" {
+        let embedding_backend: Option<Arc<dyn EmbeddingBackend>> = if embed_id != "local" {
             if let Some(api_key) = self.get_secret(embed_id) {
                 let model_override = config
                     .inference_models
                     .as_ref()
                     .and_then(|m| m.get("embedding"))
                     .cloned();
-                let maybe_backend: Option<Arc<dyn EmbeddingBackend>> = match embed_id {
+                match embed_id {
                     "openai" => Some(Arc::new(
                         super::embedding::cloud_openai::OpenAiEmbeddingBackend::new(
                             api_key,
@@ -288,20 +288,27 @@ impl InferenceRouter {
                         tracing::warn!("[inference_router] Unknown embedding backend: {}", other);
                         None
                     }
-                };
-                if let Some(backend) = maybe_backend {
-                    tracing::info!(
-                        "[inference_router] Activated embedding backend: {} ({}d)",
-                        embed_id,
-                        backend.dimensions()
-                    );
-                    *self.embedding.write().await = Some(backend);
                 }
+            } else {
+                tracing::warn!(
+                    "[inference_router] Embedding backend '{}' has no configured secret",
+                    embed_id
+                );
+                None
             }
         } else {
-            // Local — clear any stale cloud embedding backend
-            *self.embedding.write().await = None;
+            None
+        };
+        if let Some(backend) = embedding_backend.as_ref() {
+            tracing::info!(
+                "[inference_router] Activated embedding backend: {} ({}d)",
+                embed_id,
+                backend.dimensions()
+            );
         }
+        // Replace atomically even when the new selection is local, unknown, or
+        // missing a key so a previous cloud backend can never remain active.
+        *self.embedding.write().await = embedding_backend;
 
         // ── TTS backend ─────────────────────────────────────────────────
         let tts_id = config.tts_backend.as_deref().unwrap_or("local");

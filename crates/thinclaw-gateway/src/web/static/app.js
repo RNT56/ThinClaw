@@ -10773,7 +10773,7 @@ const SETTINGS_SCHEMA = {
       { key: 'routines_enabled', label: 'Routines enabled', type: 'bool', desc: 'Enable the cron-based routine system' },
       { key: 'skills_enabled', label: 'Skills enabled', type: 'bool', desc: 'Enable the skills system' },
       { key: 'claude_code_enabled', label: 'Claude Code sandbox', type: 'bool', desc: 'Enable Claude Code as a tool' },
-      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "claude-sonnet-4-6", "claude-opus-4-5")', nullable: true },
+      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "claude-sonnet-5", "claude-opus-4-5")', nullable: true },
       { key: 'claude_code_max_turns', label: 'Claude Code max turns', type: 'number', desc: 'Maximum agentic turns per Claude Code job', min: 1, nullable: true },
       { key: 'codex_code_enabled', label: 'Codex sandbox', type: 'bool', desc: 'Enable Codex CLI as a container coding agent' },
       { key: 'codex_code_model', label: 'Codex model', type: 'text', desc: 'Model for Codex containers (e.g. "gpt-5.3-codex")', nullable: true },

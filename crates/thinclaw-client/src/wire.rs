@@ -170,6 +170,12 @@ pub enum SseEvent {
         message: String,
         thread_id: Option<String>,
     },
+    /// A structured context-window capacity transition.
+    ContextPressure {
+        level: String,
+        usage_percent: Option<f64>,
+        thread_id: Option<String>,
+    },
     /// A structured internal agent lifecycle transition.
     AgentLifecycle {
         phase: String,
@@ -220,6 +226,7 @@ impl SseEvent {
             | Self::ToolResult { thread_id, .. }
             | Self::StreamChunk { thread_id, .. }
             | Self::Status { thread_id, .. }
+            | Self::ContextPressure { thread_id, .. }
             | Self::AgentLifecycle { thread_id, .. }
             | Self::UsageUpdate { thread_id, .. }
             | Self::ApprovalNeeded { thread_id, .. }
@@ -276,6 +283,11 @@ impl SseEvent {
             },
             "status" => Self::Status {
                 message: s("message").unwrap_or_default(),
+                thread_id: opt("thread_id"),
+            },
+            "context_pressure" => Self::ContextPressure {
+                level: s("level").unwrap_or_else(|| "none".to_string()),
+                usage_percent: value.get("usage_percent").and_then(|value| value.as_f64()),
                 thread_id: opt("thread_id"),
             },
             "agent_lifecycle" => Self::AgentLifecycle {
@@ -358,6 +370,26 @@ mod tests {
             }
         );
         assert_eq!(event.thread_id(), Some("t-2"));
+    }
+
+    #[test]
+    fn parses_structured_context_pressure_event() {
+        let event = SseEvent::from_json(serde_json::json!({
+            "type": "context_pressure",
+            "level": "warning",
+            "usage_percent": 88.5,
+            "thread_id": "t-3"
+        }));
+
+        assert_eq!(
+            event,
+            SseEvent::ContextPressure {
+                level: "warning".into(),
+                usage_percent: Some(88.5),
+                thread_id: Some("t-3".into()),
+            }
+        );
+        assert_eq!(event.thread_id(), Some("t-3"));
     }
 
     #[test]

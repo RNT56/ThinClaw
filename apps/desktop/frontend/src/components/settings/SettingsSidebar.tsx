@@ -101,6 +101,7 @@ export function SettingsSidebar({ activePage, onPageChange, onBack, sidebarOpen 
             <motion.button
                 variants={itemVariants}
                 onClick={onBack}
+                aria-label="Back to Workbench"
                 className={cn(
                     "flex items-center text-muted-foreground hover:text-foreground mb-6 transition-all duration-300 group rounded-lg hover:bg-accent shrink-0 h-10 px-3",
                     sidebarOpen ? "w-full" : "w-10 mx-auto"
@@ -146,6 +147,8 @@ export function SettingsSidebar({ activePage, onPageChange, onBack, sidebarOpen 
                                         key={item.id}
                                         variants={itemVariants}
                                         onClick={() => onPageChange(item.id as SettingsPage)}
+                                        aria-label={item.label}
+                                        aria-current={isActive ? 'page' : undefined}
                                         className={cn(
                                             "flex items-center rounded-lg text-sm transition-all duration-300 group w-full px-3 h-10 shrink-0",
                                             isActive

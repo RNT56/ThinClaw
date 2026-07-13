@@ -66,9 +66,7 @@ export function unwrapResult<T, E>(
         return result.data;
     }
     const prefix = label ? `[${label}]` : "[Tauri command]";
-    const message =
-        typeof result.error === "string"
-            ? result.error
-            : JSON.stringify(result.error);
+    const message = bridgeErrorMessage(result.error);
     throw new Error(`${prefix} ${message}`);
 }
+import { bridgeErrorMessage } from './command-errors';

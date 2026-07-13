@@ -707,7 +707,7 @@ async fn build_verification_request(
             &context.settings,
             providers_settings,
             slug,
-            "anthropic.claude-3-sonnet-20240229-v1:0",
+            "anthropic.claude-opus-4-8",
         );
         if let Some(api_key) = resolve_provider_secret(
             "bedrock",
@@ -721,7 +721,7 @@ async fn build_verification_request(
             let region = bedrock_region(&context.settings);
             return Ok(Some(VerificationRequest {
                 configured_model,
-                default_model: "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+                default_model: "anthropic.claude-opus-4-8".to_string(),
                 transport: VerificationTransport::OpenAiCompatible {
                     base_url: crate::llm::discovery::bedrock_mantle_base_url(&region),
                     auth_header: Some(format!("Bearer {api_key}")),
@@ -745,7 +745,7 @@ async fn build_verification_request(
             .map(|key| format!("Bearer {key}"));
             return Ok(Some(VerificationRequest {
                 configured_model,
-                default_model: "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+                default_model: "anthropic.claude-opus-4-8".to_string(),
                 transport: VerificationTransport::OpenAiCompatible {
                     base_url: proxy_url,
                     auth_header,
@@ -1190,10 +1190,10 @@ mod tests {
         let selected = choose_verification_model(
             "bedrock",
             Some("missing"),
-            "anthropic.claude-3-sonnet-20240229-v1:0",
+            "anthropic.claude-opus-4-8",
             &[
                 "anthropic.claude-3-haiku-20240307-v1:0".to_string(),
-                "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+                "anthropic.claude-opus-4-8".to_string(),
             ],
         );
         assert_eq!(

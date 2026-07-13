@@ -8,6 +8,14 @@ use thinclaw_types::error::ConfigError;
 
 use crate::helpers::{optional_env, parse_bool_env};
 
+fn split_channel_list(raw: &str) -> Vec<String> {
+    raw.split([',', '\n'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 /// Channel configurations.
 #[derive(Debug, Clone)]
 pub struct ChannelsConfig {
@@ -226,53 +234,53 @@ impl ChannelsConfig {
             None
         };
 
-        let signal = if let Some(http_url) = optional_env("SIGNAL_HTTP_URL")? {
-            let account = optional_env("SIGNAL_ACCOUNT")?.ok_or(ConfigError::InvalidValue {
-                key: "SIGNAL_ACCOUNT".to_string(),
-                message: "SIGNAL_ACCOUNT is required when SIGNAL_HTTP_URL is set".to_string(),
+        let signal_http_url =
+            optional_env("SIGNAL_HTTP_URL")?.or(settings.channels.signal_http_url.clone());
+        let signal_enabled = parse_bool_env(
+            "SIGNAL_ENABLED",
+            settings.channels.signal_enabled || signal_http_url.is_some(),
+        )?;
+        let signal = if signal_enabled {
+            let http_url = signal_http_url.ok_or(ConfigError::InvalidValue {
+                key: "SIGNAL_HTTP_URL".to_string(),
+                message: "SIGNAL_HTTP_URL is required when Signal is enabled".to_string(),
             })?;
-            let allow_from = match std::env::var_os("SIGNAL_ALLOW_FROM") {
-                None => vec![account.clone()],
-                Some(val) => {
-                    let s = val.to_string_lossy();
-                    s.split(',')
-                        .map(|e| e.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                }
-            };
-            let dm_policy =
-                optional_env("SIGNAL_DM_POLICY")?.unwrap_or_else(|| "pairing".to_string());
-            let group_policy =
-                optional_env("SIGNAL_GROUP_POLICY")?.unwrap_or_else(|| "allowlist".to_string());
+            let account = optional_env("SIGNAL_ACCOUNT")?
+                .or(settings.channels.signal_account.clone())
+                .ok_or(ConfigError::InvalidValue {
+                    key: "SIGNAL_ACCOUNT".to_string(),
+                    message: "SIGNAL_ACCOUNT is required when Signal is enabled".to_string(),
+                })?;
+            let allow_from = optional_env("SIGNAL_ALLOW_FROM")?
+                .or(settings.channels.signal_allow_from.clone())
+                .map(|raw| split_channel_list(&raw))
+                .unwrap_or_else(|| vec![account.clone()]);
+            let dm_policy = optional_env("SIGNAL_DM_POLICY")?
+                .or(settings.channels.signal_dm_policy.clone())
+                .unwrap_or_else(|| "pairing".to_string());
+            let group_policy = optional_env("SIGNAL_GROUP_POLICY")?
+                .or(settings.channels.signal_group_policy.clone())
+                .unwrap_or_else(|| "allowlist".to_string());
             Some(SignalConfig {
                 http_url,
                 account,
                 allow_from,
                 allow_from_groups: optional_env("SIGNAL_ALLOW_FROM_GROUPS")?
-                    .map(|s| {
-                        s.split(',')
-                            .map(|e| e.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect()
-                    })
+                    .or(settings.channels.signal_allow_from_groups.clone())
+                    .map(|raw| split_channel_list(&raw))
                     .unwrap_or_default(),
                 dm_policy,
                 group_policy,
                 group_allow_from: optional_env("SIGNAL_GROUP_ALLOW_FROM")?
-                    .map(|s| {
-                        s.split(',')
-                            .map(|e| e.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect()
-                    })
+                    .or(settings.channels.signal_group_allow_from.clone())
+                    .map(|raw| split_channel_list(&raw))
                     .unwrap_or_default(),
                 ignore_attachments: optional_env("SIGNAL_IGNORE_ATTACHMENTS")?
                     .map(|s| s.to_lowercase() == "true" || s == "1")
-                    .unwrap_or(false),
+                    .unwrap_or(settings.channels.signal_ignore_attachments),
                 ignore_stories: optional_env("SIGNAL_IGNORE_STORIES")?
                     .map(|s| s.to_lowercase() == "true" || s == "1")
-                    .unwrap_or(true),
+                    .unwrap_or(settings.channels.signal_ignore_stories),
             })
         } else {
             None
@@ -338,7 +346,7 @@ impl ChannelsConfig {
             discord: Self::resolve_discord(settings)?,
             gmail: Self::resolve_gmail()?,
             #[cfg(target_os = "macos")]
-            imessage: Self::resolve_imessage()?,
+            imessage: Self::resolve_imessage(settings)?,
             #[cfg(target_os = "macos")]
             apple_mail: Self::resolve_apple_mail(settings)?,
             bluebubbles: Self::resolve_bluebubbles(settings)?,
@@ -359,12 +367,8 @@ impl ChannelsConfig {
         }
 
         let relays = optional_env("NOSTR_RELAYS")?
-            .map(|s| {
-                s.split(',')
-                    .map(|r| r.trim().to_string())
-                    .filter(|r| !r.is_empty())
-                    .collect()
-            })
+            .or(settings.channels.nostr_relays.clone())
+            .map(|raw| split_channel_list(&raw))
             .unwrap_or_else(|| {
                 vec![
                     "wss://relay.damus.io".to_string(),
@@ -375,12 +379,7 @@ impl ChannelsConfig {
 
         let allow_from: Vec<String> = optional_env("NOSTR_ALLOW_FROM")?
             .or(settings.channels.nostr_allow_from.clone())
-            .map(|s| {
-                s.split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|raw| split_channel_list(&raw))
             .unwrap_or_default();
 
         let owner_pubkey = optional_env("NOSTR_OWNER_PUBKEY")?
@@ -674,12 +673,7 @@ impl ChannelsConfig {
 
         let allow_from = optional_env("DISCORD_ALLOW_FROM")?
             .or(settings.channels.discord_allow_from.clone())
-            .map(|s| {
-                s.split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|raw| split_channel_list(&raw))
             .unwrap_or_default();
 
         let stream_mode = optional_env("DISCORD_STREAM_MODE")?
@@ -696,19 +690,15 @@ impl ChannelsConfig {
     }
 
     #[cfg(target_os = "macos")]
-    fn resolve_imessage() -> Result<Option<IMessageChannelConfig>, ConfigError> {
-        let enabled = parse_bool_env("IMESSAGE_ENABLED", false)?;
+    fn resolve_imessage(settings: &Settings) -> Result<Option<IMessageChannelConfig>, ConfigError> {
+        let enabled = parse_bool_env("IMESSAGE_ENABLED", settings.channels.imessage_enabled)?;
         if !enabled {
             return Ok(None);
         }
 
         let allow_from = optional_env("IMESSAGE_ALLOW_FROM")?
-            .map(|s| {
-                s.split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .or(settings.channels.imessage_allow_from.clone())
+            .map(|raw| split_channel_list(&raw))
             .unwrap_or_default();
 
         let poll_interval_secs: u64 = optional_env("IMESSAGE_POLL_INTERVAL")?
@@ -718,6 +708,7 @@ impl ChannelsConfig {
                 key: "IMESSAGE_POLL_INTERVAL".to_string(),
                 message: format!("must be an integer: {e}"),
             })?
+            .or(settings.channels.imessage_poll_interval)
             .unwrap_or(3);
 
         Ok(Some(IMessageChannelConfig {
@@ -744,29 +735,10 @@ impl ChannelsConfig {
         let allow_from = settings
             .channels
             .apple_mail_allow_from
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                optional_env("APPLE_MAIL_ALLOW_FROM")
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    .map(|_| "")
-            })
-            .map(|_| {
-                // Re-read from whichever source had the value
-                let raw = settings
-                    .channels
-                    .apple_mail_allow_from
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| optional_env("APPLE_MAIL_ALLOW_FROM").ok().flatten())
-                    .unwrap_or_default();
-                raw.split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .or(optional_env("APPLE_MAIL_ALLOW_FROM")?)
+            .map(|raw| split_channel_list(&raw))
             .unwrap_or_default();
 
         let poll_interval_secs: u64 = settings
@@ -780,16 +752,14 @@ impl ChannelsConfig {
             })
             .unwrap_or(10);
 
-        let unread_only = if settings.channels.apple_mail_unread_only {
-            true
-        } else {
-            parse_bool_env("APPLE_MAIL_UNREAD_ONLY", true)?
-        };
-        let mark_as_read = if settings.channels.apple_mail_mark_as_read {
-            true
-        } else {
-            parse_bool_env("APPLE_MAIL_MARK_AS_READ", true)?
-        };
+        let unread_only = parse_bool_env(
+            "APPLE_MAIL_UNREAD_ONLY",
+            settings.channels.apple_mail_unread_only,
+        )?;
+        let mark_as_read = parse_bool_env(
+            "APPLE_MAIL_MARK_AS_READ",
+            settings.channels.apple_mail_mark_as_read,
+        )?;
 
         Ok(Some(AppleMailChannelConfig {
             allow_from,
@@ -847,12 +817,7 @@ impl ChannelsConfig {
 
         let allow_from = optional_env("BLUEBUBBLES_ALLOW_FROM")?
             .or(settings.channels.bluebubbles_allow_from.clone())
-            .map(|s| {
-                s.split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|raw| split_channel_list(&raw))
             .unwrap_or_default();
 
         let send_read_receipts = optional_env("BLUEBUBBLES_SEND_READ_RECEIPTS")?
@@ -947,6 +912,58 @@ mod tests {
     use crate::helpers::lock_env;
     #[cfg(feature = "nostr")]
     use secrecy::ExposeSecret;
+
+    fn clear_signal_env() {
+        // SAFETY: Only called while holding the shared environment lock.
+        unsafe {
+            for key in [
+                "SIGNAL_ENABLED",
+                "SIGNAL_HTTP_URL",
+                "SIGNAL_ACCOUNT",
+                "SIGNAL_ALLOW_FROM",
+                "SIGNAL_ALLOW_FROM_GROUPS",
+                "SIGNAL_DM_POLICY",
+                "SIGNAL_GROUP_POLICY",
+                "SIGNAL_GROUP_ALLOW_FROM",
+                "SIGNAL_IGNORE_ATTACHMENTS",
+                "SIGNAL_IGNORE_STORIES",
+            ] {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    #[test]
+    fn signal_resolution_uses_persisted_channel_settings() {
+        let _guard = crate::helpers::lock_env();
+        clear_signal_env();
+        let mut settings = Settings::default();
+        settings.channels.signal_enabled = true;
+        settings.channels.signal_http_url = Some("http://127.0.0.1:8080".to_string());
+        settings.channels.signal_account = Some("+12025550100".to_string());
+        settings.channels.signal_allow_from = Some("+12025550101\n+12025550102".to_string());
+        settings.channels.signal_dm_policy = Some("allowlist".to_string());
+        settings.channels.signal_ignore_attachments = true;
+        settings.channels.signal_ignore_stories = false;
+
+        let resolved = ChannelsConfig::resolve(&settings)
+            .expect("channel settings should resolve")
+            .signal
+            .expect("Signal should be enabled");
+        assert_eq!(resolved.allow_from, ["+12025550101", "+12025550102"]);
+        assert_eq!(resolved.dm_policy, "allowlist");
+        assert!(resolved.ignore_attachments);
+        assert!(!resolved.ignore_stories);
+        clear_signal_env();
+    }
+
+    #[test]
+    fn split_channel_list_accepts_commas_and_newlines() {
+        assert_eq!(
+            split_channel_list("alpha, beta\ngamma\n\n"),
+            ["alpha", "beta", "gamma"]
+        );
+    }
 
     #[cfg(feature = "nostr")]
     fn clear_nostr_env() {

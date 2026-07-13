@@ -14,7 +14,7 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 pub async fn thinclaw_security_posture(
     runtime: State<'_, ThinClawRuntimeState>,
     manager: State<'_, ThinClawManager>,
-) -> Result<SecurityPosture, String> {
+) -> Result<SecurityPosture, crate::thinclaw::bridge::BridgeError> {
     let runtime_mode = runtime.mode_label().await.to_string();
     let auto_approve_enabled = manager
         .get_config()

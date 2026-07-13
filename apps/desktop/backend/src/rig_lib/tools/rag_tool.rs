@@ -113,7 +113,7 @@ impl Tool for RAGTool {
                 let context = results.join("\n\n---\n\n");
                 Ok(format!("**Found in Knowledge Base:**\n{}", context))
             }
-            Err(e) => Err(RAGError::Retrieval(e)),
+            Err(e) => Err(RAGError::Retrieval(e.to_string())),
         }
     }
 }

@@ -82,6 +82,7 @@ export function FleetCommandCenter() {
     const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
     const [showTerminal, setShowTerminal] = useState(true);
     const [isSpawning, setIsSpawning] = useState(false);
+    const [fleetError, setFleetError] = useState<string | null>(null);
     const [realtimeLogs, setRealtimeLogs] = useState<Record<string, string[]>>({}); // agentId -> logs
     const [agentStates, setAgentStates] = useState<Record<string, AgentRealtimeState>>({});
 
@@ -94,8 +95,10 @@ export function FleetCommandCenter() {
         try {
             const data = await thinclaw.getFleetStatus();
             setAgents(data);
+            setFleetError(null);
         } catch (e) {
             console.error("Fleet fetch error:", e);
+            setFleetError(String(e));
         }
     }, []);
 
@@ -370,10 +373,19 @@ export function FleetCommandCenter() {
 
     const handleBroadcast = async (command: string) => {
         try {
-            await thinclaw.broadcastCommand(command);
-            toast.success('Broadcast sent to all sessions');
+            const result = await thinclaw.broadcastCommand(command);
+            if (result.failed > 0) {
+                const failed = result.deliveries
+                    .filter(delivery => !delivery.delivered)
+                    .map(delivery => delivery.agent_name)
+                    .join(', ');
+                toast.warning(`Delivered to ${result.delivered}/${result.attempted} agents; failed: ${failed}`);
+            } else {
+                toast.success(`Broadcast delivered to ${result.delivered} agent${result.delivered === 1 ? '' : 's'}`);
+            }
+            await refreshFleet();
         } catch (e) {
-            toast.error('Broadcast failed');
+            toast.error(String(e));
             console.error("Broadcast error:", e);
         }
     };
@@ -435,6 +447,12 @@ export function FleetCommandCenter() {
                     </button>
                 </div>
             </div>
+
+            {fleetError && (
+                <div role="alert" className="border-b border-red-500/20 bg-red-500/10 px-6 py-2 text-xs text-red-200">
+                    Fleet status unavailable: {fleetError}
+                </div>
+            )}
 
             {/* Main Area */}
             <div className="flex-1 relative">
@@ -661,7 +679,7 @@ export function FleetCommandCenter() {
                     <input
                         name="cmd"
                         type="text"
-                        placeholder="Broadcast to all sessions..."
+                        placeholder="Broadcast once to each agent..."
                         className="flex-1 bg-transparent border-none outline-hidden font-mono text-sm text-zinc-300 placeholder:text-zinc-600"
                         autoComplete="off"
                     />

@@ -58,7 +58,7 @@ pub async fn thinclaw_session_search(
     let hits = store
         .search_conversation_messages(USER_ID, &query, None, None, None, limit)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let mut service = thinclaw_core::agent::session_search::SessionSearchService::new();
     if summarize {

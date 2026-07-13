@@ -14,7 +14,7 @@ impl RemoteGatewayProxy {
         &self,
         session_key: &str,
         text: &str,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let thread_id = if session_key == "agent:main" || session_key.trim().is_empty() {
             serde_json::Value::Null
         } else {
@@ -31,7 +31,10 @@ impl RemoteGatewayProxy {
     }
 
     /// Abort a running chat turn.
-    pub async fn abort_chat(&self, session_key: &str) -> Result<(), String> {
+    pub async fn abort_chat(
+        &self,
+        session_key: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             "/api/chat/abort",
             &serde_json::json!({ "thread_id": remote_thread_id(session_key) }),
@@ -41,7 +44,10 @@ impl RemoteGatewayProxy {
     }
 
     /// Delete a chat session/thread.
-    pub async fn delete_session(&self, session_key: &str) -> Result<(), String> {
+    pub async fn delete_session(
+        &self,
+        session_key: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         if session_key == "agent:main" {
             return Err(Self::unavailable(
                 "session delete",
@@ -57,7 +63,10 @@ impl RemoteGatewayProxy {
     }
 
     /// Reset (clear history of) a chat session.
-    pub async fn reset_session(&self, session_key: &str) -> Result<(), String> {
+    pub async fn reset_session(
+        &self,
+        session_key: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let thread_id = required_remote_thread_id(session_key, "session reset")?;
         self.post_json(
             &format!("/api/chat/thread/{}/reset", urlencoding::encode(&thread_id)),
@@ -68,7 +77,9 @@ impl RemoteGatewayProxy {
     }
 
     /// Get all chat sessions/threads.
-    pub async fn get_sessions(&self) -> Result<serde_json::Value, String> {
+    pub async fn get_sessions(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json("/api/chat/threads").await
     }
 
@@ -77,7 +88,7 @@ impl RemoteGatewayProxy {
         &self,
         session_key: &str,
         limit: u32,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let mut query = format!("/api/chat/history?limit={}", limit);
         if session_key != "agent:main" && !session_key.trim().is_empty() {
             query.push_str("&thread_id=");
@@ -92,7 +103,7 @@ impl RemoteGatewayProxy {
         approval_id: &str,
         approved: bool,
         allow_session: bool,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let action = if approved && allow_session {
             "always"
         } else if approved {
@@ -119,7 +130,7 @@ impl RemoteGatewayProxy {
         &self,
         session_key: &str,
         format: &str,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let thread_id = required_remote_thread_id(session_key, "session export")?;
         self.get_json(&format!(
             "/api/chat/thread/{}/export?format={}",
@@ -129,7 +140,10 @@ impl RemoteGatewayProxy {
         .await
     }
 
-    pub async fn compact_session(&self, session_key: &str) -> Result<serde_json::Value, String> {
+    pub async fn compact_session(
+        &self,
+        session_key: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let thread_id = required_remote_thread_id(session_key, "session compaction")?;
         self.post_json(
             &format!(

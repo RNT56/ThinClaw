@@ -98,6 +98,8 @@ pub struct ThinClawStatus {
     pub remote_token: Option<String>,
     pub has_remote_token: bool,
     pub device_id: String,
+    /// Compatibility field. Always empty in broad status responses; use the
+    /// explicit reveal command for a user-initiated copy action.
     pub auth_token: String,
     pub state_dir: String,
     pub has_huggingface_token: bool,

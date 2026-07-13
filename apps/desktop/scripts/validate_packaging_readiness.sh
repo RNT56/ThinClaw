@@ -68,7 +68,60 @@ if (!keychain.includes('const SERVICE: &str = "com.thinclaw.desktop";')) {
   fail('Keychain service must match the bundle identifier.');
 }
 
-console.log('Bundle identity, updater metadata, entitlements, Info.plist, and keychain service are consistent.');
+const mainCapability = JSON.parse(
+  fs.readFileSync('backend/capabilities/default.json', 'utf8'),
+);
+const spotlightCapability = JSON.parse(
+  fs.readFileSync('backend/capabilities/spotlight.json', 'utf8'),
+);
+const permissionId = (permission) =>
+  typeof permission === 'string' ? permission : permission.identifier;
+const mainPermissionIds = mainCapability.permissions.map(permissionId);
+const mainSerialized = JSON.stringify(mainCapability);
+
+if (JSON.stringify(mainCapability.windows) !== JSON.stringify(['main'])) {
+  fail('The default capability must apply only to the main window.');
+}
+for (const forbidden of [
+  'shell:allow-execute',
+  'opener:allow-open-path',
+  'fs:scope',
+  '$HOME/**',
+  '/Users/',
+]) {
+  if (mainSerialized.includes(forbidden)) fail(`Forbidden capability scope: ${forbidden}`);
+}
+for (const required of [
+  'opener:allow-default-urls',
+  'core:event:default',
+  'core:window:default',
+  'fs:default',
+  'fs:allow-write-file',
+  'fs:allow-exists',
+  'updater:default',
+  'process:default',
+]) {
+  if (!mainPermissionIds.includes(required)) fail(`Missing main-window permission: ${required}`);
+}
+for (const required of ['fs:allow-write-file', 'fs:allow-exists']) {
+  const permission = mainCapability.permissions.find((entry) => permissionId(entry) === required);
+  const paths = permission?.allow?.map((entry) => entry.path) ?? [];
+  if (JSON.stringify(paths) !== JSON.stringify(['$DOWNLOAD/*'])) {
+    fail(`${required} must be restricted to direct children of Downloads.`);
+  }
+}
+if (JSON.stringify(spotlightCapability.windows) !== JSON.stringify(['spotlight'])) {
+  fail('The Spotlight capability must apply only to the spotlight window.');
+}
+const spotlightPermissionIds = spotlightCapability.permissions.map(permissionId).sort();
+if (
+  JSON.stringify(spotlightPermissionIds) !==
+  JSON.stringify(['core:event:default', 'core:window:default'])
+) {
+  fail(`Unexpected Spotlight permissions: ${spotlightPermissionIds.join(', ')}`);
+}
+
+console.log('Bundle identity, updater metadata, entitlements, keychain service, and window capabilities are consistent.');
 NODE
 
 echo "== Engine override matrix =="
@@ -98,7 +151,7 @@ NODE
 done
 
 echo "== Focused platform tests =="
-cargo test --manifest-path backend/Cargo.toml --locked thinclaw::ironclaw_secrets::tests:: -- --test-threads=1
+cargo test --manifest-path backend/Cargo.toml --locked thinclaw::secrets_adapter::tests:: -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked personas::tests::legacy_scrappy_persona_aliases_to_thinclaw -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked cloud::providers::icloud::tests:: -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked cloud::migration::tests::test_validated_manifest_relative_path_rejects_traversal -- --test-threads=1

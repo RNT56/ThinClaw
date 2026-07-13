@@ -9,6 +9,7 @@ use crate::pairing::PairingStore;
 use crate::wasm::capabilities::ChannelCapabilities;
 use crate::wasm::host::ChannelWorkspaceStore;
 use crate::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
+use crate::wasm::schema::{SecretSetupSchema, SetupSchema};
 use thinclaw_channels_core::Channel;
 
 fn create_test_channel() -> WasmChannel {
@@ -33,6 +34,30 @@ fn create_test_channel() -> WasmChannel {
 fn test_channel_name() {
     let channel = create_test_channel();
     assert_eq!(channel.name(), "test");
+}
+
+#[test]
+fn test_channel_maps_manifest_setup_to_secret_only_config_schema() {
+    let channel = create_test_channel().with_setup_schema(SetupSchema {
+        required_secrets: vec![SecretSetupSchema {
+            name: "test_bot_token".to_string(),
+            prompt: "Bot token".to_string(),
+            validation: None,
+            optional: false,
+            auto_generate: None,
+        }],
+        validation_endpoint: None,
+    });
+
+    let schema = channel
+        .config_schema()
+        .expect("setup schema should surface");
+    assert_eq!(schema.channel_id, "test");
+    assert_eq!(schema.fields.len(), 1);
+    assert_eq!(schema.fields[0].id, "test_bot_token");
+    assert_eq!(schema.fields[0].field_type, "password");
+    assert!(schema.fields[0].required);
+    assert!(schema.fields[0].default_value.is_none());
 }
 
 #[test]
@@ -735,6 +760,26 @@ fn test_status_to_wit_generic_status() {
 }
 
 #[test]
+fn test_status_to_wit_context_pressure() {
+    use super::conversions::status_to_wit;
+
+    let wit = status_to_wit(
+        &thinclaw_channels_core::StatusUpdate::ContextPressure {
+            level: "critical".into(),
+            usage_percent: 97.25,
+        },
+        &serde_json::json!({"thread_id": "thread-1"}),
+    );
+
+    assert!(matches!(
+        wit.status,
+        super::wit_channel::StatusType::ContextPressure
+    ));
+    assert_eq!(wit.message, "Context pressure: critical (97.2%)");
+    assert!(wit.metadata_json.contains("thread-1"));
+}
+
+#[test]
 fn test_status_to_wit_subagent_spawned_uses_structured_payload() {
     use super::conversions::status_to_wit;
 
@@ -1176,6 +1221,7 @@ fn test_clone_wit_status_update_all_variants() {
         wit_channel::StatusType::ToolResult,
         wit_channel::StatusType::ApprovalNeeded,
         wit_channel::StatusType::Status,
+        wit_channel::StatusType::ContextPressure,
         wit_channel::StatusType::JobStarted,
         wit_channel::StatusType::AuthRequired,
         wit_channel::StatusType::AuthCompleted,

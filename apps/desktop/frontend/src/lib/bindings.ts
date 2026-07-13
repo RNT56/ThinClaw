@@ -8,7 +8,10 @@ export const commands = {
 async greet(name: string) : Promise<string> {
     return await TAURI_INVOKE("greet", { name });
 },
-async directChatStream(payload: DirectChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Promise<Result<null, string>> {
+async directI18nGetCatalog(locale: string) : Promise<DesktopI18nCatalog> {
+    return await TAURI_INVOKE("direct_i18n_get_catalog", { locale });
+},
+async directChatStream(payload: DirectChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_chat_stream", { payload, onEvent }) };
 } catch (e) {
@@ -16,7 +19,7 @@ async directChatStream(payload: DirectChatPayload, onEvent: TAURI_CHANNEL<Stream
     else return { status: "error", error: e  as any };
 }
 },
-async directChatCompletion(payload: DirectChatPayload) : Promise<Result<string, string>> {
+async directChatCompletion(payload: DirectChatPayload) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_chat_completion", { payload }) };
 } catch (e) {
@@ -24,7 +27,7 @@ async directChatCompletion(payload: DirectChatPayload) : Promise<Result<string, 
     else return { status: "error", error: e  as any };
 }
 },
-async directChatCountTokens(conversationId: string) : Promise<Result<DirectTokenUsage, string>> {
+async directChatCountTokens(conversationId: string) : Promise<Result<DirectTokenUsage, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_chat_count_tokens", { conversationId }) };
 } catch (e) {
@@ -32,7 +35,7 @@ async directChatCountTokens(conversationId: string) : Promise<Result<DirectToken
     else return { status: "error", error: e  as any };
 }
 },
-async directRuntimeStartChatServer(modelPath: string, contextSize: number, template: string | null, mmproj: string | null, exposeNetwork: boolean | null, mlock: boolean | null, quantizeKv: boolean | null) : Promise<Result<null, string>> {
+async directRuntimeStartChatServer(modelPath: string, contextSize: number, template: string | null, mmproj: string | null, exposeNetwork: boolean | null, mlock: boolean | null, quantizeKv: boolean | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_chat_server", { modelPath, contextSize, template, mmproj, exposeNetwork, mlock, quantizeKv }) };
 } catch (e) {
@@ -40,7 +43,7 @@ async directRuntimeStartChatServer(modelPath: string, contextSize: number, templ
     else return { status: "error", error: e  as any };
 }
 },
-async directRuntimeStopChatServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStopChatServer(modelPath: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_stop_chat_server", { modelPath }) };
 } catch (e) {
@@ -48,7 +51,7 @@ async directRuntimeStopChatServer(modelPath: string) : Promise<Result<null, stri
     else return { status: "error", error: e  as any };
 }
 },
-async directRuntimeStartEmbeddingServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStartEmbeddingServer(modelPath: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_embedding_server", { modelPath }) };
 } catch (e) {
@@ -56,7 +59,7 @@ async directRuntimeStartEmbeddingServer(modelPath: string) : Promise<Result<null
     else return { status: "error", error: e  as any };
 }
 },
-async directRuntimeStartSummarizerServer(modelPath: string, contextSize: number) : Promise<Result<null, string>> {
+async directRuntimeStartSummarizerServer(modelPath: string, contextSize: number) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_summarizer_server", { modelPath, contextSize }) };
 } catch (e) {
@@ -70,7 +73,7 @@ async directRuntimeGetSidecarStatus() : Promise<SidecarStatus> {
 async directRuntimeGetChatServerConfig() : Promise<ChatServerConfig | null> {
     return await TAURI_INVOKE("direct_runtime_get_chat_server_config");
 },
-async directRuntimeStartSttServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStartSttServer(modelPath: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_stt_server", { modelPath }) };
 } catch (e) {
@@ -78,7 +81,7 @@ async directRuntimeStartSttServer(modelPath: string) : Promise<Result<null, stri
     else return { status: "error", error: e  as any };
 }
 },
-async directRuntimeStartImageServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStartImageServer(modelPath: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_image_server", { modelPath }) };
 } catch (e) {
@@ -86,7 +89,7 @@ async directRuntimeStartImageServer(modelPath: string) : Promise<Result<null, st
     else return { status: "error", error: e  as any };
 }
 },
-async directRuntimeStartTtsServer(modelPath: string) : Promise<Result<null, string>> {
+async directRuntimeStartTtsServer(modelPath: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_tts_server", { modelPath }) };
 } catch (e) {
@@ -94,7 +97,7 @@ async directRuntimeStartTtsServer(modelPath: string) : Promise<Result<null, stri
     else return { status: "error", error: e  as any };
 }
 },
-async directRuntimeCancelGeneration() : Promise<Result<null, string>> {
+async directRuntimeCancelGeneration() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_cancel_generation") };
 } catch (e) {
@@ -114,7 +117,7 @@ async directRuntimeCancelGeneration() : Promise<Result<null, string>> {
  * The `model_path` is only used for the local Piper backend — it should point
  * to the `.onnx` file (Piper locates the companion `.onnx.json` automatically).
  */
-async directMediaTtsSynthesize(text: string, modelPath: string | null) : Promise<Result<DirectTtsResponse, string>> {
+async directMediaTtsSynthesize(text: string, modelPath: string | null) : Promise<Result<DirectTtsResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_tts_synthesize", { text, modelPath }) };
 } catch (e) {
@@ -129,7 +132,7 @@ async directMediaTtsSynthesize(text: string, modelPath: string | null) : Promise
  * for local Piper it returns a hardcoded set of bundled voices.
  * Returns an empty list if no TTS backend is active.
  */
-async directMediaTtsListVoices() : Promise<Result<VoiceInfo[], string>> {
+async directMediaTtsListVoices() : Promise<Result<VoiceInfo[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_tts_list_voices") };
 } catch (e) {
@@ -137,7 +140,7 @@ async directMediaTtsListVoices() : Promise<Result<VoiceInfo[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<DirectSttResponse, string>> {
+async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<DirectSttResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_transcribe_audio", { audioBytes }) };
 } catch (e) {
@@ -145,7 +148,7 @@ async directMediaTranscribeAudio(audioBytes: number[]) : Promise<Result<DirectSt
     else return { status: "error", error: e  as any };
 }
 },
-async directMediaGenerateImage(params: ImageGenParams) : Promise<Result<ImageResponse, string>> {
+async directMediaGenerateImage(params: ImageGenParams) : Promise<Result<ImageResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_media_generate_image", { params }) };
 } catch (e) {
@@ -153,7 +156,7 @@ async directMediaGenerateImage(params: ImageGenParams) : Promise<Result<ImageRes
     else return { status: "error", error: e  as any };
 }
 },
-async directRagIngestDocument(filePath: string, chatId: string | null, projectId: string | null, embeddingModelPath: string | null) : Promise<Result<DirectDocumentIngestResponse, string>> {
+async directRagIngestDocument(filePath: string, chatId: string | null, projectId: string | null, embeddingModelPath: string | null) : Promise<Result<DirectDocumentIngestResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_rag_ingest_document", { filePath, chatId, projectId, embeddingModelPath }) };
 } catch (e) {
@@ -161,7 +164,7 @@ async directRagIngestDocument(filePath: string, chatId: string | null, projectId
     else return { status: "error", error: e  as any };
 }
 },
-async directRagUploadDocument(fileBytes: number[], filename: string) : Promise<Result<DirectDocumentUploadResponse, string>> {
+async directRagUploadDocument(fileBytes: number[], filename: string) : Promise<Result<DirectDocumentUploadResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_rag_upload_document", { fileBytes, filename }) };
 } catch (e) {
@@ -169,7 +172,7 @@ async directRagUploadDocument(fileBytes: number[], filename: string) : Promise<R
     else return { status: "error", error: e  as any };
 }
 },
-async directRagRetrieveContext(query: string, chatId: string | null, docIds: string[] | null, projectId: string | null) : Promise<Result<string[], string>> {
+async directRagRetrieveContext(query: string, chatId: string | null, docIds: string[] | null, projectId: string | null) : Promise<Result<string[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_rag_retrieve_context", { query, chatId, docIds, projectId }) };
 } catch (e) {
@@ -177,7 +180,7 @@ async directRagRetrieveContext(query: string, chatId: string | null, docIds: str
     else return { status: "error", error: e  as any };
 }
 },
-async directRagCheckVectorIndexIntegrity() : Promise<Result<string, string>> {
+async directRagCheckVectorIndexIntegrity() : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_rag_check_vector_index_integrity") };
 } catch (e) {
@@ -185,7 +188,7 @@ async directRagCheckVectorIndexIntegrity() : Promise<Result<string, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async listModels() : Promise<Result<ModelFile[], string>> {
+async listModels() : Promise<Result<ModelFile[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_models") };
 } catch (e) {
@@ -193,7 +196,7 @@ async listModels() : Promise<Result<ModelFile[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async downloadModel(url: string, filename: string) : Promise<Result<string, string>> {
+async downloadModel(url: string, filename: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("download_model", { url, filename }) };
 } catch (e) {
@@ -201,7 +204,7 @@ async downloadModel(url: string, filename: string) : Promise<Result<string, stri
     else return { status: "error", error: e  as any };
 }
 },
-async cancelDownload(filename: string) : Promise<Result<null, string>> {
+async cancelDownload(filename: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_download", { filename }) };
 } catch (e) {
@@ -212,7 +215,7 @@ async cancelDownload(filename: string) : Promise<Result<null, string>> {
 async checkModelPath(path: string) : Promise<boolean> {
     return await TAURI_INVOKE("check_model_path", { path });
 },
-async openModelsFolder() : Promise<Result<null, string>> {
+async openModelsFolder() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_models_folder") };
 } catch (e) {
@@ -220,7 +223,7 @@ async openModelsFolder() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async deleteLocalModel(filename: string) : Promise<Result<null, string>> {
+async deleteLocalModel(filename: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_local_model", { filename }) };
 } catch (e) {
@@ -228,7 +231,7 @@ async deleteLocalModel(filename: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async openUrl(url: string) : Promise<Result<null, string>> {
+async openUrl(url: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_url", { url }) };
 } catch (e) {
@@ -236,7 +239,7 @@ async openUrl(url: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async checkMissingStandardAssets() : Promise<Result<StandardAsset[], string>> {
+async checkMissingStandardAssets() : Promise<Result<StandardAsset[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_missing_standard_assets") };
 } catch (e) {
@@ -244,7 +247,7 @@ async checkMissingStandardAssets() : Promise<Result<StandardAsset[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async downloadStandardAsset(filename: string) : Promise<Result<string, string>> {
+async downloadStandardAsset(filename: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("download_standard_asset", { filename }) };
 } catch (e) {
@@ -252,7 +255,7 @@ async downloadStandardAsset(filename: string) : Promise<Result<string, string>> 
     else return { status: "error", error: e  as any };
 }
 },
-async openStandardModelsFolder() : Promise<Result<null, string>> {
+async openStandardModelsFolder() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_standard_models_folder") };
 } catch (e) {
@@ -260,7 +263,7 @@ async openStandardModelsFolder() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async getModelMetadata(path: string) : Promise<Result<GGUFMetadata, string>> {
+async getModelMetadata(path: string) : Promise<Result<GGUFMetadata, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_model_metadata", { path }) };
 } catch (e) {
@@ -268,7 +271,7 @@ async getModelMetadata(path: string) : Promise<Result<GGUFMetadata, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async updateRemoteModelCatalog(entries: RemoteModelEntry[]) : Promise<Result<null, string>> {
+async updateRemoteModelCatalog(entries: RemoteModelEntry[]) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_remote_model_catalog", { entries }) };
 } catch (e) {
@@ -276,7 +279,7 @@ async updateRemoteModelCatalog(entries: RemoteModelEntry[]) : Promise<Result<nul
     else return { status: "error", error: e  as any };
 }
 },
-async getRemoteModelCatalog() : Promise<Result<RemoteModelEntry[], string>> {
+async getRemoteModelCatalog() : Promise<Result<RemoteModelEntry[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_remote_model_catalog") };
 } catch (e) {
@@ -284,7 +287,7 @@ async getRemoteModelCatalog() : Promise<Result<RemoteModelEntry[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryGetConversations() : Promise<Result<Conversation[], string>> {
+async directHistoryGetConversations() : Promise<Result<Conversation[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_get_conversations") };
 } catch (e) {
@@ -292,7 +295,7 @@ async directHistoryGetConversations() : Promise<Result<Conversation[], string>> 
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryCreateConversation(title: string, projectId: string | null) : Promise<Result<Conversation, string>> {
+async directHistoryCreateConversation(title: string, projectId: string | null) : Promise<Result<Conversation, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_create_conversation", { title, projectId }) };
 } catch (e) {
@@ -300,7 +303,7 @@ async directHistoryCreateConversation(title: string, projectId: string | null) :
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryDeleteConversation(id: string) : Promise<Result<null, string>> {
+async directHistoryDeleteConversation(id: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_delete_conversation", { id }) };
 } catch (e) {
@@ -308,7 +311,7 @@ async directHistoryDeleteConversation(id: string) : Promise<Result<null, string>
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryGetMessages(conversationId: string, limit: number | null, beforeCreatedAt: number | null) : Promise<Result<FrontendMessage[], string>> {
+async directHistoryGetMessages(conversationId: string, limit: number | null, beforeCreatedAt: number | null) : Promise<Result<FrontendMessage[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_get_messages", { conversationId, limit, beforeCreatedAt }) };
 } catch (e) {
@@ -316,7 +319,7 @@ async directHistoryGetMessages(conversationId: string, limit: number | null, bef
     else return { status: "error", error: e  as any };
 }
 },
-async directHistorySaveMessage(conversationId: string, role: string, content: string, images: string[] | null, assets: AssetRef[] | null, attachedDocs: DirectAttachedDocument[] | null, webSearchResults: WebSearchResult[] | null) : Promise<Result<string, string>> {
+async directHistorySaveMessage(conversationId: string, role: string, content: string, images: string[] | null, assets: AssetRef[] | null, attachedDocs: DirectAttachedDocument[] | null, webSearchResults: WebSearchResult[] | null) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_save_message", { conversationId, role, content, images, assets, attachedDocs, webSearchResults }) };
 } catch (e) {
@@ -324,7 +327,7 @@ async directHistorySaveMessage(conversationId: string, role: string, content: st
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryEditMessage(messageId: string, newContent: string) : Promise<Result<null, string>> {
+async directHistoryEditMessage(messageId: string, newContent: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_edit_message", { messageId, newContent }) };
 } catch (e) {
@@ -332,7 +335,7 @@ async directHistoryEditMessage(messageId: string, newContent: string) : Promise<
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryUpdateConversationTitle(id: string, title: string) : Promise<Result<null, string>> {
+async directHistoryUpdateConversationTitle(id: string, title: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_update_conversation_title", { id, title }) };
 } catch (e) {
@@ -340,7 +343,7 @@ async directHistoryUpdateConversationTitle(id: string, title: string) : Promise<
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryUpdateConversationProject(id: string, projectId: string | null) : Promise<Result<null, string>> {
+async directHistoryUpdateConversationProject(id: string, projectId: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_update_conversation_project", { id, projectId }) };
 } catch (e) {
@@ -348,7 +351,7 @@ async directHistoryUpdateConversationProject(id: string, projectId: string | nul
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryUpdateConversationsOrder(orders: ([string, number])[]) : Promise<Result<null, string>> {
+async directHistoryUpdateConversationsOrder(orders: ([string, number])[]) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_update_conversations_order", { orders }) };
 } catch (e) {
@@ -356,7 +359,7 @@ async directHistoryUpdateConversationsOrder(orders: ([string, number])[]) : Prom
     else return { status: "error", error: e  as any };
 }
 },
-async directHistoryDeleteAllHistory() : Promise<Result<null, string>> {
+async directHistoryDeleteAllHistory() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_history_delete_all_history") };
 } catch (e) {
@@ -364,7 +367,7 @@ async directHistoryDeleteAllHistory() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async openConfigFile() : Promise<Result<null, string>> {
+async openConfigFile() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_config_file") };
 } catch (e) {
@@ -375,7 +378,7 @@ async openConfigFile() : Promise<Result<null, string>> {
 async getUserConfig() : Promise<UserConfig> {
     return await TAURI_INVOKE("get_user_config");
 },
-async updateUserConfig(config: UserConfigPatch) : Promise<Result<null, string>> {
+async updateUserConfig(config: UserConfigPatch) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_user_config", { config }) };
 } catch (e) {
@@ -383,7 +386,7 @@ async updateUserConfig(config: UserConfigPatch) : Promise<Result<null, string>> 
     else return { status: "error", error: e  as any };
 }
 },
-async getHfToken() : Promise<Result<string | null, string>> {
+async getHfToken() : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_hf_token") };
 } catch (e) {
@@ -391,7 +394,7 @@ async getHfToken() : Promise<Result<string | null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async directAssetsUploadImage(imageBytes: number[]) : Promise<Result<ImageResponse, string>> {
+async directAssetsUploadImage(imageBytes: number[]) : Promise<Result<ImageResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_assets_upload_image", { imageBytes }) };
 } catch (e) {
@@ -399,7 +402,7 @@ async directAssetsUploadImage(imageBytes: number[]) : Promise<Result<ImageRespon
     else return { status: "error", error: e  as any };
 }
 },
-async directAssetsLoadImage(id: string) : Promise<Result<string, string>> {
+async directAssetsLoadImage(id: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_assets_load_image", { id }) };
 } catch (e) {
@@ -407,7 +410,7 @@ async directAssetsLoadImage(id: string) : Promise<Result<string, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async directAssetsGetImagePath(id: string) : Promise<Result<string, string>> {
+async directAssetsGetImagePath(id: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_assets_get_image_path", { id }) };
 } catch (e) {
@@ -415,7 +418,7 @@ async directAssetsGetImagePath(id: string) : Promise<Result<string, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async directAssetsOpenImagesFolder() : Promise<Result<null, string>> {
+async directAssetsOpenImagesFolder() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_assets_open_images_folder") };
 } catch (e) {
@@ -439,7 +442,7 @@ async directAssetsOpenImagesFolder() : Promise<Result<null, string>> {
  * - `"together"` → Together AI (via InferenceRouter)
  * - `"local"` / anything else → local sd.cpp / mflux sidecar
  */
-async directImagineGenerate(params: ImagineParams) : Promise<Result<GeneratedImage, string>> {
+async directImagineGenerate(params: ImagineParams) : Promise<Result<GeneratedImage, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_imagine_generate", { params }) };
 } catch (e) {
@@ -450,7 +453,7 @@ async directImagineGenerate(params: ImagineParams) : Promise<Result<GeneratedIma
 /**
  * List all generated images for the gallery
  */
-async directImagineListImages(limit: number | null, offset: number | null, favoritesOnly: boolean | null) : Promise<Result<GeneratedImage[], string>> {
+async directImagineListImages(limit: number | null, offset: number | null, favoritesOnly: boolean | null) : Promise<Result<GeneratedImage[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_imagine_list_images", { limit, offset, favoritesOnly }) };
 } catch (e) {
@@ -461,7 +464,7 @@ async directImagineListImages(limit: number | null, offset: number | null, favor
 /**
  * Search generated images by prompt
  */
-async directImagineSearchImages(query: string) : Promise<Result<GeneratedImage[], string>> {
+async directImagineSearchImages(query: string) : Promise<Result<GeneratedImage[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_imagine_search_images", { query }) };
 } catch (e) {
@@ -472,7 +475,7 @@ async directImagineSearchImages(query: string) : Promise<Result<GeneratedImage[]
 /**
  * Toggle favorite status for an image
  */
-async directImagineToggleFavorite(imageId: string) : Promise<Result<boolean, string>> {
+async directImagineToggleFavorite(imageId: string) : Promise<Result<boolean, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_imagine_toggle_favorite", { imageId }) };
 } catch (e) {
@@ -483,7 +486,7 @@ async directImagineToggleFavorite(imageId: string) : Promise<Result<boolean, str
 /**
  * Delete a generated image
  */
-async directImagineDeleteImage(imageId: string) : Promise<Result<null, string>> {
+async directImagineDeleteImage(imageId: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_imagine_delete_image", { imageId }) };
 } catch (e) {
@@ -494,7 +497,7 @@ async directImagineDeleteImage(imageId: string) : Promise<Result<null, string>> 
 /**
  * Get image count and stats
  */
-async directImagineGetStats() : Promise<Result<JsonValue, string>> {
+async directImagineGetStats() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_imagine_get_stats") };
 } catch (e) {
@@ -505,7 +508,7 @@ async directImagineGetStats() : Promise<Result<JsonValue, string>> {
 async getSystemSpecs() : Promise<SystemSpecs> {
     return await TAURI_INVOKE("get_system_specs");
 },
-async createProject(request: CreateProjectRequest) : Promise<Result<Project, string>> {
+async createProject(request: CreateProjectRequest) : Promise<Result<Project, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("create_project", { request }) };
 } catch (e) {
@@ -513,7 +516,7 @@ async createProject(request: CreateProjectRequest) : Promise<Result<Project, str
     else return { status: "error", error: e  as any };
 }
 },
-async listProjects() : Promise<Result<Project[], string>> {
+async listProjects() : Promise<Result<Project[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_projects") };
 } catch (e) {
@@ -521,7 +524,7 @@ async listProjects() : Promise<Result<Project[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async deleteProject(id: string) : Promise<Result<null, string>> {
+async deleteProject(id: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_project", { id }) };
 } catch (e) {
@@ -529,7 +532,7 @@ async deleteProject(id: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async updateProject(id: string, name: string | null, description: string | null) : Promise<Result<Project, string>> {
+async updateProject(id: string, name: string | null, description: string | null) : Promise<Result<Project, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_project", { id, name, description }) };
 } catch (e) {
@@ -537,7 +540,7 @@ async updateProject(id: string, name: string | null, description: string | null)
     else return { status: "error", error: e  as any };
 }
 },
-async updateProjectsOrder(orders: ([string, number])[]) : Promise<Result<null, string>> {
+async updateProjectsOrder(orders: ([string, number])[]) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_projects_order", { orders }) };
 } catch (e) {
@@ -545,7 +548,7 @@ async updateProjectsOrder(orders: ([string, number])[]) : Promise<Result<null, s
     else return { status: "error", error: e  as any };
 }
 },
-async getProjectDocuments(projectId: string) : Promise<Result<Document[], string>> {
+async getProjectDocuments(projectId: string) : Promise<Result<Document[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_project_documents", { projectId }) };
 } catch (e) {
@@ -553,7 +556,7 @@ async getProjectDocuments(projectId: string) : Promise<Result<Document[], string
     else return { status: "error", error: e  as any };
 }
 },
-async deleteDocument(id: string) : Promise<Result<null, string>> {
+async deleteDocument(id: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_document", { id }) };
 } catch (e) {
@@ -561,7 +564,7 @@ async deleteDocument(id: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async agentChat(request: string) : Promise<Result<string, string>> {
+async agentChat(request: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("agent_chat", { request }) };
 } catch (e) {
@@ -576,7 +579,7 @@ async agentChat(request: string) : Promise<Result<string, string>> {
  * Engine status fields (`engine_running`, `engine_connected`) reflect the active
  * gateway mode: embedded runtime in local mode or a connected proxy in remote mode.
  */
-async thinclawGetStatus() : Promise<Result<ThinClawStatus, string>> {
+async thinclawGetStatus() : Promise<Result<ThinClawStatus, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_status") };
 } catch (e) {
@@ -585,9 +588,20 @@ async thinclawGetStatus() : Promise<Result<ThinClawStatus, string>> {
 }
 },
 /**
+ * Reveal the local gateway bearer token for an explicit user copy action.
+ */
+async thinclawRevealGatewayToken() : Promise<Result<string, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_reveal_gateway_token") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Save Slack configuration
  */
-async thinclawSaveAnthropicKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveAnthropicKey(key: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_anthropic_key", { key }) };
 } catch (e) {
@@ -598,7 +612,7 @@ async thinclawSaveAnthropicKey(key: string | null) : Promise<Result<null, string
 /**
  * Get Anthropic API key
  */
-async thinclawGetAnthropicKey() : Promise<Result<string | null, string>> {
+async thinclawGetAnthropicKey() : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_anthropic_key") };
 } catch (e) {
@@ -620,7 +634,7 @@ async thinclawSaveBraveKey(key: string | null) : Promise<Result<null, BridgeErro
 /**
  * Get Brave Search API key
  */
-async thinclawGetBraveKey() : Promise<Result<string | null, string>> {
+async thinclawGetBraveKey() : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_brave_key") };
 } catch (e) {
@@ -631,7 +645,7 @@ async thinclawGetBraveKey() : Promise<Result<string | null, string>> {
 /**
  * Save OpenAI API key
  */
-async thinclawSaveOpenaiKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveOpenaiKey(key: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_openai_key", { key }) };
 } catch (e) {
@@ -642,7 +656,7 @@ async thinclawSaveOpenaiKey(key: string | null) : Promise<Result<null, string>> 
 /**
  * Get OpenAI API key
  */
-async thinclawGetOpenaiKey() : Promise<Result<string | null, string>> {
+async thinclawGetOpenaiKey() : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_openai_key") };
 } catch (e) {
@@ -653,7 +667,7 @@ async thinclawGetOpenaiKey() : Promise<Result<string | null, string>> {
 /**
  * Save OpenRouter API key
  */
-async thinclawSaveOpenrouterKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveOpenrouterKey(key: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_openrouter_key", { key }) };
 } catch (e) {
@@ -664,7 +678,7 @@ async thinclawSaveOpenrouterKey(key: string | null) : Promise<Result<null, strin
 /**
  * Get OpenRouter API key
  */
-async thinclawGetOpenrouterKey() : Promise<Result<string | null, string>> {
+async thinclawGetOpenrouterKey() : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_openrouter_key") };
 } catch (e) {
@@ -675,7 +689,7 @@ async thinclawGetOpenrouterKey() : Promise<Result<string | null, string>> {
 /**
  * Save Gemini API key
  */
-async thinclawSaveGeminiKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveGeminiKey(key: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_gemini_key", { key }) };
 } catch (e) {
@@ -686,7 +700,7 @@ async thinclawSaveGeminiKey(key: string | null) : Promise<Result<null, string>> 
 /**
  * Get Gemini API key
  */
-async thinclawGetGeminiKey() : Promise<Result<string | null, string>> {
+async thinclawGetGeminiKey() : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_gemini_key") };
 } catch (e) {
@@ -697,7 +711,7 @@ async thinclawGetGeminiKey() : Promise<Result<string | null, string>> {
 /**
  * Save Groq API key
  */
-async thinclawSaveGroqKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveGroqKey(key: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_groq_key", { key }) };
 } catch (e) {
@@ -708,7 +722,7 @@ async thinclawSaveGroqKey(key: string | null) : Promise<Result<null, string>> {
 /**
  * Get Groq API key
  */
-async thinclawGetGroqKey() : Promise<Result<string | null, string>> {
+async thinclawGetGroqKey() : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_groq_key") };
 } catch (e) {
@@ -719,7 +733,7 @@ async thinclawGetGroqKey() : Promise<Result<string | null, string>> {
 /**
  * Save selected cloud model
  */
-async thinclawSaveSelectedCloudModel(model: string | null) : Promise<Result<null, string>> {
+async thinclawSaveSelectedCloudModel(model: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_selected_cloud_model", { model }) };
 } catch (e) {
@@ -730,7 +744,7 @@ async thinclawSaveSelectedCloudModel(model: string | null) : Promise<Result<null
 /**
  * Select the cloud brain to use for the agent
  */
-async selectThinclawBrain(brain: string | null) : Promise<Result<null, string>> {
+async selectThinclawBrain(brain: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("select_thinclaw_brain", { brain }) };
 } catch (e) {
@@ -738,7 +752,7 @@ async selectThinclawBrain(brain: string | null) : Promise<Result<null, string>> 
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSaveCloudConfig(enabledProviders: string[], enabledModels: { [key in string]: string[] }, customLlm: CustomLlmConfigInput | null) : Promise<Result<null, string>> {
+async thinclawSaveCloudConfig(enabledProviders: string[], enabledModels: { [key in string]: string[] }, customLlm: CustomLlmConfigInput | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_cloud_config", { enabledProviders, enabledModels, customLlm }) };
 } catch (e) {
@@ -749,7 +763,7 @@ async thinclawSaveCloudConfig(enabledProviders: string[], enabledModels: { [key 
 /**
  * Toggle secret access for ThinClaw
  */
-async thinclawToggleSecretAccess(secret: string, granted: boolean) : Promise<Result<null, string>> {
+async thinclawToggleSecretAccess(secret: string, granted: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_secret_access", { secret, granted }) };
 } catch (e) {
@@ -757,7 +771,7 @@ async thinclawToggleSecretAccess(secret: string, granted: boolean) : Promise<Res
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSaveSlackConfig(configInput: SlackConfigInput) : Promise<Result<null, string>> {
+async thinclawSaveSlackConfig(configInput: SlackConfigInput) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_slack_config", { configInput }) };
 } catch (e) {
@@ -768,7 +782,7 @@ async thinclawSaveSlackConfig(configInput: SlackConfigInput) : Promise<Result<nu
 /**
  * Save Telegram configuration
  */
-async thinclawSaveTelegramConfig(configInput: TelegramConfigInput) : Promise<Result<null, string>> {
+async thinclawSaveTelegramConfig(configInput: TelegramConfigInput) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_telegram_config", { configInput }) };
 } catch (e) {
@@ -779,7 +793,7 @@ async thinclawSaveTelegramConfig(configInput: TelegramConfigInput) : Promise<Res
 /**
  * Save Gateway configuration
  */
-async thinclawSaveGatewaySettings(mode: string, url: string | null, token: string | null) : Promise<Result<null, string>> {
+async thinclawSaveGatewaySettings(mode: string, url: string | null, token: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_gateway_settings", { mode, url, token }) };
 } catch (e) {
@@ -790,7 +804,7 @@ async thinclawSaveGatewaySettings(mode: string, url: string | null, token: strin
 /**
  * Add or update an agent profile
  */
-async thinclawAddAgentProfile(profile: AgentProfile) : Promise<Result<null, string>> {
+async thinclawAddAgentProfile(profile: AgentProfile) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_add_agent_profile", { profile }) };
 } catch (e) {
@@ -801,7 +815,7 @@ async thinclawAddAgentProfile(profile: AgentProfile) : Promise<Result<null, stri
 /**
  * Remove an agent profile
  */
-async thinclawRemoveAgentProfile(id: string) : Promise<Result<null, string>> {
+async thinclawRemoveAgentProfile(id: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_remove_agent_profile", { id }) };
 } catch (e) {
@@ -816,7 +830,7 @@ async thinclawRemoveAgentProfile(id: string) : Promise<Result<null, string>> {
  * updates gateway settings from the selected profile, and
  * restarts the connection with the new configuration.
  */
-async thinclawSwitchToProfile(profileId: string) : Promise<Result<null, string>> {
+async thinclawSwitchToProfile(profileId: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_switch_to_profile", { profileId }) };
 } catch (e) {
@@ -833,7 +847,7 @@ async thinclawSwitchToProfile(profileId: string) : Promise<Result<null, string>>
  * This was previously a stub (command registered but returning error).
  * Now fully implemented using RemoteGatewayProxy.
  */
-async thinclawTestConnection(url: string, token: string | null) : Promise<Result<boolean, string>> {
+async thinclawTestConnection(url: string, token: string | null) : Promise<Result<boolean, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_test_connection", { url, token }) };
 } catch (e) {
@@ -841,7 +855,7 @@ async thinclawTestConnection(url: string, token: string | null) : Promise<Result
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawGetFleetStatus() : Promise<Result<AgentStatusSummary[], string>> {
+async thinclawGetFleetStatus() : Promise<Result<AgentStatusSummary[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_fleet_status") };
 } catch (e) {
@@ -849,9 +863,33 @@ async thinclawGetFleetStatus() : Promise<Result<AgentStatusSummary[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawBroadcastCommand(command: string) : Promise<Result<null, string>> {
+async thinclawBroadcastCommand(command: string) : Promise<Result<FleetBroadcastResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_broadcast_command", { command }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRemoteAccessStatus() : Promise<Result<RemoteAccessStatus, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_remote_access_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRemoteAccessStart(request: RemoteAccessStartRequest) : Promise<Result<RemoteAccessStatus, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_remote_access_start", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRemoteAccessStop() : Promise<Result<RemoteAccessStatus, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_remote_access_stop") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -872,7 +910,7 @@ async thinclawBroadcastCommand(command: string) : Promise<Result<null, string>> 
  * In both modes, the frontend receives the same events via `thinclaw-event`
  * and invokes the same Tauri commands — all routing is transparent.
  */
-async thinclawStartGateway() : Promise<Result<null, string>> {
+async thinclawStartGateway() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_start_gateway") };
 } catch (e) {
@@ -886,7 +924,7 @@ async thinclawStartGateway() : Promise<Result<null, string>> {
  * - Local mode: shuts down in-process engine gracefully.
  * - Remote mode: closes the SSE subscription and clears the proxy.
  */
-async thinclawStopGateway() : Promise<Result<null, string>> {
+async thinclawStopGateway() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_stop_gateway") };
 } catch (e) {
@@ -905,7 +943,7 @@ async thinclawStopGateway() : Promise<Result<null, string>> {
  *
  * This is a no-op if the engine isn't running.
  */
-async thinclawReloadSecrets() : Promise<Result<null, string>> {
+async thinclawReloadSecrets() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_reload_secrets") };
 } catch (e) {
@@ -916,7 +954,7 @@ async thinclawReloadSecrets() : Promise<Result<null, string>> {
 /**
  * Get sessions list from ThinClaw.
  */
-async thinclawGetSessions() : Promise<Result<ThinClawSessionsResponse, string>> {
+async thinclawGetSessions() : Promise<Result<ThinClawSessionsResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_sessions") };
 } catch (e) {
@@ -930,7 +968,7 @@ async thinclawGetSessions() : Promise<Result<ThinClawSessionsResponse, string>> 
  * Routes to remote proxy when in remote mode, converting the gateway's
  * message format to ThinClawHistoryResponse.
  */
-async thinclawGetHistory(sessionKey: string, limit: number, before: string | null) : Promise<Result<ThinClawHistoryResponse, string>> {
+async thinclawGetHistory(sessionKey: string, limit: number, before: string | null) : Promise<Result<ThinClawHistoryResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_history", { sessionKey, limit, before }) };
 } catch (e) {
@@ -941,7 +979,7 @@ async thinclawGetHistory(sessionKey: string, limit: number, before: string | nul
 /**
  * Delete a session.
  */
-async thinclawDeleteSession(sessionKey: string) : Promise<Result<null, string>> {
+async thinclawDeleteSession(sessionKey: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_delete_session", { sessionKey }) };
 } catch (e) {
@@ -952,7 +990,7 @@ async thinclawDeleteSession(sessionKey: string) : Promise<Result<null, string>> 
 /**
  * Reset a session (clear history).
  */
-async thinclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
+async thinclawResetSession(sessionKey: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_reset_session", { sessionKey }) };
 } catch (e) {
@@ -968,7 +1006,7 @@ async thinclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
  *
  * Routes to RemoteGatewayProxy when in remote mode.
  */
-async thinclawSendMessage(sessionKey: string, text: string, deliver: boolean) : Promise<Result<ThinClawRpcResponse, string>> {
+async thinclawSendMessage(sessionKey: string, text: string, deliver: boolean) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_send_message", { sessionKey, text, deliver }) };
 } catch (e) {
@@ -987,7 +1025,7 @@ async thinclawSendMessage(sessionKey: string, text: string, deliver: boolean) : 
  * Events themselves stream via the `thinclaw-event` Tauri channel; this
  * command just registers intent so routing is correct from the first event.
  */
-async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_subscribe_session", { sessionKey }) };
 } catch (e) {
@@ -998,7 +1036,7 @@ async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcR
 /**
  * Abort a running chat turn.
  */
-async thinclawAbortChat(sessionKey: string, runId: string | null) : Promise<Result<ThinClawRpcResponse, string>> {
+async thinclawAbortChat(sessionKey: string, runId: string | null) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_abort_chat", { sessionKey, runId }) };
 } catch (e) {
@@ -1014,7 +1052,7 @@ async thinclawAbortChat(sessionKey: string, runId: string | null) : Promise<Resu
  * applies the per-thread undo. Works in both local and remote mode, mirroring
  * `thinclaw_send_message`.
  */
-async thinclawUndo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+async thinclawUndo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_undo", { sessionKey }) };
 } catch (e) {
@@ -1029,7 +1067,7 @@ async thinclawUndo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, str
  * `SubmissionParser` converts it to `Submission::Redo`. Works in both local and
  * remote mode, mirroring `thinclaw_send_message`.
  */
-async thinclawRedo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
+async thinclawRedo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_redo", { sessionKey }) };
 } catch (e) {
@@ -1042,7 +1080,7 @@ async thinclawRedo(sessionKey: string) : Promise<Result<ThinClawRpcResponse, str
  *
  * In remote mode, sends the approval decision to the remote gateway.
  */
-async thinclawResolveApproval(approvalId: string, approved: boolean, allowSession: boolean | null) : Promise<Result<ThinClawRpcResponse, string>> {
+async thinclawResolveApproval(approvalId: string, approved: boolean, allowSession: boolean | null) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_resolve_approval", { approvalId, approved, allowSession }) };
 } catch (e) {
@@ -1053,7 +1091,7 @@ async thinclawResolveApproval(approvalId: string, approved: boolean, allowSessio
 /**
  * Get engine diagnostic info.
  */
-async thinclawGetDiagnostics() : Promise<Result<ThinClawDiagnostics, string>> {
+async thinclawGetDiagnostics() : Promise<Result<ThinClawDiagnostics, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_diagnostics") };
 } catch (e) {
@@ -1068,7 +1106,7 @@ async thinclawGetDiagnostics() : Promise<Result<ThinClawDiagnostics, string>> {
  * DB-backed workspace API. For "all" (factory reset), it stops the
  * engine and wipes the legacy state directories.
  */
-async thinclawClearMemory(target: string) : Promise<Result<null, string>> {
+async thinclawClearMemory(target: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_clear_memory", { target }) };
 } catch (e) {
@@ -1079,7 +1117,7 @@ async thinclawClearMemory(target: string) : Promise<Result<null, string>> {
 /**
  * Get MEMORY.md content from ThinClaw's DB-backed workspace.
  */
-async thinclawGetMemory() : Promise<Result<string, string>> {
+async thinclawGetMemory() : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_memory") };
 } catch (e) {
@@ -1090,7 +1128,7 @@ async thinclawGetMemory() : Promise<Result<string, string>> {
 /**
  * Get contents of a workspace file (e.g. SOUL.md) from ThinClaw's DB.
  */
-async thinclawGetFile(path: string) : Promise<Result<string, string>> {
+async thinclawGetFile(path: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_file", { path }) };
 } catch (e) {
@@ -1101,7 +1139,7 @@ async thinclawGetFile(path: string) : Promise<Result<string, string>> {
 /**
  * Write content to a workspace file in ThinClaw's DB.
  */
-async thinclawWriteFile(path: string, content: string) : Promise<Result<null, string>> {
+async thinclawWriteFile(path: string, content: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_write_file", { path, content }) };
 } catch (e) {
@@ -1117,7 +1155,7 @@ async thinclawWriteFile(path: string, content: string) : Promise<Result<null, st
  * files, or project sub-files. If the path matches a directory prefix,
  * all files under that prefix are deleted.
  */
-async thinclawDeleteFile(path: string) : Promise<Result<null, string>> {
+async thinclawDeleteFile(path: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_delete_file", { path }) };
 } catch (e) {
@@ -1128,7 +1166,7 @@ async thinclawDeleteFile(path: string) : Promise<Result<null, string>> {
 /**
  * Save MEMORY.md content to ThinClaw's DB-backed workspace.
  */
-async thinclawSaveMemory(content: string) : Promise<Result<null, string>> {
+async thinclawSaveMemory(content: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_memory", { content }) };
 } catch (e) {
@@ -1141,7 +1179,7 @@ async thinclawSaveMemory(content: string) : Promise<Result<null, string>> {
  *
  * Returns flat file paths (e.g., `SOUL.md`, `daily/2026-03-09.md`).
  */
-async thinclawListWorkspaceFiles() : Promise<Result<string[], string>> {
+async thinclawListWorkspaceFiles() : Promise<Result<string[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_list_workspace_files") };
 } catch (e) {
@@ -1149,7 +1187,7 @@ async thinclawListWorkspaceFiles() : Promise<Result<string[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawCronList() : Promise<Result<JsonValue, string>> {
+async thinclawCronList() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_cron_list") };
 } catch (e) {
@@ -1157,7 +1195,7 @@ async thinclawCronList() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawCronRun(key: string) : Promise<Result<JsonValue, string>> {
+async thinclawCronRun(key: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_cron_run", { key }) };
 } catch (e) {
@@ -1165,7 +1203,7 @@ async thinclawCronRun(key: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue, string>> {
+async thinclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_cron_history", { key, limit }) };
 } catch (e) {
@@ -1177,7 +1215,7 @@ async thinclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue
  * Validates a cron expression and returns next fire times.
  * This is a frontend-facing version of `thinclaw cron lint`.
  */
-async thinclawCronLint(expression: string) : Promise<Result<JsonValue, string>> {
+async thinclawCronLint(expression: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_cron_lint", { expression }) };
 } catch (e) {
@@ -1191,9 +1229,9 @@ async thinclawCronLint(expression: string) : Promise<Result<JsonValue, string>> 
  * Stores the routine in ThinClaw's RoutineStore so it persists
  * and is picked up by the RoutineEngine on its next tick.
  */
-async thinclawRoutineCreate(name: string, description: string, schedule: string, task: string) : Promise<Result<JsonValue, string>> {
+async thinclawRoutineCreate(name: string, description: string, schedule: string, task: string, triggerType: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_create", { name, description, schedule, task }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_create", { name, description, schedule, task, triggerType }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1205,7 +1243,7 @@ async thinclawRoutineCreate(name: string, description: string, schedule: string,
  * Queries the agent's ChannelManager for actually registered channels
  * instead of reading static config/env vars.
  */
-async thinclawChannelsList() : Promise<Result<JsonValue, string>> {
+async thinclawChannelsList() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_channels_list") };
 } catch (e) {
@@ -1213,7 +1251,7 @@ async thinclawChannelsList() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillsList() : Promise<Result<JsonValue, string>> {
+async thinclawSkillsList() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_list") };
 } catch (e) {
@@ -1221,7 +1259,7 @@ async thinclawSkillsList() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillsStatus() : Promise<Result<JsonValue, string>> {
+async thinclawSkillsStatus() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_status") };
 } catch (e) {
@@ -1237,7 +1275,7 @@ async thinclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonV
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillsSearch(query: string) : Promise<Result<JsonValue, string>> {
+async thinclawSkillsSearch(query: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_search", { query }) };
 } catch (e) {
@@ -1245,7 +1283,7 @@ async thinclawSkillsSearch(query: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillInstall(name: string, url: string | null, content: string | null, force: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawSkillInstall(name: string, url: string | null, content: string | null, force: boolean | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_install", { name, url, content, force }) };
 } catch (e) {
@@ -1253,7 +1291,7 @@ async thinclawSkillInstall(name: string, url: string | null, content: string | n
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillRemove(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawSkillRemove(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_remove", { name }) };
 } catch (e) {
@@ -1261,7 +1299,7 @@ async thinclawSkillRemove(name: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillTrust(name: string, trust: string) : Promise<Result<JsonValue, string>> {
+async thinclawSkillTrust(name: string, trust: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_trust", { name, trust }) };
 } catch (e) {
@@ -1269,7 +1307,7 @@ async thinclawSkillTrust(name: string, trust: string) : Promise<Result<JsonValue
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillReload(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawSkillReload(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_reload", { name }) };
 } catch (e) {
@@ -1277,7 +1315,7 @@ async thinclawSkillReload(name: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillsReloadAll() : Promise<Result<JsonValue, string>> {
+async thinclawSkillsReloadAll() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_reload_all") };
 } catch (e) {
@@ -1285,7 +1323,7 @@ async thinclawSkillsReloadAll() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillInspect(name: string, includeContent: boolean | null, includeFiles: boolean | null, audit: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawSkillInspect(name: string, includeContent: boolean | null, includeFiles: boolean | null, audit: boolean | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_inspect", { name, includeContent, includeFiles, audit }) };
 } catch (e) {
@@ -1293,7 +1331,7 @@ async thinclawSkillInspect(name: string, includeContent: boolean | null, include
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSkillPublish(name: string, targetRepo: string, dryRun: boolean | null, remoteWrite: boolean | null, confirmRemoteWrite: boolean | null, approveRisky: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawSkillPublish(name: string, targetRepo: string, dryRun: boolean | null, remoteWrite: boolean | null, confirmRemoteWrite: boolean | null, approveRisky: boolean | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_publish", { name, targetRepo, dryRun, remoteWrite, confirmRemoteWrite, approveRisky }) };
 } catch (e) {
@@ -1309,7 +1347,7 @@ async thinclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, BridgeE
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawInstallSkillDeps(name: string, installId: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawInstallSkillDeps(name: string, installId: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_install_skill_deps", { name, installId }) };
 } catch (e) {
@@ -1317,7 +1355,7 @@ async thinclawInstallSkillDeps(name: string, installId: string | null) : Promise
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawConfigSchema() : Promise<Result<JsonValue, string>> {
+async thinclawConfigSchema() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_config_schema") };
 } catch (e) {
@@ -1325,7 +1363,7 @@ async thinclawConfigSchema() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawConfigGet() : Promise<Result<JsonValue, string>> {
+async thinclawConfigGet() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_config_get") };
 } catch (e) {
@@ -1333,7 +1371,7 @@ async thinclawConfigGet() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawConfigSet(key: string, value: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawConfigSet(key: string, value: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_config_set", { key, value }) };
 } catch (e) {
@@ -1341,7 +1379,7 @@ async thinclawConfigSet(key: string, value: JsonValue) : Promise<Result<JsonValu
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawConfigPatch(patch: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawConfigPatch(patch: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_config_patch", { patch }) };
 } catch (e) {
@@ -1349,7 +1387,7 @@ async thinclawConfigPatch(patch: JsonValue) : Promise<Result<JsonValue, string>>
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSystemPresence() : Promise<Result<JsonValue, string>> {
+async thinclawSystemPresence() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_system_presence") };
 } catch (e) {
@@ -1357,7 +1395,7 @@ async thinclawSystemPresence() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLogsTail(limit: number) : Promise<Result<JsonValue, string>> {
+async thinclawLogsTail(limit: number) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_logs_tail", { limit }) };
 } catch (e) {
@@ -1365,25 +1403,9 @@ async thinclawLogsTail(limit: number) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawUpdateRun() : Promise<Result<JsonValue, string>> {
+async thinclawUpdateRun() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_run") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async thinclawWebLoginWhatsapp() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("thinclaw_web_login_whatsapp") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async thinclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("thinclaw_web_login_telegram") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1392,7 +1414,7 @@ async thinclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
 /**
  * Add a custom secret
  */
-async thinclawAddCustomSecret(name: string, value: string, description: string | null) : Promise<Result<null, string>> {
+async thinclawAddCustomSecret(name: string, value: string, description: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_add_custom_secret", { name, value, description }) };
 } catch (e) {
@@ -1403,7 +1425,7 @@ async thinclawAddCustomSecret(name: string, value: string, description: string |
 /**
  * Update an existing custom secret value without changing its identity or grant.
  */
-async thinclawUpdateCustomSecret(id: string, value: string) : Promise<Result<null, string>> {
+async thinclawUpdateCustomSecret(id: string, value: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_custom_secret", { id, value }) };
 } catch (e) {
@@ -1414,7 +1436,7 @@ async thinclawUpdateCustomSecret(id: string, value: string) : Promise<Result<nul
 /**
  * Remove a custom secret
  */
-async thinclawRemoveCustomSecret(id: string) : Promise<Result<null, string>> {
+async thinclawRemoveCustomSecret(id: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_remove_custom_secret", { id }) };
 } catch (e) {
@@ -1425,7 +1447,7 @@ async thinclawRemoveCustomSecret(id: string) : Promise<Result<null, string>> {
 /**
  * Toggle custom secret access for ThinClaw
  */
-async thinclawToggleCustomSecret(id: string, granted: boolean) : Promise<Result<null, string>> {
+async thinclawToggleCustomSecret(id: string, granted: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_custom_secret", { id, granted }) };
 } catch (e) {
@@ -1436,7 +1458,7 @@ async thinclawToggleCustomSecret(id: string, granted: boolean) : Promise<Result<
 /**
  * Toggle local dev tools (shell, write_file, read_file, etc.) for ThinClaw
  */
-async thinclawToggleLocalTools(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawToggleLocalTools(enabled: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_local_tools", { enabled }) };
 } catch (e) {
@@ -1447,7 +1469,7 @@ async thinclawToggleLocalTools(enabled: boolean) : Promise<Result<null, string>>
 /**
  * Set workspace mode and optional root directory for the agent
  */
-async thinclawSetWorkspaceMode(mode: string, root: string | null) : Promise<Result<string, string>> {
+async thinclawSetWorkspaceMode(mode: string, root: string | null) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_workspace_mode", { mode, root }) };
 } catch (e) {
@@ -1458,7 +1480,7 @@ async thinclawSetWorkspaceMode(mode: string, root: string | null) : Promise<Resu
 /**
  * Toggle local inference (exposing local LLM) for ThinClaw
  */
-async thinclawToggleLocalInference(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawToggleLocalInference(enabled: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_local_inference", { enabled }) };
 } catch (e) {
@@ -1466,7 +1488,7 @@ async thinclawToggleLocalInference(enabled: boolean) : Promise<Result<null, stri
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawToggleExposeInference(enabled: boolean) : Promise<Result<JsonValue, string>> {
+async thinclawToggleExposeInference(enabled: boolean) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_expose_inference", { enabled }) };
 } catch (e) {
@@ -1474,7 +1496,7 @@ async thinclawToggleExposeInference(enabled: boolean) : Promise<Result<JsonValue
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSetSetupCompleted(completed: boolean) : Promise<Result<null, string>> {
+async thinclawSetSetupCompleted(completed: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_setup_completed", { completed }) };
 } catch (e) {
@@ -1482,7 +1504,7 @@ async thinclawSetSetupCompleted(completed: boolean) : Promise<Result<null, strin
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawToggleAutoStart(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawToggleAutoStart(enabled: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_auto_start", { enabled }) };
 } catch (e) {
@@ -1490,7 +1512,7 @@ async thinclawToggleAutoStart(enabled: boolean) : Promise<Result<null, string>> 
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_dev_mode_wizard", { enabled }) };
 } catch (e) {
@@ -1518,7 +1540,7 @@ async thinclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, BridgeErr
 /**
  * Get the current autonomy mode setting.
  */
-async thinclawGetAutonomyMode() : Promise<Result<boolean, string>> {
+async thinclawGetAutonomyMode() : Promise<Result<boolean, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_autonomy_mode") };
 } catch (e) {
@@ -1529,7 +1551,7 @@ async thinclawGetAutonomyMode() : Promise<Result<boolean, string>> {
 /**
  * Mark the first-run identity bootstrap as completed.
  */
-async thinclawSetBootstrapCompleted(completed: boolean) : Promise<Result<null, string>> {
+async thinclawSetBootstrapCompleted(completed: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_bootstrap_completed", { completed }) };
 } catch (e) {
@@ -1548,7 +1570,7 @@ async thinclawSetBootstrapCompleted(completed: boolean) : Promise<Result<null, s
  * completed the ritual already (the save just failed silently).  We
  * auto-mark it done here so the button never shows the wrong label again.
  */
-async thinclawCheckBootstrapNeeded() : Promise<Result<boolean, string>> {
+async thinclawCheckBootstrapNeeded() : Promise<Result<boolean, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_check_bootstrap_needed") };
 } catch (e) {
@@ -1562,7 +1584,7 @@ async thinclawCheckBootstrapNeeded() : Promise<Result<boolean, string>> {
  * Resets bootstrap_completed to false so the BootstrapModal shows again
  * on next startup. The agent will re-run its identity awakening.
  */
-async thinclawTriggerBootstrap() : Promise<Result<null, string>> {
+async thinclawTriggerBootstrap() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_trigger_bootstrap") };
 } catch (e) {
@@ -1570,7 +1592,7 @@ async thinclawTriggerBootstrap() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobsList() : Promise<Result<JsonValue, string>> {
+async thinclawJobsList() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_jobs_list") };
 } catch (e) {
@@ -1578,7 +1600,7 @@ async thinclawJobsList() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobsSummary() : Promise<Result<JsonValue, string>> {
+async thinclawJobsSummary() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_jobs_summary") };
 } catch (e) {
@@ -1586,7 +1608,7 @@ async thinclawJobsSummary() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobDetail(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobDetail(jobId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_detail", { jobId }) };
 } catch (e) {
@@ -1594,7 +1616,7 @@ async thinclawJobDetail(jobId: string) : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobCancel(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobCancel(jobId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_cancel", { jobId }) };
 } catch (e) {
@@ -1618,7 +1640,7 @@ async thinclawJobPrompt(jobId: string, content: string | null, done: boolean | n
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawJobEvents(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobEvents(jobId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_events", { jobId }) };
 } catch (e) {
@@ -1642,7 +1664,7 @@ async thinclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValu
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectsList() : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectsList() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_list") };
 } catch (e) {
@@ -1650,7 +1672,7 @@ async thinclawRepoProjectsList() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectGet(projectId: string) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectGet(projectId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_get", { projectId }) };
 } catch (e) {
@@ -1658,7 +1680,7 @@ async thinclawRepoProjectGet(projectId: string) : Promise<Result<JsonValue, stri
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectCreate(input: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectCreate(input: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_create", { input }) };
 } catch (e) {
@@ -1666,7 +1688,7 @@ async thinclawRepoProjectCreate(input: JsonValue) : Promise<Result<JsonValue, st
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectPlan(projectId: string) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectPlan(projectId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_plan", { projectId }) };
 } catch (e) {
@@ -1674,7 +1696,7 @@ async thinclawRepoProjectPlan(projectId: string) : Promise<Result<JsonValue, str
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectStart(projectId: string) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectStart(projectId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_start", { projectId }) };
 } catch (e) {
@@ -1682,7 +1704,7 @@ async thinclawRepoProjectStart(projectId: string) : Promise<Result<JsonValue, st
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectPause(projectId: string) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectPause(projectId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_pause", { projectId }) };
 } catch (e) {
@@ -1690,7 +1712,7 @@ async thinclawRepoProjectPause(projectId: string) : Promise<Result<JsonValue, st
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectResume(projectId: string) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectResume(projectId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_resume", { projectId }) };
 } catch (e) {
@@ -1698,7 +1720,7 @@ async thinclawRepoProjectResume(projectId: string) : Promise<Result<JsonValue, s
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectCancel(projectId: string, runId: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectCancel(projectId: string, runId: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_cancel", { projectId, runId }) };
 } catch (e) {
@@ -1706,7 +1728,7 @@ async thinclawRepoProjectCancel(projectId: string, runId: string | null) : Promi
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectApprove(projectId: string, input: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectApprove(projectId: string, input: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_approve", { projectId, input }) };
 } catch (e) {
@@ -1714,7 +1736,7 @@ async thinclawRepoProjectApprove(projectId: string, input: JsonValue) : Promise<
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectEnqueue(projectId: string, item: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectEnqueue(projectId: string, item: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_enqueue", { projectId, item }) };
 } catch (e) {
@@ -1722,7 +1744,7 @@ async thinclawRepoProjectEnqueue(projectId: string, item: JsonValue) : Promise<R
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectEvents(projectId: string, limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectEvents(projectId: string, limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_events", { projectId, limit }) };
 } catch (e) {
@@ -1730,7 +1752,7 @@ async thinclawRepoProjectEvents(projectId: string, limit: number | null) : Promi
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawRepoProjectMergeGates(projectId: string) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectMergeGates(projectId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_merge_gates", { projectId }) };
 } catch (e) {
@@ -1742,7 +1764,7 @@ async thinclawRepoProjectMergeGates(projectId: string) : Promise<Result<JsonValu
  * Report supervisor readiness: feature flag, credential mode, GitHub App
  * config, derived install URL, and per-secret presence.
  */
-async thinclawRepoProjectsReadiness() : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectsReadiness() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_readiness") };
 } catch (e) {
@@ -1754,7 +1776,7 @@ async thinclawRepoProjectsReadiness() : Promise<Result<JsonValue, string>> {
  * Enable + configure the supervisor (feature flag, GitHub App config, policy).
  * Secret VALUES are never written here — only the names of secrets.
  */
-async thinclawRepoProjectsSetup(input: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectsSetup(input: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_setup", { input }) };
 } catch (e) {
@@ -1766,7 +1788,7 @@ async thinclawRepoProjectsSetup(input: JsonValue) : Promise<Result<JsonValue, st
  * Securely store a GitHub credential (PAT or GitHub App PEM key) in the
  * encrypted secrets store. The value never touches settings, events, or logs.
  */
-async thinclawRepoProjectsSetCredential(name: string, valueSecret: string) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectsSetCredential(name: string, valueSecret: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_set_credential", { name, valueSecret }) };
 } catch (e) {
@@ -1779,7 +1801,7 @@ async thinclawRepoProjectsSetCredential(name: string, valueSecret: string) : Pro
  * connector repo picker. Each repo is marked with whether it is already
  * under supervision.
  */
-async thinclawRepoProjectsConnectableRepos() : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectsConnectableRepos() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_connectable_repos") };
 } catch (e) {
@@ -1791,7 +1813,7 @@ async thinclawRepoProjectsConnectableRepos() : Promise<Result<JsonValue, string>
  * Bring selected repositories under supervision (a project per repo). Provide
  * `repos: ["owner/repo", …]` or `all: true`.
  */
-async thinclawRepoProjectsConnect(input: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectsConnect(input: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_projects_connect", { input }) };
 } catch (e) {
@@ -1802,7 +1824,7 @@ async thinclawRepoProjectsConnect(input: JsonValue) : Promise<Result<JsonValue, 
 /**
  * Enroll an additional repository into an existing project.
  */
-async thinclawRepoProjectEnroll(projectId: string, input: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawRepoProjectEnroll(projectId: string, input: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_repo_project_enroll", { projectId, input }) };
 } catch (e) {
@@ -1810,7 +1832,7 @@ async thinclawRepoProjectEnroll(projectId: string, input: JsonValue) : Promise<R
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyStatus() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyStatus() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_status") };
 } catch (e) {
@@ -1818,7 +1840,7 @@ async thinclawAutonomyStatus() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyBootstrap() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyBootstrap() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_bootstrap") };
 } catch (e) {
@@ -1826,7 +1848,7 @@ async thinclawAutonomyBootstrap() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyPause(reason: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyPause(reason: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_pause", { reason }) };
 } catch (e) {
@@ -1834,7 +1856,7 @@ async thinclawAutonomyPause(reason: string | null) : Promise<Result<JsonValue, s
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyResume() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyResume() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_resume") };
 } catch (e) {
@@ -1842,7 +1864,7 @@ async thinclawAutonomyResume() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyPermissions() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyPermissions() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_permissions") };
 } catch (e) {
@@ -1850,7 +1872,7 @@ async thinclawAutonomyPermissions() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawDesktopPermissionStatus() : Promise<Result<JsonValue, string>> {
+async thinclawDesktopPermissionStatus() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_desktop_permission_status") };
 } catch (e) {
@@ -1858,7 +1880,7 @@ async thinclawDesktopPermissionStatus() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawAutonomyRollback() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyRollback() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_rollback") };
 } catch (e) {
@@ -1906,7 +1928,7 @@ async thinclawSetHfToken(token: string) : Promise<Result<null, BridgeError>> {
  * Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral,
  * cohere, voyage, deepgram, elevenlabs, stability, fal.
  */
-async thinclawSaveImplicitProviderKey(provider: string, key: string) : Promise<Result<null, string>> {
+async thinclawSaveImplicitProviderKey(provider: string, key: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_implicit_provider_key", { provider, key }) };
 } catch (e) {
@@ -1917,7 +1939,7 @@ async thinclawSaveImplicitProviderKey(provider: string, key: string) : Promise<R
 /**
  * Get an implicit cloud provider API key (generic)
  */
-async thinclawGetImplicitProviderKey(provider: string) : Promise<Result<string | null, string>> {
+async thinclawGetImplicitProviderKey(provider: string) : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_implicit_provider_key", { provider }) };
 } catch (e) {
@@ -1939,7 +1961,7 @@ async thinclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: strin
 /**
  * Get Amazon Bedrock credentials
  */
-async thinclawGetBedrockCredentials() : Promise<Result<[string | null, string | null, string | null], string>> {
+async thinclawGetBedrockCredentials() : Promise<Result<[string | null, string | null, string | null], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_bedrock_credentials") };
 } catch (e) {
@@ -1953,7 +1975,7 @@ async thinclawGetBedrockCredentials() : Promise<Result<[string | null, string | 
  * Still needed: ThinClaw Desktop manages the local llama-server sidecar and needs to
  * sync its port/model info to the config that ThinClaw reads on restart.
  */
-async thinclawSyncLocalLlm() : Promise<Result<null, string>> {
+async thinclawSyncLocalLlm() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_sync_local_llm") };
 } catch (e) {
@@ -1977,7 +1999,7 @@ async thinclawSyncLocalLlm() : Promise<Result<null, string>> {
  * - Optional: systemd service (--systemd)
  * 4. Return the URL + generated token as the command result
  */
-async thinclawDeployRemote(ip: string, user: string, tailscaleKey: string | null, enableSystemd: boolean | null) : Promise<Result<RemoteDeployResult, string>> {
+async thinclawDeployRemote(ip: string, user: string, tailscaleKey: string | null, enableSystemd: boolean | null) : Promise<Result<RemoteDeployResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_deploy_remote", { ip, user, tailscaleKey, enableSystemd }) };
 } catch (e) {
@@ -1993,7 +2015,7 @@ async thinclawDeployRemote(ip: string, user: string, tailscaleKey: string | null
  * session's frontend. If no parent is provided, behaves like a standalone
  * session spawn.
  */
-async thinclawSpawnSession(agentId: string, task: string, parentSession: string | null) : Promise<Result<SpawnSessionResponse, string>> {
+async thinclawSpawnSession(agentId: string, task: string, parentSession: string | null) : Promise<Result<SpawnSessionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_spawn_session", { agentId, task, parentSession }) };
 } catch (e) {
@@ -2007,7 +2029,7 @@ async thinclawSpawnSession(agentId: string, task: string, parentSession: string 
  * Falls back to scanning the live session list for child key patterns
  * (`<parent>:task-<uuid>`) so the Fleet panel persists across restarts.
  */
-async thinclawListChildSessions(parentSession: string) : Promise<Result<ChildSessionInfo[], string>> {
+async thinclawListChildSessions(parentSession: string) : Promise<Result<ChildSessionInfo[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_list_child_sessions", { parentSession }) };
 } catch (e) {
@@ -2020,7 +2042,7 @@ async thinclawListChildSessions(parentSession: string) : Promise<Result<ChildSes
  *
  * Also emits a `SubAgentUpdate` event to the parent session's frontend.
  */
-async thinclawUpdateSubAgentStatus(childSession: string, status: string, resultSummary: string | null) : Promise<Result<ThinClawRpcResponse, string>> {
+async thinclawUpdateSubAgentStatus(childSession: string, status: string, resultSummary: string | null) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_sub_agent_status", { childSession, status, resultSummary }) };
 } catch (e) {
@@ -2031,7 +2053,7 @@ async thinclawUpdateSubAgentStatus(childSession: string, status: string, resultS
 /**
  * List available agents (Discovery)
  */
-async thinclawAgentsList() : Promise<Result<AgentProfile[], string>> {
+async thinclawAgentsList() : Promise<Result<AgentProfile[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_agents_list") };
 } catch (e) {
@@ -2042,7 +2064,7 @@ async thinclawAgentsList() : Promise<Result<AgentProfile[], string>> {
 /**
  * Push content to the Canvas UI
  */
-async thinclawCanvasPush(content: string) : Promise<Result<null, string>> {
+async thinclawCanvasPush(content: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_push", { content }) };
 } catch (e) {
@@ -2053,7 +2075,7 @@ async thinclawCanvasPush(content: string) : Promise<Result<null, string>> {
 /**
  * Navigate the Canvas UI
  */
-async thinclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
+async thinclawCanvasNavigate(url: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_navigate", { url }) };
 } catch (e) {
@@ -2064,7 +2086,7 @@ async thinclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
 /**
  * Dispatch an event from the Canvas UI back to the agent session
  */
-async thinclawCanvasDispatchEvent(sessionKey: string, runId: string | null, eventType: string, payload: JsonValue) : Promise<Result<ThinClawRpcResponse, string>> {
+async thinclawCanvasDispatchEvent(sessionKey: string, runId: string | null, eventType: string, payload: JsonValue) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_dispatch_event", { sessionKey, runId, eventType, payload }) };
 } catch (e) {
@@ -2075,7 +2097,7 @@ async thinclawCanvasDispatchEvent(sessionKey: string, runId: string | null, even
 /**
  * List all active canvas panels.
  */
-async thinclawCanvasPanelsList() : Promise<Result<JsonValue, string>> {
+async thinclawCanvasPanelsList() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_panels_list") };
 } catch (e) {
@@ -2086,7 +2108,7 @@ async thinclawCanvasPanelsList() : Promise<Result<JsonValue, string>> {
 /**
  * Get a specific canvas panel's full data.
  */
-async thinclawCanvasPanelGet(panelId: string) : Promise<Result<JsonValue, string>> {
+async thinclawCanvasPanelGet(panelId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_panel_get", { panelId }) };
 } catch (e) {
@@ -2097,7 +2119,7 @@ async thinclawCanvasPanelGet(panelId: string) : Promise<Result<JsonValue, string
 /**
  * Dismiss (remove) a canvas panel.
  */
-async thinclawCanvasPanelDismiss(panelId: string) : Promise<Result<boolean, string>> {
+async thinclawCanvasPanelDismiss(panelId: string) : Promise<Result<boolean, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_panel_dismiss", { panelId }) };
 } catch (e) {
@@ -2108,7 +2130,7 @@ async thinclawCanvasPanelDismiss(panelId: string) : Promise<Result<boolean, stri
 /**
  * Delete a routine by ID or name.
  */
-async thinclawRoutineDelete(routineId: string) : Promise<Result<JsonValue, string>> {
+async thinclawRoutineDelete(routineId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_delete", { routineId }) };
 } catch (e) {
@@ -2119,7 +2141,7 @@ async thinclawRoutineDelete(routineId: string) : Promise<Result<JsonValue, strin
 /**
  * Toggle a routine enabled/disabled by ID or name.
  */
-async thinclawRoutineToggle(routineId: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
+async thinclawRoutineToggle(routineId: string, enabled: boolean) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_toggle", { routineId, enabled }) };
 } catch (e) {
@@ -2135,7 +2157,7 @@ async thinclawRoutineToggle(routineId: string, enabled: boolean) : Promise<Resul
  *
  * `interval_minutes` must be between 5 and 1440 (24 hours).
  */
-async thinclawHeartbeatSetInterval(intervalMinutes: number) : Promise<Result<JsonValue, string>> {
+async thinclawHeartbeatSetInterval(intervalMinutes: number) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_heartbeat_set_interval", { intervalMinutes }) };
 } catch (e) {
@@ -2150,7 +2172,7 @@ async thinclawHeartbeatSetInterval(intervalMinutes: number) : Promise<Result<Jso
  * "Think step by step" to messages. Now we set the env vars
  * that ThinClaw's ThinkingConfig reads natively.
  */
-async thinclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promise<Result<ThinkingConfig, string>> {
+async thinclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promise<Result<ThinkingConfig, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_thinking", { enabled, budgetTokens }) };
 } catch (e) {
@@ -2164,7 +2186,7 @@ async thinclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promi
  * Falls back to simple text search across workspace files if the
  * vector search API isn't available.
  */
-async thinclawMemorySearch(query: string, limit: number | null) : Promise<Result<MemorySearchResponse, string>> {
+async thinclawMemorySearch(query: string, limit: number | null) : Promise<Result<MemorySearchResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_memory_search", { query, limit }) };
 } catch (e) {
@@ -2191,7 +2213,7 @@ async thinclawSessionSearch(query: string, limit: number | null, summarize: bool
  * The `format` parameter is optional — `None` defaults to markdown
  * for backward compatibility with existing frontend callers.
  */
-async thinclawExportSession(sessionKey: string, format: string | null) : Promise<Result<SessionExportResponse, string>> {
+async thinclawExportSession(sessionKey: string, format: string | null) : Promise<Result<SessionExportResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_export_session", { sessionKey, format }) };
 } catch (e) {
@@ -2202,7 +2224,7 @@ async thinclawExportSession(sessionKey: string, format: string | null) : Promise
 /**
  * List all registered lifecycle hooks with their details.
  */
-async thinclawHooksList() : Promise<Result<HooksListResponse, string>> {
+async thinclawHooksList() : Promise<Result<HooksListResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_hooks_list") };
 } catch (e) {
@@ -2213,7 +2235,7 @@ async thinclawHooksList() : Promise<Result<HooksListResponse, string>> {
 /**
  * Register hooks from a declarative JSON bundle (rules and/or outbound webhooks).
  */
-async thinclawHooksRegister(input: HookRegisterInput) : Promise<Result<HookRegisterResponse, string>> {
+async thinclawHooksRegister(input: HookRegisterInput) : Promise<Result<HookRegisterResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_hooks_register", { input }) };
 } catch (e) {
@@ -2224,7 +2246,7 @@ async thinclawHooksRegister(input: HookRegisterInput) : Promise<Result<HookRegis
 /**
  * Unregister (remove) a hook by name.
  */
-async thinclawHooksUnregister(hookName: string) : Promise<Result<HookUnregisterResponse, string>> {
+async thinclawHooksUnregister(hookName: string) : Promise<Result<HookUnregisterResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_hooks_unregister", { hookName }) };
 } catch (e) {
@@ -2235,7 +2257,7 @@ async thinclawHooksUnregister(hookName: string) : Promise<Result<HookUnregisterR
 /**
  * List all installed extensions/plugins.
  */
-async thinclawExtensionsList() : Promise<Result<ExtensionsListResponse, string>> {
+async thinclawExtensionsList() : Promise<Result<ExtensionsListResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extensions_list") };
 } catch (e) {
@@ -2246,7 +2268,7 @@ async thinclawExtensionsList() : Promise<Result<ExtensionsListResponse, string>>
 /**
  * Install an extension by registry name or direct URL.
  */
-async thinclawExtensionInstall(name: string, url: string | null, kind: string | null) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionInstall(name: string, url: string | null, kind: string | null) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_install", { name, url, kind }) };
 } catch (e) {
@@ -2257,7 +2279,7 @@ async thinclawExtensionInstall(name: string, url: string | null, kind: string | 
 /**
  * Activate an extension by name.
  */
-async thinclawExtensionActivate(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionActivate(name: string) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_activate", { name }) };
 } catch (e) {
@@ -2279,7 +2301,7 @@ async thinclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionR
 /**
  * Fetch an extension setup schema.
  */
-async thinclawExtensionSetupGet(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawExtensionSetupGet(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_setup_get", { name }) };
 } catch (e) {
@@ -2290,7 +2312,7 @@ async thinclawExtensionSetupGet(name: string) : Promise<Result<JsonValue, string
 /**
  * Submit extension setup secrets.
  */
-async thinclawExtensionSetupSubmit(name: string, secrets: { [key in string]: string }) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionSetupSubmit(name: string, secrets: { [key in string]: string }) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_setup_submit", { name, secrets }) };
 } catch (e) {
@@ -2301,7 +2323,7 @@ async thinclawExtensionSetupSubmit(name: string, secrets: { [key in string]: str
 /**
  * Validate extension setup and manifest/auth readiness.
  */
-async thinclawExtensionValidateSetup(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionValidateSetup(name: string) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_validate_setup", { name }) };
 } catch (e) {
@@ -2312,7 +2334,7 @@ async thinclawExtensionValidateSetup(name: string) : Promise<Result<ExtensionAct
 /**
  * Remove an extension by name.
  */
-async thinclawExtensionRemove(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionRemove(name: string) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_remove", { name }) };
 } catch (e) {
@@ -2323,7 +2345,7 @@ async thinclawExtensionRemove(name: string) : Promise<Result<ExtensionActionResp
 /**
  * Search the bundled extension registry.
  */
-async thinclawExtensionRegistrySearch(query: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawExtensionRegistrySearch(query: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_registry_search", { query }) };
 } catch (e) {
@@ -2334,7 +2356,7 @@ async thinclawExtensionRegistrySearch(query: string | null) : Promise<Result<Jso
 /**
  * List configured MCP servers.
  */
-async thinclawMcpServers() : Promise<Result<JsonValue, string>> {
+async thinclawMcpServers() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_servers") };
 } catch (e) {
@@ -2345,7 +2367,7 @@ async thinclawMcpServers() : Promise<Result<JsonValue, string>> {
 /**
  * Fetch one MCP server's status/config.
  */
-async thinclawMcpServer(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpServer(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_server", { name }) };
 } catch (e) {
@@ -2356,7 +2378,7 @@ async thinclawMcpServer(name: string) : Promise<Result<JsonValue, string>> {
 /**
  * List tools exposed by an MCP server.
  */
-async thinclawMcpServerTools(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpServerTools(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_server_tools", { name }) };
 } catch (e) {
@@ -2367,7 +2389,7 @@ async thinclawMcpServerTools(name: string) : Promise<Result<JsonValue, string>> 
 /**
  * List resources exposed by an MCP server.
  */
-async thinclawMcpServerResources(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpServerResources(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_server_resources", { name }) };
 } catch (e) {
@@ -2378,7 +2400,7 @@ async thinclawMcpServerResources(name: string) : Promise<Result<JsonValue, strin
 /**
  * Read one MCP resource by URI.
  */
-async thinclawMcpReadResource(name: string, uri: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpReadResource(name: string, uri: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_read_resource", { name, uri }) };
 } catch (e) {
@@ -2389,7 +2411,7 @@ async thinclawMcpReadResource(name: string, uri: string) : Promise<Result<JsonVa
 /**
  * List resource templates exposed by an MCP server.
  */
-async thinclawMcpResourceTemplates(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpResourceTemplates(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_resource_templates", { name }) };
 } catch (e) {
@@ -2400,7 +2422,7 @@ async thinclawMcpResourceTemplates(name: string) : Promise<Result<JsonValue, str
 /**
  * List prompts exposed by an MCP server.
  */
-async thinclawMcpServerPrompts(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpServerPrompts(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_server_prompts", { name }) };
 } catch (e) {
@@ -2411,7 +2433,7 @@ async thinclawMcpServerPrompts(name: string) : Promise<Result<JsonValue, string>
 /**
  * Render one MCP prompt.
  */
-async thinclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: JsonValue | null) : Promise<Result<JsonValue, string>> {
+async thinclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: JsonValue | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_get_prompt", { serverName, promptName, promptArgs }) };
 } catch (e) {
@@ -2422,7 +2444,7 @@ async thinclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: J
 /**
  * Discover OAuth metadata for an HTTP MCP server.
  */
-async thinclawMcpOauth(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpOauth(name: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_oauth", { name }) };
 } catch (e) {
@@ -2433,7 +2455,7 @@ async thinclawMcpOauth(name: string) : Promise<Result<JsonValue, string>> {
 /**
  * Set MCP server log level.
  */
-async thinclawMcpSetLogLevel(name: string, level: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawMcpSetLogLevel(name: string, level: string) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_set_log_level", { name, level }) };
 } catch (e) {
@@ -2444,7 +2466,7 @@ async thinclawMcpSetLogLevel(name: string, level: string) : Promise<Result<Exten
 /**
  * List pending MCP interaction/auth requests.
  */
-async thinclawMcpInteractions() : Promise<Result<JsonValue, string>> {
+async thinclawMcpInteractions() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_interactions") };
 } catch (e) {
@@ -2455,7 +2477,7 @@ async thinclawMcpInteractions() : Promise<Result<JsonValue, string>> {
 /**
  * Respond to a pending MCP interaction/auth request.
  */
-async thinclawMcpInteractionRespond(interactionId: string, action: string, response: JsonValue | null, message: string | null) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawMcpInteractionRespond(interactionId: string, action: string, response: JsonValue | null, message: string | null) : Promise<Result<ExtensionActionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_interaction_respond", { interactionId, action, response, message }) };
 } catch (e) {
@@ -2463,7 +2485,7 @@ async thinclawMcpInteractionRespond(interactionId: string, action: string, respo
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawDiagnostics() : Promise<Result<DiagnosticsResponse, string>> {
+async thinclawDiagnostics() : Promise<Result<DiagnosticsResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_diagnostics") };
 } catch (e) {
@@ -2471,7 +2493,7 @@ async thinclawDiagnostics() : Promise<Result<DiagnosticsResponse, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSecurityPosture() : Promise<Result<SecurityPosture, string>> {
+async thinclawSecurityPosture() : Promise<Result<SecurityPosture, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_security_posture") };
 } catch (e) {
@@ -2479,7 +2501,7 @@ async thinclawSecurityPosture() : Promise<Result<SecurityPosture, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSecretRecoveryStatus() : Promise<Result<SecretRecoveryStatus, string>> {
+async thinclawSecretRecoveryStatus() : Promise<Result<SecretRecoveryStatus, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_secret_recovery_status") };
 } catch (e) {
@@ -2487,7 +2509,7 @@ async thinclawSecretRecoveryStatus() : Promise<Result<SecretRecoveryStatus, stri
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSecretRecoveryExport() : Promise<Result<string, string>> {
+async thinclawSecretRecoveryExport() : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_secret_recovery_export") };
 } catch (e) {
@@ -2495,7 +2517,7 @@ async thinclawSecretRecoveryExport() : Promise<Result<string, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSecretMasterKeyRotate(confirmation: string) : Promise<Result<SecretMasterKeyRotation, string>> {
+async thinclawSecretMasterKeyRotate(confirmation: string) : Promise<Result<SecretMasterKeyRotation, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_secret_master_key_rotate", { confirmation }) };
 } catch (e) {
@@ -2503,7 +2525,7 @@ async thinclawSecretMasterKeyRotate(confirmation: string) : Promise<Result<Secre
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawSecretRecoveryImport(recoveryKey: string, confirmation: string) : Promise<Result<SecretMasterKeyRotation, string>> {
+async thinclawSecretRecoveryImport(recoveryKey: string, confirmation: string) : Promise<Result<SecretMasterKeyRotation, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_secret_recovery_import", { recoveryKey, confirmation }) };
 } catch (e) {
@@ -2511,7 +2533,7 @@ async thinclawSecretRecoveryImport(recoveryKey: string, confirmation: string) : 
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawToolsList() : Promise<Result<ToolsListResponse, string>> {
+async thinclawToolsList() : Promise<Result<ToolsListResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_tools_list") };
 } catch (e) {
@@ -2522,7 +2544,7 @@ async thinclawToolsList() : Promise<Result<ToolsListResponse, string>> {
 /**
  * Get the set of globally disabled tools (deny-list stored in settings).
  */
-async thinclawToolPolicyGet() : Promise<Result<string[], string>> {
+async thinclawToolPolicyGet() : Promise<Result<string[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_tool_policy_get") };
 } catch (e) {
@@ -2533,7 +2555,7 @@ async thinclawToolPolicyGet() : Promise<Result<string[], string>> {
 /**
  * Set (overwrite) the list of globally disabled tools.
  */
-async thinclawToolPolicySet(disabledTools: string[]) : Promise<Result<null, string>> {
+async thinclawToolPolicySet(disabledTools: string[]) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_tool_policy_set", { disabledTools }) };
 } catch (e) {
@@ -2541,7 +2563,7 @@ async thinclawToolPolicySet(disabledTools: string[]) : Promise<Result<null, stri
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawPairingList(channel: string) : Promise<Result<PairingListResponse, string>> {
+async thinclawPairingList(channel: string) : Promise<Result<PairingListResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_pairing_list", { channel }) };
 } catch (e) {
@@ -2549,7 +2571,7 @@ async thinclawPairingList(channel: string) : Promise<Result<PairingListResponse,
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawPairingApprove(channel: string, code: string) : Promise<Result<JsonValue, string>> {
+async thinclawPairingApprove(channel: string, code: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_pairing_approve", { channel, code }) };
 } catch (e) {
@@ -2557,7 +2579,7 @@ async thinclawPairingApprove(channel: string, code: string) : Promise<Result<Jso
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawCompactSession(sessionKey: string) : Promise<Result<CompactSessionResponse, string>> {
+async thinclawCompactSession(sessionKey: string) : Promise<Result<CompactSessionResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_compact_session", { sessionKey }) };
 } catch (e) {
@@ -2569,7 +2591,7 @@ async thinclawCompactSession(sessionKey: string) : Promise<Result<CompactSession
  * List filesystem checkpoints (shadow-git snapshots) for a project directory,
  * newest first as returned by the core.
  */
-async thinclawCheckpointsList(projectDir: string) : Promise<Result<CheckpointEntryItem[], string>> {
+async thinclawCheckpointsList(projectDir: string) : Promise<Result<CheckpointEntryItem[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoints_list", { projectDir }) };
 } catch (e) {
@@ -2580,7 +2602,7 @@ async thinclawCheckpointsList(projectDir: string) : Promise<Result<CheckpointEnt
 /**
  * Diff the current project state against a checkpoint commit (unified diff text).
  */
-async thinclawCheckpointDiff(projectDir: string, commitHash: string) : Promise<Result<string, string>> {
+async thinclawCheckpointDiff(projectDir: string, commitHash: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoint_diff", { projectDir, commitHash }) };
 } catch (e) {
@@ -2592,7 +2614,7 @@ async thinclawCheckpointDiff(projectDir: string, commitHash: string) : Promise<R
  * Restore a project (or a single `file`) to a checkpoint commit. The core
  * creates a safety snapshot automatically before applying the restore.
  */
-async thinclawCheckpointRestore(projectDir: string, commitHash: string, file: string | null) : Promise<Result<null, string>> {
+async thinclawCheckpointRestore(projectDir: string, commitHash: string, file: string | null) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_checkpoint_restore", { projectDir, commitHash, file }) };
 } catch (e) {
@@ -2603,7 +2625,7 @@ async thinclawCheckpointRestore(projectDir: string, commitHash: string, file: st
 /**
  * Aggregate stats over the local trajectory archive (counts, span, outcomes).
  */
-async thinclawTrajectoryStats() : Promise<Result<TrajectoryStatsItem, string>> {
+async thinclawTrajectoryStats() : Promise<Result<TrajectoryStatsItem, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_stats") };
 } catch (e) {
@@ -2614,9 +2636,46 @@ async thinclawTrajectoryStats() : Promise<Result<TrajectoryStatsItem, string>> {
 /**
  * The most recent trajectory turn records (default 100), as raw JSON values.
  */
-async thinclawTrajectoryRecords(limit: number | null) : Promise<Result<JsonValue[], string>> {
+async thinclawTrajectoryRecords(limit: number | null) : Promise<Result<JsonValue[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_records", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Export the local trajectory archive as canonical SFT or DPO JSONL.
+ *
+ * The payload is bounded before crossing IPC. The frontend only writes it
+ * after an explicit click, so background polling never exposes or downloads
+ * training data.
+ */
+async thinclawTrajectoryExport(format: string) : Promise<Result<TrajectoryExportItem, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_export", { format }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return the current profile plus its reserved evolution routine state.
+ */
+async thinclawProfileEvolutionStatus() : Promise<Result<ProfileEvolutionStatusItem, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_profile_evolution_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Upsert the reserved evolution routine and run it immediately.
+ */
+async thinclawProfileEvolutionRun() : Promise<Result<ProfileEvolutionRunItem, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_profile_evolution_run") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2630,7 +2689,7 @@ async thinclawTrajectoryRecords(limit: number | null) : Promise<Result<JsonValue
  *
  * Also auto-persists entries to the ThinClaw DB on each poll (cheap, ~10s interval).
  */
-async thinclawCostSummary() : Promise<Result<CostSummary, string>> {
+async thinclawCostSummary() : Promise<Result<CostSummary, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_cost_summary") };
 } catch (e) {
@@ -2641,7 +2700,7 @@ async thinclawCostSummary() : Promise<Result<CostSummary, string>> {
 /**
  * Export cost data as CSV.
  */
-async thinclawCostExportCsv() : Promise<Result<string, string>> {
+async thinclawCostExportCsv() : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_cost_export_csv") };
 } catch (e) {
@@ -2654,7 +2713,7 @@ async thinclawCostExportCsv() : Promise<Result<string, string>> {
  *
  * Clears in-memory entries and persists the empty state to the ThinClaw DB.
  */
-async thinclawCostReset() : Promise<Result<null, string>> {
+async thinclawCostReset() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_cost_reset") };
 } catch (e) {
@@ -2668,7 +2727,7 @@ async thinclawCostReset() : Promise<Result<null, string>> {
  * Queries the agent's ChannelManager for actually registered channels
  * instead of reading static config/env vars.
  */
-async thinclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], string>> {
+async thinclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_status_list") };
 } catch (e) {
@@ -2679,7 +2738,7 @@ async thinclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], string>
 /**
  * Return the configuration schema for a single channel, if it exposes one.
  */
-async thinclawChannelConfigSchema(channelId: string) : Promise<Result<JsonValue, string>> {
+async thinclawChannelConfigSchema(channelId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_config_schema", { channelId }) };
 } catch (e) {
@@ -2690,7 +2749,7 @@ async thinclawChannelConfigSchema(channelId: string) : Promise<Result<JsonValue,
 /**
  * Return configuration schemas for every channel that exposes one.
  */
-async thinclawChannelConfigSchemas() : Promise<Result<JsonValue, string>> {
+async thinclawChannelConfigSchemas() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_config_schemas") };
 } catch (e) {
@@ -2718,7 +2777,7 @@ async thinclawChannelConfigSubmit(channelId: string, values: JsonValue) : Promis
 /**
  * Set the default agent profile.
  */
-async thinclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> {
+async thinclawAgentsSetDefault(agentId: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_agents_set_default", { agentId }) };
 } catch (e) {
@@ -2729,7 +2788,7 @@ async thinclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> 
 /**
  * Search ClawHub plugin catalog (proxied through ThinClaw).
  */
-async thinclawClawhubSearch(query: string) : Promise<Result<JsonValue, string>> {
+async thinclawClawhubSearch(query: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_clawhub_search", { query }) };
 } catch (e) {
@@ -2740,7 +2799,7 @@ async thinclawClawhubSearch(query: string) : Promise<Result<JsonValue, string>> 
 /**
  * Install a plugin from ClawHub.
  */
-async thinclawClawhubInstall(pluginId: string) : Promise<Result<JsonValue, string>> {
+async thinclawClawhubInstall(pluginId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_clawhub_install", { pluginId }) };
 } catch (e) {
@@ -2754,7 +2813,7 @@ async thinclawClawhubInstall(pluginId: string) : Promise<Result<JsonValue, strin
  * Replaces the empty `thinclaw_cron_history` stub with actual data
  * access from ThinClaw's RoutineAuditLog.
  */
-async thinclawRoutineAuditList(routineKey: string, limit: number | null, outcome: string | null) : Promise<Result<RoutineAuditEntry[], string>> {
+async thinclawRoutineAuditList(routineKey: string, limit: number | null, outcome: string | null) : Promise<Result<RoutineAuditEntry[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_audit_list", { routineKey, limit, outcome }) };
 } catch (e) {
@@ -2768,7 +2827,7 @@ async thinclawRoutineAuditList(routineKey: string, limit: number | null, outcome
  * If `key` is provided, clears runs for that specific routine.
  * If `key` is null, clears ALL routine runs.
  */
-async thinclawClearRoutineRuns(key: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawClearRoutineRuns(key: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_clear_routine_runs", { key }) };
 } catch (e) {
@@ -2779,7 +2838,7 @@ async thinclawClearRoutineRuns(key: string | null) : Promise<Result<JsonValue, s
 /**
  * Get response cache statistics.
  */
-async thinclawCacheStats() : Promise<Result<CacheStats, string>> {
+async thinclawCacheStats() : Promise<Result<CacheStats, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_cache_stats") };
 } catch (e) {
@@ -2790,7 +2849,7 @@ async thinclawCacheStats() : Promise<Result<CacheStats, string>> {
 /**
  * List plugin lifecycle events.
  */
-async thinclawPluginLifecycleList() : Promise<Result<LifecycleEventItem[], string>> {
+async thinclawPluginLifecycleList() : Promise<Result<LifecycleEventItem[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_plugin_lifecycle_list") };
 } catch (e) {
@@ -2801,7 +2860,7 @@ async thinclawPluginLifecycleList() : Promise<Result<LifecycleEventItem[], strin
 /**
  * Validate a plugin's manifest.
  */
-async thinclawManifestValidate(pluginId: string) : Promise<Result<ManifestValidationResponse, string>> {
+async thinclawManifestValidate(pluginId: string) : Promise<Result<ManifestValidationResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_manifest_validate", { pluginId }) };
 } catch (e) {
@@ -2812,7 +2871,7 @@ async thinclawManifestValidate(pluginId: string) : Promise<Result<ManifestValida
 /**
  * Get the current smart routing configuration.
  */
-async thinclawRoutingGet() : Promise<Result<JsonValue, string>> {
+async thinclawRoutingGet() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_get") };
 } catch (e) {
@@ -2823,7 +2882,7 @@ async thinclawRoutingGet() : Promise<Result<JsonValue, string>> {
 /**
  * Enable or disable smart routing.
  */
-async thinclawRoutingSet(smartRoutingEnabled: boolean) : Promise<Result<null, string>> {
+async thinclawRoutingSet(smartRoutingEnabled: boolean) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_set", { smartRoutingEnabled }) };
 } catch (e) {
@@ -2834,7 +2893,7 @@ async thinclawRoutingSet(smartRoutingEnabled: boolean) : Promise<Result<null, st
 /**
  * List all routing rules along with the smart routing toggle state.
  */
-async thinclawRoutingRulesList() : Promise<Result<RoutingRulesResponse, string>> {
+async thinclawRoutingRulesList() : Promise<Result<RoutingRulesResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_list") };
 } catch (e) {
@@ -2845,7 +2904,7 @@ async thinclawRoutingRulesList() : Promise<Result<RoutingRulesResponse, string>>
 /**
  * Save routing rules (full replace).
  */
-async thinclawRoutingRulesSave(rules: RoutingRule[]) : Promise<Result<null, string>> {
+async thinclawRoutingRulesSave(rules: RoutingRule[]) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_save", { rules }) };
 } catch (e) {
@@ -2856,7 +2915,7 @@ async thinclawRoutingRulesSave(rules: RoutingRule[]) : Promise<Result<null, stri
 /**
  * Add a routing rule at a specific position (or at the end).
  */
-async thinclawRoutingRulesAdd(rule: RoutingRule, position: number | null) : Promise<Result<RoutingRule[], string>> {
+async thinclawRoutingRulesAdd(rule: RoutingRule, position: number | null) : Promise<Result<RoutingRule[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_add", { rule, position }) };
 } catch (e) {
@@ -2867,7 +2926,7 @@ async thinclawRoutingRulesAdd(rule: RoutingRule, position: number | null) : Prom
 /**
  * Remove a routing rule by index.
  */
-async thinclawRoutingRulesRemove(index: number) : Promise<Result<RoutingRule[], string>> {
+async thinclawRoutingRulesRemove(index: number) : Promise<Result<RoutingRule[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_remove", { index }) };
 } catch (e) {
@@ -2878,7 +2937,7 @@ async thinclawRoutingRulesRemove(index: number) : Promise<Result<RoutingRule[], 
 /**
  * Reorder a routing rule (move from one position to another).
  */
-async thinclawRoutingRulesReorder(from: number, to: number) : Promise<Result<RoutingRule[], string>> {
+async thinclawRoutingRulesReorder(from: number, to: number) : Promise<Result<RoutingRule[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_reorder", { from, to }) };
 } catch (e) {
@@ -2889,7 +2948,7 @@ async thinclawRoutingRulesReorder(from: number, to: number) : Promise<Result<Rou
 /**
  * Save explicit provider order for primary and cheap routing pools.
  */
-async thinclawRoutingPoolsSave(primaryPoolOrder: string[], cheapPoolOrder: string[]) : Promise<Result<null, string>> {
+async thinclawRoutingPoolsSave(primaryPoolOrder: string[], cheapPoolOrder: string[]) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_pools_save", { primaryPoolOrder, cheapPoolOrder }) };
 } catch (e) {
@@ -2900,7 +2959,7 @@ async thinclawRoutingPoolsSave(primaryPoolOrder: string[], cheapPoolOrder: strin
 /**
  * Get full routing policy status including latency data.
  */
-async thinclawRoutingStatus() : Promise<Result<RoutingStatusResponse, string>> {
+async thinclawRoutingStatus() : Promise<Result<RoutingStatusResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_status") };
 } catch (e) {
@@ -2911,7 +2970,7 @@ async thinclawRoutingStatus() : Promise<Result<RoutingStatusResponse, string>> {
 /**
  * Simulate ThinClaw's route decision for a draft prompt.
  */
-async thinclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<RouteSimulationResponse, string>> {
+async thinclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<RouteSimulationResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_simulate", { request }) };
 } catch (e) {
@@ -2926,7 +2985,7 @@ async thinclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<
  * callback, exchanges the auth code for tokens, and returns them.
  * On success, the tokens are also stored in the Keychain.
  */
-async thinclawGmailOauthStart() : Promise<Result<GmailOAuthResult, string>> {
+async thinclawGmailOauthStart() : Promise<Result<GmailOAuthResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_gmail_oauth_start") };
 } catch (e) {
@@ -2937,7 +2996,7 @@ async thinclawGmailOauthStart() : Promise<Result<GmailOAuthResult, string>> {
 /**
  * Get Gmail channel configuration status.
  */
-async thinclawGmailStatus() : Promise<Result<GmailStatusResponse, string>> {
+async thinclawGmailStatus() : Promise<Result<GmailStatusResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_gmail_status") };
 } catch (e) {
@@ -2945,7 +3004,7 @@ async thinclawGmailStatus() : Promise<Result<GmailStatusResponse, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningStatus(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningStatus(limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_status", { limit }) };
 } catch (e) {
@@ -2953,7 +3012,7 @@ async thinclawLearningStatus(limit: number | null) : Promise<Result<JsonValue, s
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningHistory(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningHistory(limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_history", { limit }) };
 } catch (e) {
@@ -2961,7 +3020,7 @@ async thinclawLearningHistory(limit: number | null) : Promise<Result<JsonValue, 
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningCandidates(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningCandidates(limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_candidates", { limit }) };
 } catch (e) {
@@ -2969,7 +3028,7 @@ async thinclawLearningCandidates(limit: number | null) : Promise<Result<JsonValu
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningArtifactVersions(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningArtifactVersions(limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_artifact_versions", { limit }) };
 } catch (e) {
@@ -2977,7 +3036,7 @@ async thinclawLearningArtifactVersions(limit: number | null) : Promise<Result<Js
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningProviderHealth() : Promise<Result<JsonValue, string>> {
+async thinclawLearningProviderHealth() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_provider_health") };
 } catch (e) {
@@ -2985,7 +3044,23 @@ async thinclawLearningProviderHealth() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningCodeProposals(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawExternalMemoryConfigure(request: ExternalMemoryConfigureRequest) : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_external_memory_configure", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawExternalMemoryDisable() : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_external_memory_disable") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawLearningCodeProposals(status: string | null, limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_code_proposals", { status, limit }) };
 } catch (e) {
@@ -2993,7 +3068,7 @@ async thinclawLearningCodeProposals(status: string | null, limit: number | null)
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningOutcomes(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningOutcomes(status: string | null, limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_outcomes", { status, limit }) };
 } catch (e) {
@@ -3001,7 +3076,7 @@ async thinclawLearningOutcomes(status: string | null, limit: number | null) : Pr
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningRollbacks(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningRollbacks(limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_rollbacks", { limit }) };
 } catch (e) {
@@ -3009,7 +3084,7 @@ async thinclawLearningRollbacks(limit: number | null) : Promise<Result<JsonValue
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningReviewCodeProposal(proposalId: string, decision: string, note: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningReviewCodeProposal(proposalId: string, decision: string, note: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_review_code_proposal", { proposalId, decision, note }) };
 } catch (e) {
@@ -3017,7 +3092,7 @@ async thinclawLearningReviewCodeProposal(proposalId: string, decision: string, n
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningReviewOutcome(outcomeId: string, decision: string, verdict: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningReviewOutcome(outcomeId: string, decision: string, verdict: string | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_review_outcome", { outcomeId, decision, verdict }) };
 } catch (e) {
@@ -3025,7 +3100,7 @@ async thinclawLearningReviewOutcome(outcomeId: string, decision: string, verdict
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawLearningRecordRollback(artifactType: string, artifactName: string, artifactVersionId: string | null, reason: string) : Promise<Result<JsonValue, string>> {
+async thinclawLearningRecordRollback(artifactType: string, artifactName: string, artifactVersionId: string | null, reason: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_record_rollback", { artifactType, artifactName, artifactVersionId, reason }) };
 } catch (e) {
@@ -3041,7 +3116,7 @@ async thinclawLearningEvaluateOutcomes() : Promise<Result<JsonValue, BridgeError
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsProjects() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsProjects() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_projects") };
 } catch (e) {
@@ -3049,7 +3124,7 @@ async thinclawExperimentsProjects() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsCampaigns() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsCampaigns() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_campaigns") };
 } catch (e) {
@@ -3057,7 +3132,7 @@ async thinclawExperimentsCampaigns() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsRunners() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsRunners() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_runners") };
 } catch (e) {
@@ -3065,7 +3140,7 @@ async thinclawExperimentsRunners() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsTargets() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsTargets() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_targets") };
 } catch (e) {
@@ -3073,7 +3148,7 @@ async thinclawExperimentsTargets() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsTrials(campaignId: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsTrials(campaignId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_trials", { campaignId }) };
 } catch (e) {
@@ -3081,7 +3156,7 @@ async thinclawExperimentsTrials(campaignId: string) : Promise<Result<JsonValue, 
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsTrialArtifacts(trialId: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsTrialArtifacts(trialId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_trial_artifacts", { trialId }) };
 } catch (e) {
@@ -3089,7 +3164,7 @@ async thinclawExperimentsTrialArtifacts(trialId: string) : Promise<Result<JsonVa
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsModelUsage(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsModelUsage(limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_model_usage", { limit }) };
 } catch (e) {
@@ -3097,7 +3172,7 @@ async thinclawExperimentsModelUsage(limit: number | null) : Promise<Result<JsonV
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsOpportunities(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsOpportunities(limit: number | null) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_opportunities", { limit }) };
 } catch (e) {
@@ -3105,7 +3180,7 @@ async thinclawExperimentsOpportunities(limit: number | null) : Promise<Result<Js
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsGpuClouds() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsGpuClouds() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_clouds") };
 } catch (e) {
@@ -3113,7 +3188,7 @@ async thinclawExperimentsGpuClouds() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsValidateRunner(runnerId: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsValidateRunner(runnerId: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_validate_runner", { runnerId }) };
 } catch (e) {
@@ -3121,7 +3196,7 @@ async thinclawExperimentsValidateRunner(runnerId: string) : Promise<Result<JsonV
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawExperimentsCampaignAction(campaignId: string, action: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsCampaignAction(campaignId: string, action: string) : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_campaign_action", { campaignId, action }) };
 } catch (e) {
@@ -3151,7 +3226,7 @@ async thinclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonVa
  * `agent_loop` is runnable against the embedded agent; the benchmark envs
  * need case definitions and are CLI-only for now (reported as non-runnable).
  */
-async thinclawExperimentsListEnvs() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsListEnvs() : Promise<Result<JsonValue, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_list_envs") };
 } catch (e) {
@@ -3234,7 +3309,7 @@ async directRuntimeGetEngineSetupStatus() : Promise<EngineSetupStatus> {
  * Emits `engine_setup_progress` events:
  * `{ stage: "creating_venv" | "installing" | "complete" | "error", message: String }`
  */
-async directRuntimeSetupEngine() : Promise<Result<null, string>> {
+async directRuntimeSetupEngine() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_setup_engine") };
 } catch (e) {
@@ -3242,7 +3317,7 @@ async directRuntimeSetupEngine() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async directRuntimeSnapshot() : Promise<Result<LocalRuntimeSnapshot, string>> {
+async directRuntimeSnapshot() : Promise<Result<LocalRuntimeSnapshot, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_snapshot") };
 } catch (e) {
@@ -3256,7 +3331,7 @@ async directRuntimeSnapshot() : Promise<Result<LocalRuntimeSnapshot, string>> {
  * This is the new engine-aware entry point. For llamacpp builds, the existing
  * `direct_runtime_start_chat_server` in sidecar.rs still works — this command is for MLX/vLLM/Ollama.
  */
-async directRuntimeStartEngine(modelPath: string, contextSize: number) : Promise<Result<EngineStartResult, string>> {
+async directRuntimeStartEngine(modelPath: string, contextSize: number) : Promise<Result<EngineStartResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_engine", { modelPath, contextSize }) };
 } catch (e) {
@@ -3267,7 +3342,7 @@ async directRuntimeStartEngine(modelPath: string, contextSize: number) : Promise
 /**
  * Stop the active engine.
  */
-async directRuntimeStopEngine() : Promise<Result<null, string>> {
+async directRuntimeStopEngine() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_stop_engine") };
 } catch (e) {
@@ -3278,7 +3353,7 @@ async directRuntimeStopEngine() : Promise<Result<null, string>> {
 /**
  * Check if the active engine is ready (health check).
  */
-async directRuntimeIsEngineReady() : Promise<Result<boolean, string>> {
+async directRuntimeIsEngineReady() : Promise<Result<boolean, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_is_engine_ready") };
 } catch (e) {
@@ -3297,7 +3372,7 @@ async directRuntimeIsEngineReady() : Promise<Result<boolean, string>> {
  * both text-only and multimodal LLMs.  One API request is made per tag,
  * results are merged, deduplicated by repo ID, and re-sorted by downloads.
  */
-async directRuntimeDiscoverHfModels(query: string, engine: string, limit: number | null, pipelineTags: string[] | null) : Promise<Result<HfModelCard[], string>> {
+async directRuntimeDiscoverHfModels(query: string, engine: string, limit: number | null, pipelineTags: string[] | null) : Promise<Result<HfModelCard[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_discover_hf_models", { query, engine, limit, pipelineTags }) };
 } catch (e) {
@@ -3314,7 +3389,7 @@ async directRuntimeDiscoverHfModels(query: string, engine: string, limit: number
  * For MLX/vLLM repos: lists all model files (skipping README, images, etc.)
  * for a directory download.
  */
-async directRuntimeGetModelFiles(repoId: string, engine: string) : Promise<Result<ModelDownloadInfo, string>> {
+async directRuntimeGetModelFiles(repoId: string, engine: string) : Promise<Result<ModelDownloadInfo, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_get_model_files", { repoId, engine }) };
 } catch (e) {
@@ -3332,7 +3407,7 @@ async directRuntimeGetModelFiles(repoId: string, engine: string) : Promise<Resul
  * `category` controls which subdirectory the model is saved under
  * (`LLM`, `Embedding`, `Diffusion`, `STT`, etc.). Defaults to `"LLM"`.
  */
-async directRuntimeDownloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null, category: string | null) : Promise<Result<string, string>> {
+async directRuntimeDownloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null, category: string | null) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_download_hf_model_files", { repoId, filesToDownload, destSubdir, category }) };
 } catch (e) {
@@ -3342,15 +3417,14 @@ async directRuntimeDownloadHfModelFiles(repoId: string, filesToDownload: string[
 },
 /**
  * Discover the embedding dimension of a HuggingFace model by fetching its
- * `config.json` from the API and extracting `hidden_size`, `d_model`, or
- * `embedding_dim`.
+ * `config.json` and inspecting common sentence-transformer and model fields.
  *
  * Returns `None` for GGUF single-file models or repos without a `config.json`.
  * This is used by the onboarding wizard to pre-configure the vector store
  * dimension *before* the embedding server starts, avoiding a wasteful
  * create-then-destroy cycle on first boot.
  */
-async directRuntimeDiscoverEmbeddingDimension(repoId: string) : Promise<Result<number | null, string>> {
+async directRuntimeDiscoverEmbeddingDimension(repoId: string) : Promise<Result<number | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_discover_embedding_dimension", { repoId }) };
 } catch (e) {
@@ -3361,7 +3435,7 @@ async directRuntimeDiscoverEmbeddingDimension(repoId: string) : Promise<Result<n
 /**
  * Returns the active and available backends for all 5 modalities.
  */
-async directInferenceGetBackends() : Promise<Result<ModalityBackends[], string>> {
+async directInferenceGetBackends() : Promise<Result<ModalityBackends[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_inference_get_backends") };
 } catch (e) {
@@ -3376,7 +3450,7 @@ async directInferenceGetBackends() : Promise<Result<ModalityBackends[], string>>
  * will construct the appropriate cloud backend immediately (API-key-only
  * providers) or mark local backends for deferred construction.
  */
-async directInferenceUpdateBackend(modality: Modality, backendId: string) : Promise<Result<null, string>> {
+async directInferenceUpdateBackend(modality: Modality, backendId: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_inference_update_backend", { modality, backendId }) };
 } catch (e) {
@@ -3390,7 +3464,7 @@ async directInferenceUpdateBackend(modality: Modality, backendId: string) : Prom
  * Returns models grouped by provider. Results are cached for 30 minutes.
  * Pass an empty `providers` array to discover from ALL providers with keys.
  */
-async directInferenceDiscoverCloudModels(providers: string[]) : Promise<Result<ModelDiscoveryResult, string>> {
+async directInferenceDiscoverCloudModels(providers: string[]) : Promise<Result<ModelDiscoveryResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_inference_discover_cloud_models", { providers }) };
 } catch (e) {
@@ -3401,7 +3475,7 @@ async directInferenceDiscoverCloudModels(providers: string[]) : Promise<Result<M
 /**
  * Refresh models for a single provider (bypasses cache).
  */
-async directInferenceRefreshCloudModels(provider: string) : Promise<Result<ProviderDiscoveryResult, string>> {
+async directInferenceRefreshCloudModels(provider: string) : Promise<Result<ProviderDiscoveryResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_inference_refresh_cloud_models", { provider }) };
 } catch (e) {
@@ -3412,7 +3486,7 @@ async directInferenceRefreshCloudModels(provider: string) : Promise<Result<Provi
 /**
  * Get the current cloud storage status.
  */
-async cloudGetStatus() : Promise<Result<CloudStatusResponse, string>> {
+async cloudGetStatus() : Promise<Result<CloudStatusResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_get_status") };
 } catch (e) {
@@ -3423,7 +3497,7 @@ async cloudGetStatus() : Promise<Result<CloudStatusResponse, string>> {
 /**
  * Configure and test an S3-compatible cloud provider.
  */
-async cloudTestConnection(config: S3ConfigInput) : Promise<Result<ConnectionTestResult, string>> {
+async cloudTestConnection(config: S3ConfigInput) : Promise<Result<ConnectionTestResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_test_connection", { config }) };
 } catch (e) {
@@ -3436,7 +3510,7 @@ async cloudTestConnection(config: S3ConfigInput) : Promise<Result<ConnectionTest
  *
  * iCloud requires no configuration — it uses the native macOS container.
  */
-async cloudTestIcloud() : Promise<Result<ConnectionTestResult, string>> {
+async cloudTestIcloud() : Promise<Result<ConnectionTestResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_test_icloud") };
 } catch (e) {
@@ -3447,7 +3521,7 @@ async cloudTestIcloud() : Promise<Result<ConnectionTestResult, string>> {
 /**
  * Configure and test a WebDAV provider.
  */
-async cloudTestWebdav(config: WebDavConfigInput) : Promise<Result<ConnectionTestResult, string>> {
+async cloudTestWebdav(config: WebDavConfigInput) : Promise<Result<ConnectionTestResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_test_webdav", { config }) };
 } catch (e) {
@@ -3458,7 +3532,7 @@ async cloudTestWebdav(config: WebDavConfigInput) : Promise<Result<ConnectionTest
 /**
  * Configure and test an SFTP provider.
  */
-async cloudTestSftp(config: SftpConfigInput) : Promise<Result<ConnectionTestResult, string>> {
+async cloudTestSftp(config: SftpConfigInput) : Promise<Result<ConnectionTestResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_test_sftp", { config }) };
 } catch (e) {
@@ -3475,7 +3549,7 @@ async cloudTestSftp(config: SftpConfigInput) : Promise<Result<ConnectionTestResu
  * 2. Listen for the redirect on `http://localhost:11434/callback` (or similar)
  * 3. Pass the received `code` + `code_verifier` to `cloud_oauth_complete()`
  */
-async cloudOauthStart(provider: string) : Promise<Result<OAuthStartResult, string>> {
+async cloudOauthStart(provider: string) : Promise<Result<OAuthStartResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_oauth_start", { provider }) };
 } catch (e) {
@@ -3488,7 +3562,7 @@ async cloudOauthStart(provider: string) : Promise<Result<OAuthStartResult, strin
  *
  * On success, the provider is configured and a connection test is performed.
  */
-async cloudOauthComplete(provider: string, code: string, codeVerifier: string) : Promise<Result<ConnectionTestResult, string>> {
+async cloudOauthComplete(provider: string, code: string, codeVerifier: string) : Promise<Result<ConnectionTestResult, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_oauth_complete", { provider, code, codeVerifier }) };
 } catch (e) {
@@ -3499,7 +3573,7 @@ async cloudOauthComplete(provider: string, code: string, codeVerifier: string) :
 /**
  * Start migration from local to cloud storage.
  */
-async cloudMigrateToCloud() : Promise<Result<null, string>> {
+async cloudMigrateToCloud() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_migrate_to_cloud") };
 } catch (e) {
@@ -3510,7 +3584,7 @@ async cloudMigrateToCloud() : Promise<Result<null, string>> {
 /**
  * Start migration from cloud to local storage.
  */
-async cloudMigrateToLocal() : Promise<Result<null, string>> {
+async cloudMigrateToLocal() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_migrate_to_local") };
 } catch (e) {
@@ -3521,7 +3595,7 @@ async cloudMigrateToLocal() : Promise<Result<null, string>> {
 /**
  * Cancel an in-progress migration.
  */
-async cloudCancelMigration() : Promise<Result<null, string>> {
+async cloudCancelMigration() : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_cancel_migration") };
 } catch (e) {
@@ -3532,7 +3606,7 @@ async cloudCancelMigration() : Promise<Result<null, string>> {
 /**
  * Get the recovery key (base64-encoded master encryption key).
  */
-async cloudGetRecoveryKey() : Promise<Result<string, string>> {
+async cloudGetRecoveryKey() : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_get_recovery_key") };
 } catch (e) {
@@ -3543,7 +3617,7 @@ async cloudGetRecoveryKey() : Promise<Result<string, string>> {
 /**
  * Import a recovery key (for restoring on a new device).
  */
-async cloudImportRecoveryKey(recoveryKey: string) : Promise<Result<null, string>> {
+async cloudImportRecoveryKey(recoveryKey: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_import_recovery_key", { recoveryKey }) };
 } catch (e) {
@@ -3554,7 +3628,7 @@ async cloudImportRecoveryKey(recoveryKey: string) : Promise<Result<null, string>
 /**
  * Get storage breakdown by category (for the progress bar UI).
  */
-async cloudGetStorageBreakdown() : Promise<Result<StorageCategory[], string>> {
+async cloudGetStorageBreakdown() : Promise<Result<StorageCategory[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_get_storage_breakdown") };
 } catch (e) {
@@ -3568,7 +3642,7 @@ async cloudGetStorageBreakdown() : Promise<Result<StorageCategory[], string>> {
  * This is the directory where the agent writes local files (write_file, shell, etc.).
  * Defaults to the same app-data agent workspace used by the ThinClaw bridge.
  */
-async thinclawGetWorkspacePath() : Promise<Result<string, string>> {
+async thinclawGetWorkspacePath() : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_workspace_path") };
 } catch (e) {
@@ -3581,7 +3655,7 @@ async thinclawGetWorkspacePath() : Promise<Result<string, string>> {
  *
  * Creates the directory if it doesn't exist yet. Returns the path that was opened.
  */
-async thinclawRevealWorkspace() : Promise<Result<string, string>> {
+async thinclawRevealWorkspace() : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_reveal_workspace") };
 } catch (e) {
@@ -3595,7 +3669,7 @@ async thinclawRevealWorkspace() : Promise<Result<string, string>> {
  * Returns relative paths (from workspace root), file sizes, and modification
  * timestamps so the frontend can build a proper file browser.
  */
-async thinclawListAgentWorkspaceFiles() : Promise<Result<JsonValue[], string>> {
+async thinclawListAgentWorkspaceFiles() : Promise<Result<JsonValue[], BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_list_agent_workspace_files") };
 } catch (e) {
@@ -3610,7 +3684,7 @@ async thinclawListAgentWorkspaceFiles() : Promise<Result<JsonValue[], string>> {
  * are created automatically. Path traversal (`..`) is rejected for safety.
  * Returns the absolute path of the written file.
  */
-async thinclawWriteAgentWorkspaceFile(relativePath: string, content: string) : Promise<Result<string, string>> {
+async thinclawWriteAgentWorkspaceFile(relativePath: string, content: string) : Promise<Result<string, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_write_agent_workspace_file", { relativePath, content }) };
 } catch (e) {
@@ -3624,7 +3698,7 @@ async thinclawWriteAgentWorkspaceFile(relativePath: string, content: string) : P
  * Uses `open -R <path>` on macOS to select the file in a Finder window,
  * which is more user-friendly than just opening the parent folder.
  */
-async thinclawRevealFile(path: string) : Promise<Result<null, string>> {
+async thinclawRevealFile(path: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_reveal_file", { path }) };
 } catch (e) {
@@ -3692,9 +3766,33 @@ export type BridgeError =
  */
 { kind: "unavailable"; capability: string; reason: string; remediation: string | null; satisfied_by: RouteMode } |
 /**
- * A genuine error (kept distinct from the gated state above).
- * Struct variant (not a tuple) so the internally-tagged (`tag = "kind"`)
- * representation stays valid for serde/specta export.
+ * User-provided data failed validation.
+ */
+{ kind: "invalid_input"; message: string; field: string | null } |
+/**
+ * Credentials are absent, expired, or rejected by the target service.
+ */
+{ kind: "unauthorized"; message: string; remediation: string | null } |
+/**
+ * A requested local or remote resource does not exist.
+ */
+{ kind: "not_found"; resource: string; message: string } |
+/**
+ * The request conflicts with current state and may be retried after it changes.
+ */
+{ kind: "conflict"; message: string; remediation: string | null } |
+/**
+ * The operation exceeded a bounded deadline.
+ */
+{ kind: "timeout"; operation: string; message: string; retryable: boolean } |
+/**
+ * The transport failed before a valid response was received.
+ */
+{ kind: "network"; message: string; retryable: boolean } |
+/**
+ * A genuine unclassified runtime error (kept distinct from gated and
+ * actionable outcomes). Struct variants keep the internally-tagged
+ * (`tag = "kind"`) representation valid for serde/specta export.
  */
 { kind: "runtime"; message: string }
 /**
@@ -3747,6 +3845,10 @@ export type CompactSessionResponse = { tokens_before: number; tokens_after: numb
  * Connection test result for the frontend.
  */
 export type ConnectionTestResult = { connected: boolean; provider_name: string; storage_used: number; storage_available: number | null; error: string | null }
+/**
+ * Context-window pressure level carried by [`UiEvent::ContextPressure`].
+ */
+export type ContextPressureLevel = "none" | "warning" | "critical"
 export type Conversation = { id: string; title: string; created_at: number; updated_at: number; project_id: string | null; sort_order: number }
 /**
  * LLM cost tracker summary
@@ -3759,6 +3861,10 @@ export type CreateProjectRequest = { name: string; description: string | null }
 export type CustomLlmConfigInput = { url: string | null; key: string | null; model: string | null; enabled: boolean }
 export type CustomPersona = { id: string; name: string; description: string; instructions: string }
 export type CustomSecret = { id: string; name: string; description: string | null; granted: boolean }
+/**
+ * Complete translation payload consumed by every Desktop webview.
+ */
+export type DesktopI18nCatalog = { locale: string; default_locale: string; available_locales: string[]; messages: { [key in string]: string } }
 /**
  * A single diagnostic check result
  */
@@ -3844,6 +3950,17 @@ export type ExtensionInfoItem = { name: string; kind: string; description: strin
  * Extensions list response
  */
 export type ExtensionsListResponse = { extensions: ExtensionInfoItem[]; total: number }
+/**
+ * Secret-safe external-memory setup request.
+ *
+ * Desktop intentionally accepts an environment-variable *name*, never an API
+ * key value. Provider credentials therefore stay out of the settings database
+ * and can be supplied through the existing process environment / secret
+ * injection boundary.
+ */
+export type ExternalMemoryConfigureRequest = { provider: string; base_url: string | null; api_key_env: string | null; embedding_url: string | null; embedding_api_key_env: string | null; collection: string | null; collection_id: string | null; agent_id: string | null; provider_user_id: string | null; enabled: boolean; activate: boolean; cadence: number | null; depth: number | null; user_modeling_enabled: boolean }
+export type FleetBroadcastDelivery = { agent_id: string; agent_name: string; delivered: boolean; error: string | null }
+export type FleetBroadcastResult = { attempted: number; delivered: number; failed: number; deliveries: FleetBroadcastDelivery[] }
 export type FrontendMessage = { id: string; conversation_id: string; role: string; content: string; images: string[] | null; assets: AssetRef[] | null; attached_docs: DirectAttachedDocument[] | null; web_search_results: WebSearchResult[] | null; created_at: number }
 export type GGUFMetadata = { architecture: string; context_length: number; embedding_length: number; block_count: number; head_count: number; head_count_kv: number; file_type: number;
 /**
@@ -4023,8 +4140,18 @@ export type PairingItem = { channel: string; user_id: string; paired_at: string;
  */
 export type PairingListResponse = { pairings: PairingItem[]; total: number }
 export type PermissionStatus = { accessibility: boolean; screen_recording: boolean }
+export type ProfileEvolutionRunItem = { routine_id: string; run_id: string }
+export type ProfileEvolutionStatusItem = { profile_path: string; profile_exists: boolean; profile_parse_error: string | null; preferred_name: string | null; confidence: number | null; message_count: number | null; profile_updated_at: string | null; profile: JsonValue | null; routine_exists: boolean; routine_id: string | null; routine_enabled: boolean; last_run_at: string | null; next_fire_at: string | null; run_count: number; consecutive_failures: number }
 export type Project = { id: string; name: string; description: string | null; created_at: number; updated_at: number; sort_order: number }
 export type ProviderDiscoveryResult = { provider: string; models: ModelDescriptor[]; fromCache: boolean; error?: string | null }
+export type RemoteAccessExposure = "tailnet" | "public"
+export type RemoteAccessStartRequest = { exposure: RemoteAccessExposure;
+/**
+ * Public Funnel changes the trust boundary and must be acknowledged for
+ * each start. The private tailnet mode never requires this flag.
+ */
+confirm_public: boolean }
+export type RemoteAccessStatus = { runtime_mode: string; gateway_running: boolean; gateway_port: number; gateway_url: string; tailscale_installed: boolean; tailscale_authenticated: boolean; tailscale_dns_name: string | null; tailscale_error: string | null; tunnel_running: boolean; exposure: RemoteAccessExposure | null; access_url: string | null }
 export type RemoteDeployResult = { status: string; url: string; token: string; message: string | null }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 /**
@@ -4236,7 +4363,27 @@ string
  * The recognised, closed set of [`SubAgentStatus`] values.
  */
 export type SubAgentStatusKnown = "running" | "completed" | "failed"
-export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string; app_memory: number; memory_bandwidth_gbps: number }
+export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string;
+/**
+ * Resident memory of the Tauri desktop process alone.
+ */
+desktop_memory: number;
+/**
+ * Resident memory of all descendant sidecar processes.
+ */
+sidecar_memory: number;
+/**
+ * Desktop + descendant sidecar resident memory.
+ */
+app_memory: number;
+/**
+ * Configured app+sidecar memory budget (zero when disabled).
+ */
+memory_ceiling: number; memory_budget_exceeded: boolean;
+/**
+ * Backend initialization time captured immediately before the event loop.
+ */
+startup_ready_ms: number; startup_budget_ms: number; startup_budget_exceeded: boolean; memory_bandwidth_gbps: number }
 export type TAURI_CHANNEL<TSend> = import("@tauri-apps/api/core").Channel<TSend>
 /**
  * Telegram configuration input
@@ -4274,7 +4421,12 @@ export type ThinClawStatus = { engine_running: boolean; engine_connected: boolea
  * Compatibility field. Persisted bearer credentials are never returned
  * through the broad status command; use `has_remote_token` for presence.
  */
-remote_token: string | null; has_remote_token: boolean; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
+remote_token: string | null; has_remote_token: boolean; device_id: string;
+/**
+ * Compatibility field. Always empty in broad status responses; use the
+ * explicit reveal command for a user-initiated copy action.
+ */
+auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
 /**
  * Whether the agent runs tools without individual approval prompts.
  */
@@ -4327,6 +4479,10 @@ export type ToolStatus =
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
 /**
+ * Bounded training export returned to the frontend for an explicit download.
+ */
+export type TrajectoryExportItem = { format: string; payload: string; source_record_count: number; exported_record_count: number; skipped_counts: { [key in string]: number } }
+/**
  * Frontend-facing aggregate trajectory stats. Mirrors `TrajectoryStats` with
  * paths/timestamps rendered as strings so the type is specta-exportable.
  */
@@ -4378,6 +4534,10 @@ export type UiEvent =
  * Run status change
  */
 { kind: "RunStatus"; session_key: string; run_id: string | null; status: RunStatus; error: string | null } |
+/**
+ * Structured context-window capacity transition for the active session.
+ */
+{ kind: "ContextPressure"; session_key: string; level: ContextPressureLevel; usage_percent: number } |
 /**
  * Explicit run lifecycle transition.
  */

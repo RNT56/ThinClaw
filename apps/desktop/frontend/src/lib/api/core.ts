@@ -5,7 +5,6 @@
  * Command names, parameters, and result data are owned by bindings.ts.
  */
 
-import { openPath as tauriOpenPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { compatibilityCommands } from '../command-client';
 // ============================================================================
 // Types (matching Rust types from commands.rs)
@@ -30,6 +29,7 @@ export interface ThinClawStatus {
     remote_token: string | null;
     has_remote_token: boolean;
     device_id: string;
+    /** Always empty in status responses; retained for wire compatibility. */
     auth_token: string;
     state_dir: string;
     has_huggingface_token: boolean;
@@ -235,6 +235,11 @@ export async function getThinClawStatus(): Promise<ThinClawStatus> {
     return compatibilityCommands.thinclawGetStatus();
 }
 
+/** Reveal the local gateway token only for an explicit user copy action. */
+export async function revealGatewayToken(): Promise<string> {
+    return compatibilityCommands.thinclawRevealGatewayToken();
+}
+
 /**
  * Save Slack configuration
  */
@@ -427,15 +432,4 @@ export async function writeThinClawFile(path: string, content: string): Promise<
  */
 export async function deleteThinClawFile(path: string): Promise<void> {
     return compatibilityCommands.thinclawDeleteFile(path);
-}
-
-/**
- * Open a path in the system file manager
- */
-export async function openPath(path: string): Promise<void> {
-    return tauriOpenPath(path);
-}
-
-export async function revealPath(path: string): Promise<void> {
-    return revealItemInDir(path);
 }

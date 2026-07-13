@@ -56,7 +56,7 @@ pub async fn thinclaw_deploy_remote(
     user: String,
     tailscale_key: Option<String>,
     enable_systemd: Option<bool>,
-) -> Result<RemoteDeployResult, String> {
+) -> Result<RemoteDeployResult, crate::thinclaw::bridge::BridgeError> {
     // ── Validate input ────────────────────────────────────────────────────────
     let ip = validate_ssh_host(&ip)?;
     let user = if user.trim().is_empty() {
@@ -119,7 +119,7 @@ pub async fn thinclaw_deploy_remote(
 
         if let Err(e) = scp_result {
             let msg = format!("SCP failed: {}. Is SSH access configured?", e);
-            return Err(msg);
+            return Err((msg).into());
         }
         emit(&app, "[1/4] Deploy bundle copied.");
     } else {
@@ -180,10 +180,7 @@ pub async fn thinclaw_deploy_remote(
         Some(format!(
             "{}\n{}\n",
             token,
-            tailscale_key
-                .as_ref()
-                .map(|key| key.as_str())
-                .unwrap_or("")
+            tailscale_key.as_ref().map(|key| key.as_str()).unwrap_or("")
         )),
         vec![
             token.clone(),
@@ -198,23 +195,19 @@ pub async fn thinclaw_deploy_remote(
     // ── Step 3: Verify ───────────────────────────────────────────────────────
     emit(&app, "[3/5] Verifying connectivity to new deployment...");
 
-    let mut connection_note = None;
+    let mut connection_note: Option<String> = None;
     let gateway_host = if tailscale_key.is_some() {
         match discover_tailscale_ip(&ssh_target).await {
             Ok(tailscale_ip) => tailscale_ip,
             Err(error) => {
-                connection_note = Some(error);
+                connection_note = Some(error.to_string());
                 ip.clone()
             }
         }
     } else {
         ip.clone()
     };
-    let gateway_url = format!(
-        "http://{}:{}",
-        url_host(&gateway_host),
-        REMOTE_GATEWAY_PORT
-    );
+    let gateway_url = format!("http://{}:{}", url_host(&gateway_host), REMOTE_GATEWAY_PORT);
     let mut connected = false;
 
     // Give Docker a moment to start
@@ -222,16 +215,14 @@ pub async fn thinclaw_deploy_remote(
 
     for attempt in 1..=6 {
         emit(&app, &format!("[3/5] Connection attempt {}/6...", attempt));
-        let proxy = match crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(
-            &gateway_url,
-            &token,
-        ) {
-            Ok(proxy) => proxy,
-            Err(error) => {
-                connection_note = Some(error);
-                break;
-            }
-        };
+        let proxy =
+            match crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&gateway_url, &token) {
+                Ok(proxy) => proxy,
+                Err(error) => {
+                    connection_note = Some(error.to_string());
+                    break;
+                }
+            };
         match proxy.health_check().await {
             Ok(true) => {
                 connected = true;
@@ -242,7 +233,7 @@ pub async fn thinclaw_deploy_remote(
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
             Err(error) => {
-                connection_note = Some(error);
+                connection_note = Some(error.to_string());
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         }
@@ -317,10 +308,10 @@ fn generate_secure_token() -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn validate_ssh_host(raw: &str) -> Result<String, String> {
+fn validate_ssh_host(raw: &str) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let host = raw.trim();
     if host.is_empty() || host.len() > 253 || host.starts_with('-') {
-        return Err("SSH host must be a valid IP address or DNS hostname".to_string());
+        return Err(("SSH host must be a valid IP address or DNS hostname".to_string()).into());
     }
     if host.parse::<std::net::IpAddr>().is_ok() {
         return Ok(host.to_string());
@@ -335,27 +326,26 @@ fn validate_ssh_host(raw: &str) -> Result<String, String> {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     });
     if !valid {
-        return Err("SSH host must be a valid IP address or DNS hostname".to_string());
+        return Err(("SSH host must be a valid IP address or DNS hostname".to_string()).into());
     }
     Ok(host.to_string())
 }
 
-fn validate_ssh_user(raw: &str) -> Result<String, String> {
+fn validate_ssh_user(raw: &str) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let user = raw.trim();
     let mut bytes = user.bytes();
     let valid_start = bytes
         .next()
         .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-    let valid_rest = bytes.all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
-    });
+    let valid_rest =
+        bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
     if user.len() > 32 || !valid_start || !valid_rest {
-        return Err("SSH user contains unsupported characters".to_string());
+        return Err(("SSH user contains unsupported characters".to_string()).into());
     }
     Ok(user.to_string())
 }
 
-fn validate_tailscale_key(raw: &str) -> Result<String, String> {
+fn validate_tailscale_key(raw: &str) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let key = raw.trim();
     if !key.starts_with("tskey-")
         || key.len() > 512
@@ -363,7 +353,7 @@ fn validate_tailscale_key(raw: &str) -> Result<String, String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err("Tailscale auth key has an invalid format".to_string());
+        return Err(("Tailscale auth key has an invalid format".to_string()).into());
     }
     Ok(key.to_string())
 }
@@ -376,7 +366,9 @@ fn url_host(host: &str) -> String {
     }
 }
 
-async fn discover_tailscale_ip(ssh_target: &str) -> Result<String, String> {
+async fn discover_tailscale_ip(
+    ssh_target: &str,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::process::Command::new("ssh")
@@ -397,7 +389,7 @@ async fn discover_tailscale_ip(ssh_target: &str) -> Result<String, String> {
     .map_err(|error| format!("failed to discover the deployed Tailscale address: {error}"))?;
 
     if !output.status.success() {
-        return Err("the remote host did not report a Tailscale IPv4 address".to_string());
+        return Err(("the remote host did not report a Tailscale IPv4 address".to_string()).into());
     }
     let value = String::from_utf8_lossy(&output.stdout);
     let candidate = value
@@ -410,7 +402,10 @@ async fn discover_tailscale_ip(ssh_target: &str) -> Result<String, String> {
         .map_err(|_| "the remote host reported an invalid Tailscale address".to_string())?;
     let octets = address.octets();
     if octets[0] != 100 || !(64..=127).contains(&octets[1]) {
-        return Err("the remote host reported an address outside Tailscale CGNAT space".to_string());
+        return Err(
+            ("the remote host reported an address outside Tailscale CGNAT space".to_string())
+                .into(),
+        );
     }
     Ok(address.to_string())
 }
@@ -420,24 +415,26 @@ trait ResultExt<E: std::fmt::Display> {
     fn unwrap_err_or_default(&self) -> String;
 }
 
-impl ResultExt<String> for Result<(), String> {
+impl ResultExt<crate::thinclaw::bridge::BridgeError>
+    for Result<(), crate::thinclaw::bridge::BridgeError>
+{
     fn unwrap_err_or_default(&self) -> String {
         match self {
-            Err(e) => e.clone(),
+            Err(e) => e.to_string(),
             Ok(()) => String::new(),
         }
     }
 }
 
 /// Run a command, emitting stdout/stderr lines as `deploy-log` events.
-/// Returns Ok(()) on exit code 0, Err(message) otherwise.
+/// Returns Ok(()) on exit code 0, Err((message).into()) otherwise.
 async fn run_command_with_events(
     app: &AppHandle,
     program: &str,
     args: &[String],
     stdin_payload: Option<String>,
     mut redactions: Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let child_result = tokio::process::Command::new(program)
         .args(args)
         .stdin(if stdin_payload.is_some() {
@@ -459,7 +456,7 @@ async fn run_command_with_events(
         Ok(child) => child,
         Err(error) => {
             redactions.zeroize();
-            return Err(format!("Failed to run {program}: {error}"));
+            return Err((format!("Failed to run {program}: {error}")).into());
         }
     };
 
@@ -467,14 +464,14 @@ async fn run_command_with_events(
         let Some(mut stdin) = child.stdin.take() else {
             payload.zeroize();
             redactions.zeroize();
-            return Err("Failed to open command stdin".to_string());
+            return Err(("Failed to open command stdin".to_string()).into());
         };
         let write_result = stdin.write_all(payload.as_bytes()).await;
         payload.zeroize();
         if let Err(error) = write_result {
             redactions.zeroize();
             let _ = child.kill().await;
-            return Err(format!("Failed to send deployment credentials: {error}"));
+            return Err((format!("Failed to send deployment credentials: {error}")).into());
         }
         drop(stdin);
     }
@@ -482,12 +479,12 @@ async fn run_command_with_events(
     let Some(stdout) = child.stdout.take() else {
         redactions.zeroize();
         let _ = child.kill().await;
-        return Err("Failed to capture stdout".to_string());
+        return Err(("Failed to capture stdout".to_string()).into());
     };
     let Some(stderr) = child.stderr.take() else {
         redactions.zeroize();
         let _ = child.kill().await;
-        return Err("Failed to capture stderr".to_string());
+        return Err(("Failed to capture stderr".to_string()).into());
     };
 
     let app_out = app.clone();
@@ -515,11 +512,7 @@ async fn run_command_with_events(
     if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "Command '{}' exited with code {:?}",
-            program,
-            status.code()
-        ))
+        Err((format!("Command '{}' exited with code {:?}", program, status.code())).into())
     }
 }
 
@@ -590,11 +583,16 @@ fn redact_line(mut line: String, redactions: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_line, url_host, validate_ssh_host, validate_ssh_user, validate_tailscale_key};
+    use super::{
+        redact_line, url_host, validate_ssh_host, validate_ssh_user, validate_tailscale_key,
+    };
 
     #[test]
     fn deployment_targets_reject_shell_and_option_injection() {
-        assert_eq!(validate_ssh_host("agent.tailnet.ts.net").unwrap(), "agent.tailnet.ts.net");
+        assert_eq!(
+            validate_ssh_host("agent.tailnet.ts.net").unwrap(),
+            "agent.tailnet.ts.net"
+        );
         assert!(validate_ssh_host("-oProxyCommand=evil").is_err());
         assert!(validate_ssh_host("host; touch /tmp/pwned").is_err());
         assert_eq!(validate_ssh_user("deploy-user").unwrap(), "deploy-user");

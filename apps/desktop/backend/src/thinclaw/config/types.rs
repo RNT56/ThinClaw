@@ -91,6 +91,7 @@ impl Drop for AgentProfile {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ThinClawIdentity {
     pub device_id: String,
+    #[serde(default, skip_serializing)]
     pub auth_token: String,
     /// Ed25519 key pair for protocol signing (not an API credential, generated locally)
     #[serde(default)]

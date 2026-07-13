@@ -395,6 +395,14 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             message: msg,
             thread_id,
         },
+        StatusUpdate::ContextPressure {
+            level,
+            usage_percent,
+        } => SseEvent::ContextPressure {
+            level,
+            usage_percent,
+            thread_id,
+        },
         StatusUpdate::ContextCompactionStarted { used, limit } => SseEvent::AgentLifecycle {
             phase: "context_compaction".to_string(),
             label: "Context limit reached — compacting and retrying".to_string(),
@@ -1119,5 +1127,27 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn context_pressure_keeps_structured_level_usage_and_thread() {
+        let event = status_update_to_sse_event(
+            StatusUpdate::ContextPressure {
+                level: "critical".to_string(),
+                usage_percent: 96.25,
+            },
+            Some("thread-1".to_string()),
+        );
+
+        assert_eq!(event.event_type(), "context_pressure");
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "context_pressure",
+                "level": "critical",
+                "usage_percent": 96.25,
+                "thread_id": "thread-1",
+            })
+        );
     }
 }

@@ -2,6 +2,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useEffect, useRef } from 'react';
 
 import type { UiEvent } from '../lib/bindings';
+import { ThinClawEventBuffer } from '../lib/thinclaw-event-buffer';
 
 // Types for run tracking — consumed by LiveAgentStatus and ThinClawChatView
 
@@ -43,6 +44,15 @@ export type ThinClawEventHandler = (event: UiEvent) => void;
 
 const eventSubscribers = new Set<ThinClawEventHandler>();
 let eventBusStart: Promise<void> | null = null;
+const eventBuffer = new ThinClawEventBuffer((event) => {
+    for (const subscriber of [...eventSubscribers]) {
+        try {
+            subscriber(event);
+        } catch (error) {
+            console.error('[thinclaw-event] subscriber failed:', error);
+        }
+    }
+});
 
 /**
  * Start the one native `thinclaw-event` listener for the frontend process.
@@ -52,13 +62,7 @@ let eventBusStart: Promise<void> | null = null;
 function ensureThinClawEventBus(): Promise<void> {
     if (!eventBusStart) {
         eventBusStart = listen<UiEvent>('thinclaw-event', ({ payload }) => {
-            for (const subscriber of [...eventSubscribers]) {
-                try {
-                    subscriber(payload);
-                } catch (error) {
-                    console.error('[thinclaw-event] subscriber failed:', error);
-                }
-            }
+            eventBuffer.push(payload);
         }).then(() => undefined).catch((error) => {
             eventBusStart = null;
             throw error;

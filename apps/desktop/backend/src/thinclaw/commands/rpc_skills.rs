@@ -34,7 +34,7 @@ fn desktop_quarantine() -> std::sync::Arc<thinclaw_core::skills::quarantine::Qua
 #[specta::specta]
 pub async fn thinclaw_skills_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.list_skills().await;
     }
@@ -43,8 +43,9 @@ pub async fn thinclaw_skills_list(
     if let Some(registry) = agent.skill_registry() {
         let resp = thinclaw_core::api::skills::list_skills(registry)
             .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_value(resp).map_err(|e| e.to_string())
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+        serde_json::to_value(resp)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
     } else {
         Ok(serde_json::json!({ "skills": [], "count": 0 }))
     }
@@ -82,7 +83,7 @@ pub async fn thinclaw_skills_toggle(
 #[specta::specta]
 pub async fn thinclaw_skills_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.list_skills().await;
     }
@@ -91,8 +92,9 @@ pub async fn thinclaw_skills_status(
     if let Some(registry) = agent.skill_registry() {
         let resp = thinclaw_core::api::skills::list_skills(registry)
             .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_value(resp).map_err(|e| e.to_string())
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+        serde_json::to_value(resp)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
     } else {
         Ok(serde_json::json!({ "skills": [], "count": 0 }))
     }
@@ -103,7 +105,7 @@ pub async fn thinclaw_skills_status(
 pub async fn thinclaw_skills_search(
     ironclaw: State<'_, ThinClawRuntimeState>,
     query: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json("/api/skills/search", &serde_json::json!({ "query": query }))
@@ -117,8 +119,9 @@ pub async fn thinclaw_skills_search(
     let catalog = agent.skill_catalog().ok_or("Skill catalog not available")?;
     let resp = thinclaw_core::api::skills::search_skills(catalog, registry, &query)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 #[tauri::command]
@@ -129,7 +132,7 @@ pub async fn thinclaw_skill_install(
     url: Option<String>,
     content: Option<String>,
     force: Option<bool>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json_confirm(
@@ -180,7 +183,7 @@ pub async fn thinclaw_skill_install(
 
     let resp = thinclaw_core::api::skills::install_skill(registry, &raw_content)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(action_to_json(resp))
 }
 
@@ -189,7 +192,7 @@ pub async fn thinclaw_skill_install(
 pub async fn thinclaw_skill_remove(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .delete_json_confirm(&format!("/api/skills/{}", urlencoding::encode(&name)))
@@ -202,7 +205,7 @@ pub async fn thinclaw_skill_remove(
         .ok_or("Skill registry not available")?;
     let resp = thinclaw_core::api::skills::remove_skill(registry, &name)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(action_to_json(resp))
 }
 
@@ -212,7 +215,7 @@ pub async fn thinclaw_skill_trust(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     trust: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .put_json_confirm(
@@ -226,10 +229,11 @@ pub async fn thinclaw_skill_trust(
         "trusted" => thinclaw_core::skills::SkillTrust::Trusted,
         "installed" => thinclaw_core::skills::SkillTrust::Installed,
         other => {
-            return Err(format!(
+            return Err((format!(
                 "Invalid trust level '{}'. Must be 'trusted' or 'installed'.",
                 other
-            ));
+            ))
+            .into());
         }
     };
     let agent = ironclaw.agent().await?;
@@ -256,7 +260,7 @@ pub async fn thinclaw_skill_trust(
 pub async fn thinclaw_skill_reload(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json_confirm(
@@ -289,7 +293,7 @@ pub async fn thinclaw_skill_reload(
 #[specta::specta]
 pub async fn thinclaw_skills_reload_all(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json_confirm("/api/skills/reload-all", &serde_json::json!({}))
@@ -318,7 +322,7 @@ pub async fn thinclaw_skill_inspect(
     include_content: Option<bool>,
     include_files: Option<bool>,
     audit: Option<bool>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
@@ -345,7 +349,7 @@ pub async fn thinclaw_skill_inspect(
         audit.unwrap_or(true),
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 #[tauri::command]
@@ -358,7 +362,7 @@ pub async fn thinclaw_skill_publish(
     remote_write: Option<bool>,
     confirm_remote_write: Option<bool>,
     approve_risky: Option<bool>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let path = format!("/api/skills/{}/publish", urlencoding::encode(&name));
         let body = serde_json::json!({
@@ -404,7 +408,7 @@ pub async fn thinclaw_skill_publish(
             &ctx,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(output.result)
 }
 
@@ -414,7 +418,7 @@ pub async fn thinclaw_install_skill_deps(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     _install_id: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json_confirm(
@@ -502,7 +506,8 @@ pub async fn thinclaw_install_skill_repo(
         .ok_or("ThinClaw config not initialized")?;
 
     let skills_dir = cfg.workspace_dir().join("skills");
-    std::fs::create_dir_all(&skills_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&skills_dir)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let repo_name = repo_url
         .split('/')

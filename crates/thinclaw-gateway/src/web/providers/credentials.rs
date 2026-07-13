@@ -339,7 +339,7 @@ pub fn fallback_provider_credential_spec(slug: &str) -> Option<ProviderCredentia
         "bedrock" => Some(ProviderCredentialSpec::api_key(
             "AWS Bedrock",
             "llm_bedrock_api_key",
-            "anthropic.claude-3-sonnet-20240229-v1:0",
+            "anthropic.claude-opus-4-8",
         )),
         _ => None,
     }

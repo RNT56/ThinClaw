@@ -22,6 +22,7 @@ describe("unified theme preferences", () => {
         document.documentElement.removeAttribute("style")
         delete document.documentElement.dataset.appTheme
         delete document.documentElement.dataset.colorScheme
+        delete document.documentElement.dataset.density
         vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
             matches: false,
             addEventListener: vi.fn(),
@@ -38,9 +39,10 @@ describe("unified theme preferences", () => {
         const preferences = readThemePreferences()
 
         expect(preferences).toEqual({
-            version: 1,
+            version: 2,
             mode: "dark",
             appThemeId: "emerald",
+            density: "comfortable",
             syntaxTheme: {
                 dark: "thinclaw-dark",
                 light: "thinclaw-light",
@@ -56,9 +58,10 @@ describe("unified theme preferences", () => {
             appThemeId: "missing",
             syntaxTheme: { dark: "missing", light: "missing" },
         }, "light")).toEqual({
-            version: 1,
+            version: 2,
             mode: "light",
             appThemeId: "zinc",
+            density: "comfortable",
             syntaxTheme: {
                 dark: "tokyo-night",
                 light: "atom-one-light",
@@ -78,6 +81,7 @@ describe("unified theme preferences", () => {
         expect(document.documentElement).toHaveClass("light")
         expect(document.documentElement.dataset.appTheme).toBe("indigo")
         expect(document.documentElement.dataset.colorScheme).toBe("light")
+        expect(document.documentElement.dataset.density).toBe("comfortable")
         expect(document.documentElement.style.getPropertyValue("--surface-canvas"))
             .toBe("hsl(var(--background))")
         expect(document.documentElement.style.getPropertyValue("--color-zinc-950"))
@@ -86,6 +90,21 @@ describe("unified theme preferences", () => {
             .toBe("hsl(var(--primary))")
         expect(document.documentElement.style.getPropertyValue("--background"))
             .toBe("226 100% 97%")
+    })
+
+    it("migrates v1 preferences and applies compact density", () => {
+        const preferences = normalizeThemePreferences({
+            version: 1,
+            mode: "dark",
+            appThemeId: "zinc",
+            density: "compact",
+            syntaxTheme: { dark: "tokyo-night", light: "atom-one-light" },
+        })
+
+        expect(preferences.version).toBe(2)
+        expect(preferences.density).toBe("compact")
+        applyThemeTokens(document.documentElement, preferences, "dark")
+        expect(document.documentElement.dataset.density).toBe("compact")
     })
 
     it("synchronizes preference changes emitted by another window", async () => {

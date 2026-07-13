@@ -66,6 +66,14 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub signal_group_allow_from: Option<String>,
 
+    /// Skip Signal messages that contain only attachments.
+    #[serde(default)]
+    pub signal_ignore_attachments: bool,
+
+    /// Skip Signal story events.
+    #[serde(default = "default_true")]
+    pub signal_ignore_stories: bool,
+
     // === Native lifecycle surfaces ===
     /// Whether the Matrix native lifecycle surface is configured.
     #[serde(default)]
@@ -308,6 +316,8 @@ impl Default for ChannelSettings {
             signal_dm_policy: None,
             signal_group_policy: None,
             signal_group_allow_from: None,
+            signal_ignore_attachments: false,
+            signal_ignore_stories: true,
             matrix_enabled: false,
             voice_call_enabled: false,
             apns_enabled: false,

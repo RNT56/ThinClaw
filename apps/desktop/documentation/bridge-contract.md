@@ -40,6 +40,12 @@ Desktop talks to a remote ThinClaw gateway through `RemoteGatewayProxy`.
 - The remote SSE stream is subscribed by the proxy.
 - Remote events must be re-emitted to the frontend as the same `thinclaw-event` `UiEvent` schema used by local mode.
 - Unsupported remote endpoints must return a typed unavailable response or a clear error reason. They must not silently no-op.
+- Idempotent GET requests retry transient transport failures and HTTP 408/425/429/5xx
+  responses at most three times with bounded exponential backoff. `Retry-After` seconds are
+  honored up to ten seconds. Mutating requests are never retried implicitly.
+- SSE reconnects use a one-to-thirty-second bounded backoff, stop immediately on explicit
+  shutdown, and stop retrying non-transient HTTP failures such as rejected credentials or a
+  missing endpoint. The UI shows one updating reconnect notice and a recovery confirmation.
 
 ## Command Routing & Gating (TDO-001/002)
 
@@ -50,10 +56,11 @@ from "failed":
 - **`RouteMode`** — `LocalAndRemote` (works in both modes), `RemoteOnly` (needs a live gateway,
   e.g. sandbox job/GPU flows), `LocalOnly` (only meaningful embedded, e.g. sidecar control,
   channel-config submit, agent-loop eval).
-- **`BridgeError`** — an internally-tagged enum (`kind`): `Unavailable { capability, reason,
-  remediation, satisfied_by }` for a gated capability (the frontend renders a CTA), and
-  `Runtime { message }` for a genuine error. `From<String>`/`From<&str>` let existing
-  `?`/`map_err` sites migrate mechanically.
+- **`BridgeError`** — the only registered-command error envelope. Its stable `kind` taxonomy
+  distinguishes `Unavailable`, `InvalidInput`, `Unauthorized`, `NotFound`, `Conflict`,
+  `Timeout`, `Network`, and fallback `Runtime` outcomes. Actionable variants carry fields such
+  as remediation, retryability, and the affected resource/operation. `From<String>`/`From<&str>`
+  keep internal migrations mechanical without weakening the IPC shape.
 - **`gated(capability, reason, remediation, satisfied_by)`** — the helper that builds an
   `Unavailable`; it replaced the ad-hoc `local_unavailable`/`unavailable(...)` JSON helpers.
 - **`ROUTE_TABLE`** — a `&[(&str, RouteMode)]` registry mapping command names to their mode.
@@ -76,6 +83,8 @@ command to `ROUTE_TABLE`, then run `cargo run --locked --example export_bindings
 - Local conversion: `apps/desktop/backend/src/thinclaw/event_mapping.rs`
 - Local transport: `apps/desktop/backend/src/thinclaw/tauri_channel.rs`
 - Remote transport: `apps/desktop/backend/src/thinclaw/remote_proxy/`
+
+Both local and remote connection events use protocol version `2`.
 
 Every current ThinClaw `StatusUpdate` variant must be either mapped to `UiEvent` or explicitly documented as intentionally ignored. As of this checkpoint, Desktop maps chat, plan, usage, cost, lifecycle, approval, auth, canvas, job, subagent, agent-message, and routine events. Unknown remote gateway SSE events are forwarded as `UiEvent::GatewayEvent` instead of being silently dropped.
 
@@ -107,7 +116,10 @@ The frontend and existing automation scripts depend on the current Tauri command
 `apps/desktop/frontend/src/lib/bindings.ts` is the only source of command names,
 parameter lists, and generated result types. `lib/command-client.ts` derives a
 runtime-guarded client from `commands`, unwraps the generated transport `Result`,
-and preserves typed `BridgeError::Unavailable` detail in thrown errors.
+and throws `ThinClawCommandError` while preserving error kind, remediation, and retryability.
+`lib/command-errors.ts` is the shared rendering path for direct binding consumers. A contract
+test rejects any generated `Promise<Result<…, string>>`, so raw string errors cannot re-enter
+the registered command surface.
 
 `lib/thinclaw.ts` is a compatibility surface for existing component-friendly
 names and richer legacy views over JSON-valued commands. It may delegate through

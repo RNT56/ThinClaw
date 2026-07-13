@@ -64,6 +64,47 @@ export async function getTrajectoryRecords(limit?: number | null): Promise<ThinC
     return compatibilityCommands.thinclawTrajectoryRecords(limit ?? null);
 }
 
+export type TrajectoryExportFormat = 'sft' | 'dpo';
+
+export interface TrajectoryExport {
+    format: TrajectoryExportFormat;
+    payload: string;
+    source_record_count: number;
+    exported_record_count: number;
+    skipped_counts: Record<string, number>;
+}
+
+/** Render a bounded local training export for an explicit frontend download. */
+export async function exportTrajectory(format: TrajectoryExportFormat): Promise<TrajectoryExport> {
+    return compatibilityCommands.thinclawTrajectoryExport(format) as Promise<TrajectoryExport>;
+}
+
+export interface ProfileEvolutionStatus {
+    profile_path: string;
+    profile_exists: boolean;
+    profile_parse_error: string | null;
+    preferred_name: string | null;
+    confidence: number | null;
+    message_count: number | null;
+    profile_updated_at: string | null;
+    profile: ThinClawJson | null;
+    routine_exists: boolean;
+    routine_id: string | null;
+    routine_enabled: boolean;
+    last_run_at: string | null;
+    next_fire_at: string | null;
+    run_count: number;
+    consecutive_failures: number;
+}
+
+export async function getProfileEvolutionStatus(): Promise<ProfileEvolutionStatus> {
+    return compatibilityCommands.thinclawProfileEvolutionStatus();
+}
+
+export async function runProfileEvolution(): Promise<{ routine_id: string; run_id: string }> {
+    return compatibilityCommands.thinclawProfileEvolutionRun();
+}
+
 // ============================================================================
 // Sprint 13 — New Backend APIs
 // ============================================================================
@@ -738,6 +779,35 @@ export async function getLearningProviderHealth(): Promise<ThinClawJson> {
     return compatibilityCommands.thinclawLearningProviderHealth();
 }
 
+export interface ExternalMemoryConfigureRequest {
+    provider: string;
+    base_url: string | null;
+    api_key_env: string | null;
+    embedding_url: string | null;
+    embedding_api_key_env: string | null;
+    collection: string | null;
+    collection_id: string | null;
+    agent_id: string | null;
+    provider_user_id: string | null;
+    enabled: boolean;
+    activate: boolean;
+    cadence: number | null;
+    depth: number | null;
+    user_modeling_enabled: boolean;
+}
+
+/** Configure a local external-memory provider without persisting raw credentials. */
+export async function configureExternalMemoryProvider(
+    request: ExternalMemoryConfigureRequest,
+): Promise<ThinClawJson> {
+    return compatibilityCommands.thinclawExternalMemoryConfigure(request);
+}
+
+/** Deactivate the local external-memory provider while preserving its settings. */
+export async function disableExternalMemoryProvider(): Promise<ThinClawJson> {
+    return compatibilityCommands.thinclawExternalMemoryDisable();
+}
+
 export async function getLearningCodeProposals(status: string | null = null, limit = 50): Promise<ThinClawJson> {
     return compatibilityCommands.thinclawLearningCodeProposals(status, limit);
 }
@@ -816,4 +886,51 @@ export async function validateExperimentGpuCloud(provider: string): Promise<Thin
 
 export async function launchExperimentGpuCloudTest(provider: string): Promise<ThinClawJson> {
     return compatibilityCommands.thinclawExperimentsGpuLaunchTest(provider);
+}
+
+export interface ExperimentEnvironment {
+    id: string;
+    name: string;
+    description: string;
+    runnable: boolean;
+}
+
+export interface ExperimentEnvironmentCatalog {
+    available: boolean;
+    environments: ExperimentEnvironment[];
+}
+
+export interface ExperimentEvalSummary {
+    env_names: string[];
+    episode_count: number;
+    step_count: number;
+    score: number;
+    exact_tokens_supported: boolean;
+    logprobs_supported: boolean;
+    token_capture_steps: number;
+    captured_token_ids: number;
+    captured_logprobs: number;
+}
+
+export interface ExperimentEvalResult {
+    available: boolean;
+    env_id: string;
+    episodes: number;
+    summary: ExperimentEvalSummary;
+    trajectories: ThinClawJson[];
+}
+
+/** Discover the local evaluator environments exposed by the embedded runtime. */
+export async function getExperimentEnvironments(): Promise<ExperimentEnvironmentCatalog> {
+    return compatibilityCommands.thinclawExperimentsListEnvs();
+}
+
+/** Run a bounded evaluation in throwaway sessions owned by the evaluator. */
+export async function runExperimentEvaluation(
+    envId: string,
+    prompt: string,
+    nEpisodes: number,
+    maxSteps: number,
+): Promise<ExperimentEvalResult> {
+    return compatibilityCommands.thinclawExperimentsRunEval(envId, prompt, nEpisodes, maxSteps);
 }

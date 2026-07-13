@@ -115,7 +115,7 @@ async fn run_mflux_inference(
     app: &AppHandle,
     model_path: &str,
     params: &ImageGenParams,
-) -> Result<ImageResponse, String> {
+) -> Result<ImageResponse, crate::thinclaw::bridge::BridgeError> {
     use std::io::Write;
 
     let output_temp =
@@ -208,10 +208,11 @@ except Exception as e:
         .join("python3");
 
     if !python_path.exists() {
-        return Err(format!(
+        return Err((format!(
             "MLX venv not bootstrapped — Python not found at {:?}",
             python_path
-        ));
+        ))
+        .into());
     }
 
     println!(
@@ -278,17 +279,18 @@ except Exception as e:
 
     let _ = child.kill();
     if !success {
-        return Err("MLX image generation failed".to_string());
+        return Err(("MLX image generation failed".to_string()).into());
     }
 
     // Copy to permanent location
     let images_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
         .join("images");
     if !images_dir.exists() {
-        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&images_dir)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     let id = Uuid::new_v4().to_string();
@@ -319,7 +321,7 @@ async fn run_inference(
     params: &ImageGenParams,
     use_standard_fallbacks: bool,
     _sd_threads_config: u32,
-) -> Result<ImageResponse, String> {
+) -> Result<ImageResponse, crate::thinclaw::bridge::BridgeError> {
     let output_temp =
         NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {}", e))?;
     let output_path = output_temp.path().to_string_lossy().to_string();
@@ -650,7 +652,10 @@ async fn run_inference(
 
     println!("[image_gen] Executing: sd-sidecar {}", args.join(" "));
 
-    let mut command_runner = app.shell().sidecar("sd").map_err(|e| e.to_string())?;
+    let mut command_runner = app
+        .shell()
+        .sidecar("sd")
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // Environment & Library Loading
     let mut bin_path = None;
@@ -778,16 +783,17 @@ async fn run_inference(
 
     let _ = child.kill();
     if !success {
-        return Err("Image Generation Failed".to_string());
+        return Err(("Image Generation Failed".to_string()).into());
     }
 
     let images_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
         .join("images");
     if !images_dir.exists() {
-        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&images_dir)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     let id = Uuid::new_v4().to_string();
@@ -821,7 +827,7 @@ pub async fn direct_media_generate_image(
     state: State<'_, SidecarManager>,
     config: State<'_, ConfigManager>,
     params: ImageGenParams,
-) -> Result<ImageResponse, String> {
+) -> Result<ImageResponse, crate::thinclaw::bridge::BridgeError> {
     // 1. Try params first
     let mut model_path = params.model.clone().unwrap_or_default();
 

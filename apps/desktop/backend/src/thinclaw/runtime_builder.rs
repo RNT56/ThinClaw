@@ -16,10 +16,11 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Mutex;
 
-use thinclaw_core::agent::{Agent, AgentDeps, AgentRegistry, AgentRouter};
+use thinclaw_core::agent::{Agent, AgentDeps, AgentRegistry, AgentRouter, SessionManager};
 use thinclaw_core::app::{AppBuilder, AppBuilderFlags, PeriodicPersistencePlan};
 use thinclaw_core::channels::web::log_layer::LogBroadcaster;
 use thinclaw_core::channels::web::types::SseEvent;
+use thinclaw_core::channels::web::GatewayChannel;
 use thinclaw_core::channels::ChannelManager;
 use thinclaw_core::extensions::clawhub::CatalogCache;
 use thinclaw_core::extensions::manifest_validator::ManifestValidator;
@@ -292,9 +293,62 @@ pub(crate) async fn build_inner(
     });
     components.observer = desktop_observer;
 
-    // ── 5. Create channel manager and register TauriChannel ─────────
+    // ── 5. Create channel manager and register Tauri + gateway channels ─
     let channel_manager = Arc::new(ChannelManager::new());
     channel_manager.add(Box::new(tauri_channel)).await;
+
+    // Share one session manager between the embedded agent and HTTP gateway.
+    // Without this, remote clients would see a different in-memory thread view
+    // from the Desktop surface even though both use the same database.
+    let session_manager = Arc::new(SessionManager::new().with_hooks(components.hooks.clone()));
+    let mut gateway_state = None;
+    let mut repo_project_supervisor_slot = None;
+
+    if let Some(gateway_config) = components.config.channels.gateway.clone() {
+        let mut gateway = GatewayChannel::new(gateway_config)
+            .with_llm_provider(Arc::clone(&components.llm))
+            .with_llm_runtime(Arc::clone(&components.llm_runtime))
+            .with_session_manager(Arc::clone(&session_manager))
+            .with_log_broadcaster(Arc::clone(&log_broadcaster))
+            .with_tool_registry(Arc::clone(&components.tools))
+            .with_context_manager(Arc::clone(&components.context_manager))
+            .with_registry_entries(components.catalog_entries.clone())
+            .with_cost_guard(Arc::clone(&components.cost_guard))
+            .with_cost_tracker(Arc::clone(&components.cost_tracker))
+            .with_response_cache(Arc::clone(&components.response_cache))
+            .with_hooks(Arc::clone(&components.hooks))
+            .with_channel_manager(Arc::clone(&channel_manager));
+        if let Some(workspace) = components.workspace.as_ref() {
+            gateway = gateway.with_workspace(Arc::clone(workspace));
+        }
+        if let Some(extension_manager) = components.extension_manager.as_ref() {
+            gateway = gateway.with_extension_manager(Arc::clone(extension_manager));
+        }
+        if let Some(store) = components.db.as_ref() {
+            gateway = gateway.with_store(Arc::clone(store));
+        }
+        if let Some(skill_registry) = components.skill_registry.as_ref() {
+            gateway = gateway.with_skill_registry(Arc::clone(skill_registry));
+        }
+        if let Some(skill_catalog) = components.skill_catalog.as_ref() {
+            gateway = gateway.with_skill_catalog(Arc::clone(skill_catalog));
+        }
+        if let Some(skill_remote_hub) = components.skill_remote_hub.as_ref() {
+            gateway = gateway.with_skill_remote_hub(skill_remote_hub.clone());
+        }
+        if let Some(skill_quarantine) = components.skill_quarantine.as_ref() {
+            gateway = gateway.with_skill_quarantine(Arc::clone(skill_quarantine));
+        }
+        if let Some(metrics_registry) = components.metrics_registry.as_ref() {
+            gateway = gateway.with_metrics_registry(Arc::clone(metrics_registry));
+        }
+        if let Some(secrets_store) = components.secrets_store.as_ref() {
+            gateway = gateway.with_secrets_store(Arc::clone(secrets_store));
+        }
+        repo_project_supervisor_slot = Some(gateway.repo_project_supervisor_cell());
+        gateway_state = Some(Arc::clone(gateway.state()));
+        channel_manager.add(Box::new(gateway)).await;
+    }
 
     {
         let send_handle = app_handle.clone();
@@ -546,8 +600,7 @@ pub(crate) async fn build_inner(
         sse_sender: Some(sse_tx.clone()), // ← wired into RoutineEngine + Dispatcher
         job_manager,
         secrets_store: components.secrets_store.clone(),
-        // Desktop has no gateway webhook surface, so no shared supervisor slot.
-        repo_project_supervisor_slot: None,
+        repo_project_supervisor_slot,
         agent_router: Some(shared_agent_router),
         agent_registry: Some(agent_registry),
         canvas_store: Some(thinclaw_core::channels::canvas_gateway::CanvasStore::new(
@@ -568,8 +621,81 @@ pub(crate) async fn build_inner(
         Some(components.config.hygiene.clone()),
         Some(components.config.routines.clone()),
         Some(components.context_manager.clone()),
-        None,
+        Some(session_manager),
     ));
+    if let Some(gateway_state) = gateway_state.as_ref() {
+        *gateway_state.scheduler.write().await = Some(Arc::clone(agent.scheduler()));
+    }
+
+    // Tauri commands invoke the agent directly, so Desktop historically never
+    // started its registered Channel streams. The HTTP gateway is an actual
+    // inbound channel and must be started and consumed. Keep this small bridge
+    // loop runtime-owned so shutdown aborts it with the rest of the embedded
+    // auxiliary tasks.
+    match agent.channels().start_all().await {
+        Ok(mut messages) => {
+            use futures::StreamExt as _;
+            let channel_agent = Arc::clone(&agent);
+            auxiliary_tasks.push(tokio::spawn(async move {
+                while let Some(message) = messages.next().await {
+                    channel_agent
+                        .channels()
+                        .record_received(&message.channel)
+                        .await;
+                    match channel_agent.handle_message_external(&message).await {
+                        Ok(Some(response)) if !response.is_empty() => {
+                            let outbound = thinclaw_core::hooks::HookEvent::Outbound {
+                                user_id: message.user_id.clone(),
+                                channel: message.channel.clone(),
+                                content: response.clone(),
+                                thread_id: message.thread_id.clone(),
+                            };
+                            let response = match channel_agent.hooks().run(&outbound).await {
+                                Err(error) => {
+                                    tracing::warn!(
+                                        channel = %message.channel,
+                                        %error,
+                                        "Embedded gateway response blocked by outbound hook"
+                                    );
+                                    None
+                                }
+                                Ok(thinclaw_core::hooks::HookOutcome::Continue {
+                                    modified: Some(content),
+                                }) => Some(content),
+                                _ => Some(response),
+                            };
+                            if let Some(response) = response {
+                                if let Err(error) = channel_agent
+                                    .channels()
+                                    .respond(
+                                        &message,
+                                        thinclaw_core::channels::OutgoingResponse::text(response),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        channel = %message.channel,
+                                        %error,
+                                        "Failed to deliver embedded gateway response"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(
+                            channel = %message.channel,
+                            %error,
+                            "Embedded gateway message failed"
+                        ),
+                    }
+                }
+            }));
+        }
+        Err(error) => tracing::warn!(
+            %error,
+            "No embedded Desktop channels could be started"
+        ),
+    }
 
     agent.tools().register_job_tools(
         components.context_manager.clone(),
@@ -589,6 +715,9 @@ pub(crate) async fn build_inner(
     background_tasks::spawn_subagent_result_injector(&agent, subagent_result_rx);
 
     let (bg_handle, routine_engine) = background_tasks::start(&agent).await;
+    if let Some(gateway_state) = gateway_state.as_ref() {
+        gateway_state.set_routine_engine(routine_engine.clone());
+    }
 
     // ── 8. Emit Connected event ─────────────────────────────────────
     use tauri::Emitter;

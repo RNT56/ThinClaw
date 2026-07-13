@@ -961,7 +961,7 @@ mod tests {
             pair_complete_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 300),
             registry_entries: Vec::new(),
             cost_guard: None,
-            routine_engine: None,
+            routine_engine: Arc::new(std::sync::RwLock::new(None)),
             repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),

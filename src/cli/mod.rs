@@ -334,8 +334,8 @@ pub enum Command {
         #[arg(long, default_value = "50")]
         max_turns: u32,
 
-        /// Claude model to use (e.g. "claude-sonnet-4-6", "claude-opus-4-5").
-        #[arg(long, default_value = "claude-sonnet-4-6")]
+        /// Claude model to use (e.g. "claude-sonnet-5", "claude-opus-4-5").
+        #[arg(long, default_value = "claude-sonnet-5")]
         model: String,
     },
 

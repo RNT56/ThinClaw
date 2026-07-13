@@ -95,7 +95,7 @@ impl Tool for ImageGenTool {
                     res.path, res.id
                 ))
             }
-            Err(e) => Err(ImageGenError::Generation(e)),
+            Err(e) => Err(ImageGenError::Generation(e.to_string())),
         }
     }
 }

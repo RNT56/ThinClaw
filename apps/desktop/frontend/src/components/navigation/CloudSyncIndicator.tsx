@@ -84,7 +84,7 @@ export function CloudSyncIndicator({ sidebarOpen }: { sidebarOpen: boolean }) {
                     state.migrating
                         ? 'bg-blue-500/10 text-blue-500'
                         : 'text-muted-foreground/60'
-                )}>
+                )} role="status" aria-live="polite" aria-label={state.migrating ? `Cloud sync ${state.overallPercent.toFixed(0)} percent` : 'Cloud storage synced'}>
                     {state.migrating ? (
                         <>
                             <Loader2 className="w-3 h-3 animate-spin shrink-0" />

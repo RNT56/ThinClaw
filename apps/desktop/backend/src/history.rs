@@ -123,7 +123,10 @@ pub struct SharedHistoryStore {
 }
 
 impl SharedHistoryStore {
-    pub async fn open(state_dir: &Path, legacy_pool: &SqlitePool) -> Result<Self, String> {
+    pub async fn open(
+        state_dir: &Path,
+        legacy_pool: &SqlitePool,
+    ) -> Result<Self, crate::thinclaw::bridge::BridgeError> {
         let runtime_path = crate::thinclaw::runtime_builder::runtime_db_path(state_dir);
 
         #[cfg(feature = "runtime-libsql")]
@@ -132,11 +135,11 @@ impl SharedHistoryStore {
 
             let backend = thinclaw_core::db::libsql::LibSqlBackend::new_local(&runtime_path)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
             backend
                 .run_migrations()
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
             Arc::new(backend) as Arc<dyn thinclaw_core::db::Database>
         };
 
@@ -156,7 +159,7 @@ impl SharedHistoryStore {
             })
             .connect(&database_url)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
 
         ensure_shared_history_schema(&pool).await?;
 
@@ -178,21 +181,24 @@ impl SharedHistoryStore {
         &self.pool
     }
 
-    async fn migrate_legacy_history(&self, legacy_pool: &SqlitePool) -> Result<(), String> {
+    async fn migrate_legacy_history(
+        &self,
+        legacy_pool: &SqlitePool,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS desktop_history_migrations (\
              id TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now')))",
         )
         .execute(&self.pool)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
 
         let already_applied: Option<String> =
             sqlx::query_scalar("SELECT id FROM desktop_history_migrations WHERE id = ?")
                 .bind(LEGACY_HISTORY_MIGRATION)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         if already_applied.is_some() {
             return Ok(());
         }
@@ -203,18 +209,22 @@ impl SharedHistoryStore {
         )
         .fetch_all(legacy_pool)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         let messages = sqlx::query_as::<_, LegacyMessage>(
             "SELECT id, conversation_id, role, content, images, assets, attached_docs, \
              web_search_results, created_at FROM messages ORDER BY created_at ASC",
         )
         .fetch_all(legacy_pool)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         let legacy_conversation_ids: HashSet<&str> =
             conversations.iter().map(|row| row.id.as_str()).collect();
 
-        let mut transaction = self.pool.begin().await.map_err(|error| error.to_string())?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         for conversation in &conversations {
             let id = legacy_conversation_id(&conversation.id);
             let metadata = json!({
@@ -247,7 +257,7 @@ impl SharedHistoryStore {
             .bind(metadata.to_string())
             .execute(&mut *transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         }
 
         for message in &messages {
@@ -285,18 +295,18 @@ impl SharedHistoryStore {
             .bind(millis_to_timestamp(message.created_at))
             .execute(&mut *transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         }
 
         sqlx::query("INSERT INTO desktop_history_migrations (id) VALUES (?)")
             .bind(LEGACY_HISTORY_MIGRATION)
             .execute(&mut *transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         transaction
             .commit()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
 
         tracing::info!(
             conversations = conversations.len(),
@@ -306,7 +316,10 @@ impl SharedHistoryStore {
         Ok(())
     }
 
-    async fn require_direct_conversation(&self, id: &str) -> Result<String, String> {
+    async fn require_direct_conversation(
+        &self,
+        id: &str,
+    ) -> Result<String, crate::thinclaw::bridge::BridgeError> {
         let exact = exact_id(id);
         let migrated = legacy_conversation_id(id);
         let resolved: Option<String> = sqlx::query_scalar(
@@ -319,8 +332,8 @@ impl SharedHistoryStore {
         .bind(&exact)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|error| error.to_string())?;
-        resolved.ok_or_else(|| "Direct Workbench conversation not found".to_string())
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        Ok(resolved.ok_or_else(|| "Direct Workbench conversation not found".to_string())?)
     }
 
     async fn set_conversation_metadata_value(
@@ -328,14 +341,18 @@ impl SharedHistoryStore {
         id: &str,
         key: &str,
         value: Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let id = self.require_direct_conversation(id).await?;
-        let mut transaction = self.pool.begin().await.map_err(|error| error.to_string())?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         let raw: String = sqlx::query_scalar("SELECT metadata FROM conversations WHERE id = ?")
             .bind(&id)
             .fetch_one(&mut *transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         let mut metadata: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
         set_direct_metadata_value(&mut metadata, key, value);
         sqlx::query("UPDATE conversations SET metadata = ? WHERE id = ? AND surface = ?")
@@ -344,14 +361,17 @@ impl SharedHistoryStore {
             .bind(DIRECT_SURFACE)
             .execute(&mut *transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         transaction
             .commit()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
     }
 
-    pub async fn message_texts(&self, id: &str) -> Result<Vec<(String, String)>, String> {
+    pub async fn message_texts(
+        &self,
+        id: &str,
+    ) -> Result<Vec<(String, String)>, crate::thinclaw::bridge::BridgeError> {
         #[derive(FromRow)]
         struct TextMessage {
             role: String,
@@ -372,10 +392,13 @@ impl SharedHistoryStore {
                 .map(|message| (message.role, message.content))
                 .collect()
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
     }
 
-    pub async fn conversation_project_id(&self, id: &str) -> Result<Option<String>, String> {
+    pub async fn conversation_project_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
         let exact = exact_id(id);
         let migrated = legacy_conversation_id(id);
         let metadata: Option<String> = sqlx::query_scalar(
@@ -388,7 +411,7 @@ impl SharedHistoryStore {
         .bind(&exact)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         Ok(metadata
             .and_then(|metadata| serde_json::from_str::<Value>(&metadata).ok())
             .and_then(|value| {
@@ -399,7 +422,10 @@ impl SharedHistoryStore {
             }))
     }
 
-    pub async fn delete_project_conversations(&self, project_id: &str) -> Result<(), String> {
+    pub async fn delete_project_conversations(
+        &self,
+        project_id: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         sqlx::query(
             "DELETE FROM conversations WHERE surface = ? \
              AND json_extract(metadata, '$.direct_workbench.project_id') = ?",
@@ -409,20 +435,22 @@ impl SharedHistoryStore {
         .execute(&self.pool)
         .await
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
     }
 
-    pub async fn delete_all_direct(&self) -> Result<(), String> {
+    pub async fn delete_all_direct(&self) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         sqlx::query("DELETE FROM conversations WHERE surface = ?")
             .bind(DIRECT_SURFACE)
             .execute(&self.pool)
             .await
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
     }
 }
 
-async fn ensure_shared_history_schema(pool: &SqlitePool) -> Result<(), String> {
+async fn ensure_shared_history_schema(
+    pool: &SqlitePool,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     for statement in [
         "CREATE TABLE IF NOT EXISTS conversations (\
          id TEXT PRIMARY KEY, channel TEXT NOT NULL, user_id TEXT NOT NULL, actor_id TEXT, \
@@ -443,7 +471,7 @@ async fn ensure_shared_history_schema(pool: &SqlitePool) -> Result<(), String> {
         sqlx::query(statement)
             .execute(pool)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
     }
     Ok(())
 }
@@ -590,7 +618,7 @@ fn message_from_entry(entry: MessageEntry) -> FrontendMessage {
 #[specta::specta]
 pub async fn direct_history_get_conversations(
     state: State<'_, SharedHistoryStore>,
-) -> Result<Vec<Conversation>, String> {
+) -> Result<Vec<Conversation>, crate::thinclaw::bridge::BridgeError> {
     sqlx::query_as::<_, SharedConversationRow>(
         "SELECT id, metadata, started_at, last_activity FROM conversations \
          WHERE surface = ? ORDER BY \
@@ -601,7 +629,7 @@ pub async fn direct_history_get_conversations(
     .fetch_all(state.pool())
     .await
     .map(|rows| rows.into_iter().map(conversation_from_row).collect())
-    .map_err(|e| e.to_string())
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 #[tauri::command]
@@ -610,7 +638,7 @@ pub async fn direct_history_create_conversation(
     state: State<'_, SharedHistoryStore>,
     title: String,
     project_id: Option<String>,
-) -> Result<Conversation, String> {
+) -> Result<Conversation, crate::thinclaw::bridge::BridgeError> {
     let id = Uuid::new_v4().to_string();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -654,7 +682,7 @@ pub async fn direct_history_create_conversation(
     .bind(metadata.to_string())
     .execute(state.pool())
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(conv)
 }
@@ -664,14 +692,14 @@ pub async fn direct_history_create_conversation(
 pub async fn direct_history_delete_conversation(
     state: State<'_, SharedHistoryStore>,
     id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let id = state.require_direct_conversation(&id).await?;
     sqlx::query("DELETE FROM conversations WHERE id = ? AND surface = ?")
         .bind(id)
         .bind(DIRECT_SURFACE)
         .execute(state.pool())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(())
 }
 
@@ -681,7 +709,7 @@ pub async fn direct_history_update_conversation_title(
     state: State<'_, SharedHistoryStore>,
     id: String,
     title: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .set_conversation_metadata_value(&id, "title", Value::String(title))
         .await
@@ -693,7 +721,7 @@ pub async fn direct_history_update_conversation_project(
     state: State<'_, SharedHistoryStore>,
     id: String,
     project_id: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .set_conversation_metadata_value(
             &id,
@@ -708,8 +736,12 @@ pub async fn direct_history_update_conversation_project(
 pub async fn direct_history_update_conversations_order(
     state: State<'_, SharedHistoryStore>,
     orders: Vec<(String, i32)>,
-) -> Result<(), String> {
-    let mut tx = state.pool().begin().await.map_err(|e| e.to_string())?;
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let mut tx = state
+        .pool()
+        .begin()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     for (id, order) in orders {
         let exact = exact_id(&id);
         let migrated = legacy_conversation_id(&id);
@@ -723,9 +755,9 @@ pub async fn direct_history_update_conversations_order(
         .bind(&exact)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
         let Some((id, raw)) = resolved else {
-            return Err("Direct Workbench conversation not found".to_string());
+            return Err(("Direct Workbench conversation not found".to_string()).into());
         };
         let mut metadata: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
         set_direct_metadata_value(&mut metadata, "sort_order", json!(order));
@@ -735,9 +767,11 @@ pub async fn direct_history_update_conversations_order(
             .bind(DIRECT_SURFACE)
             .execute(&mut *tx)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(())
 }
 
@@ -748,7 +782,7 @@ pub async fn direct_history_get_messages(
     conversation_id: String,
     limit: Option<i32>,
     before_created_at: Option<f64>,
-) -> Result<Vec<FrontendMessage>, String> {
+) -> Result<Vec<FrontendMessage>, crate::thinclaw::bridge::BridgeError> {
     let limit = limit.unwrap_or(50) as i64;
     let conversation_id = state.require_direct_conversation(&conversation_id).await?;
     let before = before_created_at
@@ -765,7 +799,7 @@ pub async fn direct_history_get_messages(
     .bind(limit)
     .fetch_all(state.pool())
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // We fetch DESC for pagination logic (getting the *previous* messages), but frontend expects ASC (chronological)
     // so we reverse them before returning.
@@ -790,7 +824,7 @@ pub async fn direct_history_save_message(
     assets: Option<Vec<AssetRef>>,
     attached_docs: Option<Vec<AttachedDoc>>,
     web_search_results: Option<Vec<crate::web_search::WebSearchResult>>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let conversation_id = state.require_direct_conversation(&conversation_id).await?;
     let id = Uuid::new_v4().to_string();
     let now = std::time::SystemTime::now()
@@ -809,7 +843,11 @@ pub async fn direct_history_save_message(
         }
     });
     let now_timestamp = millis_to_timestamp(now);
-    let mut tx = state.pool().begin().await.map_err(|e| e.to_string())?;
+    let mut tx = state
+        .pool()
+        .begin()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     sqlx::query(
         "INSERT INTO conversation_messages (\
@@ -827,13 +865,13 @@ pub async fn direct_history_save_message(
     .bind(&now_timestamp)
     .execute(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let raw: String = sqlx::query_scalar("SELECT metadata FROM conversations WHERE id = ?")
         .bind(&conversation_id)
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let mut conversation_metadata: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
     set_direct_metadata_value(&mut conversation_metadata, "updated_at", json!(now));
     sqlx::query(
@@ -845,8 +883,10 @@ pub async fn direct_history_save_message(
     .bind(DIRECT_SURFACE)
     .execute(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
-    tx.commit().await.map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(id)
 }
@@ -857,8 +897,12 @@ pub async fn direct_history_edit_message(
     state: State<'_, SharedHistoryStore>,
     message_id: String,
     new_content: String,
-) -> Result<(), String> {
-    let mut tx = state.pool().begin().await.map_err(|e| e.to_string())?;
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let mut tx = state
+        .pool()
+        .begin()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let exact_message_id = exact_id(&message_id);
     let migrated_message_id = legacy_message_id(&message_id);
 
@@ -875,7 +919,7 @@ pub async fn direct_history_edit_message(
     .bind(&exact_message_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
     .ok_or("Message not found")?;
     let message_id = msg.id.clone();
 
@@ -885,7 +929,7 @@ pub async fn direct_history_edit_message(
         .bind(&message_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // 3. Delete subsequent messages (use >= to catch millisecond collisions,
     //    but exclude the edited message itself by ID)
@@ -898,7 +942,7 @@ pub async fn direct_history_edit_message(
     .bind(&message_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // 4. Update conversation timestamp
     let now = std::time::SystemTime::now()
@@ -910,7 +954,7 @@ pub async fn direct_history_edit_message(
         .bind(&msg.conversation_id)
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let mut metadata: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
     set_direct_metadata_value(&mut metadata, "updated_at", json!(now));
     sqlx::query(
@@ -922,9 +966,11 @@ pub async fn direct_history_edit_message(
     .bind(DIRECT_SURFACE)
     .execute(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(())
 }
@@ -937,9 +983,12 @@ pub async fn direct_history_delete_all_history(
     history: State<'_, SharedHistoryStore>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     file_store: State<'_, FileStore>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     println!("[history] direct_history_delete_all_history: clearing database...");
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     history.delete_all_direct().await?;
 
@@ -991,7 +1040,9 @@ pub async fn direct_history_delete_all_history(
     println!("[history] database transaction committed");
 
     // 2. Reset all Vector Store indices
-    vector_manager.reset_all().map_err(|e| e.to_string())?;
+    vector_manager
+        .reset_all()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // 3. Clear Files via FileStore
     if file_store.exists("documents").await {
@@ -1000,7 +1051,7 @@ pub async fn direct_history_delete_all_history(
         file_store
             .create_dir_all("documents")
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     if file_store.exists("images").await {
@@ -1009,7 +1060,7 @@ pub async fn direct_history_delete_all_history(
         file_store
             .create_dir_all("images")
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     println!("[history] All history deleted and vector stores reset.");

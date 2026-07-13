@@ -35,11 +35,11 @@ pub async fn direct_rag_upload_document(
     pool: State<'_, SqlitePool>,
     file_bytes: Vec<u8>,
     filename: String,
-) -> Result<DirectDocumentUploadResponse, String> {
+) -> Result<DirectDocumentUploadResponse, crate::thinclaw::bridge::BridgeError> {
     file_store
         .create_dir_all("documents")
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let safe_filename = std::path::Path::new(&filename)
         .file_name()
@@ -103,7 +103,7 @@ pub async fn extract_document_content(
     buffer: &[u8],
     hash: &str,
     force_ocr_arg: bool,
-) -> Result<(String, bool), String> {
+) -> Result<(String, bool), crate::thinclaw::bridge::BridgeError> {
     let mut force_ocr = force_ocr_arg;
     let path_lc = file_path.to_lowercase();
     let is_pdf = path_lc.ends_with(".pdf");
@@ -154,14 +154,14 @@ pub async fn extract_document_content(
                     ..Default::default()
                 })
                 .build()
-                .map_err(|e| e.to_string())?,
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
         // Ensure browser is closed on all paths (including errors)
         // by using a scope guard pattern.
-        let browser_close_result: Result<(), String> = async {
+        let browser_close_result: Result<(), crate::thinclaw::bridge::BridgeError> = async {
         let _handle = tokio::spawn(async move { while (handler.next().await).is_some() {} });
 
         let page = browser
@@ -307,16 +307,16 @@ pub async fn extract_document_content(
                             ..Default::default()
                         })
                         .build()
-                        .map_err(|e| e.to_string())?,
+                        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?,
                 )
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
                 let _handle =
                     tokio::spawn(async move { while (handler.next().await).is_some() {} });
                 let page = browser
                     .new_page(&format!("file://{}", file_path))
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if let Ok(screenshot) = page.screenshot(chromiumoxide::page::ScreenshotParams::builder().format(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Jpeg).quality(80).build()).await {
                         let preview_rel = format!("previews/{}.jpg", hash);
@@ -355,7 +355,7 @@ pub async fn direct_rag_ingest_document(
     chat_id: Option<String>,
     project_id: Option<String>,
     embedding_model_path: Option<String>,
-) -> Result<DirectDocumentIngestResponse, String> {
+) -> Result<DirectDocumentIngestResponse, crate::thinclaw::bridge::BridgeError> {
     println!(
         "[rag] direct_rag_ingest_document: start for {}, chat_id={:?}, project_id={:?}",
         &file_path, chat_id, project_id
@@ -375,7 +375,7 @@ pub async fn direct_rag_ingest_document(
             .bind(&hash)
             .fetch_optional(pool.inner())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     if let Some((id, status)) = existing_doc {
         if status == "indexed" {
@@ -391,7 +391,7 @@ pub async fn direct_rag_ingest_document(
                 .bind(&id)
                 .execute(pool.inner())
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
             let mut metadata = HashMap::new();
             metadata.insert("hash".to_string(), hash);
@@ -442,7 +442,7 @@ pub async fn direct_rag_ingest_document(
     }
 
     if final_content.trim().is_empty() {
-        return Err("Document appears empty even after OCR attempts.".to_string());
+        return Err(("Document appears empty even after OCR attempts.".to_string()).into());
     }
 
     let doc_id: String = rand::thread_rng()
@@ -467,7 +467,7 @@ pub async fn direct_rag_ingest_document(
         .bind(&project_id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let chunk_size = 1000;
     let overlap = 100;
@@ -492,6 +492,59 @@ pub async fn direct_rag_ingest_document(
 
     // ── Try InferenceRouter embedding backend first ───────────────────────
     let embedding_backend = inference_router.embedding_backend().await;
+
+    if let Some(backend) = embedding_backend.as_ref() {
+        crate::inference::reconcile_embedding_dimensions(
+            &app,
+            &vector_manager,
+            backend.dimensions(),
+            &backend.info().display_name,
+        )
+        .await?;
+    }
+
+    // Start and probe the local server before opening the scoped index. This
+    // ensures the index filename and in-memory dimensions match live output.
+    let sidecar_connection = if embedding_backend.is_none() {
+        let maybe_live = if let Some((port, token)) = sidecar.get_embedding_config() {
+            let health_url = format!("http://127.0.0.1:{port}/health");
+            let alive = reqwest::Client::new()
+                .get(&health_url)
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success());
+            alive.then_some((port, token))
+        } else {
+            None
+        };
+
+        if let Some(connection) = maybe_live {
+            Some(connection)
+        } else {
+            let model_path = embedding_model_path.clone().ok_or_else(|| {
+                "Embedding server is not running and no embedding_model_path was provided. Select an embedding model in Settings."
+                    .to_string()
+            })?;
+            println!(
+                "[rag] Embedding server not alive — starting on demand with model: {}",
+                model_path
+            );
+            crate::sidecar::start_embedding_server_core(
+                &app,
+                &sidecar,
+                &vector_manager,
+                model_path,
+            )
+            .await
+            .map_err(|error| format!("Failed to auto-start embedding server: {error}"))?;
+            Some(sidecar.get_embedding_config().ok_or_else(|| {
+                "Embedding server failed to publish its connection configuration".to_string()
+            })?)
+        }
+    } else {
+        None
+    };
 
     let chunks_with_index: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
     let total_chunks = chunks_with_index.len();
@@ -548,14 +601,14 @@ pub async fn direct_rag_ingest_document(
                         .map_err(|e| format!("Database insert failed: {}", e))?;
 
                     if let Err(e) = scoped_store.add(rowid as u64, &embedding) {
-                        return Err(format!("Vector store index failed: {}", e));
+                        return Err((format!("Vector store index failed: {}", e)).into());
                     }
                     Ok(())
                 }
             })
             .buffer_unordered(5);
 
-        let results: Vec<Result<(), String>> = stream.collect().await;
+        let results: Vec<Result<(), crate::thinclaw::bridge::BridgeError>> = stream.collect().await;
 
         for res in &results {
             if let Err(e) = res {
@@ -568,56 +621,16 @@ pub async fn direct_rag_ingest_document(
                     .bind(&doc_id)
                     .execute(pool.inner())
                     .await;
-                return Err(format!("Ingestion failed (rolling back): {}", e));
+                return Err((format!("Ingestion failed (rolling back): {}", e)).into());
             }
         }
     } else {
         // ── Sidecar fallback path ────────────────────────────────────────
-        // Ensure the embedding server is alive; start on demand if not.
-        let (port, token) = {
-            let maybe_live = if let Some((p, t)) = sidecar.get_embedding_config() {
-                let health_url = format!("http://127.0.0.1:{}/health", p);
-                let alive = reqwest::Client::new()
-                    .get(&health_url)
-                    .timeout(std::time::Duration::from_secs(2))
-                    .send()
-                    .await
-                    .is_ok();
-                if alive {
-                    Some((p, t))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            if let Some(cfg) = maybe_live {
-                cfg
-            } else {
-                let model_path = embedding_model_path
-                    .clone()
-                    .ok_or_else(|| "Embedding server is not running and no embedding_model_path provided. Please select an embedding model in Settings.".to_string())?;
-
-                println!(
-                    "[rag] Embedding server not alive — starting on demand with model: {}",
-                    model_path
-                );
-
-                crate::sidecar::start_embedding_server_core(
-                    &app,
-                    &sidecar,
-                    &vector_manager,
-                    model_path.clone(),
-                )
-                .await
-                .map_err(|e| format!("Failed to auto-start embedding server: {}", e))?;
-
-                sidecar.get_embedding_config().ok_or_else(|| {
-                    "Embedding server failed to start (no config after launch)".to_string()
-                })?
-            }
-        };
+        let (port, token) = sidecar_connection.ok_or_else(|| {
+            crate::thinclaw::bridge::BridgeError::from(
+                "Local embedding server connection was not initialized",
+            )
+        })?;
 
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
@@ -653,10 +666,10 @@ pub async fn direct_rag_ingest_document(
                             .text()
                             .await
                             .unwrap_or_else(|_| "Could not read response text".to_string());
-                        return Err(format!(
+                        return Err((format!(
                             "Embedding failed for chunk {}: {} - Body: {}",
                             i, status, text
-                        ));
+                        )).into());
                     }
 
                     let res_json: EmbeddingResponse = response
@@ -665,6 +678,17 @@ pub async fn direct_rag_ingest_document(
                         .map_err(|e| format!("Parse error: {}", e))?;
 
                     if let Some(data) = res_json.data.first() {
+                        if data.embedding.len() != scoped_store.dimensions() {
+                            return Err(format!(
+                                "Embedding server returned {} dimensions; active index expects {}",
+                                data.embedding.len(),
+                                scoped_store.dimensions()
+                            )
+                            .into());
+                        }
+                        if data.embedding.iter().any(|value| !value.is_finite()) {
+                            return Err("Embedding server returned a non-finite vector".into());
+                        }
                         let bytes: Vec<u8> = data
                             .embedding
                             .iter()
@@ -683,15 +707,17 @@ pub async fn direct_rag_ingest_document(
                             .map_err(|e| format!("Database insert failed: {}", e))?;
 
                         if let Err(e) = scoped_store.add(rowid as u64, &data.embedding) {
-                            return Err(format!("Vector store index failed: {}", e));
+                            return Err((format!("Vector store index failed: {}", e)).into());
                         }
+                    } else {
+                        return Err("Embedding server returned no vector".into());
                     }
                     Ok(())
                 }
             })
             .buffer_unordered(5);
 
-        let results: Vec<Result<(), String>> = stream.collect().await;
+        let results: Vec<Result<(), crate::thinclaw::bridge::BridgeError>> = stream.collect().await;
 
         for res in &results {
             if let Err(e) = res {
@@ -704,7 +730,7 @@ pub async fn direct_rag_ingest_document(
                     .bind(&doc_id)
                     .execute(pool.inner())
                     .await;
-                return Err(format!("Ingestion failed (rolling back): {}", e));
+                return Err((format!("Ingestion failed (rolling back): {}", e)).into());
             }
         }
     }
@@ -714,14 +740,14 @@ pub async fn direct_rag_ingest_document(
             .bind(&doc_id)
             .execute(pool.inner())
             .await;
-        return Err(format!("Failed to save vector index: {}", e));
+        return Err((format!("Failed to save vector index: {}", e)).into());
     }
 
     sqlx::query("UPDATE documents SET status = 'indexed' WHERE id = ?")
         .bind(&doc_id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let mut metadata = HashMap::new();
     metadata.insert("hash".to_string(), hash.clone());
@@ -779,7 +805,7 @@ pub async fn direct_rag_retrieve_context(
     chat_id: Option<String>,
     doc_ids: Option<Vec<String>>,
     project_id: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
     let embedding_backend = inference_router.embedding_backend().await;
     retrieve_context_internal(
         Some(app),
@@ -808,7 +834,7 @@ pub async fn retrieve_context_internal(
     chat_id: Option<String>,
     doc_ids: Option<Vec<String>>,
     project_id_arg: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
     #[derive(serde::Serialize, Clone)]
     struct WebSearchStatus {
         id: Option<String>,
@@ -975,13 +1001,18 @@ pub async fn retrieve_context_internal(
 
     // Try embedding via InferenceRouter first (supports cloud + local backends),
     // fall back to direct sidecar HTTP call if no embedding backend is active.
+    let mut should_try_sidecar = embedding_backend.is_none();
     if let Some(backend) = &embedding_backend {
-        match backend.embed(query.clone()).await {
+        match backend.embed_query(query.clone()).await {
             Ok(embedding) => {
-                if let Ok(keys) =
-                    vector_manager.search_scoped(&embedding, &search_scopes, initial_top_k)
-                {
-                    vector_results = keys.into_iter().map(|k| k as i64).collect();
+                match vector_manager.search_scoped(&embedding, &search_scopes, initial_top_k) {
+                    Ok(keys) => {
+                        vector_results = keys.into_iter().map(|key| key as i64).collect();
+                    }
+                    Err(error) => tracing::warn!(
+                        error = %error,
+                        "configured embedding could not query the active vector index; using full-text retrieval"
+                    ),
                 }
             }
             Err(e) => {
@@ -989,13 +1020,13 @@ pub async fn retrieve_context_internal(
                     "[rag] InferenceRouter embedding failed, trying sidecar: {}",
                     e
                 );
-                // Fall through to sidecar below
+                should_try_sidecar = true;
             }
         }
     }
 
     // Sidecar fallback (or primary if no embedding backend configured)
-    if vector_results.is_empty() {
+    if should_try_sidecar {
         if let Some((port, token)) = sidecar.get_embedding_config() {
             let client = reqwest::Client::new();
             let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
@@ -1009,12 +1040,22 @@ pub async fn retrieve_context_internal(
             {
                 if let Ok(res_json) = response.json::<EmbeddingResponse>().await {
                     if let Some(data) = res_json.data.first() {
-                        if let Ok(keys) = vector_manager.search_scoped(
-                            &data.embedding,
-                            &search_scopes,
-                            initial_top_k,
-                        ) {
-                            vector_results = keys.into_iter().map(|k| k as i64).collect();
+                        if data.embedding.len() == vector_manager.dimensions()
+                            && data.embedding.iter().all(|value| value.is_finite())
+                        {
+                            if let Ok(keys) = vector_manager.search_scoped(
+                                &data.embedding,
+                                &search_scopes,
+                                initial_top_k,
+                            ) {
+                                vector_results = keys.into_iter().map(|key| key as i64).collect();
+                            }
+                        } else {
+                            tracing::warn!(
+                                actual_dimensions = data.embedding.len(),
+                                expected_dimensions = vector_manager.dimensions(),
+                                "sidecar embedding response is incompatible; using full-text retrieval"
+                            );
                         }
                     }
                 }
@@ -1267,7 +1308,7 @@ pub async fn list_project_files(pool: &SqlitePool, project_id: &str) -> Vec<Stri
 pub async fn perform_integrity_check(
     pool: &SqlitePool,
     vector_manager: &crate::vector_store::VectorStoreManager,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let chunk_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunks")
         .fetch_one(pool)
         .await
@@ -1295,6 +1336,6 @@ pub async fn perform_integrity_check(
 pub async fn direct_rag_check_vector_index_integrity(
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     perform_integrity_check(&pool, &vector_manager).await
 }

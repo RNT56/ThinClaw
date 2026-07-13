@@ -30,7 +30,6 @@ interface StatusInfo {
     remoteUrl: string | null;
     hasRemoteToken: boolean;
     deviceId: string;
-    authToken: string;
     stateDir: string;
     allowLocalTools: boolean;
     workspaceMode: string;
@@ -70,7 +69,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
         remoteUrl: null,
         hasRemoteToken: false,
         deviceId: '',
-        authToken: '',
         stateDir: '',
         allowLocalTools: true,
         workspaceMode: 'sandboxed',
@@ -133,7 +131,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 remoteUrl: s.remote_url,
                 hasRemoteToken: s.has_remote_token,
                 deviceId: s.device_id,
-                authToken: s.auth_token,
                 stateDir: s.state_dir,
                 allowLocalTools: s.allow_local_tools ?? true,
                 workspaceMode: s.workspace_mode || 'unrestricted',
@@ -817,8 +814,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             onClick={async () => {
                                 if (status.stateDir) {
                                     try {
-                                        const baseDir = status.stateDir.replace(/\/state$/, '');
-                                        await thinclaw.revealPath(`${baseDir}/workspace`);
+                                        await thinclaw.revealWorkspace();
                                     } catch (e) { toast.error('Directory access denied'); }
                                 }
                             }}
@@ -1257,7 +1253,18 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                         <span className="text-[10px] font-bold text-muted-foreground/60 uppercase">Handshake Token</span>
                                         <div className="flex items-center justify-between bg-muted/30 p-2.5 rounded-xl border border-border/50">
                                             <span className="text-[10px] font-mono">••••••••••••••••</span>
-                                            <button onClick={() => copyToClipboard(status.authToken, 'Access Token')} className="p-1 hover:bg-primary/10 rounded-lg transition-colors">
+                                            <button
+                                                onClick={async () => {
+                                                    try {
+                                                        const token = await thinclaw.revealGatewayToken();
+                                                        await copyToClipboard(token, 'Access Token');
+                                                    } catch (error) {
+                                                        toast.error('Could not reveal gateway token', { description: String(error) });
+                                                    }
+                                                }}
+                                                aria-label="Copy gateway access token"
+                                                className="p-1 hover:bg-primary/10 rounded-lg transition-colors"
+                                            >
                                                 <Copy className="w-3.5 h-3.5 text-primary" />
                                             </button>
                                         </div>

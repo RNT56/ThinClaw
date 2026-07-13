@@ -67,6 +67,59 @@ impl Channel for NostrChannel {
         "nostr"
     }
 
+    fn config_schema(&self) -> Option<thinclaw_channels_core::ConfigSchema> {
+        use thinclaw_channels_core::{ConfigField, ConfigSchema};
+        Some(ConfigSchema {
+            channel_id: "nostr".to_string(),
+            channel_name: "Nostr".to_string(),
+            fields: vec![
+                ConfigField {
+                    id: "relays".to_string(),
+                    label: "Relay URLs".to_string(),
+                    field_type: "textarea".to_string(),
+                    required: true,
+                    help_text: Some("One secure WebSocket relay URL per line.".to_string()),
+                    default_value: Some(serde_json::Value::String(
+                        self.config.relays.join("\n"),
+                    )),
+                    options: None,
+                },
+                ConfigField {
+                    id: "owner_pubkey".to_string(),
+                    label: "Owner public key".to_string(),
+                    field_type: "text".to_string(),
+                    required: false,
+                    help_text: Some(
+                        "Hex or npub key authorized to control ThinClaw over encrypted DMs."
+                            .to_string(),
+                    ),
+                    default_value: Some(serde_json::Value::String(
+                        self.config.owner_pubkey.clone().unwrap_or_default(),
+                    )),
+                    options: None,
+                },
+                ConfigField {
+                    id: "social_dm_enabled".to_string(),
+                    label: "Allow social DM reads".to_string(),
+                    field_type: "checkbox".to_string(),
+                    required: false,
+                    help_text: Some(
+                        "Let the Nostr tool read non-owner DMs; command ingress remains owner-only."
+                            .to_string(),
+                    ),
+                    default_value: Some(serde_json::Value::Bool(
+                        self.config.social_dm_enabled,
+                    )),
+                    options: None,
+                },
+            ],
+            help: Some(
+                "Configure Nostr relays and the owner-control boundary. The private key remains in the encrypted Secrets surface. Changes apply after restart."
+                    .to_string(),
+            ),
+        })
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         if let Some(handle) = self.notification_task.lock().await.take() {
             self.runtime.shutdown().await;
@@ -377,5 +430,20 @@ mod tests {
         let runtime = Arc::new(NostrRuntime::new(&config).unwrap());
         let channel = NostrChannel::new_with_runtime(config, Arc::clone(&runtime)).unwrap();
         assert_eq!(channel.runtime().public_key_hex(), runtime.public_key_hex());
+    }
+
+    #[test]
+    fn config_schema_never_exposes_the_private_key() {
+        let channel = NostrChannel::new(sample_config()).unwrap();
+        let schema = channel.config_schema().unwrap();
+        assert_eq!(schema.channel_id, "nostr");
+        assert!(schema.fields.iter().all(|field| field.id != "private_key"));
+        assert_eq!(
+            schema.fields[0]
+                .default_value
+                .as_ref()
+                .and_then(|v| v.as_str()),
+            Some("wss://relay.example")
+        );
     }
 }

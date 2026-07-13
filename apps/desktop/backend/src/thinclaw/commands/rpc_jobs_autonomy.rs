@@ -14,19 +14,19 @@ fn local_unavailable(capability: &str, reason: impl AsRef<str>) -> String {
     )
 }
 
-fn autonomy_unavailable(reason: impl AsRef<str>) -> String {
-    local_unavailable(
+fn autonomy_unavailable(reason: impl AsRef<str>) -> BridgeError {
+    BridgeError::from(local_unavailable(
         "desktop autonomy execution",
         format!(
             "{}. Enable reckless desktop autonomy in the ThinClaw host config and satisfy host permission checks first",
             reason.as_ref()
         ),
-    )
+    ))
 }
 
 async fn local_direct_jobs(
     ironclaw: &ThinClawRuntimeState,
-) -> Result<Vec<thinclaw_core::context::JobContext>, String> {
+) -> Result<Vec<thinclaw_core::context::JobContext>, crate::thinclaw::bridge::BridgeError> {
     let agent = ironclaw.agent().await?;
     let context_manager = agent.context_manager();
     let mut jobs = Vec::new();
@@ -125,21 +125,24 @@ fn job_detail(job: &thinclaw_core::context::JobContext) -> serde_json::Value {
 async fn local_job_by_id(
     ironclaw: &ThinClawRuntimeState,
     job_id: &str,
-) -> Result<thinclaw_core::context::JobContext, String> {
+) -> Result<thinclaw_core::context::JobContext, crate::thinclaw::bridge::BridgeError> {
     let parsed = Uuid::parse_str(job_id).map_err(|_| "Invalid job ID".to_string())?;
     let agent = ironclaw.agent().await?;
     agent
         .context_manager()
         .get_context(parsed)
         .await
-        .map_err(|_| "Job not found".to_string())
+        .map_err(|_| BridgeError::NotFound {
+            resource: format!("job:{job_id}"),
+            message: "Job not found".to_string(),
+        })
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_jobs_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_jobs().await;
     }
@@ -167,7 +170,7 @@ pub async fn thinclaw_jobs_list(
 #[specta::specta]
 pub async fn thinclaw_jobs_summary(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_jobs_summary().await;
     }
@@ -181,7 +184,7 @@ pub async fn thinclaw_jobs_summary(
 pub async fn thinclaw_job_detail(
     ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_job_detail(&job_id).await;
     }
@@ -195,7 +198,7 @@ pub async fn thinclaw_job_detail(
 pub async fn thinclaw_job_cancel(
     ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.cancel_job(&job_id).await;
     }
@@ -208,7 +211,7 @@ pub async fn thinclaw_job_cancel(
         .await
         .map_err(|_| "Job not found".to_string())?;
     if !current.state.is_active() {
-        return Err(format!("Cannot cancel job in state '{}'", current.state));
+        return Err((format!("Cannot cancel job in state '{}'", current.state)).into());
     }
 
     if agent.scheduler().is_running(parsed).await {
@@ -216,7 +219,7 @@ pub async fn thinclaw_job_cancel(
             .scheduler()
             .stop(parsed)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     agent
@@ -228,12 +231,15 @@ pub async fn thinclaw_job_cancel(
             )
         })
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     if let Some(store) = agent.store() {
         if let Ok(snapshot) = agent.context_manager().get_context(parsed).await {
-            store.save_job(&snapshot).await.map_err(|e| e.to_string())?;
+            store
+                .save_job(&snapshot)
+                .await
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
         }
     }
 
@@ -247,10 +253,7 @@ pub async fn thinclaw_job_restart(
     job_id: String,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .restart_job(&job_id)
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+        return proxy.restart_job(&job_id).await;
     }
 
     Err(crate::thinclaw::bridge::gated(
@@ -272,8 +275,7 @@ pub async fn thinclaw_job_prompt(
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .prompt_job(&job_id, content, done.unwrap_or(false))
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+            .await;
     }
 
     Err(crate::thinclaw::bridge::gated(
@@ -289,7 +291,7 @@ pub async fn thinclaw_job_prompt(
 pub async fn thinclaw_job_events(
     ironclaw: State<'_, ThinClawRuntimeState>,
     job_id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_job_events(&job_id).await;
     }
@@ -297,13 +299,13 @@ pub async fn thinclaw_job_events(
     let parsed = Uuid::parse_str(&job_id).map_err(|_| "Invalid job ID".to_string())?;
     let agent = ironclaw.agent().await?;
     if agent.context_manager().get_context(parsed).await.is_err() {
-        return Err("Job not found".to_string());
+        return Err(("Job not found".to_string()).into());
     }
     let events = if let Some(store) = agent.store() {
         store
             .list_job_events(parsed, None)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
             .into_iter()
             .map(|event| {
                 serde_json::json!({
@@ -338,10 +340,7 @@ pub async fn thinclaw_job_files_list(
     path: Option<String>,
 ) -> Result<serde_json::Value, BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .list_job_files(&job_id, path.as_deref())
-            .await
-            .map_err(BridgeError::from);
+        return proxy.list_job_files(&job_id, path.as_deref()).await;
     }
 
     Err(gated(
@@ -360,10 +359,7 @@ pub async fn thinclaw_job_file_read(
     path: String,
 ) -> Result<serde_json::Value, BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .read_job_file(&job_id, &path)
-            .await
-            .map_err(BridgeError::from);
+        return proxy.read_job_file(&job_id, &path).await;
     }
 
     Err(gated(
@@ -378,30 +374,30 @@ pub async fn thinclaw_job_file_read(
 #[specta::specta]
 pub async fn thinclaw_autonomy_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_autonomy_status().await;
     }
 
-    thinclaw_core::desktop_api::autonomy_status()
+    let status = thinclaw_core::desktop_api::autonomy_status()
         .await
-        .and_then(|status| serde_json::to_value(status).map_err(|e| e.to_string()))
-        .map_err(autonomy_unavailable)
+        .map_err(autonomy_unavailable)?;
+    serde_json::to_value(status).map_err(|error| BridgeError::from(error.to_string()))
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_autonomy_bootstrap(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.bootstrap_autonomy().await;
     }
 
-    thinclaw_core::desktop_api::autonomy_bootstrap()
+    let report = thinclaw_core::desktop_api::autonomy_bootstrap()
         .await
-        .and_then(|report| serde_json::to_value(report).map_err(|e| e.to_string()))
-        .map_err(autonomy_unavailable)
+        .map_err(autonomy_unavailable)?;
+    serde_json::to_value(report).map_err(|error| BridgeError::from(error.to_string()))
 }
 
 #[tauri::command]
@@ -409,7 +405,7 @@ pub async fn thinclaw_autonomy_bootstrap(
 pub async fn thinclaw_autonomy_pause(
     ironclaw: State<'_, ThinClawRuntimeState>,
     reason: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.pause_autonomy(reason).await;
     }
@@ -423,7 +419,7 @@ pub async fn thinclaw_autonomy_pause(
 #[specta::specta]
 pub async fn thinclaw_autonomy_resume(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.resume_autonomy().await;
     }
@@ -437,7 +433,7 @@ pub async fn thinclaw_autonomy_resume(
 #[specta::specta]
 pub async fn thinclaw_autonomy_permissions(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_autonomy_permissions().await;
     }
@@ -451,7 +447,7 @@ pub async fn thinclaw_autonomy_permissions(
 #[specta::specta]
 pub async fn thinclaw_desktop_permission_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     thinclaw_autonomy_permissions(ironclaw).await
 }
 
@@ -459,7 +455,7 @@ pub async fn thinclaw_desktop_permission_status(
 #[specta::specta]
 pub async fn thinclaw_autonomy_rollback(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.rollback_autonomy().await;
     }
@@ -475,10 +471,7 @@ pub async fn thinclaw_autonomy_rollouts(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .get_autonomy_rollouts()
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+        return proxy.get_autonomy_rollouts().await;
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
@@ -489,11 +482,11 @@ pub async fn thinclaw_autonomy_rollouts(
             crate::thinclaw::bridge::RouteMode::LocalAndRemote,
         ));
     };
-    manager
+    let summary = manager
         .rollout_summary()
         .await
-        .and_then(|summary| serde_json::to_value(summary).map_err(|e| e.to_string()))
-        .map_err(crate::thinclaw::bridge::BridgeError::from)
+        .map_err(crate::thinclaw::bridge::BridgeError::from)?;
+    serde_json::to_value(summary).map_err(|error| BridgeError::from(error.to_string()))
 }
 
 #[tauri::command]
@@ -502,10 +495,7 @@ pub async fn thinclaw_autonomy_checks(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .get_autonomy_checks()
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+        return proxy.get_autonomy_checks().await;
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
@@ -516,11 +506,11 @@ pub async fn thinclaw_autonomy_checks(
             crate::thinclaw::bridge::RouteMode::LocalAndRemote,
         ));
     };
-    manager
+    let summary = manager
         .checks_summary()
         .await
-        .and_then(|summary| serde_json::to_value(summary).map_err(|e| e.to_string()))
-        .map_err(crate::thinclaw::bridge::BridgeError::from)
+        .map_err(crate::thinclaw::bridge::BridgeError::from)?;
+    serde_json::to_value(summary).map_err(|error| BridgeError::from(error.to_string()))
 }
 
 #[tauri::command]
@@ -529,10 +519,7 @@ pub async fn thinclaw_autonomy_evidence(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .get_autonomy_evidence()
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+        return proxy.get_autonomy_evidence().await;
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
@@ -543,9 +530,9 @@ pub async fn thinclaw_autonomy_evidence(
             crate::thinclaw::bridge::RouteMode::LocalAndRemote,
         ));
     };
-    manager
+    let summary = manager
         .evidence_summary()
         .await
-        .and_then(|summary| serde_json::to_value(summary).map_err(|e| e.to_string()))
-        .map_err(crate::thinclaw::bridge::BridgeError::from)
+        .map_err(crate::thinclaw::bridge::BridgeError::from)?;
+    serde_json::to_value(summary).map_err(|error| BridgeError::from(error.to_string()))
 }

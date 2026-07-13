@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (192)
+### Local only (197)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -76,6 +76,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `direct_history_update_conversation_project` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_history_update_conversation_title` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_history_update_conversations_order` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_i18n_get_catalog` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_imagine_delete_image` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_imagine_generate` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_imagine_get_stats` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -135,7 +136,6 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_add_agent_profile` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_add_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_agents_list` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `thinclaw_broadcast_command` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_dispatch_event` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_navigate` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_panel_dismiss` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -150,10 +150,11 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_cron_lint` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_experiments_list_envs` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_experiments_run_eval` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_external_memory_configure` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_external_memory_disable` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_anthropic_key` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_bedrock_credentials` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_brave_key` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `thinclaw_get_fleet_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_gemini_key` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_groq_key` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_implicit_provider_key` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -167,7 +168,12 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_list_child_sessions` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_manifest_validate` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_plugin_lifecycle_list` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_profile_evolution_run` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_profile_evolution_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_reload_secrets` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_remote_access_start` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_remote_access_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_remote_access_stop` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_remove_agent_profile` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_remove_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_repo_project_approve` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -189,6 +195,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_repo_projects_set_credential` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_repo_projects_setup` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_reveal_file` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_reveal_gateway_token` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_reveal_workspace` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_save_bedrock_credentials` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_save_brave_key` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -208,7 +215,6 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_set_setup_completed` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_set_workspace_mode` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_skills_toggle` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `thinclaw_spawn_session` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_sync_local_llm` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_toggle_auto_start` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_toggle_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -216,14 +222,13 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_toggle_local_inference` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_toggle_local_tools` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_toggle_secret_access` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_trajectory_export` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_trajectory_records` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_trajectory_stats` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_trigger_bootstrap` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_update_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_update_run` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_update_sub_agent_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `thinclaw_web_login_telegram` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `thinclaw_web_login_whatsapp` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_write_agent_workspace_file` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `toggle_spotlight` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_project` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -231,7 +236,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `update_remote_model_catalog` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_user_config` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 
-### Local and remote (151)
+### Local and remote (154)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -249,6 +254,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_autonomy_rollback` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_autonomy_rollouts` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_autonomy_status` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
+| `thinclaw_broadcast_command` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_cache_stats` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_channel_config_schema` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_channel_config_schemas` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
@@ -296,6 +302,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_get_autonomy_mode` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_diagnostics` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_file` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
+| `thinclaw_get_fleet_status` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_history` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_memory` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_sessions` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
@@ -376,6 +383,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_skills_reload_all` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_skills_search` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_skills_status` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
+| `thinclaw_spawn_session` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_start_gateway` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_stop_gateway` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_subscribe_session` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |

@@ -11,6 +11,9 @@ import { ModelProvider } from "./components/model-context";
 import { ChatProvider } from "./components/chat/chat-context";
 import { ConfigProvider } from "./components/config-context";
 import { ServicesProvider } from "./components/services-context";
+import { recordRendererReady } from "./lib/performance-budgets";
+import { I18nProvider, useI18n } from "./components/i18n-provider";
+import { AsyncState } from "./components/ui";
 
 const ChatLayout = lazy(() =>
   import("./components/chat/ChatLayout").then((module) => ({ default: module.ChatLayout })),
@@ -25,9 +28,10 @@ const SpotlightBar = lazy(() =>
 );
 
 function AppLoadingScreen() {
+  const { t } = useI18n();
   return (
-    <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-      Loading ThinClaw…
+    <div className="flex h-screen items-center justify-center bg-background">
+      <AsyncState kind="loading" title={t("common.loading")} compact />
     </div>
   );
 }
@@ -36,11 +40,13 @@ function AppProviders({ children }: { children: ReactNode }) {
   return (
     <ServicesProvider>
       <ThemeProvider defaultTheme="system">
-        <ConfigProvider>
-          <ModelProvider>
-            <ChatProvider>{children}</ChatProvider>
-          </ModelProvider>
-        </ConfigProvider>
+        <I18nProvider>
+          <ConfigProvider>
+            <ModelProvider>
+              <ChatProvider>{children}</ChatProvider>
+            </ModelProvider>
+          </ConfigProvider>
+        </I18nProvider>
       </ThemeProvider>
     </ServicesProvider>
   );
@@ -61,6 +67,10 @@ function App() {
       setWindowLabel("");
     }
   }, []);
+
+  useEffect(() => {
+    if (checked) recordRendererReady();
+  }, [checked]);
 
   const checkSetup = async () => {
     try {

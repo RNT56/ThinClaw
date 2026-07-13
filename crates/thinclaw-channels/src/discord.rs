@@ -404,7 +404,9 @@ impl Channel for DiscordChannel {
                         "One Discord channel ID per line. Empty allows every channel and DM."
                             .to_string(),
                     ),
-                    default_value: None,
+                    default_value: Some(serde_json::Value::String(
+                        self.config.allow_from.join("\n"),
+                    )),
                     options: None,
                 },
                 ConfigField {
@@ -416,7 +418,9 @@ impl Channel for DiscordChannel {
                         "Restrict the bot to a single guild (server). Empty allows all guilds."
                             .to_string(),
                     ),
-                    default_value: None,
+                    default_value: Some(serde_json::Value::String(
+                        self.config.guild_id.clone().unwrap_or_default(),
+                    )),
                     options: None,
                 },
             ],

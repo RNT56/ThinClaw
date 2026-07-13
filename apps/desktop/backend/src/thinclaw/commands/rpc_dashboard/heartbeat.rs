@@ -16,9 +16,9 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 pub async fn thinclaw_heartbeat_set_interval(
     ironclaw: State<'_, ThinClawRuntimeState>,
     interval_minutes: u32,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if !(5..=1440).contains(&interval_minutes) {
-        return Err("Interval must be between 5 and 1440 minutes".to_string());
+        return Err(("Interval must be between 5 and 1440 minutes".to_string()).into());
     }
 
     let agent = ironclaw.agent().await?;

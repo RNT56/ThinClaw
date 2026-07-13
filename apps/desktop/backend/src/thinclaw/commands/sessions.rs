@@ -29,7 +29,7 @@ pub async fn thinclaw_send_message(
     session_key: String,
     text: String,
     deliver: bool,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.send_message(&session_key, &text).await?;
@@ -57,7 +57,7 @@ pub async fn thinclaw_send_message(
         routine_engine,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(ThinClawRpcResponse {
         ok: true,
@@ -72,7 +72,7 @@ pub async fn thinclaw_abort_chat(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
     _run_id: Option<String>,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.abort_chat(&session_key).await?;
@@ -86,7 +86,7 @@ pub async fn thinclaw_abort_chat(
     let agent = ironclaw.agent().await?;
     thinclaw_core::api::chat::abort(&agent, &session_key)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(ThinClawRpcResponse {
         ok: true,
@@ -105,7 +105,7 @@ pub async fn thinclaw_abort_chat(
 pub async fn thinclaw_undo(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.send_message(&session_key, "/undo").await?;
@@ -129,7 +129,7 @@ pub async fn thinclaw_undo(
         routine_engine,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(ThinClawRpcResponse {
         ok: true,
@@ -147,7 +147,7 @@ pub async fn thinclaw_undo(
 pub async fn thinclaw_redo(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.send_message(&session_key, "/redo").await?;
@@ -171,7 +171,7 @@ pub async fn thinclaw_redo(
         routine_engine,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(ThinClawRpcResponse {
         ok: true,
@@ -189,7 +189,7 @@ pub async fn thinclaw_resolve_approval(
     approval_id: String,
     approved: bool,
     allow_session: Option<bool>,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy
@@ -229,7 +229,7 @@ pub async fn thinclaw_resolve_approval(
         ironclaw_always,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let message = match decision {
         ApprovalDecision::Deny => "Denied",
@@ -252,7 +252,7 @@ pub async fn thinclaw_resolve_approval(
 #[specta::specta]
 pub async fn thinclaw_get_sessions(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<ThinClawSessionsResponse, String> {
+) -> Result<ThinClawSessionsResponse, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.get_sessions().await?;
@@ -312,7 +312,7 @@ pub async fn thinclaw_get_sessions(
         "tauri",
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let mut session_list: Vec<ThinClawSession> = Vec::new();
 
@@ -393,9 +393,9 @@ pub async fn thinclaw_get_sessions(
 pub async fn thinclaw_delete_session(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if session_key == "agent:main" {
-        return Err("Cannot delete the core agent:main session.".to_string());
+        return Err(("Cannot delete the core agent:main session.".to_string()).into());
     }
 
     // ── Remote mode ──────────────────────────────────────────────────────
@@ -425,7 +425,7 @@ pub async fn thinclaw_delete_session(
         &session_key,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // Evict the deleted parent's children from the in-memory sub-agent registry
     // so the per-process registry does not slowly leak `ChildSessionInfo`.
@@ -445,7 +445,7 @@ pub async fn thinclaw_delete_session(
 pub async fn thinclaw_reset_session(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.reset_session(&session_key).await?;
@@ -464,7 +464,7 @@ pub async fn thinclaw_reset_session(
         &session_key,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     info!(
         "[thinclaw-runtime] Successfully reset session: {}",
@@ -484,7 +484,7 @@ pub async fn thinclaw_get_history(
     session_key: String,
     limit: u32,
     _before: Option<String>,
-) -> Result<ThinClawHistoryResponse, String> {
+) -> Result<ThinClawHistoryResponse, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.get_history(&session_key, limit).await?;
@@ -599,7 +599,7 @@ pub async fn thinclaw_get_history(
         _before.as_deref(),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // Map ThinClaw TurnInfo → ThinClawMessage for the frontend
     let mut messages: Vec<ThinClawMessage> = Vec::new();
@@ -675,7 +675,7 @@ pub async fn thinclaw_get_history(
 pub async fn thinclaw_subscribe_session(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     // The remote gateway pushes events over its own SSE connection; there is
     // no per-session subscribe RPC to proxy.  Record the session key locally
@@ -731,7 +731,7 @@ pub async fn thinclaw_subscribe_session(
 #[specta::specta]
 pub async fn thinclaw_get_memory(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_file("MEMORY.md").await;
     }
@@ -750,7 +750,7 @@ pub async fn thinclaw_get_memory(
 pub async fn thinclaw_save_memory(
     ironclaw: State<'_, ThinClawRuntimeState>,
     content: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.write_file("MEMORY.md", &content).await;
     }
@@ -759,7 +759,7 @@ pub async fn thinclaw_save_memory(
     let workspace = agent.workspace().ok_or("Workspace not available")?;
     thinclaw_core::api::memory::write_file(workspace, "MEMORY.md", &content)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Get contents of a workspace file (e.g. SOUL.md) from ThinClaw's DB.
@@ -768,10 +768,10 @@ pub async fn thinclaw_save_memory(
 pub async fn thinclaw_get_file(
     ironclaw: State<'_, ThinClawRuntimeState>,
     path: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     // Sanitize
     if path.contains("..") || path.starts_with("/") || path.contains("\\") {
-        return Err("Invalid file path".to_string());
+        return Err(("Invalid file path".to_string()).into());
     }
 
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -793,10 +793,10 @@ pub async fn thinclaw_write_file(
     ironclaw: State<'_, ThinClawRuntimeState>,
     path: String,
     content: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     // Sanitize
     if path.contains("..") || path.starts_with("/") || path.contains("\\") {
-        return Err("Invalid file path".to_string());
+        return Err(("Invalid file path".to_string()).into());
     }
 
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -807,7 +807,7 @@ pub async fn thinclaw_write_file(
     let workspace = agent.workspace().ok_or("Workspace not available")?;
     thinclaw_core::api::memory::write_file(workspace, &path, &content)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Delete a workspace file from ThinClaw's DB.
@@ -821,10 +821,10 @@ pub async fn thinclaw_write_file(
 pub async fn thinclaw_delete_file(
     ironclaw: State<'_, ThinClawRuntimeState>,
     path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     // Sanitize
     if path.contains("..") || path.starts_with("/") || path.contains("\\") {
-        return Err("Invalid file path".to_string());
+        return Err(("Invalid file path".to_string()).into());
     }
 
     // Protect core seeded files from deletion
@@ -841,10 +841,11 @@ pub async fn thinclaw_delete_file(
     ];
 
     if PROTECTED_FILES.contains(&path.as_str()) {
-        return Err(format!(
+        return Err((format!(
             "{} is a core workspace file and cannot be deleted. You can clear its content instead.",
             path
-        ));
+        ))
+        .into());
     }
 
     // ── Remote mode ──────────────────────────────────────────────────────
@@ -876,7 +877,10 @@ pub async fn thinclaw_delete_file(
         format!("{}/", path)
     };
 
-    let all_paths = workspace.list_all().await.map_err(|e| e.to_string())?;
+    let all_paths = workspace
+        .list_all()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let children: Vec<&String> = all_paths
         .iter()
@@ -884,16 +888,17 @@ pub async fn thinclaw_delete_file(
         .collect();
 
     if children.is_empty() {
-        return Err(format!("File or directory '{}' not found", path));
+        return Err((format!("File or directory '{}' not found", path)).into());
     }
 
     // Check none of the children are protected
     for child_path in &children {
         if PROTECTED_FILES.contains(&child_path.as_str()) {
-            return Err(format!(
+            return Err((format!(
                 "Cannot delete directory '{}' because it contains protected file '{}'",
                 path, child_path
-            ));
+            ))
+            .into());
         }
     }
 
@@ -923,7 +928,7 @@ pub async fn thinclaw_delete_file(
 #[specta::specta]
 pub async fn thinclaw_list_workspace_files(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.list_files().await;
@@ -932,7 +937,10 @@ pub async fn thinclaw_list_workspace_files(
     // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    workspace.list_all().await.map_err(|e| e.to_string())
+    workspace
+        .list_all()
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Clear memory or identity files in ThinClaw's workspace.
@@ -947,7 +955,7 @@ pub async fn thinclaw_clear_memory(
     ironclaw: State<'_, ThinClawRuntimeState>,
     legacy: State<'_, ThinClawManager>,
     target: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     match target.as_str() {
         "memory" => {
             // ── Remote mode ──────────────────────────────────────────
@@ -999,7 +1007,7 @@ pub async fn thinclaw_clear_memory(
             if runtime_db.exists() {
                 if let Err(e) = std::fs::remove_file(&runtime_db) {
                     error!("[thinclaw] Failed to delete thinclaw-runtime.db: {}", e);
-                    return Err(format!("Failed to delete thinclaw-runtime.db: {}", e));
+                    return Err((format!("Failed to delete thinclaw-runtime.db: {}", e)).into());
                 }
                 info!("[thinclaw] Deleted thinclaw-runtime.db");
             }
@@ -1131,7 +1139,7 @@ pub async fn thinclaw_clear_memory(
 
             Ok(())
         }
-        _ => Err("Invalid target".to_string()),
+        _ => Err(("Invalid target".to_string()).into()),
     }
 }
 
@@ -1150,7 +1158,7 @@ pub async fn thinclaw_set_thinking(
     ironclaw: State<'_, ThinClawRuntimeState>,
     enabled: bool,
     budget_tokens: Option<u32>,
-) -> Result<super::types::ThinkingConfig, String> {
+) -> Result<super::types::ThinkingConfig, crate::thinclaw::bridge::BridgeError> {
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let _ = proxy
@@ -1228,7 +1236,7 @@ pub async fn thinclaw_memory_search(
     ironclaw: State<'_, ThinClawRuntimeState>,
     query: String,
     limit: Option<u32>,
-) -> Result<super::types::MemorySearchResponse, String> {
+) -> Result<super::types::MemorySearchResponse, crate::thinclaw::bridge::BridgeError> {
     let limit = limit.unwrap_or(20) as usize;
 
     // ── Remote mode ──────────────────────────────────────────────────────
@@ -1370,7 +1378,7 @@ pub async fn thinclaw_export_session(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
     format: Option<String>,
-) -> Result<super::types::SessionExportResponse, String> {
+) -> Result<super::types::SessionExportResponse, crate::thinclaw::bridge::BridgeError> {
     let fmt = format.as_deref().unwrap_or("md");
 
     // ── Remote mode ──────────────────────────────────────────────────────

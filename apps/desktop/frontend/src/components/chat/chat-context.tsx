@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Message, StreamChunk, WebSearchResult, TokenUsage, AssetRef } from "../../lib/bindings";
 import { directCommands } from "../../lib/generated/direct-commands";
 import { toast } from "sonner";
+import { bridgeErrorMessage } from "../../lib/command-errors";
 
 interface ChatJob {
     conversationId: string;
@@ -87,7 +88,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (!conversationId) {
             const title = content.length > 30 ? content.substring(0, 30) + "..." : (content || "Image Upload");
             const result = await directCommands.directHistoryCreateConversation(title, projectId);
-            if (result.status === "error") throw new Error(result.error);
+            if (result.status === "error") throw new Error(bridgeErrorMessage(result.error));
             conversationId = result.data.id;
         }
 
@@ -112,7 +113,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 const hasUserTurn = (typeof content === "string" && content.trim().length > 0) || images.length > 0 || storageDocs.length > 0;
                 if (hasUserTurn) {
                     const resSave = await directCommands.directHistorySaveMessage(id, "user", content, images.length > 0 ? images : null, assets, storageDocs.length > 0 ? storageDocs : null, null);
-                    if (resSave.status === "error") throw new Error(resSave.error || "Could not save user message");
+                    if (resSave.status === "error") throw new Error(bridgeErrorMessage(resSave.error));
                 }
 
                 let finalMessages = [...history, { role: "user", content, images: images.length > 0 ? images : null, assets, attached_docs: storageDocs.length > 0 ? storageDocs : null }];

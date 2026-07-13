@@ -26,16 +26,19 @@ and locally verified; GitHub merge state remains authoritative until each PR lan
 | TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | `rpc_checkpoints.rs`:40/52/65 |
 | TDO-104 | Undo/redo: `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons | ✅ | `commands/sessions.rs`:105/147 |
 | TDO-105 | Advisor consultation → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `tool_execution.rs`, `ThinClawEventInspector.tsx` |
-| TDO-106 | Trajectory: `stats`/`records` commands + Trajectory panel | ✅ | `rpc_trajectory.rs`:45/58 |
+| TDO-106/114 | Trajectory viewer plus bounded SFT/DPO export command and explicit download controls | ✅ | `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` |
 | TDO-111/112 | Outcome evaluation and GPU operations return typed, actionable gateway gates in local mode | ✅ | `rpc_experiments_learning.rs`:394/631/654 |
-| TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | ✅ | `rpc_channel_config.rs`:19/37/61 |
+| TDO-113 | Agent-eval commands + interactive Benchmarks panel; real-engine runtime smoke remains manual | ◐ | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` |
+| TDO-120 | Channel-config framework: native/WASM schemas, encrypted credential routing, validated local/remote submit commands, and Channel Config panel | ✅ | `rpc_channel_config.rs`, `handlers/channels.rs`, `wasm/wrapper/mod.rs` |
+| TDO-121 | Signal, Discord, iMessage, and Nostr schemas preserve current non-secret values and resolve persisted settings on restart | ✅ | first-party channel adapters, `channel_config.rs` |
+| TDO-122 | Long-tail schemas cover manifest-backed WASM channels, Apple Mail, BlueBubbles, and honest host-managed lifecycle adapters | ✅ | WASM loader/wrapper, native channel adapters |
 | TDO-132 | Inline Memory Editor reads and saves the canonical memory document | ✅ | `MemoryEditor.tsx`, `commands/sessions.rs`:732/750 |
 | TDO-140 | Repo-projects enroll→plan→merge-gate flow + readiness surface | ✅ | `rpc_repo_projects.rs`, `ThinClawRepoProjects.tsx`, `src/repo_projects` |
 | TDO-143 | Local/remote session subscription activates live event routing | ✅ | `commands/sessions.rs`:675, `runtime_bridge.rs`:648 |
 | Supplemental | Session search command + Session Search panel | ✅ | `rpc_session_search.rs`, `ThinClawSessionSearch.tsx` |
 
-**Deferred / cross-lane (still open):** remote-mode channel-config submit and live-reload for
-native channels remain future work; the eval runtime smoke-test needs a running engine. See
+**Deferred / cross-lane (still open):** live-reload for startup-only native channel fields
+remains future work; the eval runtime smoke-test needs a running engine. See
 [`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md).
 
 ---
@@ -175,7 +178,7 @@ characterization test added before the split; no behavior change.
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
 | TDO-100 ✅ | **Compaction** → drives the real core `ContextCompactor` (Summarize) | M | TDO-001 | `rpc_extensions.rs` (`thinclaw_compact_session`) |
-| TDO-101 | Context-pressure `UiEvent` + header indicator | M | TDO-005 | `context_monitor`, `ui_types.rs` |
+| TDO-101 ✅ | Context-pressure `UiEvent` + header indicator | M | TDO-005 | `context_monitor`, `ui_types.rs`, `ContextPressureBadge.tsx` |
 | TDO-102 ✅ | Self-repair status event + panel row | M | TDO-033 | `self_repair.rs` |
 | TDO-103 ✅ | Checkpoints UI: `thinclaw_checkpoints_list`/`checkpoint_diff`/`checkpoint_restore` + Rollback panel | L | TDO-001 | `rpc_checkpoints.rs` |
 | TDO-104 ✅ | Undo/redo commands + control | S | TDO-001 | `commands/sessions.rs` |
@@ -185,34 +188,34 @@ characterization test added before the split; no behavior change.
 ### Proactive / learning / experiments
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
-| TDO-110 | Event-triggered routine creation (`Trigger::SystemEvent`) + UI | M | TDO-024 | `rpc_routines.rs:326`, `ThinClawAutomations.tsx` |
+| TDO-110 ✅ | Event-triggered routine creation (`Trigger::SystemEvent`) + UI | M | TDO-024 | `rpc_routines.rs`, `automations/CreateJobModal.tsx` |
 | TDO-111 ✅ | `evaluate_outcomes`: typed remote-only gate with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:394` |
 | TDO-112 ✅ | GPU validate/launch: typed remote-only gates with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:631-675` |
-| TDO-113 | Eval framework commands are wired; Benchmarks panel and runtime smoke-test remain | L | TDO-001 | `rpc_experiments_learning.rs`, frontend |
-| TDO-114 | `thinclaw_trajectory_export(format)` (SFT/DPO) + export button | M | TDO-106 | `src/cli/trajectory.rs` |
-| TDO-115 | Profile-evolution viewer + force-run | S | TDO-001 | `profile_evolution.rs` |
+| TDO-113 | Eval framework commands and Benchmarks panel are wired; real-engine runtime smoke-test remains | L | TDO-001 | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` |
+| TDO-114 ✅ | `thinclaw_trajectory_export(format)` (SFT/DPO) + export button | M | TDO-106 | `src/cli/trajectory.rs`, `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` |
+| TDO-115 ✅ | Profile-evolution viewer + force-run | S | TDO-001 | `rpc_profile_evolution.rs`, `learning/ProfileEvolutionPanel.tsx` |
 
 ### Channels (largest item)
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
 | TDO-120 ✅ | **Channel-config schema framework** (`thinclaw_channel_config_schema`/`_schemas`/`_submit` commands + generic renderer in the `ThinClawChannelConfig` panel) | XL | TDO-001 | `rpc_channel_config.rs`, channel manifests |
-| TDO-121 | First channels on framework: Signal + Discord done; iMessage, Nostr remain | L | TDO-120 | channel adapters |
-| TDO-122 | Long-tail channel configs (Matrix, Teams, LINE, SMS, BlueBubbles, Apple Mail, …) | L | TDO-120 | channel adapters |
-| TDO-123 | Pairing/web-login parity across paired channels | S | TDO-120 | `ThinClawPairing.tsx` |
+| TDO-121 ✅ | Signal, Discord, iMessage, and Nostr expose validated non-secret config schemas with current values; persisted settings resolve on restart | L | TDO-120 | channel adapters |
+| TDO-122 ✅ | WASM manifests declare encrypted credential forms for Matrix, Teams, LINE, SMS, WeCom, Feishu, Twitch, and peers; Apple Mail/BlueBubbles expose current non-secret values; native Matrix/voice/APNs/browser-push show explicit host-managed instructions | L | TDO-120 | channel adapters |
+| TDO-123 ✅ | Pairing parity covers every adapter that enforces DM codes (Telegram, Slack, Discord, WhatsApp, Signal); unsupported web-login stubs removed | S | TDO-120 | `ThinClawPairing.tsx`, `pairing/catalog.ts` |
 
 ### Identity / memory / personality
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
-| TDO-130 | `/personality` (`/vibe`) overlay command + chat control | S | TDO-001 | identity/soul |
-| TDO-131 | External-memory provider setup/status commands + panel | M | TDO-001 | `external_memory_*` |
+| TDO-130 ✅ | `/personality` (`/vibe`) overlay command + accessible session control in Agent Chat | S | TDO-001 | `commands.rs`, `chat/PersonalityControl.tsx` |
+| TDO-131 ✅ | Secret-safe external-memory setup/disable commands + provider health/configuration panel | M | TDO-001 | `rpc_experiments_learning.rs`, `learning/ExternalMemoryPanel.tsx` |
 | TDO-132 ✅ | Inline `MemoryEditor` wired to `get_memory`/`save_memory` | S | — | `MemoryEditor.tsx`, `commands/sessions.rs` |
 
 ### Repo-projects / fleet / remote
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
 | TDO-140 ✅ | Repo-projects enroll→plan→merge-gate + readiness gates | L | TDO-022 | `rpc_repo_projects.rs`, component |
-| TDO-141 | Define fleet model (multi-agent A2A) → real status + broadcast | L | TDO-001 | `fleet.rs`, `fleet/FleetCommandCenter.tsx` |
-| TDO-142 | Tunnel/Tailscale commands + Remote-access panel | M | TDO-001 | `src/tunnel/` |
+| TDO-141 ✅ | Authenticated multi-agent fleet status, real remote task routing, and one-delivery-per-node broadcast receipts | L | TDO-001 | `fleet.rs`, `rpc_orchestration.rs`, `fleet/FleetCommandCenter.tsx` |
+| TDO-142 ✅ | Authenticated loopback gateway + typed Tailscale Serve/Funnel commands + Remote Access panel | M | TDO-001 | `runtime_builder.rs`, `remote_access.rs`, `ThinClawRemoteAccess.tsx`, `src/tunnel/` |
 | TDO-143 ✅ | Real local/remote session subscription semantics | S | TDO-001 | `sessions.rs`, `runtime_bridge.rs` |
 
 ---
@@ -221,13 +224,13 @@ characterization test added before the split; no behavior change.
 
 | ID | Title | Size | Files |
 |---|---|---|---|
-| TDO-200 | Error taxonomy + user-facing error surfaces (no raw `String` errors) | M | bridge + UI |
-| TDO-201 | Bridge resilience: timeouts/retries/reconnect for `RemoteGatewayProxy` + failover UX | M | `runtime_bridge.rs` |
-| TDO-202 | Performance budgets: cold start, event-stream throughput, history virtualization, sidecar memory | L | frontend + backend |
-| TDO-203 | Model upgrade: default to latest Claude family in catalog + onboarding | M | provider catalog, onboarding |
-| TDO-204 | Engine bump (llama.cpp/MLX/vLLM/Ollama) + GGUF/quant matrix validation | L | `engine/*`, sidecars |
-| TDO-205 | Tauri v2 capabilities audit + npm/Cargo dep refresh + advisory sweep (fix-at-source) | M | `capabilities/default.json`, manifests |
-| TDO-206 | RAG/inference upgrades: reranker refresh, embedding-dim auto-detect hardening | M | `rag.rs`, `reranker.rs`, `hf_hub.rs` |
+| TDO-200 | Error taxonomy + user-facing error surfaces (no raw `String` errors) — ✅ complete | M | bridge + UI |
+| TDO-201 ✅ | Bridge resilience: bounded idempotent retries, typed transport/HTTP failures, shutdown-safe SSE reconnect, and visible failover/recovery UX | M | `remote_proxy/`, `ThinClawChatView.tsx` |
+| TDO-202 ✅ | Observable performance budgets: backend/renderer readiness, frame-batched event stream, two-surface history virtualization, frontend chunks, and app/sidecar memory ceiling status | L | `performance-budgets.md`, frontend + backend |
+| TDO-203 ✅ | Current Claude family: Fable 5, Opus 4.8 default, Sonnet 5 balanced slot, Haiku 4.5 fast slot across catalog, discovery fallback, onboarding, Bedrock, and cost metadata | M | provider catalog, onboarding |
+| TDO-204 ✅ | Reproducible engine matrix: verified llama.cpp/uv assets, exact MLX/vLLM pins with versioned upgrades, Ollama version reporting, and fail-closed bounded GGUF/quant validation | L | `engine-compatibility.md`, `engine/*`, sidecars |
+| TDO-205 ✅ | Window-isolated Tauri v2 capabilities + npm/Cargo refresh + enabled-graph advisory sweep with no RustSec ignores | M | `security-and-dependencies.md`, `capabilities/*.json`, manifests |
+| TDO-206 ✅ | RAG/inference upgrades: verified reranker artifacts, live embedding-dim authority, current provider defaults, and safe index migration | M | `rag-inference-compatibility.md`, `rag.rs`, `reranker.rs`, `hf_hub.rs` |
 
 ---
 
@@ -235,12 +238,12 @@ characterization test added before the split; no behavior change.
 
 | ID | Title | Size | Files |
 |---|---|---|---|
-| TDO-300 | Design system: token set + shared component library | L | `lib/app-themes.ts`, components |
-| TDO-301 | Mode seam: explicit Workbench↔Cockpit switch (state/identity/model) + shared command palette | M | `ModeNavigator.tsx`, `ChatLayout.tsx` |
-| TDO-302 | Onboarding overhaul: single wizard for both systems | L | `OnboardingWizard.tsx`, setup wizard |
-| TDO-303 | Accessibility pass (keyboard, focus, SR labels, contrast) | L | design system |
-| TDO-304 | Frontend i18n wiring (core i18n → UI) | M | `i18n`, frontend |
-| TDO-305 | Polish: empty/loading/error states, progress, micro-interactions, density | M | components |
+| TDO-300 ✅ | Design system: stable layout/motion/density tokens plus typed Button, Surface, Progress, and AsyncState primitives shared by both surfaces | L | `lib/app-themes.ts`, `components/ui/`, `index.css` |
+| TDO-301 ✅ | Mode seam: persistent labeled Workbench/Cockpit/Imagine switch, runtime status, direct keyboard shortcuts, and searchable shared command palette | M | `ModeNavigator.tsx`, `CommandPalette.tsx`, `ChatLayout.tsx` |
+| TDO-302 ✅ | Onboarding overhaul: one adaptive local/remote flow covers appearance, deployment, shared agent identity/personality, engine, inference, models/keys, permissions, and an explicit channel handoff | L | `OnboardingWizard.tsx`, setup wizard |
+| TDO-303 ✅ | Accessibility pass: persistent keyboard navigation, focus-safe sidebar/dialogs, screen-reader names/live states, visible focus, forced colors, and reduced motion | L | design system, `accessibility.md` |
+| TDO-304 ✅ | Frontend i18n: complete core catalogs, generated local catalog command, locale normalization/persistence/window sync, and translated shared shell/settings | M | `src/i18n.rs`, `i18n-provider.tsx`, frontend |
+| TDO-305 ✅ | Polish: shared loading/empty/error/progress states, applied shell/chat/control-surface feedback, bounded motion, and migrated compact/comfortable density | M | shared UI, theme provider, components |
 
 ---
 

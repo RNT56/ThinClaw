@@ -94,9 +94,9 @@ runtime is dual-mode: embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridg
 | Class | Items |
 |---|---|
 | **Remote-only in local mode** | `learning_evaluate_outcomes` and GPU operations are honestly gated with gateway remediation; `job_restart`/`job_prompt` remain remote-only |
-| **Headless internals (no UI/telemetry)** | advisor auto-consult, pre-compaction flush, context-pressure, config watcher, observability metrics (self-repair, checkpoints/rollback, undo, and trajectory now have commands + UI) |
-| **CLI-only (no command)** | SFT/DPO trajectory export (`src/cli/trajectory.rs`), tunnel, Claude-Code/Codex bridge job modes (the eval framework now has `thinclaw_experiments_run_eval`) |
-| **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); only cron routines creatable (not event); no `/personality`, profile-evolution, or external-memory UI |
+| **Headless internals (no UI/telemetry)** | advisor auto-consult, pre-compaction flush, config watcher, observability metrics (context pressure, self-repair, checkpoints/rollback, undo, and trajectory now have commands + UI) |
+| **CLI-only (no command)** | tunnel and Claude-Code/Codex bridge job modes (the eval framework and SFT/DPO trajectory export now have Desktop commands) |
+| **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); external-memory UI remains pending |
 | **Partial flows** | Fleet and Cloud-Brain config |
 | **Duplication** | Shared-service duplication is closed: secrets, models/providers, local conversation history, settings storage/schema, and theming are unified |
 | **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `desktop_api.rs`, and several `ThinClaw*` panel components (the root Tauri facade is retired) |
@@ -170,7 +170,7 @@ Triggered on-touch, but schedule the worst offenders:
   and self-repair start/completion preserve phase, label, and detail as typed
   `AgentLifecycleEvent`s in both embedded and remote modes. The standalone
   client consumes the same structured gateway SSE contract. The earlier
-  context-pressure header indicator remains the separate TDO-101 scope.
+  context-pressure transitions now reach the active-session header through the separate completed TDO-101 scope.
 
 ### WS-5 — Security & Secrets
 - ✅ Single encrypted secret path: the app-wide store serializes all local
@@ -212,7 +212,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
 | ~~Manual compaction is a stub~~ **DONE** | Local path drives the core `ContextCompactor` (Summarize) over each thread and mutates live thread state | `rpc_extensions.rs` (`thinclaw_compact_session`) | M |
-| No context-pressure signal | Add `ContextPressure` `UiEvent` + header indicator | `crates/thinclaw-agent/context_monitor`, `ui_types.rs` | M |
+| ~~No context-pressure signal~~ | ✅ Typed `ContextPressure` channel/SSE/`UiEvent` transitions (including recovery) drive an accessible warning/critical active-session header badge in local and remote modes | `crates/thinclaw-agent/src/context_monitor.rs`, `ui_types.rs`, `ContextPressureBadge.tsx` | M |
 | ~~Self-repair invisible~~ **DONE** | `SelfRepairStarted`/`SelfRepairCompleted` → `AgentLifecycleEvent` | `src/agent/self_repair.rs`, `ui_types.rs` | M |
 | ~~Checkpoints/`/rollback` no UI~~ **DONE** | `thinclaw_checkpoints_list`/`checkpoint_diff`/`checkpoint_restore` + Rollback panel | `rpc_checkpoints.rs` | L |
 | ~~Undo manager no UI~~ **DONE** | `thinclaw_undo`/`thinclaw_redo` commands + control | `commands/sessions.rs` | S |
@@ -222,32 +222,32 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 ### 5b. Proactive / learning / experiments
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| Event-triggered routines uncreatable | Extend `routine_create` to wire `Trigger::SystemEvent`; UI trigger-type selector | `rpc_routines.rs:326`, `ThinClawAutomations.tsx` | M |
+| ~~Event-triggered routines uncreatable~~ **DONE** | Local and remote `routine_create` wire `Trigger::SystemEvent`; the creation modal has an accessible trigger-type selector | `rpc_routines.rs`, `automations/CreateJobModal.tsx` | M |
 | ~~`evaluate_outcomes` failed opaquely in local mode~~ **DONE** | Typed remote-only gate explains that a gateway is required | `rpc_experiments_learning.rs:394` | M |
 | ~~GPU validate/launch failed opaquely in local mode~~ **DONE** | Typed remote-only gates explain the gateway credential boundary | `rpc_experiments_learning.rs:631-675` | M |
-| Eval framework partially exposed | Commands are wired; add the Benchmarks panel and runtime smoke-test | `rpc_experiments_learning.rs`, frontend | L |
-| SFT/DPO export CLI-only | `thinclaw_trajectory_export(format)` + export button | `src/cli/trajectory.rs` | M |
-| Profile-evolution no panel | Dedicated viewer + force-run | `src/profile_evolution.rs` | S |
+| Eval framework exposed; live acceptance pending | Commands and Benchmarks panel are wired; complete the real-engine runtime smoke-test | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` | L |
+| ~~SFT/DPO export CLI-only~~ **DONE** | CLI and Desktop share the canonical validated exporter; Desktop adds a bounded local command and explicit SFT/DPO download controls | `src/cli/trajectory.rs`, `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` | M |
+| ~~Profile-evolution no panel~~ **DONE** | Dedicated Learning Review panel shows bounded parsed profile/routine state and can explicitly upsert + run the reserved routine | `rpc_profile_evolution.rs`, `learning/ProfileEvolutionPanel.tsx` | S |
 
 ### 5c. Channels (breadth) — largest item
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| Many channels lack config UI (framework **DONE**, long tail pending) | **Schema-driven channel-config framework**: each native/WASM channel declares a config schema; UI renders generically (mirrors MCP/extension setup-schema). Framework + `thinclaw_channel_config_schema`/`_schemas`/`_submit` + Signal/Discord shipped; iMessage/Nostr and the long tail remain | `rpc_channel_config.rs`, `ThinClawChannelConfig` panel, channel manifests | **XL** |
-| Pairing/web-login parity | Reuse pairing UI for all paired channels | `ThinClawPairing.tsx` | S |
+| ~~Many channels lack config UI~~ **DONE** | Schema-driven local/remote forms cover the first native set, Apple Mail, BlueBubbles, manifest-backed long-tail WASM adapters, and explicit host-managed lifecycle states. Credential fields are opaque and encrypted-store-only. | `rpc_channel_config.rs`, `ThinClawChannelConfig` panel, channel manifests | **XL** |
+| ~~Pairing/web-login parity~~ **DONE** | One accessible pairing surface covers every adapter that actually emits DM pairing codes and explains each real credential path; unused web-login commands that only returned errors were removed | `ThinClawPairing.tsx`, `pairing/catalog.ts` | S |
 
 ### 5d. Identity / memory / personality
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| No `/personality` (`/vibe`) overlay | `thinclaw_personality_set/clear` + chat control | identity/soul crates | S |
-| External-memory providers no UI | setup/status commands + panel (Mem0/Letta/Zep/…) | `external_memory_*` tools | M |
+| ~~No `/personality` (`/vibe`) overlay~~ **DONE** | The canonical session command is available through an accessible Agent Chat control with inspect, preset, and clear actions; it reuses the persisted command path instead of duplicating state through a second IPC API | `commands.rs`, `chat/PersonalityControl.tsx` | S |
+| ~~External-memory providers no UI~~ **DONE** | Learning Review configures/activates/deactivates Honcho, Zep, Mem0, OpenMemory, Letta, Chroma, Qdrant, and custom HTTP providers; raw API keys are never accepted or persisted, only validated environment-variable references | `rpc_experiments_learning.rs`, `learning/ExternalMemoryPanel.tsx` | M |
 | ~~Inline MemoryEditor partial~~ **DONE** | Reads and saves the canonical memory document through registered commands | `MemoryEditor.tsx`, `commands/sessions.rs` | S |
 
 ### 5e. Repo-projects / fleet / remote (finish partials)
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
 | ~~Repo-projects partial~~ **DONE** | Enroll→plan→merge-gate flow and readiness gates are wired end to end | `ThinClawRepoProjects.tsx`, `rpc_repo_projects.rs`, `src/repo_projects` | L |
-| Fleet partial | Define fleet model (multi-agent A2A) → real status + broadcast | `thinclaw/fleet.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
-| Tunnel/Tailscale no UI | `thinclaw_tunnel_*` + Remote-access panel | `src/tunnel/` | M |
+| ~~Fleet partial~~ **DONE** | Saved remote profiles are probed through authenticated gateway status, task assignment routes to the selected agent's gateway, and broadcast targets each local/remote node once with per-node delivery receipts | `thinclaw/fleet.rs`, `rpc_orchestration.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
+| ~~Tunnel/Tailscale no UI~~ **DONE** | Desktop mounts the root authenticated gateway on loopback, then local-only typed commands own Tailscale Serve/Funnel lifecycle; the Remote Access panel defaults to private tailnet access, requires per-start public confirmation, and never accepts Tailscale auth keys | `runtime_builder.rs`, `remote_access.rs`, `ThinClawRemoteAccess.tsx`, `src/tunnel/` | M |
 | ~~`subscribe_session` stub~~ **DONE** | Activates local/remote live-event routing with real subscription semantics | `thinclaw/commands/sessions.rs`, `runtime_bridge.rs` | S |
 
 **Phase 1 exit gate:** parity matrix shows zero stub / zero silent-unavailable; every
@@ -259,15 +259,30 @@ panel wired or honestly gated; contract suite green.
 
 **Stabilize**
 - Error taxonomy + user-facing error surfaces (no raw `String` errors in the UI).
-- Bridge resilience: timeouts, retries, reconnect for `RemoteGatewayProxy`; dual-mode failover UX.
-- Performance budgets: cold start; `UiEvent` stream throughput (30 variants); large-history virtualization; sidecar memory ceilings.
+- **[DONE]** Bridge resilience: bounded retries for idempotent reads only (including
+  capped `Retry-After`), typed transport/HTTP failures, shutdown-safe SSE reconnect,
+  and deduplicated failover/recovery UX.
+- **[DONE]** Performance budgets: measured backend/renderer readiness, ordered
+  one-frame `AssistantDelta` coalescing without delaying other `UiEvent` variants,
+  virtualized histories in both chat surfaces, enforced chunk size, and visible
+  Desktop/sidecar memory ceiling state.
 - Crash reporting + structured logs surfaced in the Doctor panel.
 
 **Upgrade**
-- **Models:** default to the latest Claude family (Opus/Sonnet/Haiku 4.x, Fable 5) in provider catalog + onboarding; verify pricing/caching via the `claude-api` reference.
-- **Engines:** bump llama.cpp/MLX/vLLM/Ollama sidecars; validate GGUF/quant matrix; MLX-first on Apple Silicon.
-- **Tauri/deps:** v2 capabilities audit (`backend/capabilities/default.json`); npm + Cargo refresh; advisory sweep — fix at source, no `deny`-ignore; no heavy deps for off-by-default features without sign-off.
-- **RAG/inference:** reranker model refresh; embedding-dimension auto-detect hardening.
+- **[DONE] Models:** source-verified Claude Fable 5, Opus 4.8, Sonnet 5, and
+  Haiku 4.5 catalog; Opus 4.8 is the complex-agent default, Sonnet 5 the balanced
+  routing slot, and current IDs/context/pricing flow through onboarding and Bedrock.
+- **[DONE] Engines:** llama.cpp `b9988` and uv `0.11.28` assets are checksum/version verified; MLX/vLLM direct packages are exact and version-marker upgraded; Ollama reports its external daemon version; GGUF metadata and the b9988 quant matrix fail closed before spawn. See [`engine-compatibility.md`](engine-compatibility.md).
+- **[DONE] Tauri/deps:** main and Spotlight renderer capabilities are isolated
+  and least-privilege; file reveal is a canonicalized Rust boundary; npm is
+  audit-clean; Tauri/ORT/OpenDAL and the compatible Cargo graph are refreshed;
+  the enabled Rust graph passes without advisory ignores. See
+  [`security-and-dependencies.md`](security-and-dependencies.md).
+- **[DONE] RAG/inference:** the bounded ONNX reranker is revision/checksum
+  verified and fails soft; provider outputs and query/document semantics are
+  validated; current Gemini/Voyage defaults restore on launch; live local
+  output is authoritative for restart-safe vector-dimension migration. See
+  [`rag-inference-compatibility.md`](rag-inference-compatibility.md).
 
 **Phase 2 exit gate:** clean-machine smoke passes; notarized auto-updating build; telemetry live.
 
@@ -324,7 +339,7 @@ panel wired or honestly gated; contract suite green.
 1. WS-1 bridge linter + `RouteMode` enum — make the contract enforceable first. (`RouteMode`/`BridgeError`/`ROUTE_TABLE` in `bridge.rs` and the linter test have landed.)
 2. Generate route-matrix & `UiEvent` union from code; start the `lib/thinclaw.ts` split.
 3. ~~Fix the compaction stub~~ **done**; `thinclaw_compact_session` now drives the core `ContextCompactor`.
-4. Channel-config schema framework spike — de-risk the largest parity item early. (Framework + Signal/Discord landed; long tail pending.)
+4. ~~Channel-config schema framework spike~~ **done** — native current-value forms, WASM manifest mapping, encrypted credential routing, and honest host-managed states are implemented.
 5. Split `runtime_builder.rs` + `lib/thinclaw.ts` as their first consumers are touched.
 6. Stand up fixture acceptance in CI so every subsequent PR is gated.
 

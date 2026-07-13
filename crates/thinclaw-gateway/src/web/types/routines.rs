@@ -3,6 +3,14 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineCreateTriggerType {
+    #[default]
+    Cron,
+    SystemEvent,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RoutineInfo {
     pub id: Uuid,
@@ -31,6 +39,8 @@ pub struct RoutineCreateRequest {
     pub description: String,
     pub schedule: String,
     pub task: String,
+    #[serde(default)]
+    pub trigger_type: RoutineCreateTriggerType,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,4 +144,46 @@ pub struct RoutineEventActivityInfo {
 #[derive(Debug, Serialize)]
 pub struct RoutineEventActivityResponse {
     pub events: Vec<RoutineEventActivityInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RoutineCreateRequest, RoutineCreateTriggerType};
+
+    #[test]
+    fn routine_create_request_defaults_to_cron_for_existing_clients() {
+        let request: RoutineCreateRequest = serde_json::from_value(serde_json::json!({
+            "name": "Daily review",
+            "schedule": "0 0 9 * * * *",
+            "task": "Review open work"
+        }))
+        .expect("legacy routine create request should deserialize");
+
+        assert_eq!(request.trigger_type, RoutineCreateTriggerType::Cron);
+    }
+
+    #[test]
+    fn routine_create_request_accepts_system_event_trigger() {
+        let request: RoutineCreateRequest = serde_json::from_value(serde_json::json!({
+            "name": "Heartbeat reminder",
+            "schedule": "0 0 9 * * * *",
+            "task": "Review stalled pull requests",
+            "trigger_type": "system_event"
+        }))
+        .expect("system event routine create request should deserialize");
+
+        assert_eq!(request.trigger_type, RoutineCreateTriggerType::SystemEvent);
+    }
+
+    #[test]
+    fn routine_create_request_rejects_unknown_trigger_type() {
+        let result = serde_json::from_value::<RoutineCreateRequest>(serde_json::json!({
+            "name": "Bad trigger",
+            "schedule": "0 0 9 * * * *",
+            "task": "Do work",
+            "trigger_type": "magic"
+        }));
+
+        assert!(result.is_err());
+    }
 }

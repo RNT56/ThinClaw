@@ -34,6 +34,7 @@ pub(crate) mod rpc_experiments_learning;
 pub(crate) mod rpc_extensions;
 pub(crate) mod rpc_jobs_autonomy;
 pub(crate) mod rpc_orchestration;
+pub(crate) mod rpc_profile_evolution;
 pub(crate) mod rpc_repo_projects;
 pub(crate) mod rpc_routines;
 pub(crate) mod rpc_secret_recovery;
@@ -55,6 +56,7 @@ pub use rpc_experiments_learning::*;
 pub use rpc_extensions::*;
 pub use rpc_jobs_autonomy::*;
 pub use rpc_orchestration::*;
+pub use rpc_profile_evolution::*;
 pub use rpc_repo_projects::*;
 pub use rpc_routines::*;
 pub use rpc_secret_recovery::*;
@@ -87,11 +89,19 @@ impl ThinClawManager {
     }
 
     /// Initialize config from app data dir
-    pub async fn init_config(&self) -> Result<ThinClawConfig, String> {
-        let app_data_dir = self.app.path().app_data_dir().map_err(|e| e.to_string())?;
+    pub async fn init_config(
+        &self,
+    ) -> Result<ThinClawConfig, crate::thinclaw::bridge::BridgeError> {
+        let app_data_dir = self
+            .app
+            .path()
+            .app_data_dir()
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
         let config = ThinClawConfig::new(app_data_dir);
-        config.ensure_dirs().map_err(|e| e.to_string())?;
+        config
+            .ensure_dirs()
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
         *self.config.write().await = Some(config.clone());
         Ok(config)

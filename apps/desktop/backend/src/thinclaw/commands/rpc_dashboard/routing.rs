@@ -178,13 +178,15 @@ fn provider_policy_rule_to_desktop(index: usize, rule: &serde_json::Value) -> Ro
     fallback()
 }
 
-async fn remote_load_routing_rules(proxy: &RemoteGatewayProxy) -> Result<Vec<RoutingRule>, String> {
+async fn remote_load_routing_rules(
+    proxy: &RemoteGatewayProxy,
+) -> Result<Vec<RoutingRule>, crate::thinclaw::bridge::BridgeError> {
     let config = proxy.get_providers_config().await.map_err(|err| {
-        if err.contains("HTTP 404") {
+        if err.to_string().contains("HTTP 404") {
             "unavailable: remote ThinClaw gateway does not expose provider routing config"
                 .to_string()
         } else {
-            err
+            err.to_string()
         }
     })?;
     Ok(provider_config_route_rules(&config))
@@ -193,19 +195,22 @@ async fn remote_load_routing_rules(proxy: &RemoteGatewayProxy) -> Result<Vec<Rou
 async fn remote_save_routing_rules(
     proxy: &RemoteGatewayProxy,
     rules: &[RoutingRule],
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut config = proxy.get_providers_config().await?;
     let object = config
         .as_object_mut()
         .ok_or_else(|| "remote provider config response was not an object".to_string())?;
     object.insert(
         "policy_rules".to_string(),
-        serde_json::to_value(rules).map_err(|err| err.to_string())?,
+        serde_json::to_value(rules)
+            .map_err(|err| crate::thinclaw::bridge::BridgeError::from(err.to_string()))?,
     );
     proxy.set_providers_config(&config).await
 }
 
-async fn remote_smart_routing_enabled(proxy: &RemoteGatewayProxy) -> Result<bool, String> {
+async fn remote_smart_routing_enabled(
+    proxy: &RemoteGatewayProxy,
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     let config = proxy.get_providers_config().await?;
     Ok(config
         .get("routing_enabled")
@@ -216,7 +221,7 @@ async fn remote_smart_routing_enabled(proxy: &RemoteGatewayProxy) -> Result<bool
 async fn remote_set_smart_routing_enabled(
     proxy: &RemoteGatewayProxy,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut config = proxy.get_providers_config().await?;
     config["routing_enabled"] = serde_json::json!(enabled);
     proxy.set_providers_config(&config).await
@@ -226,7 +231,7 @@ async fn remote_save_routing_pools(
     proxy: &RemoteGatewayProxy,
     primary_pool_order: Vec<String>,
     cheap_pool_order: Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut config = proxy.get_providers_config().await?;
     let object = config
         .as_object_mut()
@@ -308,7 +313,7 @@ fn map_route_simulation_result(
 #[specta::specta]
 pub async fn thinclaw_routing_get(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let enabled = remote_smart_routing_enabled(&proxy).await?;
         return Ok(serde_json::json!({ "smart_routing_enabled": enabled }));
@@ -338,7 +343,7 @@ pub async fn thinclaw_routing_get(
 pub async fn thinclaw_routing_set(
     ironclaw: State<'_, ThinClawRuntimeState>,
     smart_routing_enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         remote_set_smart_routing_enabled(&proxy, smart_routing_enabled).await?;
         info!(
@@ -372,7 +377,7 @@ pub async fn thinclaw_routing_set(
 #[specta::specta]
 pub async fn thinclaw_routing_rules_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<RoutingRulesResponse, String> {
+) -> Result<RoutingRulesResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return Ok(RoutingRulesResponse {
             rules: remote_load_routing_rules(&proxy).await?,
@@ -416,14 +421,15 @@ pub async fn thinclaw_routing_rules_list(
 pub async fn thinclaw_routing_rules_save(
     ironclaw: State<'_, ThinClawRuntimeState>,
     rules: Vec<RoutingRule>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return remote_save_routing_rules(&proxy, &rules).await;
     }
 
     if let Ok(agent) = ironclaw.agent().await {
         if let Some(store) = agent.store() {
-            let value = serde_json::to_value(&rules).map_err(|e| e.to_string())?;
+            let value = serde_json::to_value(&rules)
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
             store
                 .set_setting("local_user", "routing_rules", &value)
                 .await
@@ -441,7 +447,7 @@ pub async fn thinclaw_routing_pools_save(
     ironclaw: State<'_, ThinClawRuntimeState>,
     primary_pool_order: Vec<String>,
     cheap_pool_order: Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let primary_pool_order = normalize_provider_order(primary_pool_order);
     let cheap_pool_order = normalize_provider_order(cheap_pool_order);
 
@@ -491,17 +497,18 @@ pub async fn thinclaw_routing_rules_add(
     ironclaw: State<'_, ThinClawRuntimeState>,
     rule: RoutingRule,
     position: Option<u32>,
-) -> Result<Vec<RoutingRule>, String> {
+) -> Result<Vec<RoutingRule>, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let mut rules = remote_load_routing_rules(&proxy).await?;
         if let Some(pos) = position {
             let pos = pos as usize;
             if pos > rules.len() {
-                return Err(format!(
+                return Err((format!(
                     "Position {} out of bounds (have {} rules)",
                     pos,
                     rules.len()
-                ));
+                ))
+                .into());
             }
             rules.insert(pos, rule);
         } else {
@@ -529,11 +536,12 @@ pub async fn thinclaw_routing_rules_add(
     if let Some(pos) = position {
         let pos = pos as usize;
         if pos > rules.len() {
-            return Err(format!(
+            return Err((format!(
                 "Position {} out of bounds (have {} rules)",
                 pos,
                 rules.len()
-            ));
+            ))
+            .into());
         }
         rules.insert(pos, rule);
     } else {
@@ -547,7 +555,8 @@ pub async fn thinclaw_routing_rules_add(
         .set_setting(
             "local_user",
             "routing_rules",
-            &serde_json::to_value(&rules).map_err(|e| e.to_string())?,
+            &serde_json::to_value(&rules)
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?,
         )
         .await
         .map_err(|e| format!("Failed to save rules: {}", e))?;
@@ -565,15 +574,13 @@ pub async fn thinclaw_routing_rules_add(
 pub async fn thinclaw_routing_rules_remove(
     ironclaw: State<'_, ThinClawRuntimeState>,
     index: u32,
-) -> Result<Vec<RoutingRule>, String> {
+) -> Result<Vec<RoutingRule>, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let mut rules = remote_load_routing_rules(&proxy).await?;
         if (index as usize) >= rules.len() {
-            return Err(format!(
-                "Index {} out of bounds (have {} rules)",
-                index,
-                rules.len()
-            ));
+            return Err(
+                (format!("Index {} out of bounds (have {} rules)", index, rules.len())).into(),
+            );
         }
         rules.remove(index as usize);
         reindex_routing_rules(&mut rules);
@@ -594,11 +601,7 @@ pub async fn thinclaw_routing_rules_remove(
         };
 
     if (index as usize) >= rules.len() {
-        return Err(format!(
-            "Index {} out of bounds (have {} rules)",
-            index,
-            rules.len()
-        ));
+        return Err((format!("Index {} out of bounds (have {} rules)", index, rules.len())).into());
     }
 
     rules.remove(index as usize);
@@ -609,7 +612,8 @@ pub async fn thinclaw_routing_rules_remove(
         .set_setting(
             "local_user",
             "routing_rules",
-            &serde_json::to_value(&rules).map_err(|e| e.to_string())?,
+            &serde_json::to_value(&rules)
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?,
         )
         .await
         .map_err(|e| format!("Failed to save rules: {}", e))?;
@@ -629,18 +633,19 @@ pub async fn thinclaw_routing_rules_reorder(
     ironclaw: State<'_, ThinClawRuntimeState>,
     from: u32,
     to: u32,
-) -> Result<Vec<RoutingRule>, String> {
+) -> Result<Vec<RoutingRule>, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let mut rules = remote_load_routing_rules(&proxy).await?;
         let from = from as usize;
         let to = to as usize;
         if from >= rules.len() || to >= rules.len() {
-            return Err(format!(
+            return Err((format!(
                 "Indices out of bounds: from={}, to={}, have {} rules",
                 from,
                 to,
                 rules.len()
-            ));
+            ))
+            .into());
         }
         let rule = rules.remove(from);
         rules.insert(to, rule);
@@ -664,12 +669,13 @@ pub async fn thinclaw_routing_rules_reorder(
     let from = from as usize;
     let to = to as usize;
     if from >= rules.len() || to >= rules.len() {
-        return Err(format!(
+        return Err((format!(
             "Indices out of bounds: from={}, to={}, have {} rules",
             from,
             to,
             rules.len()
-        ));
+        ))
+        .into());
     }
 
     let rule = rules.remove(from);
@@ -681,7 +687,8 @@ pub async fn thinclaw_routing_rules_reorder(
         .set_setting(
             "local_user",
             "routing_rules",
-            &serde_json::to_value(&rules).map_err(|e| e.to_string())?,
+            &serde_json::to_value(&rules)
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?,
         )
         .await
         .map_err(|e| format!("Failed to save rules: {}", e))?;
@@ -698,7 +705,7 @@ pub async fn thinclaw_routing_rules_reorder(
 #[specta::specta]
 pub async fn thinclaw_routing_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<RoutingStatusResponse, String> {
+) -> Result<RoutingStatusResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let provider_config = proxy.get_providers_config().await?;
         let gateway_status = proxy.get_status().await?;
@@ -895,7 +902,7 @@ pub async fn thinclaw_routing_status(
 pub async fn thinclaw_routing_simulate(
     ironclaw: State<'_, ThinClawRuntimeState>,
     request: RouteSimulationRequest,
-) -> Result<RouteSimulationResponse, String> {
+) -> Result<RouteSimulationResponse, crate::thinclaw::bridge::BridgeError> {
     if request.prompt.trim().is_empty() {
         return Ok(unavailable_route_simulation(
             "unavailable: enter a prompt to simulate routing",
@@ -903,14 +910,18 @@ pub async fn thinclaw_routing_simulate(
     }
 
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        let body = serde_json::to_value(&request).map_err(|e| e.to_string())?;
+        let body = serde_json::to_value(&request)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
         return match proxy.simulate_route(&body).await {
-            Ok(value) => serde_json::from_value::<RouteSimulationResponse>(value)
-                .map_err(|err| format!("remote route simulation returned invalid data: {err}")),
-            Err(err) if err.contains("HTTP 404") => Ok(unavailable_route_simulation(
+            Ok(value) => serde_json::from_value::<RouteSimulationResponse>(value).map_err(|err| {
+                crate::thinclaw::bridge::BridgeError::from(format!(
+                    "remote route simulation returned invalid data: {err}"
+                ))
+            }),
+            Err(err) if err.to_string().contains("HTTP 404") => Ok(unavailable_route_simulation(
                 "unavailable: remote ThinClaw gateway does not expose route simulation",
             )),
-            Err(err) if err.contains("HTTP 503") => Ok(unavailable_route_simulation(
+            Err(err) if err.to_string().contains("HTTP 503") => Ok(unavailable_route_simulation(
                 "unavailable: remote ThinClaw LLM runtime is not running",
             )),
             Err(err) => Err(err),

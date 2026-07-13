@@ -75,7 +75,7 @@ async fn generate_with_cloud_backend(
     params: &ImagineParams,
     width: u32,
     height: u32,
-) -> Result<ImageResponse, String> {
+) -> Result<ImageResponse, crate::thinclaw::bridge::BridgeError> {
     let backend = router.diffusion_backend().await.ok_or(
         "No cloud diffusion backend configured. Please select one in Settings > Inference Mode.",
     )?;
@@ -138,7 +138,7 @@ pub async fn direct_imagine_generate(
     config: State<'_, ConfigManager>,
     router: State<'_, InferenceRouter>,
     params: ImagineParams,
-) -> Result<GeneratedImage, String> {
+) -> Result<GeneratedImage, crate::thinclaw::bridge::BridgeError> {
     tracing::info!(
         "[imagine] Generating image with provider: {}",
         params.provider
@@ -245,7 +245,7 @@ pub async fn direct_imagine_list_images(
     limit: Option<i32>,
     offset: Option<i32>,
     favorites_only: Option<bool>,
-) -> Result<Vec<GeneratedImage>, String> {
+) -> Result<Vec<GeneratedImage>, crate::thinclaw::bridge::BridgeError> {
     let limit = limit.unwrap_or(50);
     let offset = offset.unwrap_or(0);
     let favorites_only = favorites_only.unwrap_or(false);
@@ -329,7 +329,7 @@ pub async fn direct_imagine_list_images(
 pub async fn direct_imagine_search_images(
     pool: State<'_, SqlitePool>,
     query: String,
-) -> Result<Vec<GeneratedImage>, String> {
+) -> Result<Vec<GeneratedImage>, crate::thinclaw::bridge::BridgeError> {
     let search_pattern = format!("%{}%", query);
 
     let rows = sqlx::query_as::<
@@ -397,7 +397,7 @@ pub async fn direct_imagine_search_images(
 pub async fn direct_imagine_toggle_favorite(
     pool: State<'_, SqlitePool>,
     image_id: String,
-) -> Result<bool, String> {
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     // Get current status
     let current: Option<(i32,)> =
         sqlx::query_as("SELECT is_favorite FROM direct_assets WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
@@ -410,7 +410,7 @@ pub async fn direct_imagine_toggle_favorite(
         Some((0,)) => 1,
         Some((1,)) => 0,
         Some(_) => 0,
-        None => return Err("Image not found".to_string()),
+        None => return Err(("Image not found".to_string()).into()),
     };
 
     sqlx::query("UPDATE direct_assets SET is_favorite = ?, updated_at = ? WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image'")
@@ -431,7 +431,7 @@ pub async fn direct_imagine_delete_image(
     _app: AppHandle,
     pool: State<'_, SqlitePool>,
     image_id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     // Get file path first
     let row: Option<(String,)> =
         sqlx::query_as("SELECT path FROM direct_assets WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image'")
@@ -462,7 +462,7 @@ pub async fn direct_imagine_delete_image(
 #[specta::specta]
 pub async fn direct_imagine_get_stats(
     pool: State<'_, SqlitePool>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM direct_assets WHERE namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
         .fetch_one(pool.inner())
         .await

@@ -219,12 +219,10 @@ the coverage test itself.
 **Landed:** `ROUTE_TABLE` (`apps/desktop/backend/src/thinclaw/bridge.rs:116`) classifies all 346
 commands (100%), enforced by `all_registered_commands_are_classified` (`bridge.rs:764`).
 
-### B5 · `Result<T,String>` → `Result<T,BridgeError>` migration · P2 · L · **[OPEN]** · Blocked-by: —
-**Why:** 313 of 342 commands still return untyped string errors; the frontend can't render
-gated-capability CTAs. (The original ~149 figure undercounted the surface.)
-**Steps:** file-by-file, change the return type (the `From<String>` impl makes existing
-`.map_err(|e| e.to_string())` compile as-is); retire `local_unavailable()` (`rpc_jobs_autonomy.rs`).
-Regenerate bindings each file. **Verify:** `export_bindings` + `tsc`; bridge tests.
+### B5 · `Result<T,String>` → `Result<T,BridgeError>` migration · P2 · L · **[DONE]**
+All 347 registered commands use the tagged `BridgeError` contract, the frontend renders errors
+through one normalizer, and a generated-binding test rejects raw string error channels.
+**Verify:** `export_bindings` + `tsc`; `registered_commands_never_expose_raw_string_errors`.
 
 ### B6 · Stringly-typed `UiEvent` status fields → specta enums · P2 · M · **[OPEN]** · Blocked-by: —
 Replace free-form `status`/`phase`/`message_type` strings (`ui_types.rs`) with serde-tagged,

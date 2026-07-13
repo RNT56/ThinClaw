@@ -7,6 +7,7 @@ import { directCommands } from "../lib/generated/direct-commands";
 import { commandClient } from "../lib/command-client";
 import { unwrapResult } from "../lib/guards";
 import { getMigratedLocalStorageItem, isOnboardingInProgress, setMigratedLocalStorageItem } from "../lib/local-storage-migration";
+import { bridgeErrorMessage } from "../lib/command-errors";
 
 import { MODEL_LIBRARY, ExtendedModelDefinition as ModelDefinition, ModelVariant } from "../lib/model-library";
 
@@ -199,7 +200,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const checkStandardAssets = useCallback(async () => {
         try {
             const result = await commands.checkMissingStandardAssets();
-            if (result.status === "error") throw new Error(result.error);
+            if (result.status === "error") throw new Error(bridgeErrorMessage(result.error));
             setStandardAssets(result.data);
         } catch (e) {
             console.error(e);

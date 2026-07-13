@@ -97,14 +97,23 @@ export interface CreateRoutineResult {
     created_at: string;
 }
 
-/** Create a new scheduled routine. */
+export type RoutineTriggerType = 'cron' | 'system_event';
+
+/** Create a scheduled agent job or heartbeat system event. */
 export async function createRoutine(
     name: string,
     description: string,
     schedule: string,
     task: string,
+    triggerType: RoutineTriggerType = 'cron',
 ): Promise<CreateRoutineResult> {
-    return compatibilityCommands.thinclawRoutineCreate(name, description, schedule, task);
+    return compatibilityCommands.thinclawRoutineCreate(
+        name,
+        description,
+        schedule,
+        task,
+        triggerType,
+    );
 }
 
 export async function getThinClawSkillsList(): Promise<Skill[]> {
@@ -258,16 +267,6 @@ export async function runThinClawUpdate(): Promise<void> {
     return compatibilityCommands.thinclawUpdateRun();
 }
 
-export async function loginThinClawWhatsapp(): Promise<void> {
-    return compatibilityCommands.thinclawWebLoginWhatsapp();
-}
-
-export async function loginThinClawTelegram(): Promise<void> {
-    return compatibilityCommands.thinclawWebLoginTelegram();
-}
-
-
-
 export async function getPermissionStatus(): Promise<{ accessibility: boolean, screen_recording: boolean }> {
     return compatibilityCommands.getPermissionStatus();
 }
@@ -308,7 +307,21 @@ export async function switchToProfile(profileId: string): Promise<void> {
     return compatibilityCommands.thinclawSwitchToProfile(profileId);
 }
 
-export async function broadcastCommand(command: string): Promise<void> {
+export interface FleetBroadcastDelivery {
+    agent_id: string;
+    agent_name: string;
+    delivered: boolean;
+    error: string | null;
+}
+
+export interface FleetBroadcastResult {
+    attempted: number;
+    delivered: number;
+    failed: number;
+    deliveries: FleetBroadcastDelivery[];
+}
+
+export async function broadcastCommand(command: string): Promise<FleetBroadcastResult> {
     return compatibilityCommands.thinclawBroadcastCommand(command);
 }
 
@@ -338,6 +351,40 @@ export interface AgentStatusSummary {
 
 export async function getFleetStatus(): Promise<AgentStatusSummary[]> {
     return compatibilityCommands.thinclawGetFleetStatus();
+}
+
+export type RemoteAccessExposure = 'tailnet' | 'public';
+
+export interface RemoteAccessStatus {
+    runtime_mode: string;
+    gateway_running: boolean;
+    gateway_port: number;
+    gateway_url: string;
+    tailscale_installed: boolean;
+    tailscale_authenticated: boolean;
+    tailscale_dns_name: string | null;
+    tailscale_error: string | null;
+    tunnel_running: boolean;
+    exposure: RemoteAccessExposure | null;
+    access_url: string | null;
+}
+
+export async function getRemoteAccessStatus(): Promise<RemoteAccessStatus> {
+    return compatibilityCommands.thinclawRemoteAccessStatus();
+}
+
+export async function startRemoteAccess(
+    exposure: RemoteAccessExposure,
+    confirmPublic: boolean,
+): Promise<RemoteAccessStatus> {
+    return compatibilityCommands.thinclawRemoteAccessStart({
+        exposure,
+        confirm_public: confirmPublic,
+    });
+}
+
+export async function stopRemoteAccess(): Promise<RemoteAccessStatus> {
+    return compatibilityCommands.thinclawRemoteAccessStop();
 }
 
 // ── Sub-agent spawning types ─────────────────────────────────────────────

@@ -8,7 +8,9 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::Agent;
-use crate::agent::context_monitor::{ContextPressure, pressure_message, pressure_transition};
+use crate::agent::context_monitor::{
+    ContextPressure, pressure_message, pressure_state_changed, pressure_transition,
+};
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
 use crate::agent::outcomes;
 use crate::agent::session::{
@@ -461,6 +463,25 @@ impl Agent {
                     None
                 }
             };
+
+        if pressure_state_changed(previous_pressure, current_pressure) {
+            let usage_percent = if usage_percent.is_finite() {
+                usage_percent.clamp(0.0, 999.9)
+            } else {
+                0.0
+            };
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ContextPressure {
+                        level: current_pressure.as_str().to_string(),
+                        usage_percent,
+                    },
+                    &message.metadata,
+                )
+                .await;
+        }
 
         let warning_level = pressure_transition(previous_pressure, current_pressure);
         if let Some(level) = warning_level

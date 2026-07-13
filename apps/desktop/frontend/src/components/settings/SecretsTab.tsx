@@ -65,7 +65,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('anthropic', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -86,7 +86,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('openai', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -97,7 +97,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('openrouter', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -108,7 +108,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('gemini', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -119,7 +119,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('groq', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -172,7 +172,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -190,7 +190,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -199,7 +199,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -208,7 +208,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -217,7 +217,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -228,7 +228,7 @@ export function SecretsTab() {
             toast.success(`${name} secret added`);
         } else {
             toast.error("Failed to add secret: " + res.error);
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -247,7 +247,7 @@ export function SecretsTab() {
             await loadStatus();
         } else {
             toast.error("Failed to update secret: " + res.error);
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 

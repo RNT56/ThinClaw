@@ -542,6 +542,7 @@ fn event_thread_id(event: &SseEvent) -> Option<&str> {
         SseEvent::ApprovalNeeded { thread_id, .. }
         | SseEvent::ToolStarted { thread_id, .. }
         | SseEvent::Status { thread_id, .. }
+        | SseEvent::ContextPressure { thread_id, .. }
         | SseEvent::AgentLifecycle { thread_id, .. } => thread_id.as_deref(),
         _ => None,
     }
@@ -555,7 +556,10 @@ fn event_thread_id(event: &SseEvent) -> Option<&str> {
 fn is_run_progress_event(event: &SseEvent) -> bool {
     matches!(
         event,
-        SseEvent::ToolStarted { .. } | SseEvent::Status { .. } | SseEvent::AgentLifecycle { .. }
+        SseEvent::ToolStarted { .. }
+            | SseEvent::Status { .. }
+            | SseEvent::ContextPressure { .. }
+            | SseEvent::AgentLifecycle { .. }
     )
 }
 
@@ -1137,6 +1141,18 @@ mod tests {
             phase: "context_compaction".to_string(),
             label: "Compacting context".to_string(),
             detail: Some("9500 of 10000 tokens".to_string()),
+            thread_id: Some("t1".to_string()),
+        };
+
+        assert_eq!(event_thread_id(&event), Some("t1"));
+        assert!(is_run_progress_event(&event));
+    }
+
+    #[test]
+    fn context_pressure_is_thread_scoped_run_progress() {
+        let event = SseEvent::ContextPressure {
+            level: "critical".to_string(),
+            usage_percent: 97.0,
             thread_id: Some("t1".to_string()),
         };
 

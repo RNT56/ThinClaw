@@ -8,6 +8,7 @@ import {
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
+import { BenchmarkPanel } from './experiments/BenchmarkPanel';
 
 type JsonMap = Record<string, any>;
 
@@ -205,6 +206,8 @@ export function ThinClawExperiments() {
                 <Stat icon={Target} label="Targets" value={targets.length} />
                 <Stat icon={Gauge} label="Usage Rows" value={usage.length} />
             </div>
+
+            <BenchmarkPanel />
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
                 <Panel title="Projects" icon={Beaker}>

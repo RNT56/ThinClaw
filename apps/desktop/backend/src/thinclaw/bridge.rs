@@ -10,9 +10,8 @@
 //! instead of an error toast.
 //!
 //! This module is the foundation the rest of WS-1 (route-table registry, bridge
-//! linter, generated route matrix) builds on. It is intentionally additive: it
-//! does not yet replace existing `Result<_, String>` signatures — commands are
-//! migrated incrementally.
+//! linter, generated route matrix) builds on. Every desktop command uses this
+//! envelope, which keeps error handling machine-readable all the way to the UI.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,9 +43,34 @@ pub enum BridgeError {
         /// Which runtime mode *would* satisfy it.
         satisfied_by: RouteMode,
     },
-    /// A genuine error (kept distinct from the gated state above).
-    /// Struct variant (not a tuple) so the internally-tagged (`tag = "kind"`)
-    /// representation stays valid for serde/specta export.
+    /// User-provided data failed validation.
+    InvalidInput {
+        message: String,
+        field: Option<String>,
+    },
+    /// Credentials are absent, expired, or rejected by the target service.
+    Unauthorized {
+        message: String,
+        remediation: Option<String>,
+    },
+    /// A requested local or remote resource does not exist.
+    NotFound { resource: String, message: String },
+    /// The request conflicts with current state and may be retried after it changes.
+    Conflict {
+        message: String,
+        remediation: Option<String>,
+    },
+    /// The operation exceeded a bounded deadline.
+    Timeout {
+        operation: String,
+        message: String,
+        retryable: bool,
+    },
+    /// The transport failed before a valid response was received.
+    Network { message: String, retryable: bool },
+    /// A genuine unclassified runtime error (kept distinct from gated and
+    /// actionable outcomes). Struct variants keep the internally-tagged
+    /// (`tag = "kind"`) representation valid for serde/specta export.
     Runtime { message: String },
 }
 
@@ -56,7 +80,13 @@ impl std::fmt::Display for BridgeError {
             BridgeError::Unavailable {
                 capability, reason, ..
             } => write!(f, "unavailable: {capability}: {reason}"),
-            BridgeError::Runtime { message } => write!(f, "{message}"),
+            BridgeError::InvalidInput { message, .. }
+            | BridgeError::Unauthorized { message, .. }
+            | BridgeError::NotFound { message, .. }
+            | BridgeError::Conflict { message, .. }
+            | BridgeError::Timeout { message, .. }
+            | BridgeError::Network { message, .. }
+            | BridgeError::Runtime { message } => write!(f, "{message}"),
         }
     }
 }
@@ -76,6 +106,15 @@ impl From<&str> for BridgeError {
         BridgeError::Runtime {
             message: value.to_string(),
         }
+    }
+}
+
+/// Compatibility for internal subsystems that have not adopted the desktop
+/// command envelope. The downgrade happens only behind the bridge boundary;
+/// registered commands still serialize [`BridgeError`] to the frontend.
+impl From<BridgeError> for String {
+    fn from(value: BridgeError) -> Self {
+        value.to_string()
     }
 }
 
@@ -191,6 +230,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("direct_imagine_toggle_favorite", RouteMode::LocalOnly),
     ("direct_inference_get_backends", RouteMode::LocalOnly),
     ("direct_inference_update_backend", RouteMode::LocalOnly),
+    ("direct_i18n_get_catalog", RouteMode::LocalOnly),
     ("direct_media_generate_image", RouteMode::LocalOnly),
     ("direct_media_transcribe_audio", RouteMode::LocalOnly),
     ("direct_media_tts_list_voices", RouteMode::LocalOnly),
@@ -266,16 +306,12 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_add_agent_profile", RouteMode::LocalOnly),
     ("thinclaw_add_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_agents_list", RouteMode::LocalOnly),
-    ("thinclaw_broadcast_command", RouteMode::LocalOnly),
     ("thinclaw_canvas_dispatch_event", RouteMode::LocalOnly),
     ("thinclaw_canvas_navigate", RouteMode::LocalOnly),
     ("thinclaw_canvas_panel_dismiss", RouteMode::LocalOnly),
     ("thinclaw_canvas_panel_get", RouteMode::LocalOnly),
     ("thinclaw_canvas_panels_list", RouteMode::LocalOnly),
     ("thinclaw_canvas_push", RouteMode::LocalOnly),
-    ("thinclaw_channel_config_schema", RouteMode::LocalAndRemote),
-    ("thinclaw_channel_config_schemas", RouteMode::LocalAndRemote),
-    ("thinclaw_channel_config_submit", RouteMode::LocalAndRemote),
     ("thinclaw_check_bootstrap_needed", RouteMode::LocalOnly),
     ("thinclaw_checkpoint_diff", RouteMode::LocalOnly),
     ("thinclaw_checkpoint_restore", RouteMode::LocalOnly),
@@ -284,10 +320,11 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_cron_lint", RouteMode::LocalOnly),
     ("thinclaw_experiments_list_envs", RouteMode::LocalOnly),
     ("thinclaw_experiments_run_eval", RouteMode::LocalOnly),
+    ("thinclaw_external_memory_configure", RouteMode::LocalOnly),
+    ("thinclaw_external_memory_disable", RouteMode::LocalOnly),
     ("thinclaw_get_anthropic_key", RouteMode::LocalOnly),
     ("thinclaw_get_bedrock_credentials", RouteMode::LocalOnly),
     ("thinclaw_get_brave_key", RouteMode::LocalOnly),
-    ("thinclaw_get_fleet_status", RouteMode::LocalOnly),
     ("thinclaw_get_gemini_key", RouteMode::LocalOnly),
     ("thinclaw_get_groq_key", RouteMode::LocalOnly),
     ("thinclaw_get_implicit_provider_key", RouteMode::LocalOnly),
@@ -301,7 +338,13 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_list_child_sessions", RouteMode::LocalOnly),
     ("thinclaw_manifest_validate", RouteMode::LocalOnly),
     ("thinclaw_plugin_lifecycle_list", RouteMode::LocalOnly),
+    ("thinclaw_profile_evolution_run", RouteMode::LocalOnly),
+    ("thinclaw_profile_evolution_status", RouteMode::LocalOnly),
     ("thinclaw_reload_secrets", RouteMode::LocalOnly),
+    ("thinclaw_reveal_gateway_token", RouteMode::LocalOnly),
+    ("thinclaw_remote_access_start", RouteMode::LocalOnly),
+    ("thinclaw_remote_access_status", RouteMode::LocalOnly),
+    ("thinclaw_remote_access_stop", RouteMode::LocalOnly),
     ("thinclaw_remove_agent_profile", RouteMode::LocalOnly),
     ("thinclaw_remove_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_repo_project_approve", RouteMode::LocalOnly),
@@ -348,7 +391,6 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_set_setup_completed", RouteMode::LocalOnly),
     ("thinclaw_set_workspace_mode", RouteMode::LocalOnly),
     ("thinclaw_skills_toggle", RouteMode::LocalOnly),
-    ("thinclaw_spawn_session", RouteMode::LocalOnly),
     ("thinclaw_sync_local_llm", RouteMode::LocalOnly),
     ("thinclaw_toggle_auto_start", RouteMode::LocalOnly),
     ("thinclaw_toggle_custom_secret", RouteMode::LocalOnly),
@@ -356,14 +398,13 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_toggle_local_inference", RouteMode::LocalOnly),
     ("thinclaw_toggle_local_tools", RouteMode::LocalOnly),
     ("thinclaw_toggle_secret_access", RouteMode::LocalOnly),
+    ("thinclaw_trajectory_export", RouteMode::LocalOnly),
     ("thinclaw_trajectory_records", RouteMode::LocalOnly),
     ("thinclaw_trajectory_stats", RouteMode::LocalOnly),
     ("thinclaw_trigger_bootstrap", RouteMode::LocalOnly),
     ("thinclaw_update_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_update_run", RouteMode::LocalOnly),
     ("thinclaw_update_sub_agent_status", RouteMode::LocalOnly),
-    ("thinclaw_web_login_telegram", RouteMode::LocalOnly),
-    ("thinclaw_web_login_whatsapp", RouteMode::LocalOnly),
     ("thinclaw_write_agent_workspace_file", RouteMode::LocalOnly),
     ("toggle_spotlight", RouteMode::LocalOnly),
     ("update_project", RouteMode::LocalOnly),
@@ -394,7 +435,11 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_autonomy_rollback", RouteMode::LocalAndRemote),
     ("thinclaw_autonomy_rollouts", RouteMode::LocalAndRemote),
     ("thinclaw_autonomy_status", RouteMode::LocalAndRemote),
+    ("thinclaw_broadcast_command", RouteMode::LocalAndRemote),
     ("thinclaw_cache_stats", RouteMode::LocalAndRemote),
+    ("thinclaw_channel_config_schema", RouteMode::LocalAndRemote),
+    ("thinclaw_channel_config_schemas", RouteMode::LocalAndRemote),
+    ("thinclaw_channel_config_submit", RouteMode::LocalAndRemote),
     ("thinclaw_channel_status_list", RouteMode::LocalAndRemote),
     ("thinclaw_channels_list", RouteMode::LocalAndRemote),
     ("thinclaw_clawhub_install", RouteMode::LocalAndRemote),
@@ -462,6 +507,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_get_autonomy_mode", RouteMode::LocalAndRemote),
     ("thinclaw_get_diagnostics", RouteMode::LocalAndRemote),
     ("thinclaw_get_file", RouteMode::LocalAndRemote),
+    ("thinclaw_get_fleet_status", RouteMode::LocalAndRemote),
     ("thinclaw_get_history", RouteMode::LocalAndRemote),
     ("thinclaw_get_memory", RouteMode::LocalAndRemote),
     ("thinclaw_get_sessions", RouteMode::LocalAndRemote),
@@ -569,6 +615,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_skills_reload_all", RouteMode::LocalAndRemote),
     ("thinclaw_skills_search", RouteMode::LocalAndRemote),
     ("thinclaw_skills_status", RouteMode::LocalAndRemote),
+    ("thinclaw_spawn_session", RouteMode::LocalAndRemote),
     ("thinclaw_start_gateway", RouteMode::LocalAndRemote),
     ("thinclaw_stop_gateway", RouteMode::LocalAndRemote),
     ("thinclaw_subscribe_session", RouteMode::LocalAndRemote),
