@@ -34,6 +34,41 @@ def locked_package_version(path: Path, name: str) -> str:
     raise SystemExit(f"{path.relative_to(ROOT)} has no {name} package")
 
 
+def validate_dist_binaries() -> tuple[str, ...]:
+    manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    package = manifest.split("[package]", 1)[1].split("\n[", 1)[0]
+    if not re.search(r"^autobins\s*=\s*false\s*$", package, re.MULTILINE):
+        raise SystemExit(
+            "root Cargo.toml must disable automatic binary discovery so developer "
+            "utilities cannot silently enter release artifacts"
+        )
+
+    binaries = tuple(
+        sorted(
+            match.group(1)
+            for section in manifest.split("[[bin]]")[1:]
+            if (
+                match := re.search(
+                    r'^name\s*=\s*"([^"]+)"', section.split("[[", 1)[0], re.MULTILINE
+                )
+            )
+        )
+    )
+    if not binaries:
+        raise SystemExit("root Cargo.toml declares no release binaries")
+
+    wix = (ROOT / "wix/main.wxs").read_text(encoding="utf-8")
+    wix_binaries = tuple(sorted(set(re.findall(r"Name='([^']+)\.exe'", wix))))
+    if wix_binaries != binaries:
+        raise SystemExit(
+            "wix/main.wxs release binaries are stale: "
+            f"{wix_binaries!r} (expected {binaries!r}); run "
+            "`dist generate --mode=msi` with the pinned cargo-dist version"
+        )
+
+    return binaries
+
+
 def main() -> int:
     config = json.loads(
         (ROOT / "release-please-config.json").read_text(encoding="utf-8")
@@ -86,6 +121,8 @@ def main() -> int:
                 f"must match root Cargo version {version}"
             )
 
+    release_binaries = validate_dist_binaries()
+
     required_workflow_fragments = [
         f"googleapis/release-please-action@{ACTION_SHA}",
         "config-file: release-please-config.json",
@@ -102,7 +139,7 @@ def main() -> int:
 
     print(
         f"Release automation: root thinclaw v{version}, immutable action, "
-        "protected CI and artifact dispatch"
+        f"protected CI and artifact dispatch, binaries {', '.join(release_binaries)}"
     )
     return 0
 

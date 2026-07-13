@@ -4,8 +4,8 @@
 //! (`crates/thinclaw-runtime-contracts/examples/export_contracts.rs`):
 //!
 //! ```bash
-//! cargo run --bin export-openapi -- generate   # rewrite the committed snapshot
-//! cargo run --bin export-openapi -- check      # fail if the snapshot drifted
+//! cargo run --example export-openapi -- generate   # rewrite the committed snapshot
+//! cargo run --example export-openapi -- check      # fail if the snapshot drifted
 //! ```
 //!
 //! The snapshot at `clients/openapi/thinclaw-gateway.openapi.json` is the
@@ -50,7 +50,7 @@ fn main() -> ExitCode {
                 Err(err) => {
                     eprintln!(
                         "missing committed OpenAPI snapshot at {} ({err}); run \
-                         `cargo run --bin export-openapi -- generate`",
+                         `cargo run --example export-openapi -- generate`",
                         path.display()
                     );
                     return ExitCode::FAILURE;
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
             } else {
                 eprintln!(
                     "OpenAPI snapshot at {} is stale; run \
-                     `cargo run --bin export-openapi -- generate` and commit the result",
+                     `cargo run --example export-openapi -- generate` and commit the result",
                     path.display()
                 );
                 ExitCode::FAILURE

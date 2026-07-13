@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Vendors the committed gateway OpenAPI spec and regenerates the Swift client.
 #
-# The spec is produced by the Rust side (`cargo run --bin export-openapi -- generate`
+# The spec is produced by the Rust side (`cargo run --example export-openapi -- generate`
 # from the repo root) and committed at clients/openapi/thinclaw-gateway.openapi.json.
 # Generated Swift is committed under Packages/ThinClawAPI/Sources/ThinClawAPI/Generated/
 # so CI never needs the Rust toolchain.
@@ -15,7 +15,7 @@ GEN_DIR="$IOS_ROOT/Packages/ThinClawAPI/Sources/ThinClawAPI/Generated"
 CONFIG="$IOS_ROOT/Packages/ThinClawAPI/openapi/openapi-generator-config.yaml"
 
 if [[ ! -f "$SPEC_SRC" ]]; then
-    echo "error: missing $SPEC_SRC — run 'cargo run --bin export-openapi -- generate' at the repo root" >&2
+    echo "error: missing $SPEC_SRC — run 'cargo run --example export-openapi -- generate' at the repo root" >&2
     exit 1
 fi
 
