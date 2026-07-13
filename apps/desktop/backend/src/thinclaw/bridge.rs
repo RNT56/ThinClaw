@@ -357,6 +357,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_toggle_local_tools", RouteMode::LocalOnly),
     ("thinclaw_toggle_secret_access", RouteMode::LocalOnly),
     ("thinclaw_trajectory_records", RouteMode::LocalOnly),
+    ("thinclaw_trajectory_export", RouteMode::LocalOnly),
     ("thinclaw_trajectory_stats", RouteMode::LocalOnly),
     ("thinclaw_trigger_bootstrap", RouteMode::LocalOnly),
     ("thinclaw_update_custom_secret", RouteMode::LocalOnly),

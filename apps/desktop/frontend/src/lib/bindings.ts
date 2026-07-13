@@ -2623,6 +2623,21 @@ async thinclawTrajectoryRecords(limit: number | null) : Promise<Result<JsonValue
 }
 },
 /**
+ * Export the local trajectory archive as canonical SFT or DPO JSONL.
+ *
+ * The payload is bounded before crossing IPC. The frontend only writes it
+ * after an explicit click, so background polling never exposes or downloads
+ * training data.
+ */
+async thinclawTrajectoryExport(format: string) : Promise<Result<TrajectoryExportItem, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trajectory_export", { format }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Get LLM cost summary.
  *
  * Returns total spend, daily/monthly breakdowns, per-model costs,
@@ -4326,6 +4341,10 @@ export type ToolStatus =
  * Tool list response
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
+/**
+ * Bounded training export returned to the frontend for an explicit download.
+ */
+export type TrajectoryExportItem = { format: string; payload: string; source_record_count: number; exported_record_count: number; skipped_counts: { [key in string]: number } }
 /**
  * Frontend-facing aggregate trajectory stats. Mirrors `TrajectoryStats` with
  * paths/timestamps rendered as strings so the type is specta-exportable.

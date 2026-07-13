@@ -64,6 +64,21 @@ export async function getTrajectoryRecords(limit?: number | null): Promise<ThinC
     return compatibilityCommands.thinclawTrajectoryRecords(limit ?? null);
 }
 
+export type TrajectoryExportFormat = 'sft' | 'dpo';
+
+export interface TrajectoryExport {
+    format: TrajectoryExportFormat;
+    payload: string;
+    source_record_count: number;
+    exported_record_count: number;
+    skipped_counts: Record<string, number>;
+}
+
+/** Render a bounded local training export for an explicit frontend download. */
+export async function exportTrajectory(format: TrajectoryExportFormat): Promise<TrajectoryExport> {
+    return compatibilityCommands.thinclawTrajectoryExport(format) as Promise<TrajectoryExport>;
+}
+
 // ============================================================================
 // Sprint 13 — New Backend APIs
 // ============================================================================
