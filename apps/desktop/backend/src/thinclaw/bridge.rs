@@ -365,8 +365,6 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_update_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_update_run", RouteMode::LocalOnly),
     ("thinclaw_update_sub_agent_status", RouteMode::LocalOnly),
-    ("thinclaw_web_login_telegram", RouteMode::LocalOnly),
-    ("thinclaw_web_login_whatsapp", RouteMode::LocalOnly),
     ("thinclaw_write_agent_workspace_file", RouteMode::LocalOnly),
     ("toggle_spotlight", RouteMode::LocalOnly),
     ("update_project", RouteMode::LocalOnly),

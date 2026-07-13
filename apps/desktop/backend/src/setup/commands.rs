@@ -162,8 +162,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_system_presence,
         crate::thinclaw::commands::thinclaw_logs_tail,
         crate::thinclaw::commands::thinclaw_update_run,
-        crate::thinclaw::commands::thinclaw_web_login_whatsapp,
-        crate::thinclaw::commands::thinclaw_web_login_telegram,
         crate::thinclaw::commands::thinclaw_add_custom_secret,
         crate::thinclaw::commands::thinclaw_update_custom_secret,
         crate::thinclaw::commands::thinclaw_remove_custom_secret,

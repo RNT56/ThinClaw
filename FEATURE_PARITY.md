@@ -110,9 +110,9 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | WASM channels | ❌ | ✅ | - | ThinClaw innovation |
 | WhatsApp | ✅ | ✅ | - | WASM channel via Cloud API webhook — GET verify-token + POST HMAC validation, text/media/location/contacts/interactive/reaction inbound handling, outbound text + media replies, DM pairing, markdown→WhatsApp formatting, Unicode-safe chunking |
 | Telegram | ✅ | ✅ | - | WASM channel, DM pairing, caption, /start, bot_username, forum threading, sendMessage+editMessageText streaming (host-side, HTML formatted) |
-| Discord | ✅ | ✅ | - | Native Rust Gateway WS + REST ([`src/channels/discord.rs`](src/channels/discord.rs)) + WASM interactions channel (slash commands) |
+| Discord | ✅ | ✅ | - | Native Rust Gateway WS + REST ([`src/channels/discord.rs`](src/channels/discord.rs)) + WASM interactions channel (slash commands and DM pairing) |
 | Signal | ✅ | ✅ | - | signal-cli daemon, SSE listener, user/group allowlists, DM pairing |
-| Slack | ✅ | ✅ | - | WASM channel (Events API webhook). Native dead code (`slack.rs`) removed. |
+| Slack | ✅ | ✅ | - | WASM channel (Events API webhook) with DM pairing. Native dead code (`slack.rs`) removed. |
 | iMessage | ✅ | ✅ | P3 | `IMessageChannel` + `IMessageConfig` native runtime ([`src/channels/imessage.rs`](src/channels/imessage.rs)) |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
 | Feishu/Lark | ✅ | ✅ | P3 | WASM package with challenge, event callback, tenant-token, and bot-reply path; live tenant smoke remains env-gated |
@@ -156,7 +156,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 
 | Feature | OpenClaw | ThinClaw | Notes |
 |---------|----------|----------|-------|
-| DM pairing codes | ✅ | ✅ | `thinclaw pairing list/approve`, host APIs |
+| DM pairing codes | ✅ | ✅ | `thinclaw pairing list/approve`, host APIs, and one Desktop pairing surface for Telegram, Slack, Discord, WhatsApp, and Signal. These adapters use tokens/app credentials or a local account; unused Telegram/WhatsApp web-login commands that only returned errors were removed. |
 | Allowlist/blocklist | ✅ | ✅ | allow_from + block_from + pairing store (blocklist takes precedence) |
 | Self-message bypass | ✅ | ✅ | Inline per-adapter filtering (e.g. Discord drops messages whose author id equals the bot id, [`crates/thinclaw-channels/src/discord.rs`](crates/thinclaw-channels/src/discord.rs)); the dedicated `self_message` module was removed as dead code. |
 | Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |

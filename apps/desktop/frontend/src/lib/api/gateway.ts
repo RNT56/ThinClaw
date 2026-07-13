@@ -267,16 +267,6 @@ export async function runThinClawUpdate(): Promise<void> {
     return compatibilityCommands.thinclawUpdateRun();
 }
 
-export async function loginThinClawWhatsapp(): Promise<void> {
-    return compatibilityCommands.thinclawWebLoginWhatsapp();
-}
-
-export async function loginThinClawTelegram(): Promise<void> {
-    return compatibilityCommands.thinclawWebLoginTelegram();
-}
-
-
-
 export async function getPermissionStatus(): Promise<{ accessibility: boolean, screen_recording: boolean }> {
     return compatibilityCommands.getPermissionStatus();
 }

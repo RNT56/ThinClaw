@@ -233,7 +233,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
 | Many channels lack config UI (framework **DONE**, long tail pending) | **Schema-driven channel-config framework**: each native/WASM channel declares a config schema; UI renders generically (mirrors MCP/extension setup-schema). Framework + `thinclaw_channel_config_schema`/`_schemas`/`_submit` + Signal/Discord shipped; iMessage/Nostr and the long tail remain | `rpc_channel_config.rs`, `ThinClawChannelConfig` panel, channel manifests | **XL** |
-| Pairing/web-login parity | Reuse pairing UI for all paired channels | `ThinClawPairing.tsx` | S |
+| ~~Pairing/web-login parity~~ **DONE** | One accessible pairing surface covers every adapter that actually emits DM pairing codes and explains each real credential path; unused web-login commands that only returned errors were removed | `ThinClawPairing.tsx`, `pairing/catalog.ts` | S |
 
 ### 5d. Identity / memory / personality
 | Gap | Approach | Key files | Size |

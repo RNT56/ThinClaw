@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (195)
+### Local only (193)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -225,8 +225,6 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_update_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_update_run` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_update_sub_agent_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `thinclaw_web_login_telegram` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `thinclaw_web_login_whatsapp` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_write_agent_workspace_file` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `toggle_spotlight` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_project` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |

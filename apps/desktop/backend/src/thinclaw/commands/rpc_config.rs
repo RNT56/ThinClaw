@@ -601,24 +601,6 @@ pub async fn thinclaw_update_run(
     Ok(serde_json::json!({ "status": "embedded", "update_available": false }))
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn thinclaw_web_login_whatsapp(
-    _state: State<'_, ThinClawManager>,
-) -> Result<serde_json::Value, String> {
-    // WhatsApp web login not supported in ThinClaw desktop mode
-    Err("WhatsApp web login is not available in desktop mode".into())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn thinclaw_web_login_telegram(
-    _state: State<'_, ThinClawManager>,
-) -> Result<serde_json::Value, String> {
-    // Telegram web login not supported in ThinClaw desktop mode
-    Err("Telegram web login is not available in desktop mode".into())
-}
-
 // ============================================================================
 // Cloud model / cloud config — write to ThinClaw Desktop identity.json
 // ============================================================================

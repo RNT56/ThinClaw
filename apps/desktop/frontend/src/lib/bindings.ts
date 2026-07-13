@@ -1373,22 +1373,6 @@ async thinclawUpdateRun() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawWebLoginWhatsapp() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("thinclaw_web_login_whatsapp") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async thinclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("thinclaw_web_login_telegram") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * Add a custom secret
  */

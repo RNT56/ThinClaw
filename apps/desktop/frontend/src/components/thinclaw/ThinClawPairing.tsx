@@ -14,10 +14,9 @@ import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import * as thinclawApi from '../../lib/thinclaw';
 import { ThinClawModeBadge, useThinClawStatusSnapshot } from './ThinClawModeBadge';
+import { PAIRING_CHANNELS } from './pairing/catalog';
 
 type PairingItem = thinclawApi.PairingItem;
-
-const CHANNELS = ['telegram', 'signal', 'discord', 'whatsapp', 'nostr', 'slack'];
 
 export function ThinClawPairing() {
     const [selectedChannel, setSelectedChannel] = useState('telegram');
@@ -69,6 +68,7 @@ export function ThinClawPairing() {
 
     const activePairings = pairings.filter(p => p.status === 'active');
     const pendingPairings = pairings.filter(p => p.status === 'pending');
+    const selectedChannelInfo = PAIRING_CHANNELS.find((channel) => channel.id === selectedChannel)!;
 
     return (
         <motion.div
@@ -102,32 +102,41 @@ export function ThinClawPairing() {
             </div>
 
             {error && (
-                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
+                <div role="alert" className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
                     {error}
                 </div>
             )}
 
             {/* Channel Tabs */}
-            <div className="flex gap-1.5 flex-wrap">
-                {CHANNELS.map(ch => (
+            <div className="flex gap-1.5 flex-wrap" role="tablist" aria-label="Pairing channel">
+                {PAIRING_CHANNELS.map(channel => (
                     <button
-                        key={ch}
-                        onClick={() => setSelectedChannel(ch)}
+                        key={channel.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={selectedChannel === channel.id}
+                        onClick={() => setSelectedChannel(channel.id)}
                         className={cn(
-                            "px-3 py-1.5 rounded-lg text-xs font-medium capitalize transition-all",
-                            selectedChannel === ch
+                            "px-3 py-1.5 rounded-lg text-xs font-medium transition-all",
+                            selectedChannel === channel.id
                                 ? "bg-primary/15 text-primary"
                                 : "bg-white/3 text-muted-foreground hover:text-foreground hover:bg-white/5"
                         )}
                     >
-                        {ch}
+                        {channel.label}
                     </button>
                 ))}
+            </div>
+
+            <div className="rounded-xl border border-border/40 bg-card/30 px-4 py-3 text-xs text-muted-foreground">
+                <span className="font-semibold text-foreground">{selectedChannelInfo.label}</span>
+                {' uses '}{selectedChannelInfo.setup}. Pairing starts when an unknown sender messages the configured channel; browser login is not part of this adapter.
             </div>
 
             {/* Approve Code Input */}
             <div className="flex gap-2 items-center">
                 <input
+                    aria-label={`Pairing code for ${selectedChannelInfo.label}`}
                     type="text"
                     value={approveCode}
                     onChange={e => setApproveCode(e.target.value.toUpperCase())}

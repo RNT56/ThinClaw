@@ -146,8 +146,10 @@ set in the report.
 
 - Open Routines and verify list, create, toggle, run, history, audit, and clear
   controls.
-- Open Channels and verify Gmail OAuth/status, Apple Mail settings, Slack,
-  Telegram, and pairing screens.
+- Open Channels and verify Gmail OAuth/status, Apple Mail settings, and Slack/
+  Telegram setup. In DM Pairing, check Telegram, Slack, Discord, WhatsApp, and
+  Signal; verify each tab lists the real credential path and a generated code
+  can be approved for a configured adapter.
 - Expected events: routine lifecycle events forward to `thinclaw-event`.
 
 ### Extensions, Skills, And MCP
