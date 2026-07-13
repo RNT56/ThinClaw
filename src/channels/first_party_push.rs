@@ -1131,6 +1131,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn structured_lifecycle_is_thread_scoped_run_progress() {
+        let event = SseEvent::AgentLifecycle {
+            phase: "context_compaction".to_string(),
+            label: "Compacting context".to_string(),
+            detail: Some("9500 of 10000 tokens".to_string()),
+            thread_id: Some("t1".to_string()),
+        };
+
+        assert_eq!(event_thread_id(&event), Some("t1"));
+        assert!(is_run_progress_event(&event));
+    }
+
     #[tokio::test]
     async fn decision_to_spec_maps_kinds_and_forwards_collapse_id() {
         let decision = PushDecision {

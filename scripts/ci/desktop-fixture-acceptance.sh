@@ -7,8 +7,20 @@ manifest="apps/desktop/backend/Cargo.toml"
 run_fixture() {
   local test_name="$1"
   local output
-  output="$(cargo test --manifest-path "$manifest" --locked --lib "$test_name" -- --exact --nocapture 2>&1)"
+  local status=0
+  if output="$(
+    CARGO_PROFILE_TEST_DEBUG=0 \
+      cargo test --manifest-path "$manifest" --locked --lib "$test_name" -- --exact --nocapture 2>&1
+  )"; then
+    status=0
+  else
+    status=$?
+  fi
   printf '%s\n' "$output"
+  if (( status != 0 )); then
+    echo "Fixture acceptance command failed: $test_name" >&2
+    exit "$status"
+  fi
   if ! grep -q 'test result: ok. 1 passed; 0 failed' <<<"$output"; then
     echo "Fixture acceptance did not execute exactly one passing test: $test_name" >&2
     exit 1

@@ -609,6 +609,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn structured_lifecycle_events_are_actor_scoped() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let conversation_id = db
+            .create_conversation("gateway", "user-1", Some("thread-a"))
+            .await
+            .expect("create gateway conversation");
+        db.update_conversation_identity(
+            conversation_id,
+            Some("user-1"),
+            Some("actor-a"),
+            Some(scope_id_from_key("principal:user-1")),
+            HistoryConversationKind::Direct,
+            Some("gateway://direct/user-1/actor/actor-a/thread/thread-a"),
+        )
+        .await
+        .expect("set conversation identity");
+
+        let store: Arc<dyn Database> = db.clone();
+        let state = test_gateway_state("user-1", "actor-a", Some(store.clone()));
+        let event = SseEvent::AgentLifecycle {
+            phase: "context_compaction".to_string(),
+            label: "Compacting context".to_string(),
+            detail: None,
+            thread_id: Some(conversation_id.to_string()),
+        };
+        let allowed = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-a",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+        let denied = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-b",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+
+        assert!(sse_event_visible_to_identity(Some(&store), &state, &allowed, &event).await);
+        assert!(!sse_event_visible_to_identity(Some(&store), &state, &denied, &event).await);
+    }
+
+    #[tokio::test]
     async fn sse_conversation_deleted_events_are_actor_scoped_without_db_lookup() {
         let state = test_gateway_state("user-1", "actor-a", None);
         let event = SseEvent::ConversationDeleted {
