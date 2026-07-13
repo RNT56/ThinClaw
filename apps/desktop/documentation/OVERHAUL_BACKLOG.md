@@ -239,7 +239,7 @@ characterization test added before the split; no behavior change.
 | ID | Title | Size | Files |
 |---|---|---|---|
 | TDO-300 ✅ | Design system: stable layout/motion/density tokens plus typed Button, Surface, Progress, and AsyncState primitives shared by both surfaces | L | `lib/app-themes.ts`, `components/ui/`, `index.css` |
-| TDO-301 | Mode seam: explicit Workbench↔Cockpit switch (state/identity/model) + shared command palette | M | `ModeNavigator.tsx`, `ChatLayout.tsx` |
+| TDO-301 ✅ | Mode seam: persistent labeled Workbench/Cockpit/Imagine switch, runtime status, direct keyboard shortcuts, and searchable shared command palette | M | `ModeNavigator.tsx`, `CommandPalette.tsx`, `ChatLayout.tsx` |
 | TDO-302 | Onboarding overhaul: single wizard for both systems | L | `OnboardingWizard.tsx`, setup wizard |
 | TDO-303 | Accessibility pass (keyboard, focus, SR labels, contrast) | L | design system |
 | TDO-304 | Frontend i18n wiring (core i18n → UI) | M | `i18n`, frontend |

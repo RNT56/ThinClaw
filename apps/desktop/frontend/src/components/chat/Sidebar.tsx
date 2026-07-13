@@ -18,6 +18,7 @@ export function Sidebar() {
         isSettingsMode,
         thinclawGatewayRunning,
         setActiveTab,
+        openCommandPalette,
     } = useChatLayout();
 
     return (
@@ -58,6 +59,7 @@ export function Sidebar() {
                             setActiveTab(mode);
                         }
                     }}
+                    onOpenPalette={openCommandPalette}
                     sidebarOpen={sidebarOpen}
                     gatewayRunning={thinclawGatewayRunning}
                 />

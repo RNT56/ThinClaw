@@ -126,6 +126,9 @@ export interface ChatLayoutState {
     activeTab: ActiveTab;
     setActiveTab: (v: ActiveTab) => void;
     appMode: AppMode;
+    commandPaletteOpen: boolean;
+    setCommandPaletteOpen: (open: boolean) => void;
+    openCommandPalette: () => void;
     isSettingsMode: boolean;
     isThinClawMode: boolean;
     isImagineMode: boolean;
@@ -281,10 +284,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const [showImageSettings, setShowImageSettings] = useState(false);
 
     const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
+    const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
     const isSettingsMode = activeTab !== 'chat' && activeTab !== 'thinclaw' && activeTab !== 'imagine';
     const isThinClawMode = activeTab === 'thinclaw';
     const isImagineMode = activeTab === 'imagine';
     const appMode: AppMode = isSettingsMode ? 'settings' : (activeTab as AppMode);
+    const openCommandPalette = useCallback(() => setCommandPaletteOpen(true), []);
 
     // Imagine
     const [activeImagineTab, setActiveImagineTab] = useState<ImagineTab>('generate');
@@ -422,14 +427,26 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         };
     }, []);
 
-    // Escape key exits settings
+    // Global shell shortcuts: command palette and direct product-mode switching.
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape' && isSettingsMode) setActiveTab('chat');
+            const modifier = e.metaKey || e.ctrlKey;
+            if (modifier && e.key.toLowerCase() === 'k') {
+                e.preventDefault();
+                setCommandPaletteOpen((open) => !open);
+                return;
+            }
+            if (modifier && ['1', '2', '3'].includes(e.key)) {
+                e.preventDefault();
+                setCommandPaletteOpen(false);
+                setActiveTab(e.key === '1' ? 'chat' : e.key === '2' ? 'thinclaw' : 'imagine');
+                return;
+            }
+            if (e.key === 'Escape' && isSettingsMode && !commandPaletteOpen) setActiveTab('chat');
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isSettingsMode]);
+    }, [commandPaletteOpen, isSettingsMode]);
 
     // Update selected project when conversation changes
     useEffect(() => {
@@ -918,7 +935,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         isWebSearchEnabled, setIsWebSearchEnabled, imageSteps, setImageSteps,
         showImageSettings, setShowImageSettings,
         // mode
-        activeTab, setActiveTab, appMode, isSettingsMode, isThinClawMode, isImagineMode,
+        activeTab, setActiveTab, appMode, commandPaletteOpen, setCommandPaletteOpen,
+        openCommandPalette, isSettingsMode, isThinClawMode, isImagineMode,
         // imagine
         activeImagineTab, setActiveImagineTab, imagineGenerating, generationProgress,
         lastGeneratedImage, setLastGeneratedImage,

@@ -1,118 +1,154 @@
-import { motion, AnimatePresence } from 'framer-motion';
-import { Settings } from 'lucide-react';
-import { cn } from '../../lib/utils';
-import { ChatModeIcon, ThinClawModeIcon, ImagineModeIcon } from '../icons/ModeIcons';
-import { CloudSyncIndicator } from './CloudSyncIndicator';
+import { motion } from "framer-motion";
+import { Command, Settings } from "lucide-react";
+import { useRef, type KeyboardEvent } from "react";
+import { cn } from "../../lib/utils";
+import { Button } from "../ui";
+import { ChatModeIcon, ImagineModeIcon, ThinClawModeIcon } from "../icons/ModeIcons";
+import { CloudSyncIndicator } from "./CloudSyncIndicator";
 
-export type AppMode = 'chat' | 'thinclaw' | 'imagine' | 'settings';
+export type AppMode = "chat" | "thinclaw" | "imagine" | "settings";
+export type ProductMode = Exclude<AppMode, "settings">;
 
 interface ModeNavigatorProps {
     activeMode: AppMode;
     onModeChange: (mode: AppMode) => void;
+    onOpenPalette: () => void;
     sidebarOpen: boolean;
     gatewayRunning?: boolean;
 }
 
-const MODES = [
-    { id: 'chat' as const, label: 'Chat', Icon: ChatModeIcon },
-    { id: 'thinclaw' as const, label: 'ThinClaw', Icon: ThinClawModeIcon },
-    { id: 'imagine' as const, label: 'Imagine', Icon: ImagineModeIcon },
-];
+export const PRODUCT_MODES = [
+    {
+        id: "chat" as const,
+        label: "Workbench",
+        description: "Direct chat, projects, and local models",
+        shortcut: "⌘1",
+        Icon: ChatModeIcon,
+    },
+    {
+        id: "thinclaw" as const,
+        label: "Agent Cockpit",
+        description: "Sessions, tools, channels, and operations",
+        shortcut: "⌘2",
+        Icon: ThinClawModeIcon,
+    },
+    {
+        id: "imagine" as const,
+        label: "Imagine",
+        description: "Create and manage generated images",
+        shortcut: "⌘3",
+        Icon: ImagineModeIcon,
+    },
+] as const;
 
-export function ModeNavigator({ activeMode, onModeChange, sidebarOpen, gatewayRunning }: ModeNavigatorProps) {
-    const isSettingsActive = activeMode === 'settings';
+export function ModeNavigator({
+    activeMode,
+    onModeChange,
+    onOpenPalette,
+    sidebarOpen,
+    gatewayRunning,
+}: ModeNavigatorProps) {
+    const modeRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
-    // Get the active mode (excluding settings) for collapsed view
-    const activeModeData = MODES.find(m => m.id === activeMode) || MODES[0];
-
-    // Filter modes to show - when collapsed, only show active mode icon
-    const modesToShow = sidebarOpen ? MODES : [activeModeData];
+    const handleModeKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+        let nextIndex: number | null = null;
+        if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+            nextIndex = (index + 1) % PRODUCT_MODES.length;
+        } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+            nextIndex = (index - 1 + PRODUCT_MODES.length) % PRODUCT_MODES.length;
+        } else if (event.key === "Home") {
+            nextIndex = 0;
+        } else if (event.key === "End") {
+            nextIndex = PRODUCT_MODES.length - 1;
+        }
+        if (nextIndex === null) return;
+        event.preventDefault();
+        const nextMode = PRODUCT_MODES[nextIndex];
+        onModeChange(nextMode.id);
+        modeRefs.current[nextIndex]?.focus();
+    };
 
     return (
-        <div className="pt-4 border-t border-border/50 space-y-2">
-            {/* Mode Icons Row */}
-            <motion.div
-                className={cn(
-                    "flex gap-1.5 transition-all duration-300",
-                    sidebarOpen ? "justify-center px-2" : "justify-center"
-                )}
-                layout
-            >
-                <AnimatePresence mode="popLayout">
-                    {modesToShow.map((mode) => {
-                        const isActive = activeMode === mode.id;
-                        const showGatewayPulse = mode.id === 'thinclaw' && gatewayRunning;
-
-                        return (
-                            <motion.button
-                                key={mode.id}
-                                layout
-                                initial={{ opacity: 0, scale: 0.8 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                exit={{ opacity: 0, scale: 0.8 }}
-                                transition={{ duration: 0.2 }}
-                                onClick={() => onModeChange(mode.id)}
-                                className={cn(
-                                    "relative flex items-center justify-center rounded-xl transition-all duration-300",
-                                    "w-10 h-10",
-                                    isActive
-                                        ? "bg-accent/80 shadow-lg ring-1 ring-primary/20 backdrop-blur-xs"
-                                        : "text-muted-foreground hover:text-foreground hover:bg-accent/40"
-                                )}
-                                title={mode.label}
-                            >
-                                <mode.Icon
-                                    isActive={isActive}
-                                    size={22}
-                                    className="shrink-0"
-                                />
-
-                                {/* Gateway running indicator for the agent runtime */}
-                                {showGatewayPulse && (
-                                    <motion.div
-                                        className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-background"
-                                        animate={{ scale: [1, 1.3, 1], opacity: [1, 0.7, 1] }}
-                                        transition={{ repeat: Infinity, duration: 2 }}
+        <nav aria-label="Product modes" className="space-y-2 border-t border-border/50 pt-3">
+            <div role="tablist" aria-label="Switch workspace" className="space-y-1">
+                {PRODUCT_MODES.map((mode, index) => {
+                    const isActive = activeMode === mode.id;
+                    const showGatewayStatus = mode.id === "thinclaw" && gatewayRunning;
+                    return (
+                        <motion.button
+                            ref={(node) => { modeRefs.current[index] = node; }}
+                            key={mode.id}
+                            role="tab"
+                            aria-selected={isActive}
+                            aria-label={sidebarOpen ? undefined : mode.label}
+                            tabIndex={isActive || (activeMode === "settings" && index === 0) ? 0 : -1}
+                            onKeyDown={(event) => handleModeKeyDown(event, index)}
+                            onClick={() => onModeChange(mode.id)}
+                            className={cn(
+                                "relative flex min-h-11 items-center rounded-[var(--radius-control)] text-left",
+                                "transition-colors duration-[var(--motion-fast)]",
+                                sidebarOpen ? "w-full gap-3 px-3" : "mx-auto w-11 justify-center",
+                                isActive
+                                    ? "bg-accent text-foreground shadow-sm ring-1 ring-primary/20"
+                                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                            )}
+                            title={!sidebarOpen ? mode.label : undefined}
+                        >
+                            <span className="relative shrink-0">
+                                <mode.Icon isActive={isActive} size={22} />
+                                {showGatewayStatus && (
+                                    <span
+                                        aria-label="Agent runtime connected"
+                                        className="absolute -right-1 -top-1 size-2.5 rounded-full border-2 border-background bg-emerald-500"
                                     />
                                 )}
-                            </motion.button>
-                        );
-                    })}
-                </AnimatePresence>
-            </motion.div>
+                            </span>
+                            {sidebarOpen && (
+                                <span className="min-w-0 flex-1">
+                                    <span className="flex items-center justify-between gap-2">
+                                        <span className="truncate text-sm font-semibold">{mode.label}</span>
+                                        <kbd className="text-[10px] font-normal text-muted-foreground">{mode.shortcut}</kbd>
+                                    </span>
+                                    <span className="block truncate text-[10px] text-muted-foreground">
+                                        {mode.description}
+                                    </span>
+                                </span>
+                            )}
+                        </motion.button>
+                    );
+                })}
+            </div>
 
-            {/* Cloud Sync Indicator — A5-9 */}
             <CloudSyncIndicator sidebarOpen={sidebarOpen} />
 
-            {/* Settings Button - Full button with text when expanded */}
-            <motion.button
-                layout
-                onClick={() => onModeChange('settings')}
-                className={cn(
-                    "flex items-center rounded-lg transition-all duration-300",
-                    sidebarOpen
-                        ? "w-full px-3 h-10"
-                        : "w-10 h-10 justify-center mx-auto",
-                    isSettingsActive
-                        ? "bg-accent text-foreground"
-                        : "text-muted-foreground hover:text-foreground hover:bg-accent"
-                )}
-                title={!sidebarOpen ? "Settings" : undefined}
+            <Button
+                variant="ghost"
+                size={sidebarOpen ? "md" : "icon"}
+                onClick={onOpenPalette}
+                className={cn(sidebarOpen ? "w-full justify-start px-3" : "mx-auto flex")}
+                aria-label="Open command palette"
+                title={!sidebarOpen ? "Command palette" : undefined}
             >
-                <Settings className="w-4 h-4 shrink-0" />
-                <AnimatePresence>
-                    {sidebarOpen && (
-                        <motion.div
-                            initial={{ opacity: 0, width: 0 }}
-                            animate={{ opacity: 1, width: "auto" }}
-                            exit={{ opacity: 0, width: 0 }}
-                            className="overflow-hidden flex items-center ml-2"
-                        >
-                            <span className="whitespace-nowrap text-sm">Settings</span>
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-            </motion.button>
-        </div>
+                <Command className="size-4" aria-hidden="true" />
+                {sidebarOpen && (
+                    <>
+                        <span className="flex-1 text-left">Commands</span>
+                        <kbd className="text-[10px] text-muted-foreground">⌘K</kbd>
+                    </>
+                )}
+            </Button>
+
+            <Button
+                variant={activeMode === "settings" ? "secondary" : "ghost"}
+                size={sidebarOpen ? "md" : "icon"}
+                onClick={() => onModeChange("settings")}
+                className={cn(sidebarOpen ? "w-full justify-start px-3" : "mx-auto flex")}
+                aria-current={activeMode === "settings" ? "page" : undefined}
+                aria-label="Settings"
+            >
+                <Settings className="size-4" aria-hidden="true" />
+                {sidebarOpen && <span>Settings</span>}
+            </Button>
+        </nav>
     );
 }

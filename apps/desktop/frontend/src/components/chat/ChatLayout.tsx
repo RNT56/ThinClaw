@@ -5,6 +5,7 @@ import { Sidebar } from './Sidebar';
 import { CanvasWindow } from '../thinclaw/canvas/CanvasWindow';
 import { CanvasProviderWrapper } from '../thinclaw/canvas/CanvasProvider';
 import { CanvasToolbar } from '../thinclaw/canvas/CanvasToolbar';
+import { CommandPalette } from '../navigation/CommandPalette';
 
 const ChatView = lazy(() => import('./views/ChatView').then((module) => ({ default: module.ChatView })));
 const ThinClawView = lazy(() => import('./views/ThinClawView').then((module) => ({ default: module.ThinClawView })));
@@ -20,7 +21,15 @@ function ViewSkeleton() {
 // ---------------------------------------------------------------------------
 
 function ChatLayoutShell() {
-    const { isThinClawMode, isImagineMode, isSettingsMode, getInputProps } = useChatLayout();
+    const {
+        isThinClawMode,
+        isImagineMode,
+        isSettingsMode,
+        getInputProps,
+        commandPaletteOpen,
+        setCommandPaletteOpen,
+        setActiveTab,
+    } = useChatLayout();
     const [mountedModes, setMountedModes] = useState(() => ({
         thinclaw: isThinClawMode,
         imagine: isImagineMode,
@@ -87,6 +96,12 @@ function ChatLayoutShell() {
             {/* Global floating canvas panels + toolbar */}
             <CanvasWindow />
             <CanvasToolbar showAvailability={isThinClawMode} />
+            <CommandPalette
+                open={commandPaletteOpen}
+                onOpenChange={setCommandPaletteOpen}
+                onModeChange={setActiveTab}
+                onSettingsChange={setActiveTab}
+            />
         </div>
     );
 }
