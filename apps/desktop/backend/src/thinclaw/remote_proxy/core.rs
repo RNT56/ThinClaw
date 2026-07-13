@@ -59,7 +59,7 @@ pub(super) fn remote_thread_id(session_key: &str) -> Option<String> {
 pub(super) fn required_remote_thread_id(
     session_key: &str,
     capability: &str,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     remote_thread_id(session_key).ok_or_else(|| {
         RemoteGatewayProxy::unavailable(
             capability,
@@ -71,11 +71,14 @@ pub(super) fn required_remote_thread_id(
 impl RemoteGatewayProxy {
     /// Create a new proxy. Does NOT connect — call `health_check` or
     /// `start_sse_subscription` to establish the connection.
-    pub fn new(base_url: &str, auth_token: &str) -> Result<Self, String> {
+    pub fn new(
+        base_url: &str,
+        auth_token: &str,
+    ) -> Result<Self, crate::thinclaw::bridge::BridgeError> {
         let base_url = validate_base_url(base_url)?;
         let token = auth_token.trim();
         if token.is_empty() {
-            return Err("Remote gateway token is required".to_string());
+            return Err(("Remote gateway token is required".to_string()).into());
         }
 
         let mut bearer = format!("Bearer {token}");
@@ -119,11 +122,18 @@ impl RemoteGatewayProxy {
         self.inner.auth_header.clone()
     }
 
-    pub fn unavailable(capability: &str, reason: impl AsRef<str>) -> String {
-        format!(
-            "unavailable: remote ThinClaw gateway does not support {}: {}",
+    pub fn unavailable(
+        capability: &str,
+        reason: impl AsRef<str>,
+    ) -> crate::thinclaw::bridge::BridgeError {
+        crate::thinclaw::bridge::gated(
             capability,
-            reason.as_ref()
+            format!(
+                "remote ThinClaw gateway does not support this capability: {}",
+                reason.as_ref()
+            ),
+            "switch to embedded mode or upgrade the remote gateway",
+            crate::thinclaw::bridge::RouteMode::LocalOnly,
         )
     }
 
@@ -133,7 +143,7 @@ impl RemoteGatewayProxy {
         path: &str,
         body: Option<&serde_json::Value>,
         headers: HeaderMap,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let url = self.url(path);
         debug!("[remote_proxy] {} {}", method, url);
 
@@ -162,23 +172,32 @@ impl RemoteGatewayProxy {
         let body = read_bounded_body(resp, max_bytes).await?;
 
         if !status.is_success() {
-            return Err(remote_http_error(status, &body));
+            return Err((remote_http_error(status, &body)).into());
         }
 
         if body.is_empty() {
             return Ok(serde_json::json!({ "ok": true }));
         }
 
-        serde_json::from_slice(&body)
-            .map_err(|e| format!("Failed to parse JSON response from {}: {}", url, e))
+        serde_json::from_slice(&body).map_err(|error| {
+            crate::thinclaw::bridge::BridgeError::from(format!(
+                "Failed to parse JSON response from {url}: {error}"
+            ))
+        })
     }
 
-    pub async fn get_json(&self, path: &str) -> Result<serde_json::Value, String> {
+    pub async fn get_json(
+        &self,
+        path: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.request_json(Method::GET, path, None, HeaderMap::new())
             .await
     }
 
-    pub(super) async fn get_text(&self, path: &str) -> Result<String, String> {
+    pub(super) async fn get_text(
+        &self,
+        path: &str,
+    ) -> Result<String, crate::thinclaw::bridge::BridgeError> {
         let url = self.url(path);
         debug!("[remote_proxy] GET {}", url);
 
@@ -200,7 +219,7 @@ impl RemoteGatewayProxy {
         let body = read_bounded_body(resp, max_bytes).await?;
 
         if !status.is_success() {
-            return Err(remote_http_error(status, &body));
+            return Err((remote_http_error(status, &body)).into());
         }
 
         Ok(String::from_utf8_lossy(&body).into_owned())
@@ -210,7 +229,7 @@ impl RemoteGatewayProxy {
         &self,
         path: &str,
         body: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.request_json(Method::POST, path, Some(body), HeaderMap::new())
             .await
     }
@@ -219,7 +238,7 @@ impl RemoteGatewayProxy {
         &self,
         path: &str,
         body: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let mut headers = HeaderMap::new();
         headers.insert("x-confirm-action", "true".parse().expect("valid header"));
         self.request_json(Method::POST, path, Some(body), headers)
@@ -230,7 +249,7 @@ impl RemoteGatewayProxy {
         &self,
         path: &str,
         body: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.request_json(Method::PUT, path, Some(body), HeaderMap::new())
             .await
     }
@@ -239,7 +258,7 @@ impl RemoteGatewayProxy {
         &self,
         path: &str,
         body: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let mut headers = HeaderMap::new();
         headers.insert("x-confirm-action", "true".parse().expect("valid header"));
         self.request_json(Method::PUT, path, Some(body), headers)
@@ -247,7 +266,11 @@ impl RemoteGatewayProxy {
     }
 
     #[allow(dead_code)]
-    async fn put_text(&self, path: &str, content: &str) -> Result<(), String> {
+    async fn put_text(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let url = self.url(path);
         debug!("[remote_proxy] PUT {}", url);
 
@@ -265,13 +288,16 @@ impl RemoteGatewayProxy {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = read_bounded_body(resp, MAX_ERROR_RESPONSE_BYTES).await?;
-            return Err(remote_http_error(status, &body));
+            return Err((remote_http_error(status, &body)).into());
         }
         Ok(())
     }
 
     #[allow(dead_code)]
-    pub async fn delete_json(&self, path: &str) -> Result<serde_json::Value, String> {
+    pub async fn delete_json(
+        &self,
+        path: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.request_json(Method::DELETE, path, None, HeaderMap::new())
             .await
     }
@@ -280,12 +306,15 @@ impl RemoteGatewayProxy {
         &self,
         path: &str,
         body: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.request_json(Method::DELETE, path, Some(body), HeaderMap::new())
             .await
     }
 
-    pub async fn delete_json_confirm(&self, path: &str) -> Result<serde_json::Value, String> {
+    pub async fn delete_json_confirm(
+        &self,
+        path: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let mut headers = HeaderMap::new();
         headers.insert("x-confirm-action", "true".parse().expect("valid header"));
         self.request_json(Method::DELETE, path, None, headers).await
@@ -298,7 +327,7 @@ impl RemoteGatewayProxy {
     /// Returns Ok(true) if the server accepts this credential on an authenticated endpoint.
     /// Returns Ok(false) if the server is reachable but auth failed.
     /// Returns Err if connection could not be established.
-    pub async fn health_check(&self) -> Result<bool, String> {
+    pub async fn health_check(&self) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
         let url = self.url("/api/gateway/status");
         let resp = self
             .inner
@@ -327,40 +356,41 @@ impl RemoteGatewayProxy {
 
         let status = resp.status();
         let body = read_bounded_body(resp, MAX_ERROR_RESPONSE_BYTES).await?;
-        Err(remote_http_error(status, &body))
+        Err((remote_http_error(status, &body)).into())
     }
 
     /// Get full gateway status including agent info.
-    pub async fn get_status(&self) -> Result<serde_json::Value, String> {
+    pub async fn get_status(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json("/api/gateway/status").await
     }
 }
 
-fn validate_base_url(raw: &str) -> Result<String, String> {
+fn validate_base_url(raw: &str) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let url = Url::parse(raw.trim()).map_err(|_| {
         "Remote gateway URL must be an absolute http:// or https:// URL".to_string()
     })?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err("Remote gateway URL must use http:// or https://".to_string());
+        return Err(("Remote gateway URL must use http:// or https://".to_string()).into());
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("Remote gateway URL must not contain credentials".to_string());
+        return Err(("Remote gateway URL must not contain credentials".to_string()).into());
     }
     if url.query().is_some() || url.fragment().is_some() {
-        return Err("Remote gateway URL must not contain a query or fragment".to_string());
+        return Err(("Remote gateway URL must not contain a query or fragment".to_string()).into());
     }
     if !matches!(url.path(), "" | "/") {
-        return Err("Remote gateway URL must not contain a path".to_string());
+        return Err(("Remote gateway URL must not contain a path".to_string()).into());
     }
 
     let host = url
         .host_str()
         .ok_or_else(|| "Remote gateway URL must contain a host".to_string())?;
     if url.scheme() == "http" && !is_private_transport_host(host) {
-        return Err(
+        return Err((
             "Public remote gateways require HTTPS; plaintext HTTP is limited to private, loopback, .local, or Tailscale hosts"
-                .to_string(),
-        );
+                .to_string()).into());
     }
 
     Ok(url.as_str().trim_end_matches('/').to_string())
@@ -399,16 +429,14 @@ fn is_ipv6_link_local(ip: Ipv6Addr) -> bool {
 async fn read_bounded_body(
     response: reqwest::Response,
     max_bytes: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, crate::thinclaw::bridge::BridgeError> {
     use futures_util::StreamExt as _;
 
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)
     {
-        return Err(format!(
-            "Remote response exceeded the {max_bytes}-byte safety limit"
-        ));
+        return Err((format!("Remote response exceeded the {max_bytes}-byte safety limit")).into());
     }
 
     let mut body = Vec::new();
@@ -416,9 +444,9 @@ async fn read_bounded_body(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| format!("Failed to read response body: {error}"))?;
         if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(format!(
-                "Remote response exceeded the {max_bytes}-byte safety limit"
-            ));
+            return Err(
+                (format!("Remote response exceeded the {max_bytes}-byte safety limit")).into(),
+            );
         }
         body.extend_from_slice(&chunk);
     }

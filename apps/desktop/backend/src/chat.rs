@@ -50,7 +50,7 @@ pub async fn resolve_provider(
     secret_store: &crate::secret_store::SecretStore,
     sidecar_manager: &State<'_, SidecarManager>,
     engine_manager: &State<'_, crate::engine::EngineManager>,
-) -> Result<ProviderConfig, String> {
+) -> Result<ProviderConfig, crate::thinclaw::bridge::BridgeError> {
     // Determine provider: prefer new `chat_backend`, fall back to legacy `selected_chat_provider`
     let provider_id = user_config
         .chat_backend
@@ -145,9 +145,9 @@ pub async fn resolve_provider(
         });
     }
 
-    Err(snapshot.unavailable_reason.unwrap_or_else(|| {
+    Err((snapshot.unavailable_reason.unwrap_or_else(|| {
         "No local inference server is running. Select a model in the chat tab — the engine will start automatically.".to_string()
-    }))
+    })).into())
 }
 
 #[tauri::command]
@@ -164,7 +164,7 @@ pub async fn direct_chat_stream(
     pool: State<'_, SqlitePool>,
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     info!("[direct_chat_stream] Starting direct_chat_stream command...");
 
     // Acquisition of Global Generation Lock (Queuing)
@@ -685,7 +685,7 @@ pub async fn direct_chat_count_tokens(
     engine_manager: State<'_, crate::engine::EngineManager>,
     history: State<'_, crate::history::SharedHistoryStore>,
     conversation_id: String,
-) -> Result<TokenUsage, String> {
+) -> Result<TokenUsage, crate::thinclaw::bridge::BridgeError> {
     // 1. Fetch messages from the shared conversation store.
     let messages = history.message_texts(&conversation_id).await?;
 
@@ -745,7 +745,7 @@ pub async fn direct_chat_completion(
     secret_store: State<'_, crate::secret_store::SecretStore>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     payload: ChatPayload,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     info!("[direct_chat_completion] Starting direct_chat_completion...");
 
     let user_config = config.get_config();

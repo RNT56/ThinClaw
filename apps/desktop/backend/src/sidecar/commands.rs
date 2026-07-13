@@ -26,7 +26,7 @@ pub async fn direct_runtime_start_chat_server(
     expose_network: Option<bool>,
     mlock: Option<bool>,
     quantize_kv: Option<bool>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     // Guard: this command starts the llama.cpp sidecar and is only meaningful
     // in llamacpp builds.  In MLX/vLLM builds the binary may still be on disk
     // from a previous install, but we must NOT launch it — the user should
@@ -34,18 +34,20 @@ pub async fn direct_runtime_start_chat_server(
     #[cfg(feature = "mlx")]
     {
         return Err(
-            "This build uses the MLX engine. GGUF/llama.cpp models are not supported. \
+            ("This build uses the MLX engine. GGUF/llama.cpp models are not supported. \
              Please select an MLX-compatible model (safetensors directory) from the model list."
-                .to_string(),
+                .to_string())
+            .into(),
         );
     }
 
     #[cfg(all(feature = "vllm", not(feature = "mlx")))]
     {
         return Err(
-            "This build uses the vLLM engine. GGUF/llama.cpp models are not supported. \
+            ("This build uses the vLLM engine. GGUF/llama.cpp models are not supported. \
              Please select a vLLM-compatible model (safetensors directory) from the model list."
-                .to_string(),
+                .to_string())
+            .into(),
         );
     }
 
@@ -112,7 +114,7 @@ pub async fn direct_runtime_start_chat_server(
                 }
             },
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // Wait for server to be ready (poll /health)
     let start = std::time::Instant::now();
@@ -175,7 +177,7 @@ pub async fn start_embedding_server_core(
     state: &SidecarManager,
     vector_manager: &crate::vector_store::VectorStoreManager,
     model_path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     // Probe the actual embedding dimension from the model's config.json
     let actual_dim: Option<usize> = (|| -> Option<usize> {
         let p = std::path::Path::new(&model_path);
@@ -221,14 +223,14 @@ pub async fn start_embedding_server_core(
             .start_mlx_embedding_server(app.clone(), model_path)
             .await
             .map(|_| ())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
     #[cfg(not(feature = "mlx"))]
     {
         state
             .direct_runtime_start_embedding_server(app.clone(), model_path)
             .map(|_| ())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     app.emit(
@@ -247,7 +249,7 @@ pub async fn direct_runtime_start_embedding_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let vec_manager = app.state::<crate::vector_store::VectorStoreManager>();
     let res = start_embedding_server_core(&app, &state, &vec_manager, model_path).await;
     res
@@ -260,11 +262,11 @@ pub async fn direct_runtime_start_summarizer_server(
     state: State<'_, SidecarManager>,
     model_path: String,
     context_size: u32,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let res = state
         .direct_runtime_start_summarizer_server(app.clone(), model_path, context_size, -1)
         .map(|_| ())
-        .map_err(|e| e.to_string());
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()));
 
     if res.is_ok() {
         app.emit(
@@ -285,20 +287,20 @@ pub async fn direct_runtime_start_stt_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     // Route to MLX STT server when compiled with MLX feature
     #[cfg(feature = "mlx")]
     let res = state
         .start_mlx_stt_server(app.clone(), model_path)
         .await
         .map(|_| ())
-        .map_err(|e| e.to_string());
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()));
 
     #[cfg(not(feature = "mlx"))]
     let res = state
         .direct_runtime_start_stt_server(app.clone(), model_path)
         .map(|_| ())
-        .map_err(|e| e.to_string());
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()));
 
     if res.is_ok() {
         app.emit(
@@ -319,10 +321,10 @@ pub async fn direct_runtime_start_image_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .direct_runtime_start_image_server(app, model_path)
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 #[tauri::command]
@@ -331,11 +333,11 @@ pub async fn direct_runtime_start_tts_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .direct_runtime_start_tts_server(app, model_path)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 #[tauri::command]
@@ -373,8 +375,10 @@ pub async fn direct_runtime_stop_chat_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     _model_path: String,
-) -> Result<(), String> {
-    state.stop_all().map_err(|e| e.to_string())?;
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    state
+        .stop_all()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     app.emit(
         "sidecar_event",
         SidecarEvent::Stopped {
@@ -389,7 +393,7 @@ pub async fn direct_runtime_stop_chat_server(
 #[specta::specta]
 pub async fn direct_runtime_cancel_generation(
     state: State<'_, SidecarManager>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state.cancellation_token.store(true, Ordering::SeqCst);
     Ok(())
 }

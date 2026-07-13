@@ -245,7 +245,7 @@ pub fn direct_runtime_get_active_engine_info() -> EngineInfo {
 pub async fn direct_runtime_snapshot(
     sidecar: tauri::State<'_, crate::sidecar::SidecarManager>,
     engine_manager: tauri::State<'_, EngineManager>,
-) -> Result<LocalRuntimeSnapshot, String> {
+) -> Result<LocalRuntimeSnapshot, crate::thinclaw::bridge::BridgeError> {
     Ok(local_runtime_snapshot(&sidecar, &engine_manager)
         .await
         .redacted_for_public_clients())
@@ -661,7 +661,7 @@ pub fn direct_runtime_get_engine_setup_status(
 pub async fn direct_runtime_setup_engine(
     app: tauri::AppHandle,
     _engine_manager: tauri::State<'_, EngineManager>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let info = direct_runtime_get_active_engine_info();
 
     #[derive(Clone, serde::Serialize)]
@@ -738,7 +738,7 @@ pub async fn direct_runtime_start_engine(
     engine_manager: tauri::State<'_, EngineManager>,
     model_path: String,
     context_size: u32,
-) -> Result<EngineStartResult, String> {
+) -> Result<EngineStartResult, crate::thinclaw::bridge::BridgeError> {
     let mut guard = engine_manager.engine.lock().await;
     let engine = guard.as_mut().ok_or("No engine configured")?;
 
@@ -760,7 +760,7 @@ pub struct EngineStartResult {
 #[specta::specta]
 pub async fn direct_runtime_stop_engine(
     engine_manager: tauri::State<'_, EngineManager>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut guard = engine_manager.engine.lock().await;
     if let Some(engine) = guard.as_mut() {
         engine.stop().await?;
@@ -774,7 +774,7 @@ pub async fn direct_runtime_stop_engine(
 pub async fn direct_runtime_is_engine_ready(
     sidecar: tauri::State<'_, crate::sidecar::SidecarManager>,
     engine_manager: tauri::State<'_, EngineManager>,
-) -> Result<bool, String> {
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     Ok(local_runtime_snapshot(&sidecar, &engine_manager)
         .await
         .endpoint

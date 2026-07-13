@@ -669,6 +669,21 @@ mod tests {
     }
 
     #[test]
+    fn registered_commands_never_expose_raw_string_errors() {
+        let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
+        let offenders: Vec<_> = bindings
+            .lines()
+            .filter(|line| line.trim_start().starts_with("async "))
+            .filter(|line| line.contains("Promise<Result<") && line.contains(", string>>"))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "registered commands must serialize BridgeError instead of raw strings: {offenders:#?}"
+        );
+    }
+
+    #[test]
     fn custom_secret_updates_use_the_registered_generated_command() {
         let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
         let secrets_tab = include_str!("../../../frontend/src/components/settings/SecretsTab.tsx");

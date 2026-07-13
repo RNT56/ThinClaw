@@ -234,10 +234,18 @@ fn fixture_response(method: &str, path: &str, body: &str) -> String {
 
 #[test]
 fn unavailable_errors_are_explicitly_typed_by_prefix() {
-    let message = RemoteGatewayProxy::unavailable("chat abort", "no endpoint");
-    assert!(message.starts_with("unavailable:"));
-    assert!(message.contains("chat abort"));
-    assert!(message.contains("no endpoint"));
+    let error = RemoteGatewayProxy::unavailable("chat abort", "no endpoint");
+    assert!(matches!(
+        error,
+        crate::thinclaw::bridge::BridgeError::Unavailable {
+            capability,
+            reason,
+            remediation: Some(remediation),
+            ..
+        } if capability == "chat abort"
+            && reason.contains("no endpoint")
+            && remediation.contains("upgrade the remote gateway")
+    ));
 }
 
 #[test]
@@ -268,9 +276,17 @@ async fn raw_secret_injection_is_unavailable_in_remote_mode() {
         .await
         .expect_err("remote raw secret injection should stay disabled");
 
-    assert!(error.starts_with("unavailable:"));
-    assert!(error.contains("raw secret injection is disabled"));
-    assert!(error.contains("provider vault save/delete"));
+    assert!(matches!(
+        error,
+        crate::thinclaw::bridge::BridgeError::Unavailable {
+            capability,
+            reason,
+            remediation: Some(remediation),
+            ..
+        } if capability == "remote raw secret injection"
+            && reason.contains("raw secret injection is disabled")
+            && remediation.contains("provider vault save/delete")
+    ));
 }
 
 #[tokio::test]

@@ -16,7 +16,7 @@ pub async fn thinclaw_agents_set_default(
     _state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     agent_id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy
             .set_setting("default_agent_id", &serde_json::json!(agent_id))
@@ -48,7 +48,7 @@ pub async fn thinclaw_agents_set_default(
 pub async fn thinclaw_clawhub_search(
     ironclaw: State<'_, ThinClawRuntimeState>,
     query: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -70,7 +70,7 @@ pub async fn thinclaw_clawhub_search(
 pub async fn thinclaw_clawhub_install(
     ironclaw: State<'_, ThinClawRuntimeState>,
     plugin_id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
@@ -83,7 +83,8 @@ pub async fn thinclaw_clawhub_install(
     let cache_lock = ironclaw.catalog_cache().await?;
     let cache = cache_lock.lock().await;
     let result = thinclaw_core::desktop_api::clawhub_prepare_install(&cache, &plugin_id)?;
-    serde_json::to_value(result).map_err(|e| e.to_string())
+    serde_json::to_value(result)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Get response cache statistics.
@@ -91,7 +92,7 @@ pub async fn thinclaw_clawhub_install(
 #[specta::specta]
 pub async fn thinclaw_cache_stats(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<CacheStats, String> {
+) -> Result<CacheStats, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.cache_stats().await?;
         return Ok(CacheStats {
@@ -135,7 +136,7 @@ pub async fn thinclaw_cache_stats(
 #[specta::specta]
 pub async fn thinclaw_plugin_lifecycle_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Vec<LifecycleEventItem>, String> {
+) -> Result<Vec<LifecycleEventItem>, crate::thinclaw::bridge::BridgeError> {
     let hook = ironclaw.audit_log_hook().await?;
     let events = thinclaw_core::desktop_api::plugin_lifecycle_list(&hook)?;
     Ok(events
@@ -155,7 +156,7 @@ pub async fn thinclaw_plugin_lifecycle_list(
 pub async fn thinclaw_manifest_validate(
     ironclaw: State<'_, ThinClawRuntimeState>,
     plugin_id: String,
-) -> Result<ManifestValidationResponse, String> {
+) -> Result<ManifestValidationResponse, crate::thinclaw::bridge::BridgeError> {
     let validator = ironclaw.manifest_validator().await?;
 
     // Build a PluginInfoRef from the plugin_id. In a full implementation,

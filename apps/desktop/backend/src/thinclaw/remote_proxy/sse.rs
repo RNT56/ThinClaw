@@ -18,7 +18,10 @@ impl RemoteGatewayProxy {
     /// between local and remote agent events.
     ///
     /// Auto-reconnects on disconnect (exponential backoff, max 30s).
-    pub async fn start_sse_subscription(&self, app_handle: tauri::AppHandle) -> Result<(), String> {
+    pub async fn start_sse_subscription(
+        &self,
+        app_handle: tauri::AppHandle,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         // Stop existing subscription first
         self.stop_sse_subscription().await;
 
@@ -141,7 +144,7 @@ impl RemoteGatewayProxy {
         &self,
         response: reqwest::Response,
         app_handle: &tauri::AppHandle,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         use futures_util::StreamExt;
 
         let mut stream = response.bytes_stream();
@@ -155,9 +158,10 @@ impl RemoteGatewayProxy {
             // sequences that cross transport chunk boundaries.
             for segment in chunk.split_inclusive(|byte| *byte == b'\n') {
                 if buffer.len().saturating_add(segment.len()) > MAX_SSE_LINE_BYTES {
-                    return Err(format!(
+                    return Err((format!(
                         "SSE event exceeded the {MAX_SSE_LINE_BYTES}-byte safety limit"
-                    ));
+                    ))
+                    .into());
                 }
                 buffer.extend_from_slice(segment);
                 if segment.ends_with(b"\n") {
@@ -175,7 +179,10 @@ impl RemoteGatewayProxy {
     }
 }
 
-fn forward_sse_line(line: &[u8], app_handle: &tauri::AppHandle) -> Result<(), String> {
+fn forward_sse_line(
+    line: &[u8],
+    app_handle: &tauri::AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     use tauri::Emitter;
 
     let mut end = line.len();

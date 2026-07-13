@@ -9,7 +9,7 @@ import {
     Box
 } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
-import { commands, GGUFMetadata, Result } from '../../lib/bindings';
+import { commands, GGUFMetadata } from '../../lib/bindings';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -17,6 +17,7 @@ import { useModelContext } from '../model-context';
 import * as Switch from '@radix-ui/react-switch';
 import { CustomSelect } from './CustomSelect';
 import { analyzeMemoryConstraints, GB } from './memory-analysis';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 export function ServerSettings() {
     const {
@@ -44,7 +45,7 @@ export function ServerSettings() {
 
     useEffect(() => {
         if (modelPath && modelPath !== "auto") {
-            commands.getModelMetadata(modelPath).then((res: Result<GGUFMetadata, string>) => {
+            commands.getModelMetadata(modelPath).then((res) => {
                 if (res.status === "ok") setMetadata(res.data);
                 else setMetadata(undefined);
             }).catch(() => setMetadata(undefined));
@@ -84,7 +85,7 @@ export function ServerSettings() {
                 try { await directCommands.directRuntimeStopEngine(); } catch { /* may already be stopped */ }
                 await new Promise(r => setTimeout(r, 500));
                 const startRes = await directCommands.directRuntimeStartEngine(modelPath, maxContext);
-                if (startRes.status === 'error') throw new Error(startRes.error);
+                if (startRes.status === 'error') throw new Error(bridgeErrorMessage(startRes.error));
             }
             const snapshot = await refreshRuntimeSnapshot();
 

@@ -229,7 +229,7 @@ fn get_active_model(cfg: &crate::thinclaw::config::ThinClawConfig) -> String {
 pub async fn thinclaw_get_fleet_status(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Vec<AgentStatusSummary>, String> {
+) -> Result<Vec<AgentStatusSummary>, crate::thinclaw::bridge::BridgeError> {
     let cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -292,13 +292,15 @@ pub async fn thinclaw_broadcast_command(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     command: String,
-) -> Result<FleetBroadcastResult, String> {
+) -> Result<FleetBroadcastResult, crate::thinclaw::bridge::BridgeError> {
     let command = command.trim();
     if command.is_empty() {
-        return Err("Fleet broadcast command must not be empty".to_string());
+        return Err(("Fleet broadcast command must not be empty".to_string()).into());
     }
     if command.chars().count() > 4_000 {
-        return Err("Fleet broadcast command must not exceed 4,000 characters".to_string());
+        return Err(
+            ("Fleet broadcast command must not exceed 4,000 characters".to_string()).into(),
+        );
     }
     tracing::info!(
         command_chars = command.chars().count(),
@@ -382,7 +384,8 @@ pub async fn thinclaw_broadcast_command(
 
     if deliveries.is_empty() {
         return Err(
-            "No local runtime or remote agent profiles are available for broadcast".to_string(),
+            ("No local runtime or remote agent profiles are available for broadcast".to_string())
+                .into(),
         );
     }
     let delivered = deliveries

@@ -299,8 +299,9 @@ pub struct UserConfigPatch {
 }
 
 impl UserConfigPatch {
-    fn into_json(self) -> Result<serde_json::Value, String> {
-        serde_json::to_value(self).map_err(|error| error.to_string())
+    fn into_json(self) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
+        serde_json::to_value(self)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
     }
 }
 
@@ -542,12 +543,12 @@ impl ConfigManager {
     pub async fn attach_database(
         &self,
         database: Arc<dyn thinclaw_core::db::Database>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let _write = self.write_lock.lock().await;
         let canonical = database
             .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
 
         let config = if let Some(value) = canonical {
             normalize_user_config(
@@ -560,10 +561,12 @@ impl ConfigManager {
                 .set_setting(
                     SETTINGS_USER_ID,
                     WORKBENCH_CONFIG_KEY,
-                    &serde_json::to_value(&config).map_err(|error| error.to_string())?,
+                    &serde_json::to_value(&config).map_err(|error| {
+                        crate::thinclaw::bridge::BridgeError::from(error.to_string())
+                    })?,
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
             config
         };
 
@@ -574,7 +577,7 @@ impl ConfigManager {
                 &serde_json::json!(SETTINGS_SCHEMA_VERSION),
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         *self
             .database
             .write()
@@ -589,7 +592,10 @@ impl ConfigManager {
         Ok(())
     }
 
-    pub async fn save_config(&self, new_config: &UserConfig) -> Result<(), String> {
+    pub async fn save_config(
+        &self,
+        new_config: &UserConfig,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let _write = self.write_lock.lock().await;
         let normalized = normalize_user_config(new_config.clone());
         let database = self
@@ -602,10 +608,12 @@ impl ConfigManager {
                 .set_setting(
                     SETTINGS_USER_ID,
                     WORKBENCH_CONFIG_KEY,
-                    &serde_json::to_value(&normalized).map_err(|error| error.to_string())?,
+                    &serde_json::to_value(&normalized).map_err(|error| {
+                        crate::thinclaw::bridge::BridgeError::from(error.to_string())
+                    })?,
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         }
         *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized.clone();
         if let Err(error) = self.write_recovery_file(&normalized).await {
@@ -614,19 +622,23 @@ impl ConfigManager {
         Ok(())
     }
 
-    async fn write_recovery_file(&self, config: &UserConfig) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    async fn write_recovery_file(
+        &self,
+        config: &UserConfig,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+        let json = serde_json::to_string_pretty(config)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         if let Some(parent) = self.config_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         }
         tokio::fs::write(&self.config_path, json)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
     }
 
-    pub async fn reload(&self) -> Result<(), String> {
+    pub async fn reload(&self) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let _write = self.write_lock.lock().await;
         let database = self
             .database
@@ -637,10 +649,10 @@ impl ConfigManager {
             database
                 .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
                 .map(serde_json::from_value)
                 .transpose()
-                .map_err(|error| error.to_string())?
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
         } else {
             tokio::fs::read_to_string(&self.config_path)
                 .await
@@ -656,20 +668,26 @@ impl ConfigManager {
         Ok(())
     }
 
-    fn canonical_database(&self) -> Result<Arc<dyn thinclaw_core::db::Database>, String> {
-        self.database
+    fn canonical_database(
+        &self,
+    ) -> Result<Arc<dyn thinclaw_core::db::Database>, crate::thinclaw::bridge::BridgeError> {
+        Ok(self
+            .database
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
-            .ok_or_else(|| "Canonical settings database is not initialized".to_string())
+            .ok_or_else(|| "Canonical settings database is not initialized".to_string())?)
     }
 
-    pub async fn agent_settings(&self) -> Result<serde_json::Value, String> {
+    pub async fn agent_settings(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         let database = self.canonical_database()?;
         let response = thinclaw_core::api::config::list_settings(&database, SETTINGS_USER_ID)
             .await
-            .map_err(|error| error.to_string())?;
-        let mut value = serde_json::to_value(response).map_err(|error| error.to_string())?;
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        let mut value = serde_json::to_value(response)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         if let Some(settings) = value
             .get_mut("settings")
             .and_then(serde_json::Value::as_array_mut)
@@ -688,33 +706,38 @@ impl ConfigManager {
         &self,
         key: &str,
         value: &serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         if key.starts_with("desktop.") {
-            return Err("desktop.* settings are reserved for the Workbench view".to_string());
+            return Err(
+                ("desktop.* settings are reserved for the Workbench view".to_string()).into(),
+            );
         }
         let database = self.canonical_database()?;
         thinclaw_core::api::config::set_setting(&database, SETTINGS_USER_ID, key, value)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
     }
 
-    pub async fn patch_workbench(&self, patch: &serde_json::Value) -> Result<(), String> {
+    pub async fn patch_workbench(
+        &self,
+        patch: &serde_json::Value,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let patch = patch
             .as_object()
             .ok_or_else(|| "Workbench settings patch must be an object".to_string())?;
-        let mut merged =
-            serde_json::to_value(self.get_config()).map_err(|error| error.to_string())?;
+        let mut merged = serde_json::to_value(self.get_config())
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         let target = merged
             .as_object_mut()
             .ok_or_else(|| "Workbench settings must serialize as an object".to_string())?;
         for (key, value) in patch {
             if !target.contains_key(key) {
-                return Err(format!("Unknown Workbench setting: {key}"));
+                return Err((format!("Unknown Workbench setting: {key}")).into());
             }
             target.insert(key.clone(), value.clone());
         }
-        let config: UserConfig =
-            serde_json::from_value(merged).map_err(|error| error.to_string())?;
+        let config: UserConfig = serde_json::from_value(merged)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
         self.save_config(&config).await
     }
 }
@@ -769,15 +792,15 @@ pub fn unified_settings_schema() -> serde_json::Value {
 
 #[tauri::command]
 #[specta::specta]
-pub fn open_config_file(app: AppHandle) -> Result<(), String> {
+pub fn open_config_file(app: AppHandle) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let config_path = app
         .path()
         .app_config_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
         .join("user_config.json");
 
     if !config_path.exists() {
-        return Err("Config file does not exist yet".to_string());
+        return Err(("Config file does not exist yet".to_string()).into());
     }
 
     #[cfg(target_os = "macos")]
@@ -788,14 +811,17 @@ pub fn open_config_file(app: AppHandle) -> Result<(), String> {
             .spawn();
     }
     #[cfg(not(target_os = "macos"))]
-    open::that(config_path.parent().unwrap_or(&config_path)).map_err(|e| e.to_string())?;
+    open::that(config_path.parent().unwrap_or(&config_path))
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn get_hf_token(
+    app: AppHandle,
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if let Some(ironclaw) = app.try_state::<crate::thinclaw::runtime_bridge::ThinClawRuntimeState>()
     {
         if ironclaw.remote_proxy().await.is_some() {
@@ -828,7 +854,7 @@ pub fn get_user_config(state: tauri::State<ConfigManager>) -> UserConfig {
 pub async fn update_user_config(
     state: tauri::State<'_, ConfigManager>,
     config: UserConfigPatch,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state.patch_workbench(&config.into_json()?).await
 }
 

@@ -30,6 +30,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { SettingsPage } from '../settings/SettingsSidebar';
 import { findStyle, STYLE_LIBRARY } from '../../lib/style-library';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -544,7 +545,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             const tId = toast.loading('Starting Image Engine...');
             try {
                 const res = await directCommands.directRuntimeStartImageServer(modelPathToUse);
-                if (res.status !== 'ok') throw new Error(res.error);
+                if (res.status !== 'ok') throw new Error(bridgeErrorMessage(res.error));
                 await new Promise(r => setTimeout(r, 4000));
                 toast.success('Image Engine Ready', { id: tId });
             } catch (e) {
@@ -684,7 +685,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                         setAttachedImages(prev => [...prev, res.data]);
                         toast.success('Image attached', { id: toastId });
                     } else {
-                        throw new Error(res.error);
+                        throw new Error(bridgeErrorMessage(res.error));
                     }
                 } catch (e) {
                     console.error('Failed to upload image:', e);
@@ -706,7 +707,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                         toast.success('added to knowledge base', { id: toastId, description: file.name });
                         setIngestedFiles(prev => [...prev, { id: docId, name: file.name, assetRef: { namespace: 'direct_workbench', id: docId } }]);
                     } else {
-                        throw new Error(res.error);
+                        throw new Error(bridgeErrorMessage(res.error));
                     }
                 } catch (e) {
                     console.error('Failed to upload/ingest document:', e);
@@ -761,7 +762,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     const tId = toast.loading('Starting STT Engine...');
                     try {
                         const res = await directCommands.directRuntimeStartSttServer(currentSttModelPath);
-                        if (res.status !== 'ok') throw new Error(res.error);
+                        if (res.status !== 'ok') throw new Error(bridgeErrorMessage(res.error));
                         await new Promise(r => setTimeout(r, 2000));
                         toast.success('STT Engine Ready', { id: tId });
                     } catch (e) {
@@ -788,7 +789,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     setInput(prev => (prev ? prev + ' ' + res.data.text : res.data.text));
                     toast.success('Transcribed', { id: toastId });
                 } else {
-                    throw new Error(res.error);
+                    throw new Error(bridgeErrorMessage(res.error));
                 }
             } catch (e) {
                 console.error(e);

@@ -15,7 +15,7 @@ use crate::thinclaw::runtime_builder::get_resolved_workspace_root;
 #[specta::specta]
 pub async fn thinclaw_get_workspace_path(
     manager: State<'_, ThinClawManager>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     Ok(workspace_root_for_commands(&manager)
         .await
         .to_string_lossy()
@@ -29,7 +29,7 @@ pub async fn thinclaw_get_workspace_path(
 #[specta::specta]
 pub async fn thinclaw_reveal_workspace(
     manager: State<'_, ThinClawManager>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let path = workspace_root_for_commands(&manager).await;
     let path_str = path.to_string_lossy().to_string();
 
@@ -70,7 +70,7 @@ pub async fn thinclaw_reveal_workspace(
 #[specta::specta]
 pub async fn thinclaw_list_agent_workspace_files(
     manager: State<'_, ThinClawManager>,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<serde_json::Value>, crate::thinclaw::bridge::BridgeError> {
     let workspace_root = workspace_root_for_commands(&manager).await;
 
     if !workspace_root.exists() {
@@ -178,16 +178,18 @@ pub async fn thinclaw_list_agent_workspace_files(
 /// which is more user-friendly than just opening the parent folder.
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_reveal_file(path: String) -> Result<(), String> {
+pub async fn thinclaw_reveal_file(
+    path: String,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     // Security: prevent path traversal
     let p = std::path::Path::new(&path);
     if path.contains("..") {
-        return Err("Invalid path: traversal not allowed".to_string());
+        return Err(("Invalid path: traversal not allowed".to_string()).into());
     }
 
     // Only reveal files that exist
     if !p.exists() {
-        return Err(format!("File not found: {}", path));
+        return Err((format!("File not found: {}", path)).into());
     }
 
     #[cfg(target_os = "macos")]
@@ -223,10 +225,10 @@ pub async fn thinclaw_write_agent_workspace_file(
     manager: State<'_, ThinClawManager>,
     relative_path: String,
     content: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     // Security: prevent path traversal
     if relative_path.contains("..") {
-        return Err("Invalid path: traversal not allowed".to_string());
+        return Err(("Invalid path: traversal not allowed".to_string()).into());
     }
 
     let workspace_root = workspace_root_for_commands(&manager).await;
@@ -249,7 +251,7 @@ pub async fn thinclaw_write_agent_workspace_file(
         .and_then(|p| p.canonicalize().ok())
         .unwrap_or_default();
     if !canonical_parent.starts_with(&canonical_root) {
-        return Err("Path escapes workspace root".to_string());
+        return Err(("Path escapes workspace root".to_string()).into());
     }
 
     std::fs::write(&target, &content).map_err(|e| format!("Failed to write file: {}", e))?;

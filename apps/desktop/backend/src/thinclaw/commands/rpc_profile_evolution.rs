@@ -41,7 +41,7 @@ pub struct ProfileEvolutionRunItem {
 #[specta::specta]
 pub async fn thinclaw_profile_evolution_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<ProfileEvolutionStatusItem, String> {
+) -> Result<ProfileEvolutionStatusItem, crate::thinclaw::bridge::BridgeError> {
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
@@ -53,13 +53,13 @@ pub async fn thinclaw_profile_evolution_status(
     let profile_content = if workspace
         .exists(&profile_path)
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
     {
         Some(
             workspace
                 .read(&profile_path)
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
                 .content,
         )
     } else {
@@ -76,7 +76,7 @@ pub async fn thinclaw_profile_evolution_status(
             thinclaw_core::profile_evolution::PROFILE_EVOLUTION_ROUTINE_NAME,
         )
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
 
     let (
         profile_parse_error,
@@ -131,7 +131,7 @@ pub async fn thinclaw_profile_evolution_status(
 #[specta::specta]
 pub async fn thinclaw_profile_evolution_run(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<ProfileEvolutionRunItem, String> {
+) -> Result<ProfileEvolutionRunItem, crate::thinclaw::bridge::BridgeError> {
     let agent = ironclaw.agent().await?;
     let store = agent.store().cloned().ok_or("Database not available")?;
     let workspace = agent
@@ -148,7 +148,7 @@ pub async fn thinclaw_profile_evolution_run(
         Some(&timezone),
     )
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
 
     let routine = store
         .get_routine_by_name_for_actor(
@@ -157,11 +157,13 @@ pub async fn thinclaw_profile_evolution_run(
             thinclaw_core::profile_evolution::PROFILE_EVOLUTION_ROUTINE_NAME,
         )
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
         .ok_or("Profile evolution is unavailable until USER.md or a populated profile exists")?;
     if !routine.enabled {
         return Err(
-            "Profile evolution is disabled until USER.md or a populated profile exists".to_string(),
+            "Profile evolution is disabled until USER.md or a populated profile exists"
+                .to_string()
+                .into(),
         );
     }
 
@@ -196,12 +198,15 @@ struct ProfileView {
     value: Option<serde_json::Value>,
 }
 
-fn profile_view_from_content(content: &str) -> Result<ProfileView, String> {
+fn profile_view_from_content(
+    content: &str,
+) -> Result<ProfileView, crate::thinclaw::bridge::BridgeError> {
     if content.len() > PROFILE_VIEW_MAX_BYTES {
-        return Err(format!(
+        return Err((format!(
             "Profile file exceeds the {} KiB desktop display limit",
             PROFILE_VIEW_MAX_BYTES / 1024
-        ));
+        ))
+        .into());
     }
     match serde_json::from_str::<thinclaw_core::profile::PsychographicProfile>(content) {
         Ok(profile) => Ok(ProfileView {

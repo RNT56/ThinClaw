@@ -201,11 +201,13 @@ into a directory module:
 sit in the 1,500–1,999 band and could be split further if desired.
 
 **2.2 Command-surface consistency (P2)**
-- **[STILL OPEN]** 313 of 342 Tauri commands with a return type still return `Result<_, String>` and
-  should migrate to `Result<T, BridgeError>` (the `From<String>` impl makes this mechanical); retire
-  `local_unavailable()`.
+- **[LANDED]** All 347 registered Tauri commands now expose `Result<T, BridgeError>`; generated
+  bindings contain zero raw string error channels. The taxonomy covers unavailable, validation,
+  authentication, missing-resource, conflict, timeout, network, and runtime outcomes, and the
+  shared frontend normalizer preserves remediation/retryability. CI rejects any generated
+  `Promise<Result<…, string>>` regression.
 - **[LANDED]** `ROUTE_TABLE` (`apps/desktop/backend/src/thinclaw/bridge.rs:116`) reached 100%
-  coverage: 346 entries for 346 `#[tauri::command]` fns, enforced by the CI test
+  coverage: all registered `#[tauri::command]` fns, enforced by the CI test
   `all_registered_commands_are_classified` (`bridge.rs:764`), which fails the build on any unclassified
   command.
 - Replace stringly-typed `UiEvent` status/phase fields (`ToolUpdate.status`, `RunStatus.status`, …)

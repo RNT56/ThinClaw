@@ -50,10 +50,11 @@ from "failed":
 - **`RouteMode`** — `LocalAndRemote` (works in both modes), `RemoteOnly` (needs a live gateway,
   e.g. sandbox job/GPU flows), `LocalOnly` (only meaningful embedded, e.g. sidecar control,
   channel-config submit, agent-loop eval).
-- **`BridgeError`** — an internally-tagged enum (`kind`): `Unavailable { capability, reason,
-  remediation, satisfied_by }` for a gated capability (the frontend renders a CTA), and
-  `Runtime { message }` for a genuine error. `From<String>`/`From<&str>` let existing
-  `?`/`map_err` sites migrate mechanically.
+- **`BridgeError`** — the only registered-command error envelope. Its stable `kind` taxonomy
+  distinguishes `Unavailable`, `InvalidInput`, `Unauthorized`, `NotFound`, `Conflict`,
+  `Timeout`, `Network`, and fallback `Runtime` outcomes. Actionable variants carry fields such
+  as remediation, retryability, and the affected resource/operation. `From<String>`/`From<&str>`
+  keep internal migrations mechanical without weakening the IPC shape.
 - **`gated(capability, reason, remediation, satisfied_by)`** — the helper that builds an
   `Unavailable`; it replaced the ad-hoc `local_unavailable`/`unavailable(...)` JSON helpers.
 - **`ROUTE_TABLE`** — a `&[(&str, RouteMode)]` registry mapping command names to their mode.
@@ -107,7 +108,10 @@ The frontend and existing automation scripts depend on the current Tauri command
 `apps/desktop/frontend/src/lib/bindings.ts` is the only source of command names,
 parameter lists, and generated result types. `lib/command-client.ts` derives a
 runtime-guarded client from `commands`, unwraps the generated transport `Result`,
-and preserves typed `BridgeError::Unavailable` detail in thrown errors.
+and throws `ThinClawCommandError` while preserving error kind, remediation, and retryability.
+`lib/command-errors.ts` is the shared rendering path for direct binding consumers. A contract
+test rejects any generated `Promise<Result<…, string>>`, so raw string errors cannot re-enter
+the registered command surface.
 
 `lib/thinclaw.ts` is a compatibility surface for existing component-friendly
 names and richer legacy views over JSON-valued commands. It may delegate through

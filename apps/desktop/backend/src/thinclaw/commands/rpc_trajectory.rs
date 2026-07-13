@@ -58,13 +58,14 @@ impl From<thinclaw_core::agent::learning::TrajectoryStats> for TrajectoryStatsIt
 /// Aggregate stats over the local trajectory archive (counts, span, outcomes).
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_trajectory_stats() -> Result<TrajectoryStatsItem, String> {
+pub async fn thinclaw_trajectory_stats(
+) -> Result<TrajectoryStatsItem, crate::thinclaw::bridge::BridgeError> {
     let stats = tokio::task::spawn_blocking(|| {
         thinclaw_core::agent::learning::TrajectoryLogger::new().stats()
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(TrajectoryStatsItem::from(stats))
 }
 
@@ -73,19 +74,22 @@ pub async fn thinclaw_trajectory_stats() -> Result<TrajectoryStatsItem, String> 
 #[specta::specta]
 pub async fn thinclaw_trajectory_records(
     limit: Option<u32>,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<serde_json::Value>, crate::thinclaw::bridge::BridgeError> {
     let records = tokio::task::spawn_blocking(|| {
         thinclaw_core::agent::learning::TrajectoryLogger::new().load_records()
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let limit = limit.unwrap_or(100) as usize;
     let start = records.len().saturating_sub(limit);
     records[start..]
         .iter()
-        .map(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
+        .map(|r| {
+            serde_json::to_value(r)
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
+        })
         .collect()
 }
 
@@ -99,7 +103,7 @@ pub async fn thinclaw_trajectory_records(
 pub async fn thinclaw_trajectory_export(
     ironclaw: State<'_, ThinClawRuntimeState>,
     format: String,
-) -> Result<TrajectoryExportItem, String> {
+) -> Result<TrajectoryExportItem, crate::thinclaw::bridge::BridgeError> {
     let format = desktop_export_format(&format)?;
     let db = match ironclaw.agent().await {
         Ok(agent) => agent.store().cloned(),
@@ -114,7 +118,7 @@ pub async fn thinclaw_trajectory_export(
         db.as_ref(),
     )
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
 
     Ok(TrajectoryExportItem {
         format: rendered.format,
@@ -129,11 +133,15 @@ pub async fn thinclaw_trajectory_export(
     })
 }
 
-fn desktop_export_format(format: &str) -> Result<&'static str, String> {
+fn desktop_export_format(
+    format: &str,
+) -> Result<&'static str, crate::thinclaw::bridge::BridgeError> {
     match format.trim().to_ascii_lowercase().as_str() {
         "sft" => Ok("sft"),
         "dpo" => Ok("dpo"),
-        _ => Err("Unsupported trajectory export format; expected 'sft' or 'dpo'".to_string()),
+        _ => Err(
+            ("Unsupported trajectory export format; expected 'sft' or 'dpo'".to_string()).into(),
+        ),
     }
 }
 

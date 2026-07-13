@@ -41,13 +41,14 @@ pub async fn thinclaw_session_search(
     summarize: Option<bool>,
 ) -> Result<SessionSearchResult, BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
-        return Err(gated(
+        return Err((gated(
             "session transcript search",
             "desktop transcript search runs against the local conversation database; \
              remote-gateway transcript search is not yet bridged",
             "run the desktop in local (embedded) mode to search session transcripts",
             RouteMode::LocalOnly,
-        ));
+        ))
+        .into());
     }
 
     let agent = ironclaw.agent().await?;
@@ -58,7 +59,7 @@ pub async fn thinclaw_session_search(
     let hits = store
         .search_conversation_messages(USER_ID, &query, None, None, None, limit)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let mut service = thinclaw_core::agent::session_search::SessionSearchService::new();
     if summarize {

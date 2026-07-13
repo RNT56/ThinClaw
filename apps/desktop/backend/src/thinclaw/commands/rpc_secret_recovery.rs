@@ -22,13 +22,14 @@ fn rotation_guard() -> &'static Mutex<()> {
     GUARD.get_or_init(|| Mutex::new(()))
 }
 
-fn require_supported_platform() -> Result<(), String> {
+fn require_supported_platform() -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if cfg!(target_os = "macos") {
         Ok(())
     } else {
         Err(
             "Desktop secret-envelope recovery is unavailable because persistent envelope storage is currently implemented only for macOS Keychain."
-                .to_string(),
+                .to_string()
+                .into(),
         )
     }
 }
@@ -41,9 +42,9 @@ fn recovery_checksum(key: &[u8]) -> String {
     hex::encode(&digest[..8])
 }
 
-fn encode_recovery_key(key: &[u8]) -> Result<String, String> {
+fn encode_recovery_key(key: &[u8]) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     if key.len() != 32 {
-        return Err("The secret master key must contain exactly 32 bytes.".to_string());
+        return Err(("The secret master key must contain exactly 32 bytes.".to_string()).into());
     }
     Ok(format!(
         "{RECOVERY_KEY_PREFIX}:{}:{}",
@@ -52,17 +53,17 @@ fn encode_recovery_key(key: &[u8]) -> Result<String, String> {
     ))
 }
 
-fn decode_recovery_key(encoded: &str) -> Result<Vec<u8>, String> {
+fn decode_recovery_key(encoded: &str) -> Result<Vec<u8>, crate::thinclaw::bridge::BridgeError> {
     let mut parts = encoded.trim().split(':');
     let prefix = parts.next();
     let Some(payload) = parts.next() else {
-        return Err("Recovery key format is invalid.".to_string());
+        return Err(("Recovery key format is invalid.".to_string()).into());
     };
     let Some(checksum) = parts.next() else {
-        return Err("Recovery key format is invalid.".to_string());
+        return Err(("Recovery key format is invalid.".to_string()).into());
     };
     if prefix != Some(RECOVERY_KEY_PREFIX) || parts.next().is_some() {
-        return Err("Recovery key format is invalid.".to_string());
+        return Err(("Recovery key format is invalid.".to_string()).into());
     }
 
     let mut key = URL_SAFE_NO_PAD
@@ -70,33 +71,38 @@ fn decode_recovery_key(encoded: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| "Recovery key payload is not valid base64url data.".to_string())?;
     if key.len() != 32 {
         key.zeroize();
-        return Err("Recovery key payload must contain exactly 32 bytes.".to_string());
+        return Err(("Recovery key payload must contain exactly 32 bytes.".to_string()).into());
     }
     if !recovery_checksum(&key).eq_ignore_ascii_case(checksum) {
         key.zeroize();
-        return Err("Recovery key checksum does not match.".to_string());
+        return Err(("Recovery key checksum does not match.".to_string()).into());
     }
     Ok(key)
 }
 
-fn require_confirmation(mut confirmation: String, expected: &str) -> Result<(), String> {
+fn require_confirmation(
+    mut confirmation: String,
+    expected: &str,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let confirmed = confirmation.trim() == expected;
     confirmation.zeroize();
     if confirmed {
         Ok(())
     } else {
-        Err(format!("Type {expected} to confirm this operation."))
+        Err((format!("Type {expected} to confirm this operation.")).into())
     }
 }
 
-async fn replace_master_key(mut new_key: Vec<u8>) -> Result<SecretMasterKeyRotation, String> {
+async fn replace_master_key(
+    mut new_key: Vec<u8>,
+) -> Result<SecretMasterKeyRotation, crate::thinclaw::bridge::BridgeError> {
     let mut old_key = thinclaw_core::platform::secure_store::get_master_key()
         .await
         .map_err(|error| format!("Failed to read the current secret master key: {error}"))?;
     if old_key == new_key {
         old_key.zeroize();
         new_key.zeroize();
-        return Err("The supplied recovery key is already active.".to_string());
+        return Err(("The supplied recovery key is already active.".to_string()).into());
     }
 
     let new_key_hex = hex::encode(&new_key);
@@ -105,18 +111,14 @@ async fn replace_master_key(mut new_key: Vec<u8>) -> Result<SecretMasterKeyRotat
         Err(error) => {
             old_key.zeroize();
             new_key.zeroize();
-            return Err(format!(
-                "Failed to initialize replacement encryption: {error}"
-            ));
+            return Err((format!("Failed to initialize replacement encryption: {error}")).into());
         }
     };
 
     if let Err(error) = thinclaw_core::platform::secure_store::store_master_key(&new_key).await {
         old_key.zeroize();
         new_key.zeroize();
-        return Err(format!(
-            "Failed to persist the replacement master key: {error}"
-        ));
+        return Err((format!("Failed to persist the replacement master key: {error}")).into());
     }
 
     let rotation = keychain::rotate_encryption_key(new_crypto);
@@ -127,10 +129,10 @@ async fn replace_master_key(mut new_key: Vec<u8>) -> Result<SecretMasterKeyRotat
             let restore = thinclaw_core::platform::secure_store::store_master_key(&old_key).await;
             old_key.zeroize();
             return match restore {
-                Ok(()) => Err(format!("Secret-envelope rotation failed: {error}")),
-                Err(restore_error) => Err(format!(
+                Ok(()) => Err((format!("Secret-envelope rotation failed: {error}")).into()),
+                Err(restore_error) => Err((format!(
                     "Secret-envelope rotation failed ({error}) and restoring the previous master key also failed ({restore_error})."
-                )),
+                )).into()),
             };
         }
     };
@@ -146,7 +148,8 @@ async fn replace_master_key(mut new_key: Vec<u8>) -> Result<SecretMasterKeyRotat
 
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_secret_recovery_status() -> Result<SecretRecoveryStatus, String> {
+pub async fn thinclaw_secret_recovery_status(
+) -> Result<SecretRecoveryStatus, crate::thinclaw::bridge::BridgeError> {
     let (key_version, stored_secrets) = keychain::encryption_metadata()?;
     let supported = cfg!(target_os = "macos");
     Ok(SecretRecoveryStatus {
@@ -164,7 +167,8 @@ pub async fn thinclaw_secret_recovery_status() -> Result<SecretRecoveryStatus, S
 
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_secret_recovery_export() -> Result<String, String> {
+pub async fn thinclaw_secret_recovery_export(
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     require_supported_platform()?;
     let _guard = rotation_guard().lock().await;
     let mut key = thinclaw_core::platform::secure_store::get_master_key()
@@ -179,7 +183,7 @@ pub async fn thinclaw_secret_recovery_export() -> Result<String, String> {
 #[specta::specta]
 pub async fn thinclaw_secret_master_key_rotate(
     confirmation: String,
-) -> Result<SecretMasterKeyRotation, String> {
+) -> Result<SecretMasterKeyRotation, crate::thinclaw::bridge::BridgeError> {
     require_supported_platform()?;
     require_confirmation(confirmation, ROTATE_CONFIRMATION)?;
     let _guard = rotation_guard().lock().await;
@@ -196,7 +200,7 @@ pub async fn thinclaw_secret_master_key_rotate(
 pub async fn thinclaw_secret_recovery_import(
     mut recovery_key: String,
     confirmation: String,
-) -> Result<SecretMasterKeyRotation, String> {
+) -> Result<SecretMasterKeyRotation, crate::thinclaw::bridge::BridgeError> {
     require_supported_platform()?;
     require_confirmation(confirmation, IMPORT_CONFIRMATION)?;
     let decoded = decode_recovery_key(&recovery_key);

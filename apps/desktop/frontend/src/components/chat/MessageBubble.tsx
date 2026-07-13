@@ -17,6 +17,7 @@ import { revealPath } from '../../lib/thinclaw';
 import { ThinkingDots } from './ThinkingDots';
 import { useInferenceBackends } from '../../hooks/use-inference-backends';
 import { parseStatusTaggedContent } from '../../lib/status-tags';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 function extractText(node: any): string {
     if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -383,7 +384,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
         try {
             const res = await directCommands.directMediaTtsSynthesize(sanitizedContent, null);
             if (res.status === 'error') {
-                toast.error('TTS failed', { description: res.error });
+                toast.error('TTS failed', { description: bridgeErrorMessage(res.error) });
                 setIsSpeaking(false);
                 return;
             }

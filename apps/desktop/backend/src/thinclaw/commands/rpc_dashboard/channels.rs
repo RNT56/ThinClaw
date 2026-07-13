@@ -92,7 +92,7 @@ fn remote_channel_status_entry(
 async fn remote_gmail_status(
     proxy: &RemoteGatewayProxy,
     gateway_status: &serde_json::Value,
-) -> Result<GmailStatusResponse, String> {
+) -> Result<GmailStatusResponse, crate::thinclaw::bridge::BridgeError> {
     let gmail = gateway_status
         .get("channel_setup")
         .and_then(|value| value.get("gmail"))
@@ -166,14 +166,15 @@ async fn remote_gmail_status(
 #[specta::specta]
 pub async fn thinclaw_channel_status_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Vec<ChannelStatusEntry>, String> {
+) -> Result<Vec<ChannelStatusEntry>, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
         let entries = remote_channel_status_entries(&status);
         if entries.is_empty() {
             return Err(
                 "unavailable: remote ThinClaw gateway did not include channel setup status"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             );
         }
         return Ok(entries);
@@ -235,7 +236,7 @@ pub async fn thinclaw_channel_status_list(
 pub async fn thinclaw_gmail_oauth_start(
     ironclaw: State<'_, ThinClawRuntimeState>,
     secret_store: State<'_, crate::secret_store::SecretStore>,
-) -> Result<GmailOAuthResult, String> {
+) -> Result<GmailOAuthResult, crate::thinclaw::bridge::BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
         return Ok(GmailOAuthResult {
             success: false,
@@ -275,7 +276,7 @@ pub async fn thinclaw_gmail_oauth_start(
             if let Some(refresh_token) = refresh_token.as_ref().map(|token| token.as_str()) {
                 secret_store.set("gmail_refresh_token", Some(refresh_token))?;
             }
-            Ok::<(), String>(())
+            Ok::<(), crate::thinclaw::bridge::BridgeError>(())
         })();
         if let Err(persist_error) = persist_result {
             let access_rollback = secret_store
@@ -291,13 +292,11 @@ pub async fn thinclaw_gmail_oauth_start(
                 )
                 .err();
             if access_rollback.is_some() || refresh_rollback.is_some() {
-                return Err(format!(
+                return Err((format!(
                     "Gmail OAuth credential save failed ({persist_error}); rollback also failed (access={access_rollback:?}, refresh={refresh_rollback:?})"
-                ));
+                )).into());
             }
-            return Err(format!(
-                "Gmail OAuth credential save failed: {persist_error}"
-            ));
+            return Err((format!("Gmail OAuth credential save failed: {persist_error}")).into());
         }
         // Clean up the legacy plaintext setting if an older build created it.
         if let Ok(agent) = ironclaw.agent().await {
@@ -330,7 +329,7 @@ pub async fn thinclaw_gmail_oauth_start(
 pub async fn thinclaw_gmail_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
     secret_store: State<'_, crate::secret_store::SecretStore>,
-) -> Result<GmailStatusResponse, String> {
+) -> Result<GmailStatusResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
         return remote_gmail_status(&proxy, &status).await;

@@ -245,7 +245,7 @@ impl ModelProviderRegistry {
         &self,
         app: &AppHandle,
     ) -> Result<Vec<crate::model_manager::ModelFile>, String> {
-        crate::model_manager::list_local_models(app)
+        Ok(crate::model_manager::list_local_models(app)?)
     }
 
     /// Snapshot the active local runtime for both Desktop product modes.

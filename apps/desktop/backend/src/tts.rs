@@ -48,7 +48,7 @@ pub async fn direct_media_tts_synthesize(
     pool: State<'_, SqlitePool>,
     text: String,
     model_path: Option<String>,
-) -> Result<DirectTtsResponse, String> {
+) -> Result<DirectTtsResponse, crate::thinclaw::bridge::BridgeError> {
     // Read user's preferred voice from config (set via InferenceModeTab voice selector)
     let user_voice = config_mgr
         .get_config()
@@ -174,13 +174,13 @@ pub async fn direct_media_tts_synthesize(
             CommandEvent::Terminated(payload) => {
                 if let Some(code) = payload.code {
                     if code != 0 {
-                        return Err(format!("piper exited with code {code}"));
+                        return Err((format!("piper exited with code {code}")).into());
                     }
                 }
                 break;
             }
             CommandEvent::Error(e) => {
-                return Err(format!("piper process error: {e}"));
+                return Err((format!("piper process error: {e}")).into());
             }
             _ => {}
         }
@@ -188,7 +188,8 @@ pub async fn direct_media_tts_synthesize(
 
     if pcm_bytes.is_empty() {
         return Err(
-            "piper produced no audio output. Check that the model path is valid.".to_string(),
+            ("piper produced no audio output. Check that the model path is valid.".to_string())
+                .into(),
         );
     }
 
@@ -220,12 +221,12 @@ async fn persist_voice_output(
     provider: Option<String>,
     mime_type: &str,
     metadata: std::collections::HashMap<String, String>,
-) -> Result<AssetRecord, String> {
+) -> Result<AssetRecord, crate::thinclaw::bridge::BridgeError> {
     let file_store = app.state::<FileStore>();
     file_store
         .create_dir_all("voice/output")
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let id = Uuid::new_v4().to_string();
     let extension = if mime_type == "audio/mpeg" {
         "mp3"
@@ -239,7 +240,7 @@ async fn persist_voice_output(
         .map_err(|e| format!("Failed to persist TTS audio: {}", e))?;
     let path = file_store.resolve_path(&relative_path).await;
 
-    DirectAssetStore::upsert(
+    Ok(DirectAssetStore::upsert(
         pool,
         NewDirectAsset {
             id,
@@ -263,7 +264,7 @@ async fn persist_voice_output(
             metadata,
         },
     )
-    .await
+    .await?)
 }
 
 /// List available voices for the active TTS backend.
@@ -275,7 +276,7 @@ async fn persist_voice_output(
 #[specta::specta]
 pub async fn direct_media_tts_list_voices(
     router: State<'_, InferenceRouter>,
-) -> Result<Vec<crate::inference::VoiceInfo>, String> {
+) -> Result<Vec<crate::inference::VoiceInfo>, crate::thinclaw::bridge::BridgeError> {
     if let Some(backend) = router.tts_backend().await {
         let voices = backend
             .available_voices()

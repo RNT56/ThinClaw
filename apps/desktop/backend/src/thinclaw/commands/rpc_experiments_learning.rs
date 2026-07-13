@@ -57,7 +57,10 @@ fn optional_trimmed(value: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn validate_env_name(label: &str, value: &Option<String>) -> Result<Option<String>, String> {
+fn validate_env_name(
+    label: &str,
+    value: &Option<String>,
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     let Some(value) = optional_trimmed(value) else {
         return Ok(None);
     };
@@ -67,14 +70,18 @@ fn validate_env_name(label: &str, value: &Option<String>) -> Result<Option<Strin
         .is_some_and(|character| character == '_' || character.is_ascii_alphabetic());
     if !valid_start || !chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
     {
-        return Err(format!(
+        return Err((format!(
             "{label} must be an environment variable name such as THINCLAW_MEMORY_API_KEY"
-        ));
+        ))
+        .into());
     }
     Ok(Some(value))
 }
 
-fn validate_http_url(label: &str, value: &Option<String>) -> Result<Option<String>, String> {
+fn validate_http_url(
+    label: &str,
+    value: &Option<String>,
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     let Some(value) = optional_trimmed(value) else {
         return Ok(None);
     };
@@ -82,35 +89,45 @@ fn validate_http_url(label: &str, value: &Option<String>) -> Result<Option<Strin
         format!("{label} must be an absolute HTTP or HTTPS URL, for example http://localhost:8888")
     })?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(format!(
+        return Err((format!(
             "{label} must be an absolute HTTP or HTTPS URL, for example http://localhost:8888"
-        ));
+        ))
+        .into());
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(format!(
+        return Err((format!(
             "{label} must not contain embedded credentials; use an API-key environment variable"
-        ));
+        ))
+        .into());
     }
     Ok(Some(value.trim_end_matches('/').to_string()))
 }
 
 fn build_external_memory_settings(
     request: &ExternalMemoryConfigureRequest,
-) -> Result<(String, thinclaw_core::settings::LearningProviderSettings), String> {
+) -> Result<
+    (String, thinclaw_core::settings::LearningProviderSettings),
+    crate::thinclaw::bridge::BridgeError,
+> {
     let provider = request.provider.trim().to_ascii_lowercase();
     if !EXTERNAL_MEMORY_PROVIDERS.contains(&provider.as_str()) {
-        return Err(format!(
+        return Err((format!(
             "Unsupported external-memory provider '{provider}'. Choose one of: {}",
             EXTERNAL_MEMORY_PROVIDERS.join(", ")
-        ));
+        ))
+        .into());
     }
     if request.activate && !request.enabled {
         return Err(
-            "An external-memory provider must be enabled before it can be activated".to_string(),
+            "An external-memory provider must be enabled before it can be activated"
+                .to_string()
+                .into(),
         );
     }
     if request.cadence == Some(0) || request.depth == Some(0) {
-        return Err("Provider cadence and depth must be at least 1 when supplied".to_string());
+        return Err(
+            ("Provider cadence and depth must be at least 1 when supplied".to_string()).into(),
+        );
     }
 
     let mut config = HashMap::new();
@@ -161,28 +178,31 @@ fn unavailable(reason: impl Into<String>) -> Value {
 
 fn api_result_to_json<T: Serialize>(
     result: thinclaw_core::api::ApiResult<T>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     match result {
-        Ok(value) => serde_json::to_value(value).map_err(|error| error.to_string()),
+        Ok(value) => serde_json::to_value(value)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string())),
         Err(thinclaw_core::api::ApiError::FeatureDisabled(message))
         | Err(thinclaw_core::api::ApiError::Unavailable(message)) => Ok(unavailable(message)),
-        Err(error) => Err(format!("{}: {}", error.error_code(), error)),
+        Err(error) => Err((format!("{}: {}", error.error_code(), error)).into()),
     }
 }
 
 async fn local_store(
     ironclaw: &State<'_, ThinClawRuntimeState>,
-) -> Result<std::sync::Arc<dyn thinclaw_core::db::Database>, String> {
+) -> Result<std::sync::Arc<dyn thinclaw_core::db::Database>, crate::thinclaw::bridge::BridgeError> {
     let agent = ironclaw.agent().await?;
-    agent
-        .store()
-        .cloned()
-        .ok_or_else(|| "ThinClaw database is not available".to_string())
+    agent.store().cloned().ok_or_else(|| {
+        crate::thinclaw::bridge::BridgeError::from("ThinClaw database is not available")
+    })
 }
 
 async fn learning_orchestrator(
     ironclaw: &State<'_, ThinClawRuntimeState>,
-) -> Result<thinclaw_core::agent::learning::LearningOrchestrator, String> {
+) -> Result<
+    thinclaw_core::agent::learning::LearningOrchestrator,
+    crate::thinclaw::bridge::BridgeError,
+> {
     let agent = ironclaw.agent().await?;
     let store = agent
         .store()
@@ -197,8 +217,11 @@ async fn learning_orchestrator(
     Ok(orchestrator)
 }
 
-fn parse_uuid(value: &str, label: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(value).map_err(|_| format!("Invalid {label} ID: {value}"))
+fn parse_uuid(value: &str, label: &str) -> Result<Uuid, crate::thinclaw::bridge::BridgeError> {
+    Uuid::parse_str(value).map_err(|_| crate::thinclaw::bridge::BridgeError::InvalidInput {
+        message: format!("Invalid {label} ID: {value}"),
+        field: Some(label.to_string()),
+    })
 }
 
 fn limit_or_default(limit: Option<u32>) -> usize {
@@ -212,7 +235,7 @@ fn limit_or_default(limit: Option<u32>) -> usize {
 pub async fn thinclaw_learning_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -239,7 +262,7 @@ pub async fn thinclaw_learning_status(
 pub async fn thinclaw_learning_history(
     ironclaw: State<'_, ThinClawRuntimeState>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -267,7 +290,7 @@ pub async fn thinclaw_learning_history(
 pub async fn thinclaw_learning_candidates(
     ironclaw: State<'_, ThinClawRuntimeState>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -294,7 +317,7 @@ pub async fn thinclaw_learning_candidates(
 pub async fn thinclaw_learning_artifact_versions(
     ironclaw: State<'_, ThinClawRuntimeState>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -320,7 +343,7 @@ pub async fn thinclaw_learning_artifact_versions(
 #[specta::specta]
 pub async fn thinclaw_learning_provider_health(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/learning/provider-health").await;
     }
@@ -337,12 +360,12 @@ pub async fn thinclaw_external_memory_configure(
     use crate::thinclaw::bridge::{gated, RouteMode};
 
     if ironclaw.remote_proxy().await.is_some() {
-        return Err(gated(
+        return Err((gated(
             "external-memory setup",
             "The connected gateway exposes provider health but does not expose credential-bearing provider configuration over HTTP.",
             "switch to the local embedded runtime and configure the provider on that host",
             RouteMode::LocalOnly,
-        ));
+        )).into());
     }
     let (provider, settings) = build_external_memory_settings(&request)?;
     let orchestrator = learning_orchestrator(&ironclaw).await?;
@@ -364,12 +387,12 @@ pub async fn thinclaw_external_memory_disable(
     use crate::thinclaw::bridge::{gated, RouteMode};
 
     if ironclaw.remote_proxy().await.is_some() {
-        return Err(gated(
+        return Err((gated(
             "external-memory setup",
             "The connected gateway exposes provider health but does not expose credential-bearing provider configuration over HTTP.",
             "switch to the local embedded runtime and disable the provider on that host",
             RouteMode::LocalOnly,
-        ));
+        )).into());
     }
     let orchestrator = learning_orchestrator(&ironclaw).await?;
     let providers = orchestrator.disable_active_memory_provider(USER_ID).await?;
@@ -385,7 +408,7 @@ pub async fn thinclaw_learning_code_proposals(
     ironclaw: State<'_, ThinClawRuntimeState>,
     status: Option<String>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status_query = status
             .as_deref()
@@ -418,7 +441,7 @@ pub async fn thinclaw_learning_outcomes(
     ironclaw: State<'_, ThinClawRuntimeState>,
     status: Option<String>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status_query = status
             .as_deref()
@@ -454,7 +477,7 @@ pub async fn thinclaw_learning_outcomes(
 pub async fn thinclaw_learning_rollbacks(
     ironclaw: State<'_, ThinClawRuntimeState>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -485,7 +508,7 @@ pub async fn thinclaw_learning_review_code_proposal(
     proposal_id: String,
     decision: String,
     note: Option<String>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
@@ -515,7 +538,7 @@ pub async fn thinclaw_learning_review_outcome(
     outcome_id: String,
     decision: String,
     verdict: Option<String>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
@@ -546,7 +569,7 @@ pub async fn thinclaw_learning_record_rollback(
     artifact_name: String,
     artifact_version_id: Option<String>,
     reason: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
@@ -590,12 +613,12 @@ pub async fn thinclaw_learning_evaluate_outcomes(
             .await
             .map_err(|e| e.into());
     }
-    Err(crate::thinclaw::bridge::gated(
+    Err((crate::thinclaw::bridge::gated(
         "manual outcome evaluation",
         "Manual outcome evaluation requires the gateway outcome service; the Desktop local engine exposes outcome review state but not direct evaluator execution.",
         "connect a remote gateway",
         crate::thinclaw::bridge::RouteMode::RemoteOnly,
-    ))
+    )).into())
 }
 
 // ── Experiments reads ──────────────────────────────────────────────────────
@@ -604,7 +627,7 @@ pub async fn thinclaw_learning_evaluate_outcomes(
 #[specta::specta]
 pub async fn thinclaw_experiments_projects(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/experiments/projects").await;
     }
@@ -616,7 +639,7 @@ pub async fn thinclaw_experiments_projects(
 #[specta::specta]
 pub async fn thinclaw_experiments_campaigns(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/experiments/campaigns").await;
     }
@@ -628,7 +651,7 @@ pub async fn thinclaw_experiments_campaigns(
 #[specta::specta]
 pub async fn thinclaw_experiments_runners(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/experiments/runners").await;
     }
@@ -640,7 +663,7 @@ pub async fn thinclaw_experiments_runners(
 #[specta::specta]
 pub async fn thinclaw_experiments_targets(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/experiments/targets").await;
     }
@@ -653,7 +676,7 @@ pub async fn thinclaw_experiments_targets(
 pub async fn thinclaw_experiments_trials(
     ironclaw: State<'_, ThinClawRuntimeState>,
     campaign_id: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!("/api/experiments/campaigns/{campaign_id}/trials"))
@@ -671,7 +694,7 @@ pub async fn thinclaw_experiments_trials(
 pub async fn thinclaw_experiments_trial_artifacts(
     ironclaw: State<'_, ThinClawRuntimeState>,
     trial_id: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!("/api/experiments/trials/{trial_id}/artifacts"))
@@ -689,7 +712,7 @@ pub async fn thinclaw_experiments_trial_artifacts(
 pub async fn thinclaw_experiments_model_usage(
     ironclaw: State<'_, ThinClawRuntimeState>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -710,7 +733,7 @@ pub async fn thinclaw_experiments_model_usage(
 pub async fn thinclaw_experiments_opportunities(
     ironclaw: State<'_, ThinClawRuntimeState>,
     limit: Option<u32>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -734,7 +757,7 @@ pub async fn thinclaw_experiments_opportunities(
 #[specta::specta]
 pub async fn thinclaw_experiments_gpu_clouds(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json("/api/experiments/providers/gpu-clouds")
@@ -753,7 +776,7 @@ pub async fn thinclaw_experiments_gpu_clouds(
 pub async fn thinclaw_experiments_validate_runner(
     ironclaw: State<'_, ThinClawRuntimeState>,
     runner_id: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
@@ -775,13 +798,13 @@ pub async fn thinclaw_experiments_campaign_action(
     ironclaw: State<'_, ThinClawRuntimeState>,
     campaign_id: String,
     action: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     let action = action.trim().to_ascii_lowercase();
     if !matches!(
         action.as_str(),
         "pause" | "resume" | "cancel" | "promote" | "reissue-lease"
     ) {
-        return Err(format!("Unsupported experiment campaign action: {action}"));
+        return Err((format!("Unsupported experiment campaign action: {action}")).into());
     }
 
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -831,12 +854,12 @@ pub async fn thinclaw_experiments_gpu_validate(
             .await
             .map_err(|e| e.into());
     }
-    Err(crate::thinclaw::bridge::gated(
+    Err((crate::thinclaw::bridge::gated(
         "GPU credential validation",
         "GPU cloud credential validation is only available through a ThinClaw gateway because it requires the gateway secrets service.",
         "connect a remote gateway",
         crate::thinclaw::bridge::RouteMode::RemoteOnly,
-    ))
+    )).into())
 }
 
 #[tauri::command]
@@ -854,12 +877,12 @@ pub async fn thinclaw_experiments_gpu_launch_test(
             .await
             .map_err(|e| e.into());
     }
-    Err(crate::thinclaw::bridge::gated(
+    Err((crate::thinclaw::bridge::gated(
         "GPU launch test",
         "GPU cloud launch tests are only available through a ThinClaw gateway because Desktop local mode does not expose provider credentials for remote compute launch.",
         "connect a remote gateway",
         crate::thinclaw::bridge::RouteMode::RemoteOnly,
-    ))
+    )).into())
 }
 
 // ── Agent eval (agent-loop environment) ─────────────────────────────────────
@@ -872,7 +895,7 @@ pub async fn thinclaw_experiments_gpu_launch_test(
 #[specta::specta]
 pub async fn thinclaw_experiments_list_envs(
     _ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     Ok(json!({
         "available": true,
         "environments": [
@@ -918,12 +941,12 @@ pub async fn thinclaw_experiments_run_eval(
 
     // Agent-loop eval drives the embedded local agent; unreachable in remote mode.
     if ironclaw.remote_proxy().await.is_some() {
-        return Err(gated(
+        return Err((gated(
             "experiment eval",
             "Agent-loop evaluation runs against the embedded local agent, which is not reachable when connected to a remote gateway.",
             "switch to the local embedded runtime to run evals",
             RouteMode::LocalOnly,
-        ));
+        )).into());
     }
 
     match env_id.to_ascii_lowercase().as_str() {
@@ -970,18 +993,18 @@ pub async fn thinclaw_experiments_run_eval(
                 "trajectories": trajectories,
             }))
         }
-        "terminal_bench" | "skill_bench" => Err(gated(
+        "terminal_bench" | "skill_bench" => Err((gated(
             "benchmark eval",
             "Terminal and skill benchmarks need case definitions, which Desktop cannot supply yet — run them through the `thinclaw` CLI experiment runner.",
             "use the CLI experiment runner",
             RouteMode::LocalOnly,
-        )),
-        other => Err(gated(
+        )).into()),
+        other => Err((gated(
             "experiment eval",
             format!("Unknown environment '{other}'."),
             "call thinclaw_experiments_list_envs to discover available environments",
             RouteMode::LocalOnly,
-        )),
+        )).into()),
     }
 }
 
@@ -1033,18 +1056,21 @@ mod external_memory_tests {
         let unsupported = request("mystery");
         assert!(build_external_memory_settings(&unsupported)
             .expect_err("unsupported provider must fail")
+            .to_string()
             .contains("Unsupported external-memory provider"));
 
         let mut unsafe_url = request("zep");
         unsafe_url.base_url = Some("https://token@example.com".to_string());
         assert!(build_external_memory_settings(&unsafe_url)
             .expect_err("embedded credentials must fail")
+            .to_string()
             .contains("must not contain embedded credentials"));
 
         let mut invalid_env = request("mem0");
         invalid_env.api_key_env = Some("not a variable".to_string());
         assert!(build_external_memory_settings(&invalid_env)
             .expect_err("invalid environment reference must fail")
+            .to_string()
             .contains("environment variable name"));
     }
 }

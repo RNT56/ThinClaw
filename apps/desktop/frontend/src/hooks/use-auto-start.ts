@@ -4,6 +4,7 @@ import { commands } from "../lib/bindings";
 import { useModelContext } from "../components/model-context";
 import { useConfig } from "./use-config";
 import { toast } from "sonner";
+import { bridgeErrorMessage } from "../lib/command-errors";
 
 export function useAutoStart() {
     const { config } = useConfig();
@@ -76,7 +77,7 @@ export function useAutoStart() {
                     // Start the engine server (mlx_lm.server / vllm serve / etc.)
                     const result = await directCommands.directRuntimeStartEngine(cleanPath, maxContext);
                     if (result.status === "error") {
-                        throw new Error(result.error);
+                        throw new Error(bridgeErrorMessage(result.error));
                     }
                     await refreshRuntimeSnapshot();
 

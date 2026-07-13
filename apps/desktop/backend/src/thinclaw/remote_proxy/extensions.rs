@@ -7,11 +7,16 @@ impl RemoteGatewayProxy {
     // ── Extensions ───────────────────────────────────────────────────────────
 
     /// List all extensions.
-    pub async fn list_extensions(&self) -> Result<serde_json::Value, String> {
+    pub async fn list_extensions(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json("/api/extensions").await
     }
 
-    pub async fn activate_extension(&self, name: &str) -> Result<serde_json::Value, String> {
+    pub async fn activate_extension(
+        &self,
+        name: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             &format!("/api/extensions/{}/activate", urlencoding::encode(name)),
             &serde_json::json!({}),
@@ -19,7 +24,10 @@ impl RemoteGatewayProxy {
         .await
     }
 
-    pub async fn remove_extension(&self, name: &str) -> Result<serde_json::Value, String> {
+    pub async fn remove_extension(
+        &self,
+        name: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             &format!("/api/extensions/{}/remove", urlencoding::encode(name)),
             &serde_json::json!({}),
@@ -27,7 +35,9 @@ impl RemoteGatewayProxy {
         .await
     }
 
-    pub async fn list_hooks(&self) -> Result<serde_json::Value, String> {
+    pub async fn list_hooks(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json("/api/hooks").await
     }
 
@@ -35,7 +45,7 @@ impl RemoteGatewayProxy {
         &self,
         bundle_json: &str,
         source: Option<&str>,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             "/api/hooks",
             &serde_json::json!({ "bundle_json": bundle_json, "source": source }),
@@ -43,30 +53,44 @@ impl RemoteGatewayProxy {
         .await
     }
 
-    pub async fn unregister_hook(&self, name: &str) -> Result<serde_json::Value, String> {
+    pub async fn unregister_hook(
+        &self,
+        name: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.delete_json(&format!("/api/hooks/{}", urlencoding::encode(name)))
             .await
     }
 
-    pub async fn list_tools(&self) -> Result<serde_json::Value, String> {
+    pub async fn list_tools(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json("/api/extensions/tools").await
     }
 
     // ── Settings / Config ────────────────────────────────────────────────────
 
     /// Get a config setting from the remote agent.
-    pub async fn get_setting(&self, key: &str) -> Result<serde_json::Value, String> {
+    pub async fn get_setting(
+        &self,
+        key: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json(&format!("/api/settings/{}", urlencoding::encode(key)))
             .await
     }
 
     /// List all non-sensitive config settings from the remote agent.
-    pub async fn list_settings(&self) -> Result<serde_json::Value, String> {
+    pub async fn list_settings(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json("/api/settings").await
     }
 
     /// Set a config setting on the remote agent.
-    pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
+    pub async fn set_setting(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let url = format!("/api/settings/{}", urlencoding::encode(key));
         let body = serde_json::json!({ "value": value });
         self.put_json(&url, &body).await.map(|_| ())
@@ -80,17 +104,21 @@ impl RemoteGatewayProxy {
     pub async fn inject_secrets(
         &self,
         _secrets: &std::collections::HashMap<String, String>,
-    ) -> Result<u32, String> {
-        Err(
-            "unavailable: remote raw secret injection is disabled; use provider vault save/delete"
-                .to_string(),
-        )
+    ) -> Result<u32, crate::thinclaw::bridge::BridgeError> {
+        Err(crate::thinclaw::bridge::gated(
+            "remote raw secret injection",
+            "raw secret injection is disabled",
+            "use provider vault save/delete",
+            crate::thinclaw::bridge::RouteMode::LocalOnly,
+        ))
     }
 
     // ── Diagnostics / Logs ───────────────────────────────────────────────────
 
     /// Get full diagnostics from the remote gateway.
-    pub async fn get_diagnostics(&self) -> Result<serde_json::Value, String> {
+    pub async fn get_diagnostics(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json("/api/gateway/status").await
     }
 }

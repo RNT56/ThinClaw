@@ -54,7 +54,9 @@ pub struct ModelDownloadInfo {
 /// Build an HTTP client with optional HF token injection.
 /// Reads the token from the app-wide SecretStore (populated once at startup
 /// from the macOS Keychain).
-async fn build_hf_client(app: &AppHandle) -> Result<reqwest::Client, String> {
+async fn build_hf_client(
+    app: &AppHandle,
+) -> Result<reqwest::Client, crate::thinclaw::bridge::BridgeError> {
     let mut headers = reqwest::header::HeaderMap::new();
 
     // Read HF token from the app-wide SecretStore (NOT ThinClawConfig)
@@ -68,12 +70,12 @@ async fn build_hf_client(app: &AppHandle) -> Result<reqwest::Client, String> {
         }
     }
 
-    reqwest::Client::builder()
+    Ok(reqwest::Client::builder()
         .default_headers(headers)
         .user_agent("ThinClawDesktop/0.14")
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?)
 }
 
 /// Format bytes as human-readable string.
@@ -144,7 +146,7 @@ async fn fetch_hf_models(
     client: &reqwest::Client,
     url: &str,
     engine_tag: &str,
-) -> Result<Vec<HfModelCard>, String> {
+) -> Result<Vec<HfModelCard>, crate::thinclaw::bridge::BridgeError> {
     let response = client.get(url).send().await.map_err(|e| {
         if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
             "HuggingFace rate limit reached. Add an HF token in settings to increase limits."
@@ -156,19 +158,21 @@ async fn fetch_hf_models(
 
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         return Err(
-            "HuggingFace rate limit reached. Add an HF token in settings to increase limits."
-                .to_string(),
+            ("HuggingFace rate limit reached. Add an HF token in settings to increase limits."
+                .to_string())
+            .into(),
         );
     }
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!(
+        return Err((format!(
             "HuggingFace model search failed with HTTP {}: {}",
             status,
             body.chars().take(240).collect::<String>()
-        ));
+        ))
+        .into());
     }
 
     let body: Vec<serde_json::Value> = response
@@ -207,7 +211,7 @@ pub async fn direct_runtime_discover_hf_models(
     // Optional list of HF pipeline tags to filter by task type.
     // When provided, one request per tag is made and results are merged.
     pipeline_tags: Option<Vec<String>>,
-) -> Result<Vec<HfModelCard>, String> {
+) -> Result<Vec<HfModelCard>, crate::thinclaw::bridge::BridgeError> {
     let tag = engine_to_hf_tag(&engine)
         .ok_or_else(|| format!("Unknown engine '{}' — cannot map to HF tag", engine))?;
 
@@ -253,10 +257,11 @@ pub async fn direct_runtime_discover_hf_models(
         }
 
         if all_cards.is_empty() && !failures.is_empty() {
-            return Err(format!(
+            return Err((format!(
                 "HuggingFace search failed for all requested filters: {}",
                 failures.join("; ")
-            ));
+            ))
+            .into());
         }
 
         // Deduplicate by model ID
@@ -290,7 +295,7 @@ pub async fn direct_runtime_get_model_files(
     app: AppHandle,
     repo_id: String,
     engine: String,
-) -> Result<ModelDownloadInfo, String> {
+) -> Result<ModelDownloadInfo, crate::thinclaw::bridge::BridgeError> {
     let client = build_hf_client(&app).await?;
     let url = format!("https://huggingface.co/api/models/{}/tree/main", repo_id);
 
@@ -301,11 +306,12 @@ pub async fn direct_runtime_get_model_files(
         .map_err(|e| format!("HF Tree API failed: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!(
+        return Err((format!(
             "HF Tree API returned {} for repo '{}'",
             response.status(),
             repo_id
-        ));
+        ))
+        .into());
     }
 
     let tree: Vec<serde_json::Value> = response
@@ -427,8 +433,11 @@ pub async fn direct_runtime_download_hf_model_files(
     files_to_download: Vec<String>,
     dest_subdir: Option<String>,
     category: Option<String>,
-) -> Result<String, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let sanitized = repo_id.replace('/', "_");
     let model_category = category.unwrap_or_else(|| "LLM".to_string());
     let dest_dir = app_data
@@ -517,11 +526,12 @@ pub async fn direct_runtime_download_hf_model_files(
             .map_err(|e| format!("Download request failed: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(format!(
+            return Err((format!(
                 "Download failed for '{}': HTTP {}",
                 filename,
                 response.status()
-            ));
+            ))
+            .into());
         }
 
         let file_total = response.content_length().unwrap_or(file_sizes[file_idx]);
@@ -641,7 +651,7 @@ pub async fn direct_runtime_download_hf_model_files(
 pub async fn direct_runtime_discover_embedding_dimension(
     app: AppHandle,
     repo_id: String,
-) -> Result<Option<u32>, String> {
+) -> Result<Option<u32>, crate::thinclaw::bridge::BridgeError> {
     let client = build_hf_client(&app).await?;
 
     // Fetch config.json from the HF Hub raw file API

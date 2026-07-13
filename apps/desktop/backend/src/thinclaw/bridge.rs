@@ -10,9 +10,8 @@
 //! instead of an error toast.
 //!
 //! This module is the foundation the rest of WS-1 (route-table registry, bridge
-//! linter, generated route matrix) builds on. It is intentionally additive: it
-//! does not yet replace existing `Result<_, String>` signatures — commands are
-//! migrated incrementally.
+//! linter, generated route matrix) builds on. Every desktop command uses this
+//! envelope, which keeps error handling machine-readable all the way to the UI.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,9 +43,34 @@ pub enum BridgeError {
         /// Which runtime mode *would* satisfy it.
         satisfied_by: RouteMode,
     },
-    /// A genuine error (kept distinct from the gated state above).
-    /// Struct variant (not a tuple) so the internally-tagged (`tag = "kind"`)
-    /// representation stays valid for serde/specta export.
+    /// User-provided data failed validation.
+    InvalidInput {
+        message: String,
+        field: Option<String>,
+    },
+    /// Credentials are absent, expired, or rejected by the target service.
+    Unauthorized {
+        message: String,
+        remediation: Option<String>,
+    },
+    /// A requested local or remote resource does not exist.
+    NotFound { resource: String, message: String },
+    /// The request conflicts with current state and may be retried after it changes.
+    Conflict {
+        message: String,
+        remediation: Option<String>,
+    },
+    /// The operation exceeded a bounded deadline.
+    Timeout {
+        operation: String,
+        message: String,
+        retryable: bool,
+    },
+    /// The transport failed before a valid response was received.
+    Network { message: String, retryable: bool },
+    /// A genuine unclassified runtime error (kept distinct from gated and
+    /// actionable outcomes). Struct variants keep the internally-tagged
+    /// (`tag = "kind"`) representation valid for serde/specta export.
     Runtime { message: String },
 }
 
@@ -56,7 +80,13 @@ impl std::fmt::Display for BridgeError {
             BridgeError::Unavailable {
                 capability, reason, ..
             } => write!(f, "unavailable: {capability}: {reason}"),
-            BridgeError::Runtime { message } => write!(f, "{message}"),
+            BridgeError::InvalidInput { message, .. }
+            | BridgeError::Unauthorized { message, .. }
+            | BridgeError::NotFound { message, .. }
+            | BridgeError::Conflict { message, .. }
+            | BridgeError::Timeout { message, .. }
+            | BridgeError::Network { message, .. }
+            | BridgeError::Runtime { message } => write!(f, "{message}"),
         }
     }
 }
@@ -76,6 +106,15 @@ impl From<&str> for BridgeError {
         BridgeError::Runtime {
             message: value.to_string(),
         }
+    }
+}
+
+/// Compatibility for internal subsystems that have not adopted the desktop
+/// command envelope. The downgrade happens only behind the bridge boundary;
+/// registered commands still serialize [`BridgeError`] to the frontend.
+impl From<BridgeError> for String {
+    fn from(value: BridgeError) -> Self {
+        value.to_string()
     }
 }
 

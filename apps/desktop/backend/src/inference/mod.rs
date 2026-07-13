@@ -233,7 +233,7 @@ pub struct ModalityBackends {
 pub async fn direct_inference_get_backends(
     router: tauri::State<'_, InferenceRouter>,
     config_manager: tauri::State<'_, crate::config::ConfigManager>,
-) -> Result<Vec<ModalityBackends>, String> {
+) -> Result<Vec<ModalityBackends>, crate::thinclaw::bridge::BridgeError> {
     let config = config_manager.get_config();
     let active_list = router.active_backends(&config).await;
     let mut result = Vec::with_capacity(5);
@@ -262,7 +262,7 @@ pub async fn direct_inference_update_backend(
     config_manager: tauri::State<'_, crate::config::ConfigManager>,
     modality: Modality,
     backend_id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     tracing::info!(
         "[inference] Updating {} backend to '{}'",
         modality,
@@ -453,7 +453,7 @@ fn remote_model_option_to_entry(
 async fn remote_discover_cloud_models(
     proxy: crate::thinclaw::remote_proxy::RemoteGatewayProxy,
     providers: Vec<String>,
-) -> Result<model_discovery::types::DiscoveryResult, String> {
+) -> Result<model_discovery::types::DiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     let config = proxy.get_providers_config().await?;
     let slugs = remote_provider_slugs(&config, &providers);
     let mut provider_results = Vec::new();
@@ -494,7 +494,7 @@ pub async fn direct_inference_discover_cloud_models(
     ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
     registry: tauri::State<'_, ModelProviderRegistry>,
     providers: Vec<String>,
-) -> Result<model_discovery::types::DiscoveryResult, String> {
+) -> Result<model_discovery::types::DiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return remote_discover_cloud_models(proxy, providers).await;
     }
@@ -524,12 +524,12 @@ pub async fn direct_inference_refresh_cloud_models(
     ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
     registry: tauri::State<'_, ModelProviderRegistry>,
     provider: String,
-) -> Result<model_discovery::types::ProviderDiscoveryResult, String> {
+) -> Result<model_discovery::types::ProviderDiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
+        return Ok(proxy
             .get_provider_models(&provider)
             .await
-            .map(remote_provider_models_to_discovery);
+            .map(remote_provider_models_to_discovery)?);
     }
 
     tracing::info!("[model_discovery] Refreshing models for '{}'", provider);

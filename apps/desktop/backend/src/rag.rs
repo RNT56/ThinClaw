@@ -35,11 +35,11 @@ pub async fn direct_rag_upload_document(
     pool: State<'_, SqlitePool>,
     file_bytes: Vec<u8>,
     filename: String,
-) -> Result<DirectDocumentUploadResponse, String> {
+) -> Result<DirectDocumentUploadResponse, crate::thinclaw::bridge::BridgeError> {
     file_store
         .create_dir_all("documents")
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let safe_filename = std::path::Path::new(&filename)
         .file_name()
@@ -103,7 +103,7 @@ pub async fn extract_document_content(
     buffer: &[u8],
     hash: &str,
     force_ocr_arg: bool,
-) -> Result<(String, bool), String> {
+) -> Result<(String, bool), crate::thinclaw::bridge::BridgeError> {
     let mut force_ocr = force_ocr_arg;
     let path_lc = file_path.to_lowercase();
     let is_pdf = path_lc.ends_with(".pdf");
@@ -154,14 +154,14 @@ pub async fn extract_document_content(
                     ..Default::default()
                 })
                 .build()
-                .map_err(|e| e.to_string())?,
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
         // Ensure browser is closed on all paths (including errors)
         // by using a scope guard pattern.
-        let browser_close_result: Result<(), String> = async {
+        let browser_close_result: Result<(), crate::thinclaw::bridge::BridgeError> = async {
         let _handle = tokio::spawn(async move { while (handler.next().await).is_some() {} });
 
         let page = browser
@@ -307,16 +307,16 @@ pub async fn extract_document_content(
                             ..Default::default()
                         })
                         .build()
-                        .map_err(|e| e.to_string())?,
+                        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?,
                 )
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
                 let _handle =
                     tokio::spawn(async move { while (handler.next().await).is_some() {} });
                 let page = browser
                     .new_page(&format!("file://{}", file_path))
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if let Ok(screenshot) = page.screenshot(chromiumoxide::page::ScreenshotParams::builder().format(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Jpeg).quality(80).build()).await {
                         let preview_rel = format!("previews/{}.jpg", hash);
@@ -355,7 +355,7 @@ pub async fn direct_rag_ingest_document(
     chat_id: Option<String>,
     project_id: Option<String>,
     embedding_model_path: Option<String>,
-) -> Result<DirectDocumentIngestResponse, String> {
+) -> Result<DirectDocumentIngestResponse, crate::thinclaw::bridge::BridgeError> {
     println!(
         "[rag] direct_rag_ingest_document: start for {}, chat_id={:?}, project_id={:?}",
         &file_path, chat_id, project_id
@@ -375,7 +375,7 @@ pub async fn direct_rag_ingest_document(
             .bind(&hash)
             .fetch_optional(pool.inner())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     if let Some((id, status)) = existing_doc {
         if status == "indexed" {
@@ -391,7 +391,7 @@ pub async fn direct_rag_ingest_document(
                 .bind(&id)
                 .execute(pool.inner())
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
             let mut metadata = HashMap::new();
             metadata.insert("hash".to_string(), hash);
@@ -442,7 +442,7 @@ pub async fn direct_rag_ingest_document(
     }
 
     if final_content.trim().is_empty() {
-        return Err("Document appears empty even after OCR attempts.".to_string());
+        return Err(("Document appears empty even after OCR attempts.".to_string()).into());
     }
 
     let doc_id: String = rand::thread_rng()
@@ -467,7 +467,7 @@ pub async fn direct_rag_ingest_document(
         .bind(&project_id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let chunk_size = 1000;
     let overlap = 100;
@@ -548,14 +548,14 @@ pub async fn direct_rag_ingest_document(
                         .map_err(|e| format!("Database insert failed: {}", e))?;
 
                     if let Err(e) = scoped_store.add(rowid as u64, &embedding) {
-                        return Err(format!("Vector store index failed: {}", e));
+                        return Err((format!("Vector store index failed: {}", e)).into());
                     }
                     Ok(())
                 }
             })
             .buffer_unordered(5);
 
-        let results: Vec<Result<(), String>> = stream.collect().await;
+        let results: Vec<Result<(), crate::thinclaw::bridge::BridgeError>> = stream.collect().await;
 
         for res in &results {
             if let Err(e) = res {
@@ -568,7 +568,7 @@ pub async fn direct_rag_ingest_document(
                     .bind(&doc_id)
                     .execute(pool.inner())
                     .await;
-                return Err(format!("Ingestion failed (rolling back): {}", e));
+                return Err((format!("Ingestion failed (rolling back): {}", e)).into());
             }
         }
     } else {
@@ -653,10 +653,10 @@ pub async fn direct_rag_ingest_document(
                             .text()
                             .await
                             .unwrap_or_else(|_| "Could not read response text".to_string());
-                        return Err(format!(
+                        return Err((format!(
                             "Embedding failed for chunk {}: {} - Body: {}",
                             i, status, text
-                        ));
+                        )).into());
                     }
 
                     let res_json: EmbeddingResponse = response
@@ -683,7 +683,7 @@ pub async fn direct_rag_ingest_document(
                             .map_err(|e| format!("Database insert failed: {}", e))?;
 
                         if let Err(e) = scoped_store.add(rowid as u64, &data.embedding) {
-                            return Err(format!("Vector store index failed: {}", e));
+                            return Err((format!("Vector store index failed: {}", e)).into());
                         }
                     }
                     Ok(())
@@ -691,7 +691,7 @@ pub async fn direct_rag_ingest_document(
             })
             .buffer_unordered(5);
 
-        let results: Vec<Result<(), String>> = stream.collect().await;
+        let results: Vec<Result<(), crate::thinclaw::bridge::BridgeError>> = stream.collect().await;
 
         for res in &results {
             if let Err(e) = res {
@@ -704,7 +704,7 @@ pub async fn direct_rag_ingest_document(
                     .bind(&doc_id)
                     .execute(pool.inner())
                     .await;
-                return Err(format!("Ingestion failed (rolling back): {}", e));
+                return Err((format!("Ingestion failed (rolling back): {}", e)).into());
             }
         }
     }
@@ -714,14 +714,14 @@ pub async fn direct_rag_ingest_document(
             .bind(&doc_id)
             .execute(pool.inner())
             .await;
-        return Err(format!("Failed to save vector index: {}", e));
+        return Err((format!("Failed to save vector index: {}", e)).into());
     }
 
     sqlx::query("UPDATE documents SET status = 'indexed' WHERE id = ?")
         .bind(&doc_id)
         .execute(pool.inner())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let mut metadata = HashMap::new();
     metadata.insert("hash".to_string(), hash.clone());
@@ -779,7 +779,7 @@ pub async fn direct_rag_retrieve_context(
     chat_id: Option<String>,
     doc_ids: Option<Vec<String>>,
     project_id: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
     let embedding_backend = inference_router.embedding_backend().await;
     retrieve_context_internal(
         Some(app),
@@ -808,7 +808,7 @@ pub async fn retrieve_context_internal(
     chat_id: Option<String>,
     doc_ids: Option<Vec<String>>,
     project_id_arg: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
     #[derive(serde::Serialize, Clone)]
     struct WebSearchStatus {
         id: Option<String>,
@@ -1267,7 +1267,7 @@ pub async fn list_project_files(pool: &SqlitePool, project_id: &str) -> Vec<Stri
 pub async fn perform_integrity_check(
     pool: &SqlitePool,
     vector_manager: &crate::vector_store::VectorStoreManager,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let chunk_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunks")
         .fetch_one(pool)
         .await
@@ -1295,6 +1295,6 @@ pub async fn perform_integrity_check(
 pub async fn direct_rag_check_vector_index_integrity(
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     perform_integrity_check(&pool, &vector_manager).await
 }

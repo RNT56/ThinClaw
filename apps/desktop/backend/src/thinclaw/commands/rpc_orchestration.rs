@@ -182,17 +182,17 @@ pub async fn thinclaw_spawn_session(
     agent_id: String,
     task: String,
     parent_session: Option<String>,
-) -> Result<SpawnSessionResponse, String> {
+) -> Result<SpawnSessionResponse, crate::thinclaw::bridge::BridgeError> {
     let agent_id = agent_id.trim();
     let task = task.trim();
     if agent_id.is_empty() {
-        return Err("Agent ID must not be empty".to_string());
+        return Err(("Agent ID must not be empty".to_string()).into());
     }
     if task.is_empty() {
-        return Err("Task must not be empty".to_string());
+        return Err(("Task must not be empty".to_string()).into());
     }
     if task.chars().count() > 8_000 {
-        return Err("Task must not exceed 8,000 characters".to_string());
+        return Err(("Task must not exceed 8,000 characters".to_string()).into());
     }
     let child_key = format!("agent:{}:task-{}", agent_id, uuid::Uuid::new_v4());
 
@@ -237,7 +237,7 @@ pub async fn thinclaw_spawn_session(
                 task: task.to_string(),
             });
         }
-        return Err(format!("Fleet agent '{agent_id}' is not configured"));
+        return Err((format!("Fleet agent '{agent_id}' is not configured")).into());
     }
 
     let now = std::time::SystemTime::now()
@@ -388,7 +388,7 @@ pub async fn thinclaw_spawn_session(
 pub async fn thinclaw_list_child_sessions(
     ironclaw: State<'_, ThinClawRuntimeState>,
     parent_session: String,
-) -> Result<Vec<ChildSessionInfo>, String> {
+) -> Result<Vec<ChildSessionInfo>, crate::thinclaw::bridge::BridgeError> {
     let mut children = sub_agent_registry::list_children(&parent_session).await;
 
     // ── Post-restart recovery: scan live sessions if registry is empty ──
@@ -438,7 +438,7 @@ pub async fn thinclaw_update_sub_agent_status(
     child_session: String,
     status: String,
     result_summary: Option<String>,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // Find the parent before updating
     let parent = sub_agent_registry::find_parent(&child_session).await;
 
@@ -482,7 +482,7 @@ pub async fn thinclaw_update_sub_agent_status(
 pub async fn thinclaw_agents_list(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Vec<AgentProfile>, String> {
+) -> Result<Vec<AgentProfile>, crate::thinclaw::bridge::BridgeError> {
     let cfg = state.get_config().await.ok_or("Config not loaded")?;
     let mut profiles: Vec<_> = cfg.profiles.iter().map(AgentProfile::redacted).collect();
 
@@ -509,11 +509,11 @@ pub async fn thinclaw_agents_list(
 pub async fn thinclaw_canvas_push(
     state: State<'_, ThinClawManager>,
     content: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .app
         .emit("thinclaw-canvas-push", content)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(())
 }
 
@@ -523,11 +523,11 @@ pub async fn thinclaw_canvas_push(
 pub async fn thinclaw_canvas_navigate(
     state: State<'_, ThinClawManager>,
     url: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .app
         .emit("thinclaw-canvas-navigate", url)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(())
 }
 
@@ -540,7 +540,7 @@ pub async fn thinclaw_canvas_dispatch_event(
     _run_id: Option<String>,
     event_type: String,
     payload: serde_json::Value,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // Inject the canvas event as a message to the agent
     let content = serde_json::json!({
         "type": "canvas_event",
@@ -557,7 +557,7 @@ pub async fn thinclaw_canvas_dispatch_event(
         false, // Context injection, don't trigger turn
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(ThinClawRpcResponse {
         ok: true,

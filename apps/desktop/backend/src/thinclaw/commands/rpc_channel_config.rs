@@ -17,7 +17,7 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 pub async fn thinclaw_channel_config_schema(
     ironclaw: State<'_, ThinClawRuntimeState>,
     channel_id: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let channel_id = urlencoding::encode(&channel_id);
         return proxy
@@ -34,7 +34,7 @@ pub async fn thinclaw_channel_config_schema(
 #[specta::specta]
 pub async fn thinclaw_channel_config_schemas(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/channels/config-schemas").await;
     }
@@ -104,10 +104,11 @@ pub async fn thinclaw_channel_config_submit(
         .filter(|field| field.required && field.field_type != "password")
     {
         if !obj.contains_key(&field.id) {
-            return Err(crate::thinclaw::bridge::BridgeError::from(format!(
+            return Err((crate::thinclaw::bridge::BridgeError::from(format!(
                 "missing required channel config field: {}",
                 field.id
-            )));
+            )))
+            .into());
         }
     }
     for (field_id, value) in &obj {
@@ -138,9 +139,10 @@ pub async fn thinclaw_channel_config_submit(
                 _ => false,
             };
         if required_value_missing || !value_valid {
-            return Err(crate::thinclaw::bridge::BridgeError::from(format!(
+            return Err((crate::thinclaw::bridge::BridgeError::from(format!(
                 "invalid value for channel config field: {field_id}"
-            )));
+            )))
+            .into());
         }
     }
 

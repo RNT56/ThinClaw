@@ -1,4 +1,5 @@
 import { commands, type Result } from './bindings';
+import { ThinClawCommandError } from './command-errors';
 
 type GeneratedCommands = typeof commands;
 type GeneratedCommand = (...args: never[]) => Promise<unknown>;
@@ -16,28 +17,6 @@ export type CommandClient = {
         ? (...args: Parameters<GeneratedCommands[Name]>) => Promise<ResultData<ReturnType<GeneratedCommands[Name]>>>
         : never;
 };
-
-function bridgeErrorMessage(error: unknown): string {
-    if (error instanceof Error) return error.message;
-    if (typeof error === 'string') return error;
-    if (error && typeof error === 'object') {
-        const value = error as Record<string, unknown>;
-        const reason = typeof value.reason === 'string' ? value.reason : null;
-        const remediation = typeof value.remediation === 'string' ? value.remediation : null;
-        const capability = typeof value.capability === 'string' ? value.capability : null;
-        if (reason) {
-            const prefix = capability ? `${capability}: ` : '';
-            return `${prefix}${reason}${remediation ? ` (${remediation})` : ''}`;
-        }
-
-        try {
-            return JSON.stringify(error);
-        } catch {
-            // Fall through to the stable generic conversion below.
-        }
-    }
-    return String(error ?? 'Unknown ThinClaw command error');
-}
 
 function isTransportResult(value: unknown): value is Result<unknown, unknown> {
     if (!value || typeof value !== 'object') return false;
@@ -62,7 +41,7 @@ export const commandClient = new Proxy(commands, {
             requireTauriRuntime(String(property));
             const result: unknown = await command(...args);
             if (!isTransportResult(result)) return result;
-            if (result.status === 'error') throw new Error(bridgeErrorMessage(result.error));
+            if (result.status === 'error') throw new ThinClawCommandError(result.error);
             return result.data;
         };
     },

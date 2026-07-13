@@ -21,12 +21,17 @@ fn routine_create_payload(
 
 impl RemoteGatewayProxy {
     /// List all routines.
-    pub async fn list_routines(&self) -> Result<serde_json::Value, String> {
+    pub async fn list_routines(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json("/api/routines").await
     }
 
     /// Trigger a routine manually.
-    pub async fn trigger_routine(&self, routine_id: &str) -> Result<serde_json::Value, String> {
+    pub async fn trigger_routine(
+        &self,
+        routine_id: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             &format!("/api/routines/{}/trigger", urlencoding::encode(routine_id)),
             &serde_json::json!({}),
@@ -39,7 +44,7 @@ impl RemoteGatewayProxy {
         &self,
         routine_id: &str,
         limit: u32,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.get_json(&format!(
             "/api/routines/{}/runs?limit={}",
             urlencoding::encode(routine_id),
@@ -56,7 +61,7 @@ impl RemoteGatewayProxy {
         schedule: &str,
         task: &str,
         trigger_type: &str,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             "/api/routines",
             &routine_create_payload(name, description, schedule, task, trigger_type),
@@ -69,7 +74,7 @@ impl RemoteGatewayProxy {
         &self,
         routine_id: &str,
         enabled: bool,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             &format!("/api/routines/{}/toggle", urlencoding::encode(routine_id)),
             &serde_json::json!({ "enabled": enabled }),
@@ -78,7 +83,10 @@ impl RemoteGatewayProxy {
     }
 
     /// Delete a routine.
-    pub async fn delete_routine(&self, routine_id: &str) -> Result<serde_json::Value, String> {
+    pub async fn delete_routine(
+        &self,
+        routine_id: &str,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.delete_json(&format!(
             "/api/routines/{}",
             urlencoding::encode(routine_id)
@@ -92,7 +100,7 @@ impl RemoteGatewayProxy {
     pub async fn clear_routine_runs(
         &self,
         routine_id: Option<&str>,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.delete_json_body(
             "/api/routines/runs",
             &serde_json::json!({ "routine_id": routine_id }),

@@ -89,11 +89,19 @@ impl ThinClawManager {
     }
 
     /// Initialize config from app data dir
-    pub async fn init_config(&self) -> Result<ThinClawConfig, String> {
-        let app_data_dir = self.app.path().app_data_dir().map_err(|e| e.to_string())?;
+    pub async fn init_config(
+        &self,
+    ) -> Result<ThinClawConfig, crate::thinclaw::bridge::BridgeError> {
+        let app_data_dir = self
+            .app
+            .path()
+            .app_data_dir()
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
         let config = ThinClawConfig::new(app_data_dir);
-        config.ensure_dirs().map_err(|e| e.to_string())?;
+        config
+            .ensure_dirs()
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
         *self.config.write().await = Some(config.clone());
         Ok(config)

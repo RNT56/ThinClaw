@@ -186,7 +186,7 @@ fn extension_action_from_api(
 #[specta::specta]
 pub async fn thinclaw_hooks_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<HooksListResponse, String> {
+) -> Result<HooksListResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.list_hooks().await?;
         let hooks = raw
@@ -262,7 +262,7 @@ pub async fn thinclaw_hooks_list(
 pub async fn thinclaw_hooks_register(
     ironclaw: State<'_, ThinClawRuntimeState>,
     input: HookRegisterInput,
-) -> Result<HookRegisterResponse, String> {
+) -> Result<HookRegisterResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy
             .register_hooks(&input.bundle_json, input.source.as_deref())
@@ -326,7 +326,7 @@ pub async fn thinclaw_hooks_register(
 pub async fn thinclaw_hooks_unregister(
     ironclaw: State<'_, ThinClawRuntimeState>,
     hook_name: String,
-) -> Result<HookUnregisterResponse, String> {
+) -> Result<HookUnregisterResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.unregister_hook(&hook_name).await?;
         let removed = raw
@@ -370,7 +370,7 @@ pub async fn thinclaw_hooks_unregister(
 #[specta::specta]
 pub async fn thinclaw_extensions_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<ExtensionsListResponse, String> {
+) -> Result<ExtensionsListResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.list_extensions().await?;
         let items: Vec<ExtensionInfoItem> = raw
@@ -391,7 +391,7 @@ pub async fn thinclaw_extensions_list(
 
     let extensions = thinclaw_core::api::extensions::list_extensions(ext_mgr)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let items: Vec<ExtensionInfoItem> = extensions
         .into_iter()
@@ -411,7 +411,7 @@ pub async fn thinclaw_extensions_list(
 pub async fn thinclaw_extension_activate(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.activate_extension(&name).await?;
         return Ok(extension_action_from_json(raw));
@@ -424,7 +424,7 @@ pub async fn thinclaw_extension_activate(
 
     let resp = thinclaw_core::api::extensions::activate_extension(ext_mgr, &name)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(extension_action_from_api(resp))
 }
@@ -435,7 +435,7 @@ pub async fn thinclaw_extension_activate(
 pub async fn thinclaw_extension_remove(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.remove_extension(&name).await?;
         return Ok(extension_action_from_json(raw));
@@ -448,7 +448,7 @@ pub async fn thinclaw_extension_remove(
 
     let resp = thinclaw_core::api::extensions::remove_extension(ext_mgr, &name)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(extension_action_from_api(resp))
 }
@@ -461,7 +461,7 @@ pub async fn thinclaw_extension_install(
     name: String,
     url: Option<String>,
     kind: Option<String>,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy
             .post_json(
@@ -483,7 +483,7 @@ pub async fn thinclaw_extension_install(
         kind.as_deref(),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(extension_action_from_api(resp))
 }
 
@@ -493,7 +493,7 @@ pub async fn thinclaw_extension_install(
 pub async fn thinclaw_extension_registry_search(
     ironclaw: State<'_, ThinClawRuntimeState>,
     query: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let encoded = query.unwrap_or_default();
         return proxy
@@ -573,12 +573,12 @@ pub async fn thinclaw_extension_reconnect(
         return Ok(extension_action_from_json(raw));
     }
 
-    Err(gated(
+    Err((gated(
         "extension reconnect",
         "local desktop mode does not expose a channel manager restart handle yet",
         "activate the extension or restart the gateway, or connect a remote gateway that supports reconnect",
         RouteMode::RemoteOnly,
-    ))
+    )).into())
 }
 
 /// Fetch an extension setup schema.
@@ -587,7 +587,7 @@ pub async fn thinclaw_extension_reconnect(
 pub async fn thinclaw_extension_setup_get(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -607,7 +607,7 @@ pub async fn thinclaw_extension_setup_get(
             thinclaw_core::extensions::manager::AuthRequestContext::default(),
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let kind = ext_mgr
         .list(None, false)
         .await
@@ -637,7 +637,7 @@ pub async fn thinclaw_extension_setup_submit(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     secrets: std::collections::HashMap<String, String>,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy
             .post_json(
@@ -672,7 +672,7 @@ pub async fn thinclaw_extension_setup_submit(
 pub async fn thinclaw_extension_validate_setup(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy
             .post_json(
@@ -707,10 +707,13 @@ pub async fn thinclaw_extension_validate_setup(
 
 fn mcp_ext_mgr(
     agent: &thinclaw_core::agent::Agent,
-) -> Result<&std::sync::Arc<thinclaw_core::extensions::ExtensionManager>, String> {
+) -> Result<
+    &std::sync::Arc<thinclaw_core::extensions::ExtensionManager>,
+    crate::thinclaw::bridge::BridgeError,
+> {
     agent
         .extension_manager()
-        .ok_or_else(|| "Extension manager not available".to_string())
+        .ok_or_else(|| BridgeError::from("Extension manager not available"))
 }
 
 /// List configured MCP servers.
@@ -718,15 +721,16 @@ fn mcp_ext_mgr(
 #[specta::specta]
 pub async fn thinclaw_mcp_servers(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/mcp/servers").await;
     }
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::list_servers(mcp_ext_mgr(&agent)?)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Fetch one MCP server's status/config.
@@ -735,7 +739,7 @@ pub async fn thinclaw_mcp_servers(
 pub async fn thinclaw_mcp_server(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!("/api/mcp/servers/{}", urlencoding::encode(&name)))
@@ -744,8 +748,9 @@ pub async fn thinclaw_mcp_server(
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::get_server(mcp_ext_mgr(&agent)?, &name)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// List tools exposed by an MCP server.
@@ -754,7 +759,7 @@ pub async fn thinclaw_mcp_server(
 pub async fn thinclaw_mcp_server_tools(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -766,8 +771,9 @@ pub async fn thinclaw_mcp_server_tools(
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::list_tools(mcp_ext_mgr(&agent)?, &name)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// List resources exposed by an MCP server.
@@ -776,7 +782,7 @@ pub async fn thinclaw_mcp_server_tools(
 pub async fn thinclaw_mcp_server_resources(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -788,8 +794,9 @@ pub async fn thinclaw_mcp_server_resources(
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::list_resources(mcp_ext_mgr(&agent)?, &name)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Read one MCP resource by URI.
@@ -799,7 +806,7 @@ pub async fn thinclaw_mcp_read_resource(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     uri: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -812,8 +819,9 @@ pub async fn thinclaw_mcp_read_resource(
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::read_resource(mcp_ext_mgr(&agent)?, &name, &uri)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// List resource templates exposed by an MCP server.
@@ -822,7 +830,7 @@ pub async fn thinclaw_mcp_read_resource(
 pub async fn thinclaw_mcp_resource_templates(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -834,8 +842,9 @@ pub async fn thinclaw_mcp_resource_templates(
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::list_resource_templates(mcp_ext_mgr(&agent)?, &name)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// List prompts exposed by an MCP server.
@@ -844,7 +853,7 @@ pub async fn thinclaw_mcp_resource_templates(
 pub async fn thinclaw_mcp_server_prompts(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -856,8 +865,9 @@ pub async fn thinclaw_mcp_server_prompts(
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::list_prompts(mcp_ext_mgr(&agent)?, &name)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Render one MCP prompt.
@@ -868,7 +878,7 @@ pub async fn thinclaw_mcp_get_prompt(
     server_name: String,
     prompt_name: String,
     prompt_args: Option<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json(
@@ -889,8 +899,9 @@ pub async fn thinclaw_mcp_get_prompt(
         prompt_args,
     )
     .await
-    .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Discover OAuth metadata for an HTTP MCP server.
@@ -899,7 +910,7 @@ pub async fn thinclaw_mcp_get_prompt(
 pub async fn thinclaw_mcp_oauth(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_json(&format!(
@@ -911,8 +922,9 @@ pub async fn thinclaw_mcp_oauth(
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::discover_oauth_metadata(mcp_ext_mgr(&agent)?, &name)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Set MCP server log level.
@@ -922,7 +934,7 @@ pub async fn thinclaw_mcp_set_log_level(
     ironclaw: State<'_, ThinClawRuntimeState>,
     name: String,
     level: String,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy
             .put_json(
@@ -935,7 +947,7 @@ pub async fn thinclaw_mcp_set_log_level(
     let agent = ironclaw.agent().await?;
     thinclaw_core::api::mcp::set_logging_level(mcp_ext_mgr(&agent)?, &name, &level)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(extension_action_from_json(serde_json::json!({
         "success": true,
         "message": format!("Updated MCP log level for '{}'", name),
@@ -947,15 +959,16 @@ pub async fn thinclaw_mcp_set_log_level(
 #[specta::specta]
 pub async fn thinclaw_mcp_interactions(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/mcp/interactions").await;
     }
     let agent = ironclaw.agent().await?;
     let resp = thinclaw_core::api::mcp::list_pending_interactions(mcp_ext_mgr(&agent)?)
         .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(resp).map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    serde_json::to_value(resp)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Respond to a pending MCP interaction/auth request.
@@ -967,7 +980,7 @@ pub async fn thinclaw_mcp_interaction_respond(
     action: String,
     response: Option<serde_json::Value>,
     message: Option<String>,
-) -> Result<ExtensionActionResponse, String> {
+) -> Result<ExtensionActionResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy
             .post_json(
@@ -991,7 +1004,7 @@ pub async fn thinclaw_mcp_interaction_respond(
         },
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(extension_action_from_json(serde_json::json!({
         "success": true,
         "message": "Submitted MCP interaction response",
@@ -1006,7 +1019,7 @@ pub async fn thinclaw_mcp_interaction_respond(
 #[specta::specta]
 pub async fn thinclaw_diagnostics(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<DiagnosticsResponse, String> {
+) -> Result<DiagnosticsResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_diagnostics().await?;
         let online = status
@@ -1200,7 +1213,7 @@ pub async fn thinclaw_diagnostics(
 #[specta::specta]
 pub async fn thinclaw_tools_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<ToolsListResponse, String> {
+) -> Result<ToolsListResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.list_tools().await?;
         let tools: Vec<ToolInfoItem> = raw
@@ -1301,7 +1314,7 @@ pub async fn thinclaw_tools_list(
 #[specta::specta]
 pub async fn thinclaw_tool_policy_get(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.get_setting("disabled_tools").await?;
         return Ok(raw
@@ -1337,7 +1350,7 @@ pub async fn thinclaw_tool_policy_get(
 pub async fn thinclaw_tool_policy_set(
     ironclaw: State<'_, ThinClawRuntimeState>,
     disabled_tools: Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .set_setting("disabled_tools", &serde_json::json!(disabled_tools))
@@ -1349,11 +1362,12 @@ pub async fn thinclaw_tool_policy_set(
         .store()
         .ok_or_else(|| "Settings store not available".to_string())?;
 
-    let val = serde_json::to_value(&disabled_tools).map_err(|e| e.to_string())?;
+    let val = serde_json::to_value(&disabled_tools)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     store
         .set_setting("local_user", "disabled_tools", &val)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 // ============================================================================
@@ -1365,7 +1379,7 @@ pub async fn thinclaw_tool_policy_set(
 pub async fn thinclaw_pairing_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
     channel: String,
-) -> Result<PairingListResponse, String> {
+) -> Result<PairingListResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.list_pairings(&channel).await?;
         let mut pairings: Vec<PairingItem> = raw
@@ -1455,7 +1469,7 @@ pub async fn thinclaw_pairing_approve(
     ironclaw: State<'_, ThinClawRuntimeState>,
     channel: String,
     code: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.approve_pairing(&channel, &code).await?;
         let success = raw
@@ -1469,7 +1483,7 @@ pub async fn thinclaw_pairing_approve(
             .get("message")
             .and_then(|value| value.as_str())
             .unwrap_or("remote pairing approval failed");
-        return Err(reason.to_string());
+        return Err((reason.to_string()).into());
     }
 
     let store = thinclaw_core::pairing::PairingStore::new();
@@ -1488,7 +1502,7 @@ pub async fn thinclaw_pairing_approve(
 pub async fn thinclaw_compact_session(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
-) -> Result<CompactSessionResponse, String> {
+) -> Result<CompactSessionResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.compact_session(&session_key).await?;
         return Ok(CompactSessionResponse {
