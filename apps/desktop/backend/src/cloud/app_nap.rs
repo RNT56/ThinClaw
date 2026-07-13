@@ -111,6 +111,13 @@ mod platform {
             false
         }
     }
+
+    // Preserve the same RAII contract on every platform. The implementation is
+    // intentionally empty, but having a Drop impl lets callers explicitly end
+    // the guard's scope without platform-specific test or control-flow branches.
+    impl Drop for AppNapGuard {
+        fn drop(&mut self) {}
+    }
 }
 
 // ── Public Re-export ─────────────────────────────────────────────────────

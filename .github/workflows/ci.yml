@@ -44,23 +44,23 @@ jobs:
       - name: Check crate boundaries
         run: |
           set -euo pipefail
-          if rg -n 'use thinclaw::' crates; then
+          if grep -RIn --include='*.rs' 'use thinclaw::' crates; then
             echo "Internal crates must not import the root thinclaw package."
             exit 1
           fi
-          if rg -n '^\s*thinclaw\s*=|^\s*\[.*\.thinclaw\]' crates -g Cargo.toml; then
+          if grep -RInE --include='Cargo.toml' '^[[:space:]]*thinclaw[[:space:]]*=|^[[:space:]]*\[.*\.thinclaw\]' crates; then
             echo "Internal crates must not depend on the root thinclaw package."
             exit 1
           fi
-          if rg -n 'package\s*=\s*"thinclaw"' crates -g Cargo.toml; then
+          if grep -RInE --include='Cargo.toml' 'package[[:space:]]*=[[:space:]]*"thinclaw"' crates; then
             echo "Internal crates must not depend on package = \"thinclaw\"."
             exit 1
           fi
-          if rg -n 'thinclaw-agent' crates/thinclaw-db/Cargo.toml; then
+          if grep -n 'thinclaw-agent' crates/thinclaw-db/Cargo.toml; then
             echo "thinclaw-db must not depend on thinclaw-agent: persistence must not depend on the agent layer. Routine DTOs live in thinclaw-types (thinclaw_types::routine)."
             exit 1
           fi
-          if rg -n 'thinclaw-tools\b' crates/thinclaw-gateway/Cargo.toml; then
+          if grep -nE 'thinclaw-tools([^[:alnum:]_-]|$)' crates/thinclaw-gateway/Cargo.toml; then
             echo "thinclaw-gateway must not depend on thinclaw-tools: the light gateway crate must not pull the heavyweight tool runtime (wasmtime/chromiumoxide). MCP/execution DTOs live in thinclaw-tools-core."
             exit 1
           fi
