@@ -1800,6 +1800,11 @@ mod tests {
     async fn injected_and_configured_databases_initialize() {
         use crate::db::Database as _;
 
+        let settings = crate::settings::Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://localhost:12345/v1".to_string()),
+            ..crate::settings::Settings::default()
+        };
         let temp = tempfile::TempDir::new().expect("temp dir");
         let backend = crate::db::libsql::LibSqlBackend::new_local(&temp.path().join("shared.db"))
             .await
@@ -1807,7 +1812,7 @@ mod tests {
         backend.run_migrations().await.expect("run migrations");
         let database: Arc<dyn Database> = Arc::new(backend);
         let mut builder = AppBuilder::new(
-            Config::from_test_settings(&crate::settings::Settings::default())
+            Config::from_test_settings(&settings)
                 .await
                 .expect("build test config"),
             AppBuilderFlags::default(),
@@ -1826,7 +1831,7 @@ mod tests {
             &database
         ));
 
-        let mut config = Config::from_test_settings(&crate::settings::Settings::default())
+        let mut config = Config::from_test_settings(&settings)
             .await
             .expect("build test config");
         config.database.backend = crate::config::DatabaseBackend::LibSql;
