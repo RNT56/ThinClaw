@@ -83,6 +83,13 @@ pub(crate) async fn channel_config_submit_handler(
         .config_schema_for(&channel_id)
         .await
         .ok_or(StatusCode::NOT_FOUND)?;
+    if schema
+        .fields
+        .iter()
+        .any(|field| field.required && !values.contains_key(&field.id))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     for (field_id, value) in &values {
         let field = schema
             .fields

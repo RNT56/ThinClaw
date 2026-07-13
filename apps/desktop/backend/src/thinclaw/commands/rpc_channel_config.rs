@@ -85,36 +85,52 @@ pub async fn thinclaw_channel_config_submit(
         crate::thinclaw::bridge::BridgeError::from("channel config must be a JSON object")
     })?;
 
-    if let Some(schema) = agent.channels().config_schema_for(&channel_id).await {
-        for (field_id, value) in &obj {
-            let field = schema
-                .fields
-                .iter()
-                .find(|field| field.id == *field_id)
-                .ok_or_else(|| {
-                    crate::thinclaw::bridge::BridgeError::from(format!(
-                        "unknown channel config field: {field_id}"
-                    ))
-                })?;
-            let required_value_missing = field.required
-                && (value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()));
-            let value_valid = (!field.required && value.is_null())
-                || match field.field_type.as_str() {
-                    "text" | "password" | "textarea" => value.is_string(),
-                    "number" => value.is_number(),
-                    "checkbox" => value.is_boolean(),
-                    "select" => value.as_str().is_some_and(|value| {
-                        field.options.as_ref().is_some_and(|options| {
-                            options.iter().any(|option| option.value == value)
-                        })
-                    }),
-                    _ => false,
-                };
-            if required_value_missing || !value_valid {
-                return Err(crate::thinclaw::bridge::BridgeError::from(format!(
-                    "invalid value for channel config field: {field_id}"
-                )));
-            }
+    let schema = agent
+        .channels()
+        .config_schema_for(&channel_id)
+        .await
+        .ok_or_else(|| {
+            crate::thinclaw::bridge::BridgeError::from(format!(
+                "channel '{channel_id}' does not expose a configuration schema"
+            ))
+        })?;
+    for field in schema.fields.iter().filter(|field| field.required) {
+        if !obj.contains_key(&field.id) {
+            return Err(crate::thinclaw::bridge::BridgeError::from(format!(
+                "missing required channel config field: {}",
+                field.id
+            )));
+        }
+    }
+    for (field_id, value) in &obj {
+        let field = schema
+            .fields
+            .iter()
+            .find(|field| field.id == *field_id)
+            .ok_or_else(|| {
+                crate::thinclaw::bridge::BridgeError::from(format!(
+                    "unknown channel config field: {field_id}"
+                ))
+            })?;
+        let required_value_missing = field.required
+            && (value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()));
+        let value_valid = (!field.required && value.is_null())
+            || match field.field_type.as_str() {
+                "text" | "password" | "textarea" => value.is_string(),
+                "number" => value.is_number(),
+                "checkbox" => value.is_boolean(),
+                "select" => value.as_str().is_some_and(|value| {
+                    field
+                        .options
+                        .as_ref()
+                        .is_some_and(|options| options.iter().any(|option| option.value == value))
+                }),
+                _ => false,
+            };
+        if required_value_missing || !value_valid {
+            return Err(crate::thinclaw::bridge::BridgeError::from(format!(
+                "invalid value for channel config field: {field_id}"
+            )));
         }
     }
 
@@ -123,28 +139,34 @@ pub async fn thinclaw_channel_config_submit(
     if let Some(store) = agent.store() {
         for (field, val) in &obj {
             let key = format!("channels.{channel_id}_{field}");
-            let _ = thinclaw_core::api::config::set_setting(store, "local_user", &key, val).await;
+            thinclaw_core::api::config::set_setting(store, "local_user", &key, val)
+                .await
+                .map_err(|error| {
+                    crate::thinclaw::bridge::BridgeError::from(format!(
+                        "failed to persist {key}: {error}"
+                    ))
+                })?;
         }
         persisted = true;
     }
 
     // Forward to the live channel (no-op for native channels that don't override).
     let updates: std::collections::HashMap<String, Value> = obj.into_iter().collect();
-    let forwarded = agent
+    agent
         .channels()
         .update_channel_runtime_config(&channel_id, updates)
         .await
-        .is_ok();
+        .map_err(|error| {
+            crate::thinclaw::bridge::BridgeError::from(format!(
+                "failed to update channel '{channel_id}': {error}"
+            ))
+        })?;
 
     Ok(json!({
-        "ok": forwarded,
+        "ok": true,
         "channel_id": channel_id,
         "persisted": persisted,
-        "forwarded": forwarded,
-        "note": if forwarded {
-            "Settings saved and forwarded to the channel. Native channels (e.g. Signal, Discord) may require a channel restart to take effect."
-        } else {
-            "Channel is not currently registered; settings were saved and will apply when it starts."
-        },
+        "forwarded": true,
+        "note": "Settings saved and forwarded to the channel. Native channels may require a channel restart to take effect.",
     }))
 }

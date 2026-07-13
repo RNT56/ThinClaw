@@ -197,7 +197,7 @@ characterization test added before the split; no behavior change.
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
 | TDO-120 ✅ | **Channel-config schema framework** (`thinclaw_channel_config_schema`/`_schemas`/`_submit` commands + generic renderer in the `ThinClawChannelConfig` panel) | XL | TDO-001 | `rpc_channel_config.rs`, channel manifests |
-| TDO-121 | First channels on framework: Signal + Discord done; iMessage, Nostr remain | L | TDO-120 | channel adapters |
+| TDO-121 ✅ | Signal, Discord, iMessage, and Nostr expose validated non-secret config schemas with current values; persisted settings resolve on restart | L | TDO-120 | channel adapters |
 | TDO-122 | Long-tail channel configs (Matrix, Teams, LINE, SMS, BlueBubbles, Apple Mail, …) | L | TDO-120 | channel adapters |
 | TDO-123 ✅ | Pairing parity covers every adapter that enforces DM codes (Telegram, Slack, Discord, WhatsApp, Signal); unsupported web-login stubs removed | S | TDO-120 | `ThinClawPairing.tsx`, `pairing/catalog.ts` |
 

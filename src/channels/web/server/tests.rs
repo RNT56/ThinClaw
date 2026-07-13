@@ -857,6 +857,22 @@ async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates(
         GatewayAuthSource::BearerHeader,
         false,
     );
+    let missing_required = channel_config_submit_handler(
+        axum::extract::State(Arc::clone(&state)),
+        identity,
+        axum::extract::Path("configurable-test".to_string()),
+        axum::Json(serde_json::json!({})),
+    )
+    .await
+    .expect_err("required channel fields cannot be omitted");
+    assert_eq!(missing_required, axum::http::StatusCode::BAD_REQUEST);
+
+    let identity = GatewayRequestIdentity::new(
+        "gateway-user",
+        "gateway-user",
+        GatewayAuthSource::BearerHeader,
+        false,
+    );
     let axum::Json(result) = channel_config_submit_handler(
         axum::extract::State(state),
         identity,
