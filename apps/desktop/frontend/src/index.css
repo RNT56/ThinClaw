@@ -135,6 +135,17 @@
 
     --radius: 0.5rem;
 
+    /* Stable cross-surface design tokens. */
+    --space-control-x: 0.75rem;
+    --radius-control: 0.625rem;
+    --radius-panel: 0.875rem;
+    --radius-dialog: 1rem;
+    --control-height: 2.5rem;
+    --control-height-compact: 2rem;
+    --motion-fast: 120ms;
+    --motion-normal: 180ms;
+    --motion-slow: 260ms;
+
     /* Theme-derived accent palette fallbacks (Zinc) */
     --chart-1: 240 10% 35%;
     --chart-2: 240 8% 50%;

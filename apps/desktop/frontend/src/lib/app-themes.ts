@@ -317,3 +317,34 @@ export const APP_THEMES: AppTheme[] = [
         }
     }
 ];
+
+/**
+ * Product-wide layout and interaction values. Color remains theme-specific,
+ * while these values deliberately stay stable across Workbench and Cockpit.
+ * CSS consumes the same contract through the matching custom properties in
+ * `index.css`; exporting it here gives non-CSS surfaces a single source of
+ * truth instead of scattering magic numbers through components.
+ */
+export const DESIGN_TOKENS = {
+    spacing: {
+        xs: "0.25rem",
+        sm: "0.5rem",
+        md: "0.75rem",
+        lg: "1rem",
+        xl: "1.5rem",
+    },
+    radius: {
+        control: "0.625rem",
+        panel: "0.875rem",
+        dialog: "1rem",
+    },
+    controlHeight: {
+        compact: "2rem",
+        comfortable: "2.5rem",
+    },
+    motion: {
+        fast: 120,
+        normal: 180,
+        slow: 260,
+    },
+} as const;
