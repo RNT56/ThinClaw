@@ -388,7 +388,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let oauth_credential_sync = components.oauth_credential_sync.take();
 
     if let Some(db) = components.db.clone() {
-        thinclaw::tauri_commands::configure_routing_persistence(
+        thinclaw::desktop_api::configure_routing_persistence(
             db,
             "default",
             Arc::clone(&components.llm_runtime),

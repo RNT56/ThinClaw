@@ -105,7 +105,7 @@ pub struct AppComponents {
     pub cost_tracker: Arc<tokio::sync::Mutex<CostTracker>>,
     /// Audit log hook — receives real plugin lifecycle events from HookRegistry.
     pub audit_hook: Arc<AuditLogHook>,
-    /// Shared response cache — populated by Reasoning, read by `openclaw_cache_stats`.
+    /// Shared response cache — populated by Reasoning, read by `thinclaw_cache_stats`.
     pub response_cache: Arc<tokio::sync::RwLock<CachedResponseStore>>,
     /// Live smart routing policy owned by the runtime manager.
     pub routing_policy: Arc<std::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>,

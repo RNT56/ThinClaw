@@ -116,6 +116,15 @@ strings, or establish a second IPC path. Production frontend source is guarded
 against raw `invoke` imports and calls; new code must use `commandClient` or a
 purpose-built adapter that is itself derived from generated `commands`.
 
+`src/desktop_api.rs` owns reusable backend service helpers. Tauri registration
+and wire-shape adapters remain in `apps/desktop/backend/src/thinclaw/commands`;
+the retired `src/tauri_commands.rs` name survives only as a deprecated Rust
+re-export for downstream source compatibility.
+
+All `UiEvent` consumers subscribe through `useThinClawEvents`. That module owns
+the one native `thinclaw-event` listener and fans the generated discriminated
+union out in process; panel-local listeners are rejected by a contract test.
+
 ### Command Surface Groups
 
 The command registry lives in `apps/desktop/backend/src/setup/commands.rs`.

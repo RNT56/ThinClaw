@@ -855,7 +855,7 @@ pub async fn thinclaw_routing_status(
     let mut latency_data: Vec<LatencyEntry> = Vec::new();
     if let Ok(tracker) = ironclaw.cost_tracker().await {
         let ct = tracker.lock().await;
-        if let Ok(summary) = thinclaw_core::tauri_commands::cost_summary(&ct) {
+        if let Ok(summary) = thinclaw_core::desktop_api::cost_summary(&ct) {
             for provider in summary.by_model.keys() {
                 latency_data.push(LatencyEntry {
                     provider: provider.clone(),

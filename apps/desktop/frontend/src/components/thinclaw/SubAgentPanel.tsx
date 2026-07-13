@@ -15,7 +15,6 @@
  * Listens for SubAgentUpdate events from the backend to update in real-time.
  */
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     CheckCircle,
@@ -34,18 +33,9 @@ import {
 } from 'lucide-react';
 import type { ChildSessionInfo } from '../../lib/thinclaw';
 import { listChildSessions, spawnSession, abortThinClawChat, updateSubAgentStatus } from '../../lib/thinclaw';
+import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 
 // ── Types ────────────────────────────────────────────────────────────────
-
-interface SubAgentUpdateEvent {
-    kind: 'SubAgentUpdate';
-    parent_session: string;
-    child_session: string;
-    task: string;
-    status: string;
-    progress: number | null;
-    result_preview: string | null;
-}
 
 /** A single progress message in the sub-agent's message feed. */
 interface FeedMessage {
@@ -362,11 +352,13 @@ let feedIdCounter = 0;
  */
 export function useSubAgentCount(sessionKey: string): number {
     const [count, setCount] = useState(0);
+    const trackedRef = useRef(new Set<string>());
 
     useEffect(() => {
-        let unlisten: UnlistenFn | null = null;
         let cancelled = false;
         const tracked = new Set<string>();
+        trackedRef.current = tracked;
+        setCount(0);
 
         // Load initial
         listChildSessions(sessionKey)
@@ -377,24 +369,16 @@ export function useSubAgentCount(sessionKey: string): number {
             })
             .catch(() => { });
 
-        // Listen for new sub-agents
-        (async () => {
-            unlisten = await listen<SubAgentUpdateEvent>('thinclaw-event', (event) => {
-                if (cancelled) return;
-                const data = event.payload;
-                if (data.kind !== 'SubAgentUpdate') return;
-                if (data.parent_session !== sessionKey) return;
-
-                tracked.add(data.child_session);
-                setCount(tracked.size);
-            });
-        })();
-
         return () => {
             cancelled = true;
-            unlisten?.();
         };
     }, [sessionKey]);
+
+    useThinClawEvents((data) => {
+        if (data.kind !== 'SubAgentUpdate' || data.parent_session !== sessionKey) return;
+        trackedRef.current.add(data.child_session);
+        setCount(trackedRef.current.size);
+    });
 
     return count;
 }
@@ -420,92 +404,76 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
             .catch(() => { });
     }, [sessionKey]);
 
-    // Listen for SubAgentUpdate events from the backend
-    useEffect(() => {
-        let unlisten: UnlistenFn | null = null;
-        let cancelled = false;
+    useThinClawEvents((data) => {
+        if (data.kind !== 'SubAgentUpdate' || data.parent_session !== sessionKey) return;
 
-        (async () => {
-            unlisten = await listen<SubAgentUpdateEvent>('thinclaw-event', (event) => {
-                if (cancelled) return;
-                const data = event.payload;
-                if (data.kind !== 'SubAgentUpdate') return;
-                if (data.parent_session !== sessionKey) return;
+        setChildren((prev) => {
+            const idx = prev.findIndex((c) => c.session_key === data.child_session);
+            const statusParts = data.status.split(':');
+            const baseStatus = statusParts[0];
+            const category = statusParts[1] || 'progress';
 
-                setChildren((prev) => {
-                    const idx = prev.findIndex((c) => c.session_key === data.child_session);
-                    const statusParts = data.status.split(':');
-                    const baseStatus = statusParts[0];
-                    const category = statusParts[1] || 'progress';
+            if (idx >= 0) {
+                const updated = [...prev];
+                const existing = updated[idx];
 
-                    if (idx >= 0) {
-                        const updated = [...prev];
-                        const existing = updated[idx];
+                const newFeed = [...existing.feed];
+                if (data.task && baseStatus === 'running' && data.task !== existing.task) {
+                    newFeed.push({
+                        id: `feed-${++feedIdCounter}`,
+                        timestamp: Date.now(),
+                        content: data.task,
+                        category,
+                    });
+                }
 
-                        const newFeed = [...existing.feed];
-                        if (data.task && baseStatus === 'running' && data.task !== existing.task) {
-                            newFeed.push({
-                                id: `feed-${++feedIdCounter}`,
-                                timestamp: Date.now(),
-                                content: data.task,
-                                category,
-                            });
-                        }
+                if ((baseStatus === 'completed' || baseStatus === 'failed') && data.result_preview) {
+                    newFeed.push({
+                        id: `feed-${++feedIdCounter}`,
+                        timestamp: Date.now(),
+                        content: data.result_preview,
+                        category: baseStatus === 'completed' ? 'result' : 'error',
+                    });
+                }
 
-                        if ((baseStatus === 'completed' || baseStatus === 'failed') && data.result_preview) {
-                            newFeed.push({
-                                id: `feed-${++feedIdCounter}`,
-                                timestamp: Date.now(),
-                                content: data.result_preview,
-                                category: baseStatus === 'completed' ? 'result' : 'error',
-                            });
-                        }
+                updated[idx] = {
+                    ...existing,
+                    status: data.status as ChildSessionInfo['status'],
+                    progress: data.progress ?? existing.progress,
+                    result_summary: data.result_preview ?? existing.result_summary,
+                    feed: newFeed,
+                    completedAt: (baseStatus === 'completed' || baseStatus === 'failed')
+                        ? Date.now()
+                        : existing.completedAt,
+                };
+                return updated;
+            } else {
+                const initialFeed: FeedMessage[] = [];
+                if (data.task) {
+                    initialFeed.push({
+                        id: `feed-${++feedIdCounter}`,
+                        timestamp: Date.now(),
+                        content: `Task started: ${data.task}`,
+                        category: 'progress',
+                    });
+                }
 
-                        updated[idx] = {
-                            ...existing,
-                            status: data.status as ChildSessionInfo['status'],
-                            progress: data.progress ?? existing.progress,
-                            result_summary: data.result_preview ?? existing.result_summary,
-                            feed: newFeed,
-                            completedAt: (baseStatus === 'completed' || baseStatus === 'failed')
-                                ? Date.now()
-                                : existing.completedAt,
-                        };
-                        return updated;
-                    } else {
-                        const initialFeed: FeedMessage[] = [];
-                        if (data.task) {
-                            initialFeed.push({
-                                id: `feed-${++feedIdCounter}`,
-                                timestamp: Date.now(),
-                                content: `Task started: ${data.task}`,
-                                category: 'progress',
-                            });
-                        }
-
-                        return [
-                            ...prev,
-                            {
-                                session_key: data.child_session,
-                                task: data.task,
-                                status: data.status as ChildSessionInfo['status'],
-                                spawned_at: Date.now(),
-                                result_summary: data.result_preview,
-                                progress: data.progress,
-                                feed: initialFeed,
-                                archived: false,
-                            },
-                        ];
-                    }
-                });
-            });
-        })();
-
-        return () => {
-            cancelled = true;
-            unlisten?.();
-        };
-    }, [sessionKey]);
+                return [
+                    ...prev,
+                    {
+                        session_key: data.child_session,
+                        task: data.task,
+                        status: data.status as ChildSessionInfo['status'],
+                        spawned_at: Date.now(),
+                        result_summary: data.result_preview,
+                        progress: data.progress,
+                        feed: initialFeed,
+                        archived: false,
+                    },
+                ];
+            }
+        });
+    });
 
     // Spawn handler
     const handleSpawn = useCallback(async () => {

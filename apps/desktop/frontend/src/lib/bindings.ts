@@ -4378,6 +4378,10 @@ export type UiEvent =
  */
 { kind: "RoutineLifecycle"; routine_name: string; event: string; run_id: string | null; result_summary: string | null } |
 /**
+ * Channel connectivity changed in either the local runtime or remote gateway.
+ */
+{ kind: "ChannelStatus"; channel_id: string; state: string; error: string | null } |
+/**
  * Cost/budget event from the gateway/runtime.
  */
 { kind: "CostAlert"; alert_type: string; current_cost_usd: number; limit_usd: number; message: string | null } |

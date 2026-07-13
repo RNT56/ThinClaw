@@ -19,11 +19,20 @@ describe('ThinClaw event bus migration', () => {
         expect(matches).toEqual([]);
     });
 
-    it('keeps Desktop event consumers on thinclaw-event', () => {
+    it('owns exactly one typed native listener and fans out in-process', () => {
         const listenerCount = productionSources()
-            .map(source => source.match(/['"]thinclaw-event['"]/g)?.length ?? 0)
+            .map(source => source.match(/listen<UiEvent>\(\s*['"]thinclaw-event['"]/g)?.length ?? 0)
             .reduce((sum, count) => sum + count, 0);
 
-        expect(listenerCount).toBeGreaterThanOrEqual(10);
+        expect(listenerCount).toBe(1);
+    });
+
+    it('does not allow panel-local listeners or untyped event payloads', () => {
+        const unsafeListeners = productionSources().filter(source =>
+            /listen(?:<[^>]+>)?\(\s*['"]thinclaw-event['"]/.test(source)
+            && !source.includes("listen<UiEvent>('thinclaw-event'"),
+        );
+
+        expect(unsafeListeners).toEqual([]);
     });
 });

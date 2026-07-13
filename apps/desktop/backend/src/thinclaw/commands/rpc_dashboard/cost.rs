@@ -46,7 +46,7 @@ pub async fn thinclaw_cost_summary(
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let tracker = tracker_lock.lock().await;
-    let ic_summary = thinclaw_core::tauri_commands::cost_summary(&tracker)?;
+    let ic_summary = thinclaw_core::desktop_api::cost_summary(&tracker)?;
 
     // Auto-persist to DB on each summary poll (cheap — 10s interval).
     if let Ok(agent) = ironclaw.agent().await {
@@ -85,7 +85,7 @@ pub async fn thinclaw_cost_export_csv(
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let tracker = tracker_lock.lock().await;
-    thinclaw_core::tauri_commands::cost_export_csv(&tracker)
+    thinclaw_core::desktop_api::cost_export_csv(&tracker)
 }
 
 /// Reset (clear) all cost tracking data.
@@ -100,7 +100,7 @@ pub async fn thinclaw_cost_reset(ironclaw: State<'_, ThinClawRuntimeState>) -> R
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let mut tracker = tracker_lock.lock().await;
-    thinclaw_core::tauri_commands::cost_reset(&mut tracker)?;
+    thinclaw_core::desktop_api::cost_reset(&mut tracker)?;
 
     // Persist empty state to DB
     if let Ok(agent) = ironclaw.agent().await {

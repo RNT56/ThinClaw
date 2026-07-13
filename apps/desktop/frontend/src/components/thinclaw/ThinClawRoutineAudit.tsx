@@ -7,7 +7,7 @@ import {
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
-import { listen } from '@tauri-apps/api/event';
+import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 import { ThinClawModeBadge, useThinClawStatusSnapshot } from './ThinClawModeBadge';
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
@@ -72,20 +72,16 @@ export function ThinClawRoutineAudit({ routineKey }: Props) {
     useEffect(() => { fetchJobs(); }, [fetchJobs]);
     useEffect(() => { fetchAudit(); }, [fetchAudit]);
 
-    useEffect(() => {
-        const unlistenPromise = listen<any>('thinclaw-event', (event) => {
-            const payload = event.payload;
-            if (payload?.kind === 'RoutineLifecycle') {
-                const routineName = payload.routine_name;
-                const selectedJob = cronJobs.find(job => job.key === selectedKey || job.name === selectedKey);
-                if (!selectedKey || routineName === selectedKey || routineName === selectedJob?.name) {
-                    fetchAudit();
-                    fetchJobs();
-                }
+    useThinClawEvents((payload) => {
+        if (payload.kind === 'RoutineLifecycle') {
+            const routineName = payload.routine_name;
+            const selectedJob = cronJobs.find(job => job.key === selectedKey || job.name === selectedKey);
+            if (!selectedKey || routineName === selectedKey || routineName === selectedJob?.name) {
+                fetchAudit();
+                fetchJobs();
             }
-        });
-        return () => { unlistenPromise.then(fn => fn()).catch(() => { }); };
-    }, [cronJobs, selectedKey, fetchAudit, fetchJobs]);
+        }
+    });
 
     const selectedJob = cronJobs.find(job => job.key === selectedKey || job.name === selectedKey);
 

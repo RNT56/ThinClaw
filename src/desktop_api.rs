@@ -1,17 +1,17 @@
-//! Unified Tauri command facade for ThinClaw backend services.
+//! Domain service API consumed by ThinClaw Desktop command modules.
 //!
-//! Provides the adapter functions that ThinClaw Desktop's Tauri command stubs
-//! should call. Each function maps directly to an `openclaw_*` command
-//! from the §17.4 integration contract.
+//! Keeps reusable service logic independent from Tauri command registration.
+//! Desktop commands live under `apps/desktop/backend/src/thinclaw/commands` and
+//! call these helpers without preserving the retired pre-rename command facade.
 //!
 //! # Usage from ThinClaw Desktop `rpc.rs`
 //!
 //! ```rust,ignore
-//! use thinclaw::tauri_commands;
+//! use thinclaw::desktop_api;
 //!
 //! #[tauri::command]
-//! fn openclaw_cost_summary(state: State<ThinClawState>) -> Result<CostSummary, String> {
-//!     tauri_commands::cost_summary(&state.cost_tracker)
+//! fn thinclaw_cost_summary(state: State<ThinClawState>) -> Result<CostSummary, String> {
+//!     desktop_api::cost_summary(&state.cost_tracker)
 //! }
 //! ```
 
@@ -90,11 +90,11 @@ fn persist_routing_policy(policy: &RoutingPolicy) -> Result<(), String> {
     })
 }
 
-// ── 1. openclaw_cost_summary ──────────────────────────────────────────
+// ── 1. thinclaw_cost_summary ──────────────────────────────────────────
 
 /// Build a cost summary.
 ///
-/// Maps to: `openclaw_cost_summary`
+/// Maps to: `thinclaw_cost_summary`
 /// Response: `CostSummary`
 pub fn cost_summary(tracker: &CostTracker) -> Result<CostSummary, String> {
     let now = chrono::Utc::now();
@@ -103,21 +103,21 @@ pub fn cost_summary(tracker: &CostTracker) -> Result<CostSummary, String> {
     Ok(tracker.summary(&today, &month))
 }
 
-// ── 2. openclaw_cost_export_csv ───────────────────────────────────────
+// ── 2. thinclaw_cost_export_csv ───────────────────────────────────────
 
 /// Export cost entries as CSV.
 ///
-/// Maps to: `openclaw_cost_export_csv`
+/// Maps to: `thinclaw_cost_export_csv`
 /// Response: `String` (CSV text)
 pub fn cost_export_csv(tracker: &CostTracker) -> Result<String, String> {
     Ok(tracker.export_csv())
 }
 
-// ── 2b. openclaw_cost_reset ──────────────────────────────────────────
+// ── 2b. thinclaw_cost_reset ──────────────────────────────────────────
 
 /// Clear all cost tracking data.
 ///
-/// Maps to: `openclaw_cost_reset`
+/// Maps to: `thinclaw_cost_reset`
 /// Response: `()`
 ///
 /// The caller is responsible for persisting the empty state to the DB
@@ -129,18 +129,18 @@ pub fn cost_reset(tracker: &mut CostTracker) -> Result<(), String> {
     Ok(())
 }
 
-// ── 3. openclaw_clawhub_search ────────────────────────────────────────
+// ── 3. thinclaw_clawhub_search ────────────────────────────────────────
 
 /// Search the ClawHub catalog cache.
 ///
-/// Maps to: `openclaw_clawhub_search`
+/// Maps to: `thinclaw_clawhub_search`
 /// Params: `query: String`
 /// Response: `Vec<CatalogEntry>`
 pub fn clawhub_search(cache: &CatalogCache, query: &str) -> Result<Vec<CatalogEntry>, String> {
     Ok(cache.search(query).into_iter().cloned().collect())
 }
 
-// ── 4. openclaw_clawhub_install ───────────────────────────────────────
+// ── 4. thinclaw_clawhub_install ───────────────────────────────────────
 
 /// Install result from ClawHub.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -154,7 +154,7 @@ pub struct InstallResult {
 
 /// Install a plugin from ClawHub.
 ///
-/// Maps to: `openclaw_clawhub_install`
+/// Maps to: `thinclaw_clawhub_install`
 /// Params: `plugin_id: String`
 /// Response: `InstallResult`
 ///
@@ -187,14 +187,14 @@ pub fn clawhub_prepare_install(
     }
 }
 
-// ── 5. openclaw_routine_audit_list ────────────────────────────────────
+// ── 5. thinclaw_routine_audit_list ────────────────────────────────────
 
 /// Query routine run history from the database.
 ///
 /// `RoutineEngine` persists every run via `store.create_routine_run()` /
 /// `store.complete_routine_run()`. This command reads that data back.
 ///
-/// Maps to: `openclaw_routine_audit_list`
+/// Maps to: `thinclaw_routine_audit_list`
 /// Params: `routine_name: String, user_id: String, limit: Option<i64>`
 /// Response: `Vec<RoutineRun>`
 pub async fn routine_audit_list(
@@ -255,31 +255,31 @@ pub async fn routine_audit_list_for_actor(
         .map_err(|e| format!("DB error listing runs: {}", e))
 }
 
-// ── 6. openclaw_cache_stats ───────────────────────────────────────────
+// ── 6. thinclaw_cache_stats ───────────────────────────────────────────
 
 /// Get response cache statistics.
 ///
-/// Maps to: `openclaw_cache_stats`
+/// Maps to: `thinclaw_cache_stats`
 /// Response: `CacheStats { hits, misses, evictions, size, hit_rate }`
 pub fn cache_stats(store: &CachedResponseStore) -> Result<CacheStats, String> {
     Ok(store.stats())
 }
 
-// ── 7. openclaw_plugin_lifecycle_list ──────────────────────────────────
+// ── 7. thinclaw_plugin_lifecycle_list ──────────────────────────────────
 
 /// List plugin lifecycle events.
 ///
-/// Maps to: `openclaw_plugin_lifecycle_list`
+/// Maps to: `thinclaw_plugin_lifecycle_list`
 /// Response: `Vec<SerializedLifecycleEvent>`
 pub fn plugin_lifecycle_list(hook: &AuditLogHook) -> Result<Vec<SerializedLifecycleEvent>, String> {
     Ok(hook.events_serialized())
 }
 
-// ── 8. openclaw_manifest_validate ─────────────────────────────────────
+// ── 8. thinclaw_manifest_validate ─────────────────────────────────────
 
 /// Validate a plugin manifest.
 ///
-/// Maps to: `openclaw_manifest_validate`
+/// Maps to: `thinclaw_manifest_validate`
 /// Params: `plugin_id: String` (used to look up the plugin info)
 /// Response: `ValidationResponse { errors: Vec<String>, warnings: Vec<String> }`
 pub fn manifest_validate(
@@ -290,21 +290,21 @@ pub fn manifest_validate(
     Ok(result.to_response())
 }
 
-// ── 9. openclaw_routing_rules_list ────────────────────────────────────
+// ── 9. thinclaw_routing_rules_list ────────────────────────────────────
 
 /// List all routing rules with human-readable descriptions.
 ///
-/// Maps to: `openclaw_routing_rules_list`
+/// Maps to: `thinclaw_routing_rules_list`
 /// Response: `Vec<RoutingRuleSummary>`
 pub fn routing_rules_list(policy: &RoutingPolicy) -> Result<Vec<RoutingRuleSummary>, String> {
     Ok(RoutingRuleSummary::from_policy(policy))
 }
 
-// ── 10. openclaw_routing_rules_add ────────────────────────────────────
+// ── 10. thinclaw_routing_rules_add ────────────────────────────────────
 
 /// Add a routing rule at the end (or at a specific position).
 ///
-/// Maps to: `openclaw_routing_rules_add`
+/// Maps to: `thinclaw_routing_rules_add`
 /// Params: `rule: RoutingRule, position: Option<usize>`
 /// Response: `Vec<RoutingRuleSummary>` (full updated list)
 pub fn routing_rules_add(
@@ -355,11 +355,11 @@ pub fn routing_rules_add(
     Ok(RoutingRuleSummary::from_policy(policy))
 }
 
-// ── 11. openclaw_routing_rules_remove ─────────────────────────────────
+// ── 11. thinclaw_routing_rules_remove ─────────────────────────────────
 
 /// Remove a routing rule by index.
 ///
-/// Maps to: `openclaw_routing_rules_remove`
+/// Maps to: `thinclaw_routing_rules_remove`
 /// Params: `index: usize`
 /// Response: `Vec<RoutingRuleSummary>` (full updated list)
 pub fn routing_rules_remove(
@@ -376,11 +376,11 @@ pub fn routing_rules_remove(
     Ok(RoutingRuleSummary::from_policy(policy))
 }
 
-// ── 12. openclaw_routing_rules_reorder ────────────────────────────────
+// ── 12. thinclaw_routing_rules_reorder ────────────────────────────────
 
 /// Reorder a routing rule (move from one position to another).
 ///
-/// Maps to: `openclaw_routing_rules_reorder`
+/// Maps to: `thinclaw_routing_rules_reorder`
 /// Params: `from: usize, to: usize`
 /// Response: `Vec<RoutingRuleSummary>` (full updated list)
 pub fn routing_rules_reorder(
@@ -398,11 +398,11 @@ pub fn routing_rules_reorder(
     Ok(RoutingRuleSummary::from_policy(policy))
 }
 
-// ── 13. openclaw_routing_status ───────────────────────────────────────
+// ── 13. thinclaw_routing_status ───────────────────────────────────────
 
 /// Get full routing policy status for UI display.
 ///
-/// Maps to: `openclaw_routing_status`
+/// Maps to: `thinclaw_routing_status`
 /// Response: `RoutingStatusResponse`
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RoutingStatusResponse {
@@ -482,11 +482,11 @@ pub fn routing_status(policy: &RoutingPolicy) -> Result<RoutingStatusResponse, S
     })
 }
 
-// ── 14. openclaw_gmail_status ─────────────────────────────────────────
+// ── 14. thinclaw_gmail_status ─────────────────────────────────────────
 
 /// Get Gmail channel configuration status.
 ///
-/// Maps to: `openclaw_gmail_status`
+/// Maps to: `thinclaw_gmail_status`
 /// Response: `GmailStatusResponse`
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GmailStatusResponse {
@@ -540,7 +540,7 @@ pub fn gmail_status(config: &GmailConfig) -> Result<GmailStatusResponse, String>
     })
 }
 
-// ── 15. openclaw_gmail_oauth_start ────────────────────────────────────
+// ── 15. thinclaw_gmail_oauth_start ────────────────────────────────────
 
 /// Response from the Gmail OAuth PKCE flow.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -558,7 +558,7 @@ pub struct GmailOAuthResult {
 /// This opens the user's browser for Google consent, waits for the
 /// callback, exchanges the auth code for tokens, and returns them.
 ///
-/// Maps to: `openclaw_gmail_oauth_start`
+/// Maps to: `thinclaw_gmail_oauth_start`
 /// Response: `GmailOAuthResult`
 pub async fn gmail_oauth_start() -> Result<GmailOAuthResult, String> {
     wasm_tool_oauth_start("gmail".to_string()).await
@@ -691,7 +691,7 @@ pub struct CanvasPanelData {
 
 /// List all active canvas panels.
 ///
-/// Maps to: `openclaw_canvas_panels_list`
+/// Maps to: `thinclaw_canvas_panels_list`
 /// Response: `Vec<CanvasPanelSummary>`
 pub async fn canvas_panels_list(
     store: &crate::channels::canvas_gateway::CanvasStore,
@@ -708,7 +708,7 @@ pub async fn canvas_panels_list(
 
 /// Get full data for a specific canvas panel.
 ///
-/// Maps to: `openclaw_canvas_panel_get`
+/// Maps to: `thinclaw_canvas_panel_get`
 /// Response: `Option<CanvasPanelData>`
 pub async fn canvas_panel_get(
     store: &crate::channels::canvas_gateway::CanvasStore,
@@ -724,7 +724,7 @@ pub async fn canvas_panel_get(
 
 /// Dismiss (remove) a canvas panel.
 ///
-/// Maps to: `openclaw_canvas_panel_dismiss`
+/// Maps to: `thinclaw_canvas_panel_dismiss`
 /// Response: `bool` (true if panel existed)
 pub async fn canvas_panel_dismiss(
     store: &crate::channels::canvas_gateway::CanvasStore,
@@ -733,14 +733,14 @@ pub async fn canvas_panel_dismiss(
     Ok(store.dismiss(panel_id).await)
 }
 
-// ── 19. openclaw_channel_status_list ──────────────────────────────────
+// ── 19. thinclaw_channel_status_list ──────────────────────────────────
 
 use crate::channels::ChannelManager;
 use crate::channels::status_view::ChannelStatusEntry;
 
 /// Get live channel status entries (message counters, uptime, state).
 ///
-/// Maps to: `openclaw_channel_status_list`
+/// Maps to: `thinclaw_channel_status_list`
 /// Response: `Vec<ChannelStatusEntry>`
 pub async fn channel_status_list(
     manager: &ChannelManager,
@@ -748,7 +748,7 @@ pub async fn channel_status_list(
     Ok(manager.status_entries().await)
 }
 
-// ── 20. openclaw_routine_create ────────────────────────────────────────
+// ── 20. thinclaw_routine_create ────────────────────────────────────────
 
 use crate::agent::routine::{NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger};
 
@@ -774,7 +774,7 @@ pub struct RoutineCreateParams {
 /// Routines in ThinClaw are file-backed (not database-backed).
 /// Each routine is saved as `{id}.json` under the routines directory.
 ///
-/// Maps to: `openclaw_routine_create`
+/// Maps to: `thinclaw_routine_create`
 /// Params: `RoutineCreateParams`
 /// Response: `Routine` (the saved object with a generated ID)
 pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
@@ -825,7 +825,7 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
     Ok(routine)
 }
 
-// ── 21. openclaw_autonomy_* ───────────────────────────────────────────
+// ── 21. thinclaw_autonomy_* ───────────────────────────────────────────
 
 pub async fn autonomy_status() -> Result<crate::desktop_autonomy::AutonomyStatus, String> {
     let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
@@ -872,41 +872,6 @@ pub async fn autonomy_rollback() -> Result<serde_json::Value, String> {
     manager.rollback().await
 }
 
-// ── Convenience: list all available command names ──────────────────────
-
-/// List all available Tauri command names from this facade.
-pub fn available_commands() -> Vec<&'static str> {
-    vec![
-        "openclaw_cost_summary",
-        "openclaw_cost_export_csv",
-        "openclaw_clawhub_search",
-        "openclaw_clawhub_install",
-        "openclaw_routine_audit_list",
-        "openclaw_cache_stats",
-        "openclaw_plugin_lifecycle_list",
-        "openclaw_manifest_validate",
-        "openclaw_routing_rules_list",
-        "openclaw_routing_rules_add",
-        "openclaw_routing_rules_remove",
-        "openclaw_routing_rules_reorder",
-        "openclaw_routing_status",
-        "openclaw_gmail_status",
-        "openclaw_gmail_oauth_start",
-        "openclaw_wasm_tool_oauth_start",
-        "openclaw_canvas_panels_list",
-        "openclaw_canvas_panel_get",
-        "openclaw_canvas_panel_dismiss",
-        "openclaw_channel_status_list",
-        "openclaw_routine_create",
-        "openclaw_autonomy_status",
-        "openclaw_autonomy_pause",
-        "openclaw_autonomy_resume",
-        "openclaw_desktop_permission_status",
-        "openclaw_autonomy_bootstrap",
-        "openclaw_autonomy_rollback",
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,6 +880,18 @@ mod tests {
     use crate::llm::cost_tracker::{BudgetConfig, CostEntry, CostSource, TokenCountSource};
     use crate::llm::response_cache_ext::CacheConfig;
     use crate::llm::routing_policy::RoutingRule;
+
+    #[test]
+    fn retired_tauri_command_facade_stays_a_compatibility_alias() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !manifest.join("src/tauri_commands.rs").exists(),
+            "service logic must not drift back into a root Tauri facade"
+        );
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains("pub mod desktop_api;"));
+        assert!(lib.contains("pub use desktop_api as tauri_commands;"));
+    }
 
     #[test]
     fn test_cost_summary() {
@@ -1021,7 +998,7 @@ mod tests {
     // routine_run persistence is tested via routine_engine integration tests.
 
     #[test]
-    fn test_cache_stats_facade() {
+    fn test_cache_stats_service_api() {
         let mut store = CachedResponseStore::new(CacheConfig::default());
         store.set("k1", "r1".into(), "gpt-4o");
         store.get("k1"); // hit
@@ -1073,25 +1050,6 @@ mod tests {
         };
         let response = manifest_validate(&validator, &info).unwrap();
         assert!(!response.errors.is_empty());
-    }
-
-    #[test]
-    fn test_available_commands() {
-        let cmds = available_commands();
-        let unique: std::collections::HashSet<_> = cmds.iter().copied().collect();
-        assert_eq!(unique.len(), cmds.len());
-        assert!(cmds.iter().all(|cmd| cmd.starts_with("openclaw_")));
-        assert!(cmds.contains(&"openclaw_cost_summary"));
-        assert!(cmds.contains(&"openclaw_manifest_validate"));
-        assert!(cmds.contains(&"openclaw_routing_rules_list"));
-        assert!(cmds.contains(&"openclaw_routing_status"));
-        assert!(cmds.contains(&"openclaw_gmail_status"));
-        assert!(cmds.contains(&"openclaw_gmail_oauth_start"));
-        assert!(cmds.contains(&"openclaw_wasm_tool_oauth_start"));
-        assert!(cmds.contains(&"openclaw_channel_status_list"));
-        assert!(cmds.contains(&"openclaw_routine_create"));
-        assert!(cmds.contains(&"openclaw_autonomy_status"));
-        assert!(cmds.contains(&"openclaw_autonomy_bootstrap"));
     }
 
     #[test]

@@ -379,6 +379,13 @@ pub enum UiEvent {
         result_summary: Option<String>,
     },
 
+    /// Channel connectivity changed in either the local runtime or remote gateway.
+    ChannelStatus {
+        channel_id: String,
+        state: String,
+        error: Option<String>,
+    },
+
     /// Cost/budget event from the gateway/runtime.
     CostAlert {
         alert_type: String,
@@ -522,6 +529,24 @@ mod tests {
         assert_eq!(
             MessageType::from_wire("custom"),
             MessageType::Other("custom".to_string())
+        );
+    }
+
+    #[test]
+    fn channel_status_uses_the_generated_discriminated_shape() {
+        let event = UiEvent::ChannelStatus {
+            channel_id: "telegram".into(),
+            state: "degraded".into(),
+            error: Some("webhook timeout".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "ChannelStatus",
+                "channel_id": "telegram",
+                "state": "degraded",
+                "error": "webhook timeout"
+            })
         );
     }
 }

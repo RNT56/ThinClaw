@@ -396,7 +396,7 @@ impl Reasoning {
 
     /// Wire a shared cost tracker so every LLM call is recorded.
     ///
-    /// The tracker is read by `tauri_commands::cost_summary()` / `cost_export_csv()`.
+    /// The tracker is read by `desktop_api::cost_summary()` / `cost_export_csv()`.
     pub fn with_cost_tracker(mut self, tracker: Arc<tokio::sync::Mutex<CostTracker>>) -> Self {
         self.cost_tracker = Some(tracker);
         self
@@ -404,7 +404,7 @@ impl Reasoning {
 
     /// Wire a shared response cache so every LLM call records hits/misses.
     ///
-    /// The cache is read by `tauri_commands::cache_stats()`.
+    /// The cache is read by `desktop_api::cache_stats()`.
     pub fn with_response_cache(
         mut self,
         cache: Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>,

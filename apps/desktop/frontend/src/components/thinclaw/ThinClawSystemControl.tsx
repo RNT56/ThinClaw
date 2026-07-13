@@ -16,10 +16,10 @@ import {
     Search,
     X
 } from 'lucide-react';
-import { listen } from '@tauri-apps/api/event';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
+import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 
 interface LogLine {
     timestamp: string;
@@ -131,30 +131,26 @@ export function ThinClawSystemControl() {
         fetchData();
     }, []);
 
-    // Live log streaming via Tauri events
+    // Load history while the live log subscription is active.
     useEffect(() => {
         if (activeTab !== 'logs') return;
-
         fetchLogHistory();
-
-        const unlistenPromise = listen<any>('thinclaw-event', (event) => {
-            const payload = event.payload;
-            if (payload?.kind === 'LogEntry') {
-                setIsLive(true);
-                appendLog({
-                    timestamp: payload.timestamp,
-                    level: payload.level,
-                    target: payload.target,
-                    message: payload.message,
-                });
-            }
-        });
-
         return () => {
-            unlistenPromise.then(fn => fn());
             setIsLive(false);
         };
-    }, [activeTab, appendLog, fetchLogHistory]);
+    }, [activeTab, fetchLogHistory]);
+
+    useThinClawEvents((payload) => {
+        if (payload.kind === 'LogEntry') {
+            setIsLive(true);
+            appendLog({
+                timestamp: payload.timestamp,
+                level: payload.level,
+                target: payload.target,
+                message: payload.message,
+            });
+        }
+    }, activeTab === 'logs');
 
     // Auto-scroll
     useEffect(() => {

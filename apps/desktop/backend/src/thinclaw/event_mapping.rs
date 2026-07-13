@@ -766,6 +766,11 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
             run_id,
             result_summary: value_string(&value, "result_summary"),
         }],
+        "channel_status_change" => vec![UiEvent::ChannelStatus {
+            channel_id: value_string(&value, "channel").unwrap_or_default(),
+            state: value_string(&value, "status").unwrap_or_default(),
+            error: value_string(&value, "message"),
+        }],
         "cost_alert" => vec![UiEvent::CostAlert {
             alert_type: value_string(&value, "alert_type").unwrap_or_default(),
             current_cost_usd: value_f64(&value, "current_cost_usd").unwrap_or_default(),
@@ -1162,6 +1167,20 @@ mod tests {
                     && event == "completed"
                     && run_id.as_deref() == Some("routine-run-1")
                     && result_summary.as_deref() == Some("ok")
+        ));
+
+        let channel = gateway_sse_to_ui_events(serde_json::json!({
+            "type": "channel_status_change",
+            "channel": "telegram",
+            "status": "degraded",
+            "message": "webhook timeout"
+        }));
+        assert!(matches!(
+            channel.as_slice(),
+            [UiEvent::ChannelStatus { channel_id, state, error }]
+                if channel_id == "telegram"
+                    && state == "degraded"
+                    && error.as_deref() == Some("webhook timeout")
         ));
 
         let cost = gateway_sse_to_ui_events(serde_json::json!({
