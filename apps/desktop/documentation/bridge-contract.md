@@ -148,6 +148,14 @@ cd apps/desktop/backend
 cargo run --locked --example export_bindings
 ```
 
+The backend contract suite regenerates the complete registry in memory and
+requires its sanitized output to match the committed binding byte-for-byte. It
+also proves that `Channel<T>` remains a real Tauri channel after Specta export,
+that sanitization is idempotent, that command names are unique, and that no
+generated command parameter is a reserved strict-mode TypeScript identifier.
+Adding or changing any command therefore requires regenerating the bindings;
+sampling a representative subset is not sufficient.
+
 After regeneration, run:
 
 ```bash

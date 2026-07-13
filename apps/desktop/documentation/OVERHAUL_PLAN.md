@@ -138,22 +138,62 @@ ownership.
 
 ### WS-3 — Architecture Hygiene (god-file decomposition)
 Triggered on-touch, but schedule the worst offenders:
-- `frontend/src/lib/thinclaw.ts` → `lib/api/{sessions,memory,routines,learning,experiments,mcp,…}.ts`.
-- `backend/src/thinclaw/runtime_builder.rs` → provider/inference setup · sandbox/Docker orchestrator · background-task wiring · channel wiring · deps assembly.
-- Oversized panel components: `ThinClawRepoProjects.tsx`, `ThinClawHooks.tsx`, `ThinClawAutomations.tsx`, `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` → extract sub-panels + hooks.
+- ✅ `frontend/src/lib/thinclaw.ts` is now a stable 13-line barrel over focused
+  `lib/api/{core,gateway,integrations,operations,repo-projects}.ts` modules; the
+  existing component import path remains compatible.
+- ✅ `backend/src/thinclaw/runtime_builder.rs` is now the 706-line assembly
+  coordinator; environment/provider resolution, sandbox/Docker orchestration,
+  background-task ownership, and event forwarding live in focused child modules.
+- Oversized panel components: ✅ `ThinClawRepoProjects.tsx` now delegates to a
+  focused data hook plus fixture, utility, and panel modules. ✅ `ThinClawHooks.tsx`
+  now composes a tested template catalog, cards, custom editor, and data hook.
+  ✅ `ThinClawAutomations.tsx` now composes a job card, create modal, tested
+  schedule helpers, and runtime data hook. ✅ `SubAgentPanel.tsx`,
+  `ThinClawChannels.tsx`, and `ThinClawSkills.tsx` now preserve their public
+  entry points while delegating child-session rendering, channel/stream catalogs,
+  skill cards, and channel/skill data ownership to focused modules; each public
+  panel is below the god-file threshold.
 - ✅ Retired `src/tauri_commands.rs`; reusable helpers now live in `src/desktop_api.rs` and registration stays in typed Desktop command modules.
 
 ### WS-4 — Test/QA & Observability
 - Contract tests per command (route-behavior matrix, bindings coverage, `Channel<T>`/reserved-arg sanitizer — extend the existing test).
-- Executable **fixture acceptance** for local + remote modes (make the parity-checklist tiers runnable, not manual).
-- Frontend: Vitest component tests (`frontend/src/tests/`) + Playwright/WebDriver E2E for the top 10 flows.
-- Runtime telemetry: wire the core `Observer` (currently `NoopObserver`) to a desktop sink + crash reporter; surface context-pressure / self-repair / advisor as `UiEvent`s (also closes §5 parity gaps).
+- ✅ Executable **fixture acceptance** for local + remote modes now runs representative bridge/gating checks and an authenticated loopback gateway across chat, jobs, autonomy, learning, experiments, MCP, skills, providers, costs, and cache surfaces in Desktop CI.
+- Frontend: Vitest component tests (`frontend/src/tests/`) plus ✅ browser-mode
+  WebDriver coverage for the top 10 user journeys: onboarding navigation and
+  appearance, Chat, Dashboard, Channels, Automations, Jobs, Models, Secrets,
+  and Appearance. The same suite separately checks deterministic Tauri IPC.
+- ✅ Runtime telemetry: Desktop now decorates the operator-selected core
+  `Observer` backend with an always-on, metadata-only typed event sink. Redacted
+  observer errors and process panics are persisted locally as private `0600`
+  reports with a 20-file retention cap; nothing is uploaded.
+- ✅ Internal lifecycle telemetry: context compaction, advisor consultation,
+  and self-repair start/completion preserve phase, label, and detail as typed
+  `AgentLifecycleEvent`s in both embedded and remote modes. The standalone
+  client consumes the same structured gateway SSE contract. The earlier
+  context-pressure header indicator remains the separate TDO-101 scope.
 
 ### WS-5 — Security & Secrets
-- Single encrypted secret path (AES-256-GCM core store ↔ macOS Keychain); grant checks enforced (contract test covers denial).
-- Surface (read-only, with reasons) core safety internals — sanitizer hits, sandbox network-allowlist, dangerous-tool tracker — in a "Security" panel.
-- Wire master-key rotation + recovery-key into Settings (reuse the cloud-sync recovery-key UI).
-- Threat-model the bridge (untrusted runtime output → React) and the remote-proxy auth.
+- ✅ Single encrypted secret path: the app-wide store serializes all local
+  credentials into one authenticated `SecretsCrypto` AES-256-GCM envelope in
+  macOS Keychain, with a separate random master-key item, transactional legacy
+  migration, fail-closed reads, a rotation seam, and live grant enforcement on
+  every runtime operation. Contract tests cover ciphertext, tamper rejection,
+  key-version rotation, canonical aliases, and grant denial.
+- ✅ Read-only Security panel now reports metadata-only sanitizer/policy decisions,
+  the effective local sandbox and network allowlist, and live tool descriptor /
+  approval metadata with human-readable reasons. It explicitly reports local,
+  stopped, and remote evidence availability. The never-wired dangerous-tool
+  tracker remains retired and is not presented as an enforcement control.
+- ✅ Secrets Settings reuses the recovery-key panel for explicit, one-minute
+  key reveal, checksummed recovery import, and exact-confirmation master-key
+  rotation. Rotation persists the replacement core key, re-encrypts and
+  verifies the complete Desktop envelope, and rolls both stores back on
+  failure. The panel honestly gates persistence to macOS Keychain.
+- ✅ The bridge threat model now treats runtime/SSE/Markdown/error content as
+  untrusted, bounds transport and rendering, validates session IDs and external
+  links, requires authenticated remote health, blocks public plaintext bearer
+  transport, redacts profile credentials from disk/IPC/logs, and hardens SSH
+  deployment input, host-key, stdin-secret, and gateway-port behavior.
 
 ### WS-6 — Packaging / Update / Platform (macOS-first)
 - CI: notarized DMG, hardened runtime, stapling; Tauri updater signing key in CI secrets (currently release-operator manual).
@@ -260,7 +300,7 @@ panel wired or honestly gated; contract suite green.
 | Command contracts | Rust tests + bridge linter | Every command: binding+wrapper+route-behavior |
 | Dual-mode behavior | Fixture acceptance (local+remote) | Per route-matrix row |
 | Frontend units | Vitest (`frontend/src/tests/`) | Components + lib |
-| E2E flows | Playwright/WebDriver | Top 10 flows green |
+| E2E flows | WebdriverIO browser mode | ✅ Top 10 flows + IPC contract green |
 | Clean-machine smoke | Manual checklist + dated report | Each phase gate |
 | Security | Secret-grant denial, sanitizer, SSRF | CI |
 | Packaging | Notarization/staple, updater signature | Release |

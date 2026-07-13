@@ -335,6 +335,11 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_save_gateway_settings", RouteMode::LocalOnly),
     ("thinclaw_save_slack_config", RouteMode::LocalOnly),
     ("thinclaw_save_telegram_config", RouteMode::LocalOnly),
+    ("thinclaw_secret_master_key_rotate", RouteMode::LocalOnly),
+    ("thinclaw_secret_recovery_export", RouteMode::LocalOnly),
+    ("thinclaw_secret_recovery_import", RouteMode::LocalOnly),
+    ("thinclaw_secret_recovery_status", RouteMode::LocalOnly),
+    ("thinclaw_security_posture", RouteMode::LocalOnly),
     ("thinclaw_session_search", RouteMode::LocalOnly),
     ("thinclaw_set_autonomy_mode", RouteMode::LocalOnly),
     ("thinclaw_set_bootstrap_completed", RouteMode::LocalOnly),
@@ -859,6 +864,55 @@ mod tests {
             Some(RouteMode::RemoteOnly),
             "thinclaw_job_restart must be RemoteOnly"
         );
+    }
+
+    #[test]
+    fn fixture_acceptance_local_route_contract() {
+        let representative_routes = [
+            ("thinclaw_send_message", RouteMode::LocalAndRemote),
+            ("thinclaw_jobs_list", RouteMode::LocalAndRemote),
+            ("thinclaw_job_detail", RouteMode::LocalAndRemote),
+            ("thinclaw_job_cancel", RouteMode::LocalAndRemote),
+            ("thinclaw_cost_summary", RouteMode::LocalAndRemote),
+            ("thinclaw_routing_status", RouteMode::LocalAndRemote),
+            ("thinclaw_experiments_projects", RouteMode::LocalAndRemote),
+            ("thinclaw_learning_status", RouteMode::LocalAndRemote),
+            ("thinclaw_autonomy_status", RouteMode::LocalAndRemote),
+            ("thinclaw_job_restart", RouteMode::RemoteOnly),
+            ("thinclaw_session_search", RouteMode::LocalOnly),
+        ];
+
+        for (command, expected_mode) in representative_routes {
+            let actual = route_mode(command);
+            assert_eq!(
+                actual,
+                Some(expected_mode),
+                "unexpected fixture route for {command}"
+            );
+            assert_eq!(
+                expected_mode != RouteMode::RemoteOnly,
+                matches!(
+                    actual,
+                    Some(RouteMode::LocalOnly | RouteMode::LocalAndRemote)
+                ),
+                "local availability mismatch for {command}"
+            );
+        }
+
+        let remote_gate = gated(
+            "job restart",
+            "the embedded runtime cannot restart remote sandbox jobs",
+            "connect a remote gateway",
+            RouteMode::RemoteOnly,
+        );
+        assert!(matches!(
+            remote_gate,
+            BridgeError::Unavailable {
+                satisfied_by: RouteMode::RemoteOnly,
+                remediation: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

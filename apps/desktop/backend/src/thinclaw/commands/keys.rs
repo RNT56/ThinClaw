@@ -1252,8 +1252,15 @@ pub async fn thinclaw_save_gateway_settings(
         state.init_config().await?
     };
 
-    let url_opt = url.filter(|s| !s.trim().is_empty());
-    let token_opt = token.filter(|s| !s.trim().is_empty());
+    if mode != "local" && mode != "remote" {
+        return Err("Gateway mode must be 'local' or 'remote'".to_string());
+    }
+
+    // `None` is a patch-style omission: preserve the encrypted value already
+    // on disk. An explicit empty string is the only way to clear a field. This
+    // lets the UI render redacted status without erasing secrets on blur.
+    let url_opt = apply_optional_string_patch(url, cfg.remote_url.clone());
+    let token_opt = apply_optional_string_patch(token, cfg.remote_token.clone());
 
     cfg.update_gateway_settings(mode, url_opt, token_opt)
         .map_err(|e| e.to_string())?;
@@ -1261,6 +1268,51 @@ pub async fn thinclaw_save_gateway_settings(
     *state.config.write().await = Some(cfg);
 
     Ok(())
+}
+
+fn apply_optional_string_patch(
+    incoming: Option<String>,
+    existing: Option<String>,
+) -> Option<String> {
+    match incoming {
+        None => existing,
+        Some(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod gateway_settings_tests {
+    use super::apply_optional_string_patch;
+
+    #[test]
+    fn omitted_redacted_value_preserves_existing_secret() {
+        assert_eq!(
+            apply_optional_string_patch(None, Some("saved-secret".to_string())),
+            Some("saved-secret".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_empty_value_clears_existing_secret() {
+        assert_eq!(
+            apply_optional_string_patch(Some("  ".to_string()), Some("saved".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn replacement_value_is_trimmed() {
+        assert_eq!(
+            apply_optional_string_patch(
+                Some("  replacement  ".to_string()),
+                Some("saved".to_string())
+            ),
+            Some("replacement".to_string())
+        );
+    }
 }
 
 /// Add or update an agent profile
@@ -1276,13 +1328,8 @@ pub async fn thinclaw_add_agent_profile(
         state.init_config().await?
     };
 
-    if let Some(existing) = cfg.profiles.iter_mut().find(|p| p.id == profile.id) {
-        *existing = profile;
-    } else {
-        cfg.profiles.push(profile);
-    }
-
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    cfg.upsert_agent_profile(profile)
+        .map_err(|error| error.to_string())?;
     *state.config.write().await = Some(cfg);
     Ok(())
 }
@@ -1300,9 +1347,8 @@ pub async fn thinclaw_remove_agent_profile(
         state.init_config().await?
     };
 
-    cfg.profiles.retain(|p| p.id != id);
-
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    cfg.remove_agent_profile(&id)
+        .map_err(|error| error.to_string())?;
     *state.config.write().await = Some(cfg);
     Ok(())
 }

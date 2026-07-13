@@ -106,10 +106,8 @@ use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(debug_assertions)]
-pub fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
-    let mut source = std::fs::read_to_string(path)?;
-    let original = source.clone();
-
+pub(crate) fn sanitize_typescript_bindings_source(source: &str) -> String {
+    let mut source = source.to_string();
     source = source.replace(
         "export type TAURI_CHANNEL<TSend> = null",
         "export type TAURI_CHANNEL<TSend> = import(\"@tauri-apps/api/core\").Channel<TSend>",
@@ -183,6 +181,14 @@ export type TokenUsage = DirectTokenUsage & {
     }
     source = lines.join("\n");
     source.push('\n');
+
+    source
+}
+
+#[cfg(debug_assertions)]
+pub fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
+    let original = std::fs::read_to_string(path)?;
+    let source = sanitize_typescript_bindings_source(&original);
 
     if source != original {
         std::fs::write(path, source)?;
@@ -387,6 +393,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error building tauri application");
 
+    let crash_reporter = thinclaw::desktop_observer::DesktopCrashReporter::new(
+        app.handle()
+            .path()
+            .app_data_dir()
+            .expect("failed to get app data dir for crash reporter")
+            .join("crash-reports"),
+    );
+    crash_reporter.install_panic_hook();
+    app.manage(crash_reporter);
+
     app.manage(SidecarManager::new());
     app.manage(model_manager::DownloadManager::new());
     app.manage(config::ConfigManager::new(app.handle()));
@@ -408,11 +424,12 @@ pub fn run() {
             migrate_legacy_app_data(&app_data_dir);
             fs::create_dir_all(&app_data_dir).expect("failed to create app data dir");
 
-            // ── Load ALL API keys from Keychain in a single read ─────────────
-            // This triggers exactly one macOS authorization prompt, then caches
-            // everything in memory.  Must happen before ThinClawConfig::new()
-            // or any other code that calls keychain::get_key().
-            thinclaw::config::keychain::load_all();
+            // ── Load ALL API keys from one encrypted Keychain envelope ───────
+            // Normal startup reads the master-key item and the data-envelope
+            // item, then caches decrypted values in memory. Must happen before
+            // ThinClawConfig::new() or any keychain::get_key() call.
+            thinclaw::config::keychain::load_all()
+                .expect("failed to initialize encrypted Desktop secrets");
 
             // ── App-wide secret store (reads from the just-loaded keychain) ───
             let secret_store = secret_store::SecretStore::new();

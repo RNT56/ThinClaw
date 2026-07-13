@@ -22,6 +22,7 @@ const KIND_CONFIG: Record<string, { icon: typeof Activity; color: string }> = {
     'ToolCall': { icon: Wrench, color: 'text-muted-foreground' },
     'ToolResult': { icon: Wrench, color: 'text-primary' },
     'StatusUpdate': { icon: Activity, color: 'text-primary' },
+    'ObserverRecord': { icon: Activity, color: 'text-cyan-400' },
     'Error': { icon: AlertTriangle, color: 'text-red-400' },
     'CanvasUpdate': { icon: Zap, color: 'text-primary' },
 };

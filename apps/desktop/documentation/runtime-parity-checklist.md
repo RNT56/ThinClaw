@@ -1,6 +1,6 @@
 # ThinClaw Desktop Runtime Parity Checklist
 
-Last updated: 2026-05-15
+Last updated: 2026-07-13
 
 This checklist maps ThinClaw root runtime surfaces to Desktop support status. Status values are:
 
@@ -43,6 +43,18 @@ This checklist maps ThinClaw root runtime surfaces to Desktop support status. St
 - Apple signing identity, notary credentials, updater private key, and clean-machine notarization remain release-operator responsibilities.
 
 ## Contract Test Targets
+
+The deterministic local/remote gate is executable from the repository root:
+
+```bash
+scripts/ci/desktop-fixture-acceptance.sh
+```
+
+CI runs this harness in the Desktop Companion job. It requires no provider
+credentials: the local fixture checks representative bridge availability and
+typed gating, while the loopback gateway fixture exercises authenticated chat,
+session, jobs, autonomy, learning, experiments, MCP, skill, provider, cost, and
+cache routes, including mutation-confirmation headers.
 
 - Every `StatusUpdate` variant maps to a `UiEvent` or is intentionally documented.
 - Desktop `AgentDeps` includes the same required runtime handles as root `src/main.rs`.

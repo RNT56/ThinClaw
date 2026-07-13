@@ -80,6 +80,24 @@ fn client_parses_status_and_stream_chunk() {
 }
 
 #[test]
+fn client_parses_structured_agent_lifecycle_event() {
+    assert_eq!(
+        roundtrip(ServerEvent::AgentLifecycle {
+            phase: "context_compaction".into(),
+            label: "Context limit reached — compacting and retrying".into(),
+            detail: Some("9500 tokens used vs 10000 limit".into()),
+            thread_id: Some("t-4".into()),
+        }),
+        ClientEvent::AgentLifecycle {
+            phase: "context_compaction".into(),
+            label: "Context limit reached — compacting and retrying".into(),
+            detail: Some("9500 tokens used vs 10000 limit".into()),
+            thread_id: Some("t-4".into()),
+        }
+    );
+}
+
+#[test]
 fn unmodeled_server_events_become_unknown_not_errors() {
     // PlanUpdate is a server variant this client does not model; it must
     // degrade to Unknown (with payload) rather than fail to deserialize.

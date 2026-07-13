@@ -395,32 +395,40 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             message: msg,
             thread_id,
         },
-        StatusUpdate::ContextCompactionStarted { used, limit } => SseEvent::Status {
-            message: format!("Compacting context ({used}/{limit} tokens) and retrying"),
+        StatusUpdate::ContextCompactionStarted { used, limit } => SseEvent::AgentLifecycle {
+            phase: "context_compaction".to_string(),
+            label: "Context limit reached — compacting and retrying".to_string(),
+            detail: Some(format!("{used} tokens used vs {limit} limit")),
             thread_id,
         },
-        StatusUpdate::AdvisorConsultationStarted { .. } => SseEvent::Status {
-            message: "Consulting the advisor lane".to_string(),
+        StatusUpdate::AdvisorConsultationStarted { reason } => SseEvent::AgentLifecycle {
+            phase: "advisor_consultation".to_string(),
+            label: "Consulting the advisor lane".to_string(),
+            detail: Some(reason),
             thread_id,
         },
         StatusUpdate::SelfRepairStarted {
             repair_type,
             target_id,
-            ..
-        } => SseEvent::Status {
-            message: format!("Self-repair: {repair_type} {target_id}"),
+            reason,
+        } => SseEvent::AgentLifecycle {
+            phase: "self_repair_started".to_string(),
+            label: format!("Self-repair: {repair_type} {target_id}"),
+            detail: Some(reason),
             thread_id,
         },
         StatusUpdate::SelfRepairCompleted {
             repair_type,
             target_id,
             success,
-            ..
-        } => SseEvent::Status {
-            message: format!(
+            summary,
+        } => SseEvent::AgentLifecycle {
+            phase: "self_repair_completed".to_string(),
+            label: format!(
                 "Self-repair {}: {repair_type} {target_id}",
                 if success { "succeeded" } else { "failed" }
             ),
+            detail: Some(summary),
             thread_id,
         },
         StatusUpdate::Plan { entries } => SseEvent::PlanUpdate { entries, thread_id },
@@ -1052,5 +1060,64 @@ mod tests {
         assert_eq!(response.size, 0);
         assert_eq!(response.hit_rate, 0.0);
         assert_eq!(response.reason.as_deref(), Some("cache unavailable"));
+    }
+
+    #[test]
+    fn internal_agent_updates_keep_structured_lifecycle_detail() {
+        let cases = [
+            (
+                StatusUpdate::ContextCompactionStarted {
+                    used: 9_500,
+                    limit: 10_000,
+                },
+                "context_compaction",
+                "Context limit reached — compacting and retrying",
+                "9500 tokens used vs 10000 limit",
+            ),
+            (
+                StatusUpdate::AdvisorConsultationStarted {
+                    reason: "confidence below threshold".to_string(),
+                },
+                "advisor_consultation",
+                "Consulting the advisor lane",
+                "confidence below threshold",
+            ),
+            (
+                StatusUpdate::SelfRepairStarted {
+                    repair_type: "tool".to_string(),
+                    target_id: "weather".to_string(),
+                    reason: "runtime failure".to_string(),
+                },
+                "self_repair_started",
+                "Self-repair: tool weather",
+                "runtime failure",
+            ),
+            (
+                StatusUpdate::SelfRepairCompleted {
+                    repair_type: "tool".to_string(),
+                    target_id: "weather".to_string(),
+                    success: true,
+                    summary: "rebuilt and reloaded".to_string(),
+                },
+                "self_repair_completed",
+                "Self-repair succeeded: tool weather",
+                "rebuilt and reloaded",
+            ),
+        ];
+
+        for (status, expected_phase, expected_label, expected_detail) in cases {
+            let event = status_update_to_sse_event(status, Some("thread-1".to_string()));
+            assert_eq!(event.event_type(), "agent_lifecycle");
+            assert_eq!(
+                serde_json::to_value(event).unwrap(),
+                serde_json::json!({
+                    "type": "agent_lifecycle",
+                    "phase": expected_phase,
+                    "label": expected_label,
+                    "detail": expected_detail,
+                    "thread_id": "thread-1",
+                })
+            );
+        }
     }
 }

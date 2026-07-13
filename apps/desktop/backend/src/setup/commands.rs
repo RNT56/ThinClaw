@@ -271,6 +271,11 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_mcp_interaction_respond,
         // Diagnostics & tools
         crate::thinclaw::commands::thinclaw_diagnostics,
+        crate::thinclaw::commands::thinclaw_security_posture,
+        crate::thinclaw::commands::thinclaw_secret_recovery_status,
+        crate::thinclaw::commands::thinclaw_secret_recovery_export,
+        crate::thinclaw::commands::thinclaw_secret_master_key_rotate,
+        crate::thinclaw::commands::thinclaw_secret_recovery_import,
         crate::thinclaw::commands::thinclaw_tools_list,
         crate::thinclaw::commands::thinclaw_tool_policy_get,
         crate::thinclaw::commands::thinclaw_tool_policy_set,
@@ -390,6 +395,161 @@ pub fn specta_builder() -> tauri_specta::Builder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    fn command_signatures(bindings: &str) -> Vec<(&str, &str)> {
+        bindings
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let rest = line.strip_prefix("async ")?;
+                let open = rest.find('(')?;
+                let close = rest.rfind(") : Promise<")?;
+                Some((&rest[..open], &rest[open + 1..close]))
+            })
+            .collect()
+    }
+
+    fn top_level_parameters(signature: &str) -> Vec<&str> {
+        let mut depth = 0_u32;
+        let mut start = 0;
+        let mut parameters = Vec::new();
+
+        for (index, character) in signature.char_indices() {
+            match character {
+                '<' | '(' | '[' | '{' => depth += 1,
+                '>' | ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parameters.push(signature[start..index].trim());
+                    start = index + character.len_utf8();
+                }
+                _ => {}
+            }
+        }
+
+        if start < signature.len() {
+            parameters.push(signature[start..].trim());
+        }
+        parameters.retain(|parameter| !parameter.is_empty());
+        parameters
+    }
+
+    #[test]
+    fn every_registered_command_matches_the_sanitized_binding_contract() {
+        let raw = super::specta_builder()
+            .export_str(
+                specta_typescript::Typescript::default()
+                    .bigint(specta_typescript::BigIntExportBehavior::Number),
+            )
+            .expect("export command registry");
+        let sanitized = crate::sanitize_typescript_bindings_source(&raw);
+        let committed = include_str!("../../../frontend/src/lib/bindings.ts");
+
+        assert_eq!(
+            sanitized, committed,
+            "bindings.ts is stale; run `cargo run --locked --example export_bindings` from apps/desktop/backend"
+        );
+        assert_eq!(
+            sanitized,
+            crate::sanitize_typescript_bindings_source(&sanitized),
+            "binding sanitization must be idempotent"
+        );
+
+        let signatures = command_signatures(&sanitized);
+        let names = signatures
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            names.len(),
+            signatures.len(),
+            "the generated command registry must not contain duplicate names"
+        );
+        assert!(
+            signatures.len() >= 340,
+            "expected the complete Desktop registry, found only {} commands",
+            signatures.len()
+        );
+    }
+
+    #[test]
+    fn binding_sanitizer_preserves_channels_and_rejects_reserved_parameters() {
+        let raw = super::specta_builder()
+            .export_str(
+                specta_typescript::Typescript::default()
+                    .bigint(specta_typescript::BigIntExportBehavior::Number),
+            )
+            .expect("export command registry");
+        let sanitized = crate::sanitize_typescript_bindings_source(&raw);
+
+        assert!(raw.contains("export type TAURI_CHANNEL<TSend> = null"));
+        assert!(sanitized.contains(
+            "export type TAURI_CHANNEL<TSend> = import(\"@tauri-apps/api/core\").Channel<TSend>"
+        ));
+        assert!(sanitized.contains(
+            "async directChatStream(payload: DirectChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>)"
+        ));
+        assert!(sanitized.contains(
+            "async thinclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: JsonValue | null)"
+        ));
+
+        let reserved = BTreeSet::from([
+            "arguments",
+            "await",
+            "break",
+            "case",
+            "catch",
+            "class",
+            "const",
+            "continue",
+            "debugger",
+            "default",
+            "delete",
+            "do",
+            "else",
+            "enum",
+            "eval",
+            "export",
+            "extends",
+            "false",
+            "finally",
+            "for",
+            "function",
+            "if",
+            "import",
+            "in",
+            "instanceof",
+            "new",
+            "null",
+            "return",
+            "super",
+            "switch",
+            "this",
+            "throw",
+            "true",
+            "try",
+            "typeof",
+            "var",
+            "void",
+            "while",
+            "with",
+            "yield",
+        ]);
+
+        for (command, signature) in command_signatures(&sanitized) {
+            for parameter in top_level_parameters(signature) {
+                let name = parameter
+                    .split_once(':')
+                    .map(|(name, _)| name.trim())
+                    .expect("generated command parameter should include a type");
+                assert!(
+                    !reserved.contains(name),
+                    "generated command `{command}` exposes reserved TypeScript parameter `{name}`"
+                );
+            }
+        }
+    }
+
     #[test]
     fn generated_bindings_cover_phase_two_desktop_surfaces() {
         let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
@@ -454,6 +614,7 @@ mod tests {
             "PlanUpdate",
             "UsageUpdate",
             "LifecycleUpdate",
+            "ObserverRecord",
             "ApprovalRequested",
             "CredentialPrompt",
             "WebLogin",

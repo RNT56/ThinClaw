@@ -541,7 +541,8 @@ fn event_thread_id(event: &SseEvent) -> Option<&str> {
         SseEvent::Response { thread_id, .. } => Some(thread_id.as_str()),
         SseEvent::ApprovalNeeded { thread_id, .. }
         | SseEvent::ToolStarted { thread_id, .. }
-        | SseEvent::Status { thread_id, .. } => thread_id.as_deref(),
+        | SseEvent::Status { thread_id, .. }
+        | SseEvent::AgentLifecycle { thread_id, .. } => thread_id.as_deref(),
         _ => None,
     }
 }
@@ -554,7 +555,7 @@ fn event_thread_id(event: &SseEvent) -> Option<&str> {
 fn is_run_progress_event(event: &SseEvent) -> bool {
     matches!(
         event,
-        SseEvent::ToolStarted { .. } | SseEvent::Status { .. }
+        SseEvent::ToolStarted { .. } | SseEvent::Status { .. } | SseEvent::AgentLifecycle { .. }
     )
 }
 
@@ -1128,6 +1129,19 @@ mod tests {
             sender.sends().is_empty(),
             "stream_chunk must not produce a push and must not read the device store"
         );
+    }
+
+    #[test]
+    fn structured_lifecycle_is_thread_scoped_run_progress() {
+        let event = SseEvent::AgentLifecycle {
+            phase: "context_compaction".to_string(),
+            label: "Compacting context".to_string(),
+            detail: Some("9500 of 10000 tokens".to_string()),
+            thread_id: Some("t1".to_string()),
+        };
+
+        assert_eq!(event_thread_id(&event), Some("t1"));
+        assert!(is_run_progress_event(&event));
     }
 
     #[tokio::test]

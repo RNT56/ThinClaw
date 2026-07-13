@@ -80,7 +80,7 @@ function normaliseHttpUrl(raw: string): string {
     if (!/^https?:\/\//.test(url)) url = `http://${url}`;
     const withoutProto = url.replace(/^https?:\/\//, '');
     const hostPart = withoutProto.split('/')[0];
-    if (!hostPart.includes(':')) url = url.replace(hostPart, `${hostPart}:18789`);
+    if (!hostPart.includes(':')) url = url.replace(hostPart, `${hostPart}:3000`);
     return url;
 }
 
@@ -311,7 +311,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         setRemoteConnecting(true);
         setRemoteError('');
         try {
-            const ok = await commands.thinclawTestConnection(url, remoteExistingToken || null);
+            const ok = unwrapResult(
+                await commands.thinclawTestConnection(url, remoteExistingToken || null),
+                'Test remote gateway connection',
+            );
             if (!ok) {
                 setRemoteError('Cannot connect — server unreachable or auth failed');
                 setRemoteConnecting(false);
@@ -327,7 +330,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 auto_connect: true,
             };
             await thinclaw.addAgentProfile(newProfile);
-            await commands.thinclawSaveGatewaySettings('remote', url, remoteExistingToken || '');
+            unwrapResult(
+                await commands.thinclawSaveGatewaySettings('remote', url, remoteExistingToken || ''),
+                'Save remote gateway settings',
+            );
             setRemoteConnected(true);
             toast.success('Connected to remote agent!');
         } catch (e: any) {
@@ -347,36 +353,44 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             const unlistenLog = await listen<string>('deploy-log', (event) => {
                 setRemoteDeployLogs((prev) => [...prev, event.payload]);
             });
-            const unlistenStatus = await listen<string>('deploy-status', (event) => {
-                unlistenLog();
-                unlistenStatus();
-                try {
-                    const result = JSON.parse(event.payload);
-                    if (result.status === 'success') {
-                        setRemoteConnected(true);
-                        // Auto-save the deployed agent
-                        const newProfile: thinclaw.AgentProfile = {
-                            id: crypto.randomUUID(),
-                            name: `Remote (${remoteIp})`,
-                            url: result.url,
-                            token: result.token || null,
-                            mode: 'remote',
-                            auto_connect: true,
-                        };
-                        thinclaw.addAgentProfile(newProfile).catch(console.error);
-                        commands.thinclawSaveGatewaySettings('remote', result.url, result.token || '').catch(console.error);
-                        toast.success('Remote agent deployed and connected!');
-                    } else {
-                        setRemoteError(result.message || 'Deployment failed');
-                    }
-                } catch {
-                    setRemoteError(event.payload);
+            try {
+                const result = unwrapResult(
+                    await commands.thinclawDeployRemote(
+                        remoteIp,
+                        remoteUser,
+                        remoteTailscaleKey || null,
+                        remoteEnableSystemd,
+                    ),
+                    'Deploy remote gateway',
+                );
+                const newProfile: thinclaw.AgentProfile = {
+                    id: crypto.randomUUID(),
+                    name: `Remote (${remoteIp})`,
+                    url: result.url,
+                    token: result.token || null,
+                    mode: 'remote',
+                    auto_connect: true,
+                };
+                // Save the returned credential even if the health check timed
+                // out: the deployment may still finish after this command, and
+                // the one-time token must not be lost with the response object.
+                await thinclaw.addAgentProfile(newProfile);
+                unwrapResult(
+                    await commands.thinclawSaveGatewaySettings('remote', result.url, result.token || ''),
+                    'Save deployed gateway settings',
+                );
+                if (result.status === 'success') {
+                    setRemoteConnected(true);
+                    toast.success('Remote agent deployed and connected!');
+                } else {
+                    setRemoteError(`${result.message || 'Deployment health check timed out'} The URL and credential were saved; retry the connection when the gateway is ready.`);
                 }
-                setRemoteDeploying(false);
-            });
-            await commands.thinclawDeployRemote(remoteIp, remoteUser, remoteTailscaleKey || null, remoteEnableSystemd);
+            } finally {
+                unlistenLog();
+            }
         } catch (e: any) {
             setRemoteError(typeof e === 'string' ? e : e.message);
+        } finally {
             setRemoteDeploying(false);
         }
     };
@@ -772,13 +786,13 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             <div className="relative">
                                                 <input type="text"
                                                     className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
-                                                    placeholder="192.168.1.50 or http://your-server.com:18789"
+                                                    placeholder="192.168.1.50 or https://your-server.com:3000"
                                                     value={remoteExistingUrl}
                                                     onChange={(e) => setRemoteExistingUrl(e.target.value)}
                                                 />
                                                 <Server className="absolute left-3 top-3.5 w-4 h-4 text-muted-foreground" />
                                             </div>
-                                            <p className="text-[10px] text-muted-foreground font-medium">Port <code>18789</code> is added automatically if omitted.</p>
+                                            <p className="text-[10px] text-muted-foreground font-medium">Port <code>3000</code> is added automatically if omitted.</p>
                                         </div>
 
                                         <div className="space-y-2">
@@ -838,7 +852,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             </div>
                                             <div className="space-y-2">
                                                 <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-muted-foreground/60">(optional)</span></label>
-                                                <input type="text"
+                                                <input type="password"
+                                                    autoComplete="off"
                                                     className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                     placeholder="tskey-auth-..."
                                                     value={remoteTailscaleKey}

@@ -44,9 +44,9 @@ async fn check_agent(profile: crate::thinclaw::config::AgentProfile) -> AgentSta
     // Basic URL validation
     if profile.url.trim().is_empty() || profile.url.starts_with("embedded://") {
         return AgentStatusSummary {
-            id: profile.id,
-            name: profile.name,
-            url: profile.url,
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            url: profile.url.clone(),
             online: false,
             latency_ms: None,
             version: None,
@@ -68,9 +68,9 @@ async fn check_agent(profile: crate::thinclaw::config::AgentProfile) -> AgentSta
         Ok(r) => r,
         Err(_) => {
             return AgentStatusSummary {
-                id: profile.id,
-                name: profile.name,
-                url: profile.url,
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                url: profile.url.clone(),
                 online: false,
                 latency_ms: None,
                 version: None,
@@ -104,9 +104,9 @@ async fn check_agent(profile: crate::thinclaw::config::AgentProfile) -> AgentSta
             let latency = start.elapsed().as_millis() as u32;
 
             AgentStatusSummary {
-                id: profile.id,
-                name: profile.name,
-                url: profile.url,
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                url: profile.url.clone(),
                 online: true,
                 latency_ms: Some(latency),
                 version: None,
@@ -124,9 +124,9 @@ async fn check_agent(profile: crate::thinclaw::config::AgentProfile) -> AgentSta
             }
         }
         _ => AgentStatusSummary {
-            id: profile.id,
-            name: profile.name,
-            url: profile.url,
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            url: profile.url.clone(),
             online: false,
             latency_ms: None,
             version: None,

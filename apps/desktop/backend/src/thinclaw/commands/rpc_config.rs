@@ -741,7 +741,9 @@ pub async fn thinclaw_save_cloud_config(
     if let Some(c) = &custom_llm {
         cfg.custom_llm_enabled = c.enabled;
         cfg.custom_llm_url = c.url.clone();
-        // Store custom LLM key in Keychain, not identity.json
+        // Store custom LLM key in Keychain, not identity.json. A missing key is
+        // an omitted patch because status responses intentionally redact it;
+        // an explicit empty string clears it.
         if remote_mode.is_none() {
             if let Some(key) = c.key.as_deref() {
                 let key = key.trim();
@@ -749,8 +751,6 @@ pub async fn thinclaw_save_cloud_config(
                 secret_store.set("custom_llm_key", value)?;
                 cfg.custom_llm_key = value.map(str::to_string);
             }
-        } else {
-            cfg.custom_llm_key = None;
         }
         cfg.custom_llm_model = c.model.clone();
     }

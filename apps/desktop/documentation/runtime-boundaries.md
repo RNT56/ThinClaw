@@ -96,6 +96,15 @@ Primary user surfaces:
 - `frontend/src/components/thinclaw/*`
 - ThinClaw management pages for memory, routines, skills, MCP, jobs, autonomy,
   channels, routing, cost, learning, experiments, and pairing
+- Repo Projects keeps its command/state orchestration in
+  `components/thinclaw/repo-projects/use-repo-projects.ts`; its public panel is a
+  composition surface, not a second runtime or persistence owner.
+- Lifecycle Hooks follows the same boundary: `components/thinclaw/hooks/use-hooks.ts`
+  owns generated-command interactions while cards, the custom editor, and the
+  built-in template catalog remain presentation modules.
+- Automations keeps routine polling, lifecycle events, CRUD, history, and cron
+  lint state in `components/thinclaw/automations/use-automations.ts`; its job
+  card, create modal, and schedule helpers do not own runtime state.
 
 Primary backend ownership:
 
@@ -108,7 +117,10 @@ Primary backend ownership:
 Runtime model:
 
 - Local mode embeds the root ThinClaw runtime in-process through
-  `ThinClawRuntimeState` and `ThinClawRuntimeInner`.
+  `ThinClawRuntimeState` and `ThinClawRuntimeInner`. The assembly coordinator is
+  `thinclaw/runtime_builder.rs`; its child modules own environment/provider
+  resolution, background tasks, typed event forwarding, and optional Docker
+  sandbox construction.
 - Remote mode talks to a remote ThinClaw HTTP gateway through
   `RemoteGatewayProxy`.
 - The frontend invokes stable `thinclaw_*` Tauri commands in both modes.
@@ -128,7 +140,23 @@ Security boundary:
 
 - ThinClaw agent tools are governed by ThinClaw policy, grant checks, and
   approval flow.
+- The Desktop Security panel is observational only. In local mode it reads the
+  active agent's bounded metadata-only safety telemetry, effective sandbox
+  configuration, and current tool descriptor/approval metadata. It never
+  receives prompts, tool parameters, tool outputs, or secrets. Remote and
+  stopped modes report that evidence is unavailable instead of synthesizing a
+  healthy posture.
 - Raw provider secrets must not be returned in remote mode.
+- Broad status and OAuth completion IPC is presence-only for remote gateway,
+  profile, custom-LLM, provider, and Gmail credentials. The local pairing
+  handshake token is exposed only for its explicit copy/pair workflow.
+- Remote bearer credentials are attached only to validated gateway origins.
+  Public origins require HTTPS; redirects are refused; authenticated status is
+  proven before SSE activation. Private/Tailscale HTTP remains an explicit
+  local-first exception and is documented as plaintext transport.
+- Runtime output remains untrusted after authentication. Remote response, SSE,
+  session-key, Markdown-link, and tool-display boundaries are bounded and
+  validated before reaching privileged host actions or React rendering.
 - Host-executing behavior such as autonomy, shell, browser, local filesystem
   writes, and arbitrary skill install must remain gated.
 
@@ -149,7 +177,7 @@ These pieces may be shared, but only through explicit adapters:
 | --- | --- |
 | Tauri shell | Hosts both systems and dispatches commands. |
 | React app shell | Provides navigation, settings, theming, windows, and layout. |
-| Keychain / `SecretStore` | One app-wide service stores provider credentials for both modes. Its shared live policy denies agent reads unless ThinClaw grants them. |
+| Keychain / `SecretStore` | One app-wide service stores provider credentials for both modes in one core AES-256-GCM authenticated envelope backed by macOS Keychain (master key in a separate Keychain item). Its shared live policy denies every agent read/probe/mutation unless ThinClaw grants it. Legacy writes migrate transactionally and corrupt/unavailable vaults fail closed. |
 | Local inference engines | Report readiness through `LocalRuntimeSnapshot`; `exposurePolicy=shared_when_enabled` means Direct may use the endpoint immediately and ThinClaw may use it only when the local inference toggle is enabled. |
 | Cloud provider catalog | May provide model discovery to both systems if the contract is provider/model metadata only. |
 | Conversation store | In the default local profile, `SharedHistoryStore` owns one runtime database. Direct rows use `surface=direct_workbench`; embedded-agent rows use `surface=agent_cockpit`; delete/list/project operations are surface-scoped. In the PostgreSQL profile, Direct retains that local store and the agent uses PostgreSQL. |
@@ -157,6 +185,7 @@ These pieces may be shared, but only through explicit adapters:
 | Theme tokens | `ThemeProvider` owns one versioned preference record and applies one semantic surface/content/accent token set to the document root. Workbench, Cockpit, Spotlight, and legacy Cockpit neutral/accent utilities consume that same selected palette. |
 | Runtime contracts | `crates/thinclaw-runtime-contracts` is the Desktop-first DTO source, with WebUI as the future adopter. The iOS surface does **not** use it — it generates its client from the gateway OpenAPI spec (`clients/openapi/thinclaw-gateway.openapi.json`) via swift-openapi-generator. |
 | Generated bindings | Direct Workbench uses `direct_*` command wrappers. Agent Cockpit uses `thinclaw_*` wrappers and `thinclaw-event`. |
+| Frontend compatibility API | `frontend/src/lib/thinclaw.ts` is a stable barrel only. Implementations live in focused `lib/api` modules and all command execution continues through the generated compatibility client. |
 | OS permissions | Camera, mic, screen, filesystem, and accessibility prompts may be shared at the host level, but authority must be checked per system. |
 
 The shared pieces are platform services. They are not proof that Direct AI

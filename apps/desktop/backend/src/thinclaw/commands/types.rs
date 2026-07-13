@@ -5,6 +5,82 @@
 
 use super::super::config::{AgentProfile, CustomSecret};
 
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SecurityTelemetryEvent {
+    pub occurred_at_ms: i64,
+    pub action: String,
+    pub source: String,
+    pub reason: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, specta::Type)]
+pub struct SecurityTelemetrySummary {
+    pub sanitized: u64,
+    pub redacted: u64,
+    pub blocked: u64,
+    pub warned: u64,
+    pub recent_events: Vec<SecurityTelemetryEvent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SandboxSecurityPosture {
+    pub enabled: bool,
+    pub policy: String,
+    pub network_allowlist: Vec<String>,
+    pub timeout_secs: u64,
+    pub memory_limit_mb: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ToolSecurityPosture {
+    pub name: String,
+    pub side_effect: String,
+    pub approval_class: String,
+    pub empty_params_requirement: String,
+    pub sanitizes_output: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, specta::Type)]
+pub struct ToolSecuritySummary {
+    pub registered: u64,
+    pub write_capable: u64,
+    pub always_approval: u64,
+    pub conditional_approval: u64,
+    pub write_without_coarse_approval: u64,
+    pub auto_approve_enabled: bool,
+    pub reviewed_tools: Vec<ToolSecurityPosture>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SecurityPosture {
+    pub runtime_mode: String,
+    pub evidence_available: bool,
+    pub unavailable_reason: Option<String>,
+    pub telemetry: SecurityTelemetrySummary,
+    pub sandbox: Option<SandboxSecurityPosture>,
+    pub tools: ToolSecuritySummary,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SecretRecoveryStatus {
+    pub supported: bool,
+    pub unavailable_reason: Option<String>,
+    pub cipher: String,
+    pub kdf: String,
+    pub key_version: i32,
+    pub stored_secrets: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SecretMasterKeyRotation {
+    pub old_key_version: i32,
+    pub new_key_version: i32,
+    pub rotated_secrets: u64,
+    pub recovery_key: Option<String>,
+}
+
 /// ThinClaw status response
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct ThinClawStatus {
@@ -17,7 +93,10 @@ pub struct ThinClawStatus {
     pub port: u16,
     pub gateway_mode: String,
     pub remote_url: Option<String>,
+    /// Compatibility field. Persisted bearer credentials are never returned
+    /// through the broad status command; use `has_remote_token` for presence.
     pub remote_token: Option<String>,
+    pub has_remote_token: bool,
     pub device_id: String,
     pub auth_token: String,
     pub state_dir: String,
@@ -50,7 +129,10 @@ pub struct ThinClawStatus {
     /// Whether the first-run identity bootstrap ritual has been completed.
     pub bootstrap_completed: bool,
     pub custom_llm_url: Option<String>,
+    /// Compatibility field. Persisted API keys are never returned through the
+    /// broad status command; use `has_custom_llm_key` for presence.
     pub custom_llm_key: Option<String>,
+    pub has_custom_llm_key: bool,
     pub custom_llm_model: Option<String>,
     pub custom_llm_enabled: bool,
     pub enabled_cloud_providers: Vec<String>,

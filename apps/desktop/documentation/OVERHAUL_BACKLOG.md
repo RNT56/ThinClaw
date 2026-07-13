@@ -123,12 +123,12 @@ app palette without changing status-color meaning.
 
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
-| TDO-020 | Split `lib/thinclaw.ts` → `lib/api/{domain}.ts` | L | ∞ | TDO-004 | `lib/thinclaw.ts` |
-| TDO-021 | Split `runtime_builder.rs` → inference/sandbox/bg-tasks/channels/deps modules | L | ∞ | — | `thinclaw/runtime_builder.rs` |
-| TDO-022 | Split `ThinClawRepoProjects.tsx` into sub-panels + hooks | M | P1 | — | component |
-| TDO-023 | Split `ThinClawHooks.tsx` | M | ∞ | — | component |
-| TDO-024 | Split `ThinClawAutomations.tsx` | M | P1 | — | component |
-| TDO-025 | Split `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` | M | ∞ | — | components |
+| TDO-020 ✅ | Split `lib/thinclaw.ts` → `lib/api/{domain}.ts` | L | ∞ | TDO-004 | `lib/thinclaw.ts`, `lib/api/*` |
+| TDO-021 ✅ | Split `runtime_builder.rs` → environment/sandbox/bg-tasks/event-forwarder modules | L | ∞ | — | `thinclaw/runtime_builder.rs`, `thinclaw/runtime_builder/*` |
+| TDO-022 ✅ | Split `ThinClawRepoProjects.tsx` into fixtures, sub-panels, hook, and utilities | M | P1 | — | `ThinClawRepoProjects.tsx`, `thinclaw/repo-projects/*` |
+| TDO-023 ✅ | Split `ThinClawHooks.tsx` into catalog, cards, modal, and data hook | M | ∞ | — | `ThinClawHooks.tsx`, `thinclaw/hooks/*` |
+| TDO-024 ✅ | Split `ThinClawAutomations.tsx` into job card, create modal, schedule helpers, and data hook | M | P1 | — | `ThinClawAutomations.tsx`, `thinclaw/automations/*` |
+| TDO-025 ✅ | Split `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` into focused rows/cards, catalogs, and data hooks | M | ∞ | — | components |
 
 **Split acceptance:** public import paths preserved via `pub use` / barrel re-exports;
 characterization test added before the split; no behavior change.
@@ -139,11 +139,11 @@ characterization test added before the split; no behavior change.
 
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
-| TDO-030 | Executable fixture acceptance for local + remote modes (make parity tiers runnable) | L | ∞ | TDO-002 | new test harness |
-| TDO-031 | Playwright/WebDriver E2E for top 10 flows | L | P2 | — | `frontend/` |
-| TDO-032 | Wire core `Observer` → desktop sink + crash reporter | M | P2 | — | `src/agent` observer, backend |
-| TDO-033 | Surface internal events as `UiEvent`s (context-pressure, self-repair, advisor) | M | P1 | TDO-005 | `ui_types.rs` |
-| TDO-034 | Expand contract/sanitizer tests (`Channel<T>`, reserved args, every command) | M | ∞ | TDO-002 | `setup/commands.rs` test |
+| TDO-030 ✅ | Executable fixture acceptance for local + remote modes (make parity tiers runnable) | L | ∞ | TDO-002 | `scripts/ci/desktop-fixture-acceptance.sh`, bridge/proxy fixtures |
+| TDO-031 ✅ | Playwright/WebDriver E2E for top 10 flows | L | P2 | — | `e2e/`, `wdio.browser.conf.ts` |
+| TDO-032 ✅ | Wire core `Observer` → desktop sink + crash reporter | M | P2 | — | `thinclaw/desktop_observer.rs`, typed event bus |
+| TDO-033 ✅ | Surface internal events as `UiEvent`s (context compaction, self-repair, advisor) in local and remote modes | M | P1 | TDO-005 | `ui_types.rs`, `event_mapping.rs`, gateway SSE |
+| TDO-034 ✅ | Expand contract/sanitizer tests (`Channel<T>`, reserved args, every command) | M | ∞ | TDO-002 | `setup/commands.rs` test |
 
 ---
 
@@ -151,10 +151,10 @@ characterization test added before the split; no behavior change.
 
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
-| TDO-040 | Single encrypted secret path (AES-256-GCM ↔ Keychain), grant enforcement | M | ∞ | TDO-011 | secret modules |
-| TDO-041 | "Security" panel: surface sanitizer hits, sandbox allowlist, dangerous-tool tracker (read-only + reasons) | M | P2 | TDO-033 | new panel |
-| TDO-042 | Master-key rotation + recovery-key in Settings (reuse cloud recovery-key UI) | M | P2 | TDO-040 | `RecoveryKeyPanel.tsx` |
-| TDO-043 | Threat-model: untrusted runtime output → React; remote-proxy auth | S | P2 | — | doc + hardening |
+| TDO-040 ✅ | Single encrypted secret path (AES-256-GCM ↔ Keychain), grant enforcement | M | ∞ | TDO-011 | `config/keychain.rs`, `secret_store.rs`, `secrets_adapter.rs` |
+| TDO-041 ✅ | "Security" panel: surface sanitizer decisions, effective sandbox allowlist, and live tool approval metadata (read-only + reasons) | M | P2 | TDO-033 | `SecurityPosturePanel.tsx`, `rpc_security.rs`, `security-posture.md` |
+| TDO-042 ✅ | Master-key rotation + recovery-key in Settings (reuse cloud recovery-key UI) | M | P2 | TDO-040 | `rpc_secret_recovery.rs`, `RecoveryKeyPanel.tsx` |
+| TDO-043 ✅ | Threat-model: untrusted runtime output → React; remote-proxy auth | S | P2 | — | `threat-model.md`, bounded rendering/transport, authenticated health, redacted profile/deploy credentials |
 
 ---
 

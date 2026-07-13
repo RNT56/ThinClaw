@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Tool-execution status carried by [`UiEvent::ToolUpdate`].
 ///
@@ -257,6 +258,9 @@ pub enum UiEvent {
         detail: Option<String>,
     },
 
+    /// Metadata-only core observer event/metric forwarded by Desktop.
+    ObserverRecord { record: UiObserverRecord },
+
     /// Structured plan/progress update from the ThinClaw agent loop.
     PlanUpdate {
         session_key: String,
@@ -428,6 +432,19 @@ pub enum UiEvent {
         #[specta(type = f64)]
         bytes: u64,
     },
+}
+
+/// Privacy-safe observer metadata surfaced to the Desktop Event Inspector.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct UiObserverRecord {
+    /// `event` or `metric`.
+    pub record_type: String,
+    /// Stable machine name such as `llm_response` or `loop_run`.
+    pub name: String,
+    pub success: Option<bool>,
+    pub duration_ms: Option<u64>,
+    /// Redacted, bounded metadata. Prompt/message bodies are never included.
+    pub attributes: BTreeMap<String, String>,
 }
 
 /// Session metadata for session list

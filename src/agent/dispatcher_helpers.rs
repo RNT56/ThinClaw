@@ -758,4 +758,13 @@ mod tests {
             .count();
         assert_eq!(nudge_count, 1);
     }
+
+    #[test]
+    fn agent_exposes_metadata_only_safety_telemetry() {
+        let agent = make_test_agent();
+
+        let snapshot = agent.safety_telemetry_snapshot();
+
+        assert_eq!(snapshot, crate::safety::SafetyTelemetrySnapshot::default());
+    }
 }

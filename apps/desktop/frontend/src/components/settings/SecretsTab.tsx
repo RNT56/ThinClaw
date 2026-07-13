@@ -6,6 +6,7 @@ import { useConfig } from '../../hooks/use-config';
 import { SecretCard } from './SecretCard';
 import { BedrockCredentialsCard } from './BedrockCredentialsCard';
 import { AddSecretForm } from './AddSecretForm';
+import { RecoveryKeyPanel } from './storage/RecoveryKeyPanel';
 
 // Typed bridge gate (BridgeError): render the reason (+ remediation) instead
 // of "[object Object]". thinclawSaveBraveKey returns BridgeError while the
@@ -840,6 +841,10 @@ export function SecretsTab() {
 
                 <div className="pt-4 border-t border-border/50">
                     <AddSecretForm onAdd={handleAddCustomSecret} />
+                </div>
+
+                <div className="pt-4 border-t border-border/50">
+                    <RecoveryKeyPanel mode="secrets" />
                 </div>
             </div>
 

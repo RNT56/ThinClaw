@@ -74,7 +74,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
     const [enabledModels, setEnabledModels] = useState<Record<string, string[]>>({});
     const [customLlmConfig, setCustomLlmConfig] = useState<thinclaw.CustomLlmConfigInput>({
         url: '',
-        key: '',
+        key: null,
         model: '',
         enabled: false
     });
@@ -129,7 +129,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
             setEnabledModels(status.enabled_cloud_models || {});
             setCustomLlmConfig({
                 url: status.custom_llm_url || '',
-                key: status.custom_llm_key || '',
+                key: null,
                 model: status.custom_llm_model || '',
                 enabled: status.custom_llm_enabled || false
             });
@@ -503,17 +503,41 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                                 </div>
 
                                 <div>
-                                    <label className="text-xs font-medium text-muted-foreground mb-1 block">API Key (Optional)</label>
+                                    <div className="mb-1 flex items-center justify-between gap-3">
+                                        <label className="text-xs font-medium text-muted-foreground">API Key (Optional)</label>
+                                        {status?.has_custom_llm_key && customLlmConfig.key === null && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setCustomLlmConfig((p: thinclaw.CustomLlmConfigInput) => ({ ...p, key: '' }))}
+                                                className="text-[10px] font-bold text-rose-500 hover:text-rose-400"
+                                            >
+                                                CLEAR SAVED KEY
+                                            </button>
+                                        )}
+                                        {status?.has_custom_llm_key && customLlmConfig.key === '' && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setCustomLlmConfig((p: thinclaw.CustomLlmConfigInput) => ({ ...p, key: null }))}
+                                                className="text-[10px] font-bold text-muted-foreground hover:text-foreground"
+                                            >
+                                                KEEP SAVED KEY
+                                            </button>
+                                        )}
+                                    </div>
                                     <div className="relative">
                                         <Key className="absolute left-3 top-2.5 w-4 h-4 text-muted-foreground" />
                                         <input
                                             type="password"
+                                            autoComplete="off"
                                             value={customLlmConfig.key || ''}
                                             onChange={e => setCustomLlmConfig((p: thinclaw.CustomLlmConfigInput) => ({ ...p, key: e.target.value }))}
-                                            placeholder="sk-..."
+                                            placeholder={status?.has_custom_llm_key ? 'Saved — enter a replacement' : 'sk-...'}
                                             className="w-full bg-muted/50 border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-hidden focus:border-primary/50 transition-colors"
                                         />
                                     </div>
+                                    {status?.has_custom_llm_key && customLlmConfig.key === '' && (
+                                        <p className="mt-1 text-[10px] text-rose-500">The saved key will be cleared when you save.</p>
+                                    )}
                                 </div>
 
                                 <div>

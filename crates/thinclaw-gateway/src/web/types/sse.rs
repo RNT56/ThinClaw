@@ -64,6 +64,18 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    /// A structured internal agent lifecycle transition. Keeping these events
+    /// distinct from generic status text lets clients render and inspect the
+    /// underlying phase without parsing a human-readable message.
+    #[serde(rename = "agent_lifecycle")]
+    AgentLifecycle {
+        phase: String,
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "plan_update")]
     PlanUpdate {
         entries: Vec<serde_json::Value>,
@@ -409,6 +421,7 @@ impl SseEvent {
             SseEvent::ToolResult { .. } => "tool_result",
             SseEvent::StreamChunk { .. } => "stream_chunk",
             SseEvent::Status { .. } => "status",
+            SseEvent::AgentLifecycle { .. } => "agent_lifecycle",
             SseEvent::PlanUpdate { .. } => "plan_update",
             SseEvent::UsageUpdate { .. } => "usage_update",
             SseEvent::ConversationUpdated { .. } => "conversation_updated",

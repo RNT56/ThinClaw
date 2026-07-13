@@ -10,6 +10,7 @@ pub mod bridge; // TDO-001: RouteMode + BridgeError dual-mode contract primitive
 pub mod commands;
 pub mod config;
 pub mod deploy;
+pub mod desktop_observer;
 pub mod event_mapping; // StatusUpdate → UiEvent conversion
 pub mod fleet;
 pub mod remote_proxy; // HTTP/SSE proxy client for remote ThinClaw gateway

@@ -587,6 +587,13 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                 error: None,
             }]
         }
+        "agent_lifecycle" => vec![UiEvent::AgentLifecycleEvent {
+            session_key: session_key.unwrap_or_else(|| "agent:main".to_string()),
+            run_id,
+            phase: value_string(&value, "phase").unwrap_or_else(|| "unknown".to_string()),
+            label: value_string(&value, "label").unwrap_or_default(),
+            detail: value_string(&value, "detail"),
+        }],
         "plan_update" => {
             let session_key = session_key.unwrap_or_else(|| "agent:main".to_string());
             vec![UiEvent::PlanUpdate {
@@ -828,6 +835,24 @@ mod tests {
             },
             StatusUpdate::StreamChunk("chunk".into()),
             StatusUpdate::Status("running".into()),
+            StatusUpdate::ContextCompactionStarted {
+                used: 9_500,
+                limit: 10_000,
+            },
+            StatusUpdate::AdvisorConsultationStarted {
+                reason: "confidence below threshold".into(),
+            },
+            StatusUpdate::SelfRepairStarted {
+                repair_type: "tool".into(),
+                target_id: "weather".into(),
+                reason: "runtime failure".into(),
+            },
+            StatusUpdate::SelfRepairCompleted {
+                repair_type: "tool".into(),
+                target_id: "weather".into(),
+                success: true,
+                summary: "rebuilt and reloaded".into(),
+            },
             StatusUpdate::Plan {
                 entries: vec![serde_json::json!({"step": "one"})],
             },
@@ -1016,6 +1041,33 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn maps_structured_gateway_agent_lifecycle_event() {
+        let events = gateway_sse_to_ui_events(serde_json::json!({
+            "type": "agent_lifecycle",
+            "thread_id": "thread-a",
+            "run_id": "run-a",
+            "phase": "self_repair_completed",
+            "label": "Self-repair succeeded: tool weather",
+            "detail": "rebuilt and reloaded"
+        }));
+
+        assert!(matches!(
+            events.as_slice(),
+            [UiEvent::AgentLifecycleEvent {
+                session_key,
+                run_id,
+                phase,
+                label,
+                detail,
+            }] if session_key == "thread-a"
+                && run_id.as_deref() == Some("run-a")
+                && phase == "self_repair_completed"
+                && label == "Self-repair succeeded: tool weather"
+                && detail.as_deref() == Some("rebuilt and reloaded")
+        ));
     }
 
     #[test]

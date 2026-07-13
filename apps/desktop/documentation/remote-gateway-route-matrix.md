@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (187)
+### Local only (192)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -195,6 +195,11 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_save_gateway_settings` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_save_slack_config` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_save_telegram_config` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_secret_master_key_rotate` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_secret_recovery_export` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_secret_recovery_import` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_secret_recovery_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_security_posture` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_session_search` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_set_autonomy_mode` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_set_bootstrap_completed` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |

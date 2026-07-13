@@ -14,6 +14,7 @@ use tracing::info;
 
 use super::types::*;
 use super::ThinClawManager;
+use crate::thinclaw::config::AgentProfile;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 /// Get ThinClaw status.
@@ -30,23 +31,18 @@ pub async fn thinclaw_get_status(
     let config = state.get_config().await;
 
     let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
-    let remote_mode = ironclaw.is_remote_mode().await
-        || config
-            .as_ref()
-            .map(|c| c.gateway_mode == "remote")
-            .unwrap_or(false);
-
     Ok(ThinClawStatus {
         gateway_mode: config
             .as_ref()
             .map(|c| c.gateway_mode.clone())
             .unwrap_or_else(|| "local".to_string()),
         remote_url: config.as_ref().and_then(|c| c.remote_url.clone()),
-        remote_token: if remote_mode {
-            None
-        } else {
-            config.as_ref().and_then(|c| c.remote_token.clone())
-        },
+        // Broad status responses expose presence, never reusable credentials.
+        remote_token: None,
+        has_remote_token: config
+            .as_ref()
+            .and_then(|c| c.remote_token.as_ref())
+            .is_some(),
         port: config.as_ref().map(|c| c.port).unwrap_or(18789),
         device_id: config
             .as_ref()
@@ -164,11 +160,11 @@ pub async fn thinclaw_get_status(
             .map(|cfg| cfg.bootstrap_completed)
             .unwrap_or(false),
         custom_llm_url: config.as_ref().and_then(|cfg| cfg.custom_llm_url.clone()),
-        custom_llm_key: if remote_mode {
-            None
-        } else {
-            config.as_ref().and_then(|cfg| cfg.custom_llm_key.clone())
-        },
+        custom_llm_key: None,
+        has_custom_llm_key: config
+            .as_ref()
+            .and_then(|cfg| cfg.custom_llm_key.as_ref())
+            .is_some(),
         custom_llm_model: config.as_ref().and_then(|cfg| cfg.custom_llm_model.clone()),
         custom_llm_enabled: config
             .as_ref()
@@ -184,7 +180,12 @@ pub async fn thinclaw_get_status(
             .unwrap_or_default(),
         profiles: config
             .as_ref()
-            .map(|cfg| cfg.profiles.clone())
+            .map(|cfg| {
+                cfg.profiles
+                    .iter()
+                    .map(AgentProfile::redacted)
+                    .collect()
+            })
             .unwrap_or_default(),
         // Implicit cloud provider status
         has_xai_key: config
@@ -397,13 +398,16 @@ pub async fn thinclaw_start_gateway(
         }
 
         let proxy =
-            crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token);
+            crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token)?;
 
         // Verify connectivity before activating
-        proxy
+        let authenticated = proxy
             .health_check()
             .await
             .map_err(|e| format!("Cannot connect to remote gateway: {}", e))?;
+        if !authenticated {
+            return Err("Remote gateway rejected the configured token".to_string());
+        }
 
         // Start SSE subscription (forwards remote events as Tauri events)
         proxy
@@ -619,10 +623,9 @@ pub async fn thinclaw_get_diagnostics(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_test_connection(url: String, token: Option<String>) -> Result<bool, String> {
-    let clean_url = url.trim_end_matches('/').to_string();
     let token_str = token.as_deref().unwrap_or("");
 
-    let proxy = crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&clean_url, token_str);
+    let proxy = crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&url, token_str)?;
     proxy.health_check().await
 }
 
@@ -658,20 +661,24 @@ pub async fn thinclaw_switch_to_profile(
         .cloned()
         .ok_or_else(|| format!("Profile '{}' not found", profile_id))?;
 
-    // Update gateway settings from profile
-    cfg.gateway_mode = profile.mode.clone();
-    cfg.remote_url = if profile.mode == "remote" && !profile.url.is_empty() {
+    let remote_url = if profile.mode == "remote" {
+        let token = profile
+            .token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| format!("Profile '{}' has no stored credential", profile.name))?;
+        // Validate the saved endpoint and credential before changing the active
+        // gateway slot. This keeps a broken profile from corrupting the current
+        // working connection settings.
+        crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&profile.url, token)?;
         Some(profile.url.clone())
     } else {
         None
     };
-    // Token: update in config (stored separately from Keychain for profiles)
-    if let Some(token) = &profile.token {
-        cfg.remote_token = Some(token.clone());
-    }
-
-    // Persist updated config
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    // Promote the selected profile credential into the active gateway slot so
+    // the selection survives restart without ever entering identity.json.
+    cfg.update_gateway_settings(profile.mode.clone(), remote_url, profile.token.clone())
+        .map_err(|error| error.to_string())?;
     *state.config.write().await = Some(cfg);
 
     info!(
