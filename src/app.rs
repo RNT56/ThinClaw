@@ -1801,13 +1801,15 @@ mod tests {
         use crate::db::Database as _;
 
         let temp = tempfile::TempDir::new().expect("temp dir");
-        let backend = crate::db::libsql::LibSqlBackend::new_local(temp.path().join("shared.db"))
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&temp.path().join("shared.db"))
             .await
             .expect("open shared database");
         backend.run_migrations().await.expect("run migrations");
         let database: Arc<dyn Database> = Arc::new(backend);
         let mut builder = AppBuilder::new(
-            Config::default(),
+            Config::from_test_settings(&crate::settings::Settings::default())
+                .await
+                .expect("build test config"),
             AppBuilderFlags::default(),
             None,
             Arc::new(LogBroadcaster::new()),
@@ -1824,7 +1826,9 @@ mod tests {
             &database
         ));
 
-        let mut config = Config::default();
+        let mut config = Config::from_test_settings(&crate::settings::Settings::default())
+            .await
+            .expect("build test config");
         config.database.backend = crate::config::DatabaseBackend::LibSql;
         config.database.libsql_path = Some(temp.path().join("configured.db"));
         let mut configured_builder = AppBuilder::new(
