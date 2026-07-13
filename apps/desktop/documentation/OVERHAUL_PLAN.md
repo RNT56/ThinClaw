@@ -184,7 +184,11 @@ Triggered on-touch, but schedule the worst offenders:
   approval metadata with human-readable reasons. It explicitly reports local,
   stopped, and remote evidence availability. The never-wired dangerous-tool
   tracker remains retired and is not presented as an enforcement control.
-- Wire master-key rotation + recovery-key into Settings (reuse the cloud-sync recovery-key UI).
+- ✅ Secrets Settings reuses the recovery-key panel for explicit, one-minute
+  key reveal, checksummed recovery import, and exact-confirmation master-key
+  rotation. Rotation persists the replacement core key, re-encrypts and
+  verifies the complete Desktop envelope, and rolls both stores back on
+  failure. The panel honestly gates persistence to macOS Keychain.
 - Threat-model the bridge (untrusted runtime output → React) and the remote-proxy auth.
 
 ### WS-6 — Packaging / Update / Platform (macOS-first)

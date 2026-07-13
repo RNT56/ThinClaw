@@ -36,6 +36,34 @@ keychain cache or secret store.
   Desktop packages can claim persistent credential support.
 - Runtime config files may store provider status, enabled providers, selected models, and grant flags, but must not store raw API keys.
 
+## Master-Key Rotation And Recovery
+
+Settings > Secrets exposes deliberate controls for the local Desktop secret
+envelope on macOS:
+
+- **Show Recovery Key** reads the current OS-secure-store master key only after
+  an explicit click. The UI holds the checksummed
+  `thinclaw-secrets-v1:<base64url>:<checksum>` value for at most one minute.
+- **Rotate Key** requires the exact `ROTATE` confirmation, generates a new
+  random 32-byte key, persists it in the shared core secure-store coordinate,
+  re-encrypts every cached secret, reads the envelope back, and verifies its
+  key version and decrypted contents. A failure restores the prior envelope
+  and prior master key; a rollback failure is surfaced as a distinct critical
+  error.
+- **Import Key** validates the prefix, payload length, and domain-separated
+  checksum, requires the exact `REPLACE` confirmation, then uses the same
+  transactional replacement path. Importing the already-active key is rejected.
+
+The recovery key contains no provider credentials. It is useful only together
+with a secure backup of the encrypted Keychain envelope; it is not a credential
+backup by itself. Clipboard copies are user-directed and may outlive the
+one-minute on-screen reveal, so the user must clear or overwrite the clipboard
+after storing the key.
+
+Windows/Linux Desktop currently reports this feature unavailable because the
+Desktop envelope itself is not durably stored there. The UI must not imply that
+process-local compatibility storage is recoverable across restarts.
+
 ## Grants
 
 Saving a key is not enough to expose it to ThinClaw tools. The user must also grant access.
@@ -90,6 +118,8 @@ P3 contract tests should cover:
 - Persisted envelopes contain no plaintext values and reject ciphertext or AAD tampering.
 - Legacy plaintext is detected for one-time encryption, and old data is not deleted when the encrypted write fails.
 - Key rotation increments the envelope key version and makes the old master key unusable.
+- Recovery-key parsing rejects malformed payloads, wrong lengths, and checksum corruption; destructive commands require exact confirmation.
+- Rotation verifies the persisted replacement envelope before committing the in-process crypto state.
 - New writes use ThinClaw identifiers.
 - Legacy Scrappy aliases migrate to canonical names without overwriting a newer canonical value.
 - Ungranted `get`, `get_for_injection`, `exists`, `list`, and `is_accessible` are denied.
@@ -105,4 +135,9 @@ Before release or review:
 - Grant access and confirm provider/model discovery works.
 - Revoke grant and confirm agent injection stops.
 - Delete key and confirm status/route simulation no longer treats it as available.
+- Export the secret recovery key, store it outside the app, rotate the master
+  key with `ROTATE`, and confirm the newly revealed key version increases while
+  all saved-key status remains intact.
+- Import a non-active test recovery key with `REPLACE` and confirm the envelope
+  is re-encrypted without changing stored secret count or grants.
 - Switch to remote gateway mode and confirm raw-secret read commands return unavailable/denied behavior.

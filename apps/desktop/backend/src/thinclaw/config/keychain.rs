@@ -326,6 +326,21 @@ fn encode_keychain_blob(
     .map_err(|error| format!("Failed to serialize encrypted API keys: {error}"))
 }
 
+fn verify_keychain_blob(
+    bytes: &[u8],
+    crypto: &SecretsCrypto,
+    key_version: i32,
+    expected: &HashMap<String, String>,
+) -> Result<(), String> {
+    let decoded = decode_keychain_blob(bytes, crypto)?;
+    if !decoded.encrypted || decoded.key_version != key_version || decoded.secrets != *expected {
+        return Err(
+            "Keychain rotation verification did not reproduce the expected envelope".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Load all API keys from the Keychain and authenticate/decrypt their single
 /// AES envelope.
 ///
@@ -764,9 +779,42 @@ pub fn rotate_encryption_key(new_crypto: Arc<SecretsCrypto>) -> Result<(i32, i32
     let new_key_version = old_key_version
         .checked_add(1)
         .ok_or_else(|| "Keychain encryption key version overflow".to_string())?;
+    let previous_envelope = match get_generic_password(SERVICE, ACCOUNT) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if is_not_found(&error) => None,
+        Err(error) => return Err(format!("Keychain rotation read failed: {error}")),
+    };
     let envelope = encode_keychain_blob(&cache, new_crypto.as_ref(), new_key_version)?;
     set_generic_password(SERVICE, ACCOUNT, &envelope)
         .map_err(|error| format!("Keychain rotation write failed: {error}"))?;
+
+    let verification = get_generic_password(SERVICE, ACCOUNT)
+        .map_err(|error| format!("Keychain rotation verification read failed: {error}"))
+        .and_then(|bytes| {
+            verify_keychain_blob(&bytes, new_crypto.as_ref(), new_key_version, &cache)
+        });
+    if let Err(error) = verification {
+        let rollback = match previous_envelope {
+            Some(bytes) => set_generic_password(SERVICE, ACCOUNT, &bytes)
+                .map_err(|rollback_error| rollback_error.to_string()),
+            None => delete_generic_password(SERVICE, ACCOUNT)
+                .or_else(|rollback_error| {
+                    if is_not_found(&rollback_error) {
+                        Ok(())
+                    } else {
+                        Err(rollback_error)
+                    }
+                })
+                .map_err(|rollback_error| rollback_error.to_string()),
+        };
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(format!(
+                "{error}; previous Keychain envelope rollback failed: {rollback_error}"
+            )),
+        };
+    }
+
     *state = Some(KeychainCryptoState {
         crypto: new_crypto,
         key_version: new_key_version,
@@ -781,6 +829,18 @@ pub fn encryption_key_version() -> i32 {
         .as_ref()
         .map(|state| state.key_version)
         .unwrap_or(INITIAL_KEY_VERSION)
+}
+
+pub fn encryption_metadata() -> Result<(i32, usize), String> {
+    ensure_loaded()?;
+    let key_version = encryption_key_version();
+    let stored_secrets = key_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .values()
+        .filter(|value| !value.is_empty())
+        .count();
+    Ok((key_version, stored_secrets))
 }
 
 fn is_not_found(e: &KeychainError) -> bool {
@@ -871,6 +931,7 @@ mod tests {
         let decoded = decode_keychain_blob(&rotated, &new_crypto).expect("new key decrypts");
         assert_eq!(decoded.key_version, 2);
         assert_eq!(decoded.secrets, secrets);
+        verify_keychain_blob(&rotated, &new_crypto, 2, &secrets).expect("rotation verifies");
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! Optional local Docker sandbox and orchestrator assembly.
 
+#[cfg(feature = "docker-sandbox")]
 use std::sync::Arc;
 
+#[cfg(feature = "docker-sandbox")]
 use thinclaw_core::channels::web::types::SseEvent;
 
 /// Build a local Docker sandbox `ContainerJobManager` + orchestrator for the

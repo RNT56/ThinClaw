@@ -272,6 +272,10 @@ pub fn specta_builder() -> tauri_specta::Builder {
         // Diagnostics & tools
         crate::thinclaw::commands::thinclaw_diagnostics,
         crate::thinclaw::commands::thinclaw_security_posture,
+        crate::thinclaw::commands::thinclaw_secret_recovery_status,
+        crate::thinclaw::commands::thinclaw_secret_recovery_export,
+        crate::thinclaw::commands::thinclaw_secret_master_key_rotate,
+        crate::thinclaw::commands::thinclaw_secret_recovery_import,
         crate::thinclaw::commands::thinclaw_tools_list,
         crate::thinclaw::commands::thinclaw_tool_policy_get,
         crate::thinclaw::commands::thinclaw_tool_policy_set,

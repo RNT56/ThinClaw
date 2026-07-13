@@ -63,6 +63,24 @@ pub struct SecurityPosture {
     pub tools: ToolSecuritySummary,
 }
 
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SecretRecoveryStatus {
+    pub supported: bool,
+    pub unavailable_reason: Option<String>,
+    pub cipher: String,
+    pub kdf: String,
+    pub key_version: i32,
+    pub stored_secrets: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SecretMasterKeyRotation {
+    pub old_key_version: i32,
+    pub new_key_version: i32,
+    pub rotated_secrets: u64,
+    pub recovery_key: Option<String>,
+}
+
 /// ThinClaw status response
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct ThinClawStatus {

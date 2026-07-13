@@ -2479,6 +2479,38 @@ async thinclawSecurityPosture() : Promise<Result<SecurityPosture, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async thinclawSecretRecoveryStatus() : Promise<Result<SecretRecoveryStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_secret_recovery_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawSecretRecoveryExport() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_secret_recovery_export") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawSecretMasterKeyRotate(confirmation: string) : Promise<Result<SecretMasterKeyRotation, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_secret_master_key_rotate", { confirmation }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawSecretRecoveryImport(recoveryKey: string, confirmation: string) : Promise<Result<SecretMasterKeyRotation, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_secret_recovery_import", { recoveryKey, confirmation }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async thinclawToolsList() : Promise<Result<ToolsListResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_tools_list") };
@@ -4105,6 +4137,8 @@ export type RuntimeReadiness = "ready" | "starting" | "setup_required" | "unavai
  */
 export type S3ConfigInput = { endpoint: string | null; bucket: string; region: string | null; access_key_id: string; secret_access_key: string; root: string | null }
 export type SandboxSecurityPosture = { enabled: boolean; policy: string; network_allowlist: string[]; timeout_secs: number; memory_limit_mb: number }
+export type SecretMasterKeyRotation = { old_key_version: number; new_key_version: number; rotated_secrets: number; recovery_key: string | null }
+export type SecretRecoveryStatus = { supported: boolean; unavailable_reason: string | null; cipher: string; kdf: string; key_version: number; stored_secrets: number }
 export type SecurityPosture = { runtime_mode: string; evidence_available: boolean; unavailable_reason: string | null; telemetry: SecurityTelemetrySummary; sandbox: SandboxSecurityPosture | null; tools: ToolSecuritySummary }
 export type SecurityTelemetryEvent = { occurred_at_ms: number; action: string; source: string; reason: string; severity: string }
 export type SecurityTelemetrySummary = { sanitized: number; redacted: number; blocked: number; warned: number; recent_events: SecurityTelemetryEvent[] }
