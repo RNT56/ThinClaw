@@ -105,6 +105,54 @@ async fn start_fixture_gateway(
     (format!("http://{addr}"), recorded, handle)
 }
 
+async fn start_scripted_gateway(
+    responses: Vec<&'static str>,
+) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind scripted gateway");
+    let addr = listener.local_addr().expect("scripted gateway address");
+    let methods = Arc::new(Mutex::new(Vec::new()));
+    let methods_for_task = Arc::clone(&methods);
+
+    let handle = tokio::spawn(async move {
+        for response in responses {
+            let (mut stream, _) = listener.accept().await.expect("accept scripted request");
+            let mut buffer = Vec::new();
+            let headers_end = loop {
+                let mut chunk = [0_u8; 1024];
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("read scripted request");
+                assert!(read > 0, "scripted client closed before sending headers");
+                buffer.extend_from_slice(&chunk[..read]);
+                if let Some(pos) = find_headers_end(&buffer) {
+                    break pos;
+                }
+            };
+            let request_line = String::from_utf8_lossy(&buffer[..headers_end])
+                .lines()
+                .next()
+                .expect("scripted request line")
+                .to_string();
+            methods_for_task.lock().await.push(
+                request_line
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write scripted response");
+        }
+    });
+
+    (format!("http://{addr}"), methods, handle)
+}
+
 fn find_headers_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -306,6 +354,47 @@ async fn health_check_proves_the_bearer_credential_on_an_authenticated_route() {
         requests[0].authorization.as_deref(),
         Some("Bearer fixture-token")
     );
+}
+
+#[tokio::test]
+async fn idempotent_get_retries_transient_responses_and_honors_retry_after() {
+    let (base_url, methods, server) = start_scripted_gateway(vec![
+        "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy",
+        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nwait",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+    ])
+    .await;
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
+
+    assert_eq!(
+        proxy.get_json("/api/transient").await.expect("retried GET")["ok"],
+        true
+    );
+    server.await.expect("scripted server completes");
+    assert_eq!(&*methods.lock().await, &["GET", "GET", "GET"]);
+}
+
+#[tokio::test]
+async fn mutation_requests_are_never_retried_implicitly() {
+    let (base_url, methods, server) = start_scripted_gateway(vec![
+        "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy",
+    ])
+    .await;
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
+
+    let error = proxy
+        .post_json("/api/mutation", &serde_json::json!({ "value": 1 }))
+        .await
+        .expect_err("mutation should surface the first transient failure");
+    assert!(matches!(
+        error,
+        crate::thinclaw::bridge::BridgeError::Network {
+            retryable: true,
+            ..
+        }
+    ));
+    server.await.expect("scripted server completes");
+    assert_eq!(&*methods.lock().await, &["POST"]);
 }
 
 #[tokio::test]

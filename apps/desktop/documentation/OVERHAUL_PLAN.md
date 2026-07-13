@@ -259,7 +259,9 @@ panel wired or honestly gated; contract suite green.
 
 **Stabilize**
 - Error taxonomy + user-facing error surfaces (no raw `String` errors in the UI).
-- Bridge resilience: timeouts, retries, reconnect for `RemoteGatewayProxy`; dual-mode failover UX.
+- **[DONE]** Bridge resilience: bounded retries for idempotent reads only (including
+  capped `Retry-After`), typed transport/HTTP failures, shutdown-safe SSE reconnect,
+  and deduplicated failover/recovery UX.
 - Performance budgets: cold start; `UiEvent` stream throughput (30 variants); large-history virtualization; sidecar memory ceilings.
 - Crash reporting + structured logs surfaced in the Doctor panel.
 

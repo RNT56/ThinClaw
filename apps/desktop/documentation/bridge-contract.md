@@ -40,6 +40,12 @@ Desktop talks to a remote ThinClaw gateway through `RemoteGatewayProxy`.
 - The remote SSE stream is subscribed by the proxy.
 - Remote events must be re-emitted to the frontend as the same `thinclaw-event` `UiEvent` schema used by local mode.
 - Unsupported remote endpoints must return a typed unavailable response or a clear error reason. They must not silently no-op.
+- Idempotent GET requests retry transient transport failures and HTTP 408/425/429/5xx
+  responses at most three times with bounded exponential backoff. `Retry-After` seconds are
+  honored up to ten seconds. Mutating requests are never retried implicitly.
+- SSE reconnects use a one-to-thirty-second bounded backoff, stop immediately on explicit
+  shutdown, and stop retrying non-transient HTTP failures such as rejected credentials or a
+  missing endpoint. The UI shows one updating reconnect notice and a recovery confirmation.
 
 ## Command Routing & Gating (TDO-001/002)
 
@@ -77,6 +83,8 @@ command to `ROUTE_TABLE`, then run `cargo run --locked --example export_bindings
 - Local conversion: `apps/desktop/backend/src/thinclaw/event_mapping.rs`
 - Local transport: `apps/desktop/backend/src/thinclaw/tauri_channel.rs`
 - Remote transport: `apps/desktop/backend/src/thinclaw/remote_proxy/`
+
+Both local and remote connection events use protocol version `2`.
 
 Every current ThinClaw `StatusUpdate` variant must be either mapped to `UiEvent` or explicitly documented as intentionally ignored. As of this checkpoint, Desktop maps chat, plan, usage, cost, lifecycle, approval, auth, canvas, job, subagent, agent-message, and routine events. Unknown remote gateway SSE events are forwarded as `UiEvent::GatewayEvent` instead of being silently dropped.
 

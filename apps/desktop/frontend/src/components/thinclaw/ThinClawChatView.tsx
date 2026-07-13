@@ -151,6 +151,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     // IC-028: Renamed from isUserScrolling (inverted logic) to isAutoScrollPinned
     const isAutoScrollPinned = useRef(true);
+    const gatewayReconnectPending = useRef(false);
 
     // Inference speed tracking for ThinClaw
     const ocStreamStartRef = useRef<number | null>(null);
@@ -342,8 +343,6 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     // The user can manually refresh context via the Wake Up button.
 
     useThinClawEvents((uiEvent) => {
-        if (!effectiveSessionKey) return;
-
         // ── Skip events owned by other panels ────────────────────────
         // LogEntry events are consumed by the Logs tab; RoutineLifecycle
         // by the Automations panel. Don't process them here.
@@ -363,13 +362,25 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             }]);
             return;
         }
+        if (uiEvent.kind === 'Connected') {
+            if (gatewayReconnectPending.current) {
+                toast.success('Gateway connection restored', { id: 'gateway-connection', duration: 3000 });
+                gatewayReconnectPending.current = false;
+            }
+            return;
+        }
         if (uiEvent.kind === 'Disconnected') {
-            toast.error(`Gateway disconnected: ${uiEvent.reason || 'unknown'}`, { duration: 5000 });
+            gatewayReconnectPending.current = true;
+            toast.warning(uiEvent.reason || 'Gateway connection interrupted — reconnecting', {
+                id: 'gateway-connection',
+                duration: 10000,
+            });
             setIsSending(false);
             setActiveRun(null);
             setContextPressure(null);
             return;
         }
+        if (!effectiveSessionKey) return;
         if (uiEvent.kind === 'BootstrapCompleted') {
             // Agent deleted BOOTSTRAP.md — mark done in identity.json and refresh parent.
             thinclawCommands.thinclawSetBootstrapCompleted(true).catch(() => { });

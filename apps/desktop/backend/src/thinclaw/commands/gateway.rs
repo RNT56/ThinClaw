@@ -422,19 +422,13 @@ pub async fn thinclaw_start_gateway(
             crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token)?;
 
         // Verify connectivity before activating
-        let authenticated = proxy
-            .health_check()
-            .await
-            .map_err(|e| format!("Cannot connect to remote gateway: {}", e))?;
+        let authenticated = proxy.health_check().await?;
         if !authenticated {
             return Err(("Remote gateway rejected the configured token".to_string()).into());
         }
 
         // Start SSE subscription (forwards remote events as Tauri events)
-        proxy
-            .start_sse_subscription(app_handle.clone())
-            .await
-            .map_err(|e| format!("Failed to start SSE subscription: {}", e))?;
+        proxy.start_sse_subscription(app_handle.clone()).await?;
 
         // Activate in ThinClawRuntimeState
         ironclaw.connect_remote(proxy).await;

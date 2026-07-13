@@ -225,7 +225,7 @@ characterization test added before the split; no behavior change.
 | ID | Title | Size | Files |
 |---|---|---|---|
 | TDO-200 | Error taxonomy + user-facing error surfaces (no raw `String` errors) — ✅ complete | M | bridge + UI |
-| TDO-201 | Bridge resilience: timeouts/retries/reconnect for `RemoteGatewayProxy` + failover UX | M | `runtime_bridge.rs` |
+| TDO-201 ✅ | Bridge resilience: bounded idempotent retries, typed transport/HTTP failures, shutdown-safe SSE reconnect, and visible failover/recovery UX | M | `remote_proxy/`, `ThinClawChatView.tsx` |
 | TDO-202 | Performance budgets: cold start, event-stream throughput, history virtualization, sidecar memory | L | frontend + backend |
 | TDO-203 | Model upgrade: default to latest Claude family in catalog + onboarding | M | provider catalog, onboarding |
 | TDO-204 | Engine bump (llama.cpp/MLX/vLLM/Ollama) + GGUF/quant matrix validation | L | `engine/*`, sidecars |

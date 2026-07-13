@@ -152,7 +152,8 @@ un-shippable.
 - Fix the **WIT `StatusType` drift** (11 variants vs `StatusUpdate`'s 21) — 10 variants collapse lossily
   to `Status`, so WASM channels can't see lifecycle/subagent/credential events. Extend the WIT enum +
   bump the interface version.
-- Standardize `UiEvent::Connected.protocol` (local emits `2`, remote proxy emits `1`).
+- **[LANDED]** `UiEvent::Connected.protocol` is standardized at `2` for local and remote
+  Desktop transports.
 
 **1.4 Dependency hygiene (P1)** *(partially landed; dedup still open)*
 - **[LANDED]** A `[workspace.dependencies]` table exists and hoists 9 shared deps (serde, serde_json,
