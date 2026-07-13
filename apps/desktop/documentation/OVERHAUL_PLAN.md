@@ -96,7 +96,7 @@ runtime is dual-mode: embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridg
 | **Remote-only in local mode** | `learning_evaluate_outcomes` and GPU operations are honestly gated with gateway remediation; `job_restart`/`job_prompt` remain remote-only |
 | **Headless internals (no UI/telemetry)** | advisor auto-consult, pre-compaction flush, config watcher, observability metrics (context pressure, self-repair, checkpoints/rollback, undo, and trajectory now have commands + UI) |
 | **CLI-only (no command)** | tunnel and Claude-Code/Codex bridge job modes (the eval framework and SFT/DPO trajectory export now have Desktop commands) |
-| **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); no `/personality` or external-memory UI |
+| **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); external-memory UI remains pending |
 | **Partial flows** | Fleet and Cloud-Brain config |
 | **Duplication** | Shared-service duplication is closed: secrets, models/providers, local conversation history, settings storage/schema, and theming are unified |
 | **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `desktop_api.rs`, and several `ThinClaw*` panel components (the root Tauri facade is retired) |
@@ -238,7 +238,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 ### 5d. Identity / memory / personality
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| No `/personality` (`/vibe`) overlay | `thinclaw_personality_set/clear` + chat control | identity/soul crates | S |
+| ~~No `/personality` (`/vibe`) overlay~~ **DONE** | The canonical session command is available through an accessible Agent Chat control with inspect, preset, and clear actions; it reuses the persisted command path instead of duplicating state through a second IPC API | `commands.rs`, `chat/PersonalityControl.tsx` | S |
 | External-memory providers no UI | setup/status commands + panel (Mem0/Letta/Zep/…) | `external_memory_*` tools | M |
 | ~~Inline MemoryEditor partial~~ **DONE** | Reads and saves the canonical memory document through registered commands | `MemoryEditor.tsx`, `commands/sessions.rs` | S |
 

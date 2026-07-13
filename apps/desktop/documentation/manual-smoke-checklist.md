@@ -176,6 +176,9 @@ set in the report.
   CLI-only, and no normal chat thread is created or modified.
 - Open Learning and verify status, history, candidates, outcomes, proposals,
   reviews, and rollbacks.
+- In Agent Chat, use the personality menu to inspect the current overlay, select
+  a preset, and restore the base identity; verify each command response appears
+  without discarding any draft already present in the composer.
 - Mutations must be enabled only when the root ThinClaw APIs and config allow
   them; otherwise record the visible gated reason.
 

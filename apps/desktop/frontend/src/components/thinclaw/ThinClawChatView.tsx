@@ -19,6 +19,7 @@ import AutomationCard from './AutomationCard';
 import { Square, Undo2, Redo2 } from 'lucide-react';
 import { ThinClawModeBadge, useThinClawStatusSnapshot } from './ThinClawModeBadge';
 import { ContextPressureBadge, type ContextPressureLevel } from './ContextPressureBadge';
+import { PersonalityControl } from './chat/PersonalityControl';
 
 interface ThinClawChatViewProps {
     sessionKey: string | null;
@@ -927,10 +928,10 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         setShowExportMenu(false);
     };
 
-    const handleSend = async () => {
-        if (!input.trim() || !effectiveSessionKey) return;
-        const msg = input.trim();
-        setInput('');
+    const submitMessage = async (message: string) => {
+        const msg = message.trim();
+        if (!msg || !effectiveSessionKey) return;
+        if (msg === input.trim()) setInput('');
         // Don't block on isSending — the engine queues messages via idempotency keys.
         // The user should be able to send follow-up messages while the agent processes.
         setIsSending(true);
@@ -941,6 +942,10 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         scrollToBottom();
         try { await thinclaw.sendThinClawMessage(effectiveSessionKey, msg, true); }
         catch (e) { toast.error('Failed to send message'); setMessages(prev => prev.filter(m => m.id !== optimisticMsg.id)); }
+    };
+
+    const handleSend = async () => {
+        await submitMessage(input);
     };
 
     const handleAbort = async () => {
@@ -1415,6 +1420,10 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                             placeholder={gatewayRunning ? (coreTab === 'chat' ? "Chat with ThinClaw..." : "Send Command...") : "Gateway offline..."}
                                             rows={1}
                                             className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-hidden resize-none p-2 max-h-32 min-h-[44px] text-sm"
+                                        />
+                                        <PersonalityControl
+                                            disabled={!gatewayRunning || !effectiveSessionKey}
+                                            onCommand={(command) => { void submitMessage(command); }}
                                         />
                                         <div className="relative">
                                             <button
