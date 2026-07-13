@@ -1005,10 +1005,11 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "runtime-libsql")]
     async fn canonical_database(temp: &tempfile::TempDir) -> Arc<dyn thinclaw_core::db::Database> {
         use thinclaw_core::db::Database as _;
         let path = temp.path().join("settings.db");
-        let backend = thinclaw_db::libsql::LibSqlBackend::new_local(&path)
+        let backend = thinclaw_core::db::libsql::LibSqlBackend::new_local(&path)
             .await
             .expect("open canonical settings database");
         backend.run_migrations().await.expect("run migrations");
@@ -1040,6 +1041,7 @@ mod tests {
         assert_eq!(read_back.mcp_cache_ttl_secs, 120);
     }
 
+    #[cfg(feature = "runtime-libsql")]
     #[tokio::test]
     async fn canonical_database_migrates_file_config_and_wins_on_restart() {
         let temp = tempfile::TempDir::new().expect("temp dir");
@@ -1092,6 +1094,7 @@ mod tests {
         assert_eq!(persisted["max_search_results"], 23);
     }
 
+    #[cfg(feature = "runtime-libsql")]
     #[tokio::test]
     async fn agent_and_workbench_views_share_storage_without_leaking_reserved_rows() {
         let temp = tempfile::TempDir::new().expect("temp dir");

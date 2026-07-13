@@ -110,7 +110,6 @@ zstd = "0.13"
 # ThinClaw agent engine (root crate; runtime DB backend is selected by features)
 thinclaw_core = { path = "../../..", package = "thinclaw", default-features = false }
 thinclaw-config = { path = "../../../crates/thinclaw-config" }
-thinclaw-db = { path = "../../../crates/thinclaw-db", features = ["libsql"] }
 thinclaw-runtime-contracts = { path = "../../../crates/thinclaw-runtime-contracts", features = ["specta"] }
 
 # macOS Keychain — secure encrypted storage for API keys

@@ -121,8 +121,8 @@ hand-written `lib/thinclaw.ts`, and generated `bindings.ts`.
 |---|---|---|
 | Secrets | One app-wide `SecretStore`; its grant-aware `SecretsStore` implementation feeds the Cockpit while host methods feed Workbench | Unified; one keychain cache, live shared grants, one `SecretsTab` |
 | Models / providers | `model_manager.rs`, `inference/router.rs` (Workbench) + ThinClaw provider catalog (Cockpit) | One model registry + one provider-key vault; `thinclaw_sync_local_llm` is the canonical bridge |
-| History | One `SharedHistoryStore` opens `thinclaw-runtime.db`; Direct commands use a SQLx adapter and the embedded agent receives the same runtime handle | Unified; `direct_workbench` and `agent_cockpit` rows are isolated by `surface`, with deterministic legacy merge |
-| Settings / config | One versioned `ConfigManager` envelope in the shared runtime database; typed Workbench and key/value Agent views retain their existing command families | Unified; `user_config.json` is a recovery mirror after deterministic first attach |
+| History | In the default local profile, one `SharedHistoryStore` opens `thinclaw-runtime.db`; Direct commands use a SQLx adapter and the embedded agent receives the same runtime handle. In the PostgreSQL profile, Direct stays local and the agent uses PostgreSQL | Unified locally; `direct_workbench` and `agent_cockpit` rows are isolated by `surface`, with deterministic legacy merge |
+| Settings / config | In the default local profile, one versioned `ConfigManager` envelope in the shared runtime database serves typed Workbench and key/value Agent views. In the PostgreSQL profile, Workbench remains recovery-file-backed and the agent uses its remote store | Unified locally; `user_config.json` is a recovery mirror after deterministic first attach |
 | Theming | One versioned `thinclaw-ui-theme` preference record and one semantic token application path | Unified across Workbench, Cockpit, Spotlight, system mode changes, and all five palettes; feeds WS / Phase 3 |
 
 Approach: **strangler-fig with an adapter seam** — a `SharedServices` Rust module + a

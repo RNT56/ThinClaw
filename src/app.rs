@@ -1795,6 +1795,52 @@ impl AppBuilder {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn injected_and_configured_databases_initialize() {
+        use crate::db::Database as _;
+
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let backend = crate::db::libsql::LibSqlBackend::new_local(temp.path().join("shared.db"))
+            .await
+            .expect("open shared database");
+        backend.run_migrations().await.expect("run migrations");
+        let database: Arc<dyn Database> = Arc::new(backend);
+        let mut builder = AppBuilder::new(
+            Config::default(),
+            AppBuilderFlags::default(),
+            None,
+            Arc::new(LogBroadcaster::new()),
+        )
+        .with_database(Arc::clone(&database));
+
+        builder
+            .init_database()
+            .await
+            .expect("initialize injected database");
+
+        assert!(Arc::ptr_eq(
+            builder.db().expect("database retained"),
+            &database
+        ));
+
+        let mut config = Config::default();
+        config.database.backend = crate::config::DatabaseBackend::LibSql;
+        config.database.libsql_path = Some(temp.path().join("configured.db"));
+        let mut configured_builder = AppBuilder::new(
+            config,
+            AppBuilderFlags::default(),
+            None,
+            Arc::new(LogBroadcaster::new()),
+        );
+
+        configured_builder
+            .init_database()
+            .await
+            .expect("initialize configured database");
+        assert!(configured_builder.db().is_some());
+    }
+
     #[test]
     fn restricted_modes_disable_background_processes() {
         assert_eq!(

@@ -484,6 +484,7 @@ pub fn run() {
             let shared_history = history::SharedHistoryStore::open(&app_data_dir, &pool)
                 .await
                 .expect("failed to initialize shared history store");
+            #[cfg(feature = "runtime-libsql")]
             handle
                 .state::<config::ConfigManager>()
                 .attach_database(shared_history.runtime_store())

@@ -9,6 +9,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{FromRow, SqlitePool};
 use std::collections::HashSet;
 use std::path::Path;
+#[cfg(feature = "runtime-libsql")]
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 use thinclaw_runtime_contracts::AssetRef;
@@ -109,28 +110,35 @@ struct LegacyMessage {
     created_at: i64,
 }
 
-/// One app-wide conversation service shared by Direct Workbench and the
-/// embedded ThinClaw agent. Direct commands use the SQLx adapter while the
-/// agent receives the exact same `Arc<dyn Database>`.
+/// One app-wide conversation service for Direct Workbench. In the default
+/// local runtime, the embedded agent receives the exact same database through
+/// [`Self::runtime_store`]. The PostgreSQL build keeps Direct history in the
+/// canonical local Desktop database while the agent uses its configured remote
+/// store.
 #[derive(Clone)]
 pub struct SharedHistoryStore {
     pool: SqlitePool,
+    #[cfg(feature = "runtime-libsql")]
     runtime_store: Arc<dyn thinclaw_core::db::Database>,
 }
 
 impl SharedHistoryStore {
     pub async fn open(state_dir: &Path, legacy_pool: &SqlitePool) -> Result<Self, String> {
-        use thinclaw_core::db::Database as _;
-
         let runtime_path = crate::thinclaw::runtime_builder::runtime_db_path(state_dir);
-        let backend = thinclaw_db::libsql::LibSqlBackend::new_local(&runtime_path)
-            .await
-            .map_err(|error| error.to_string())?;
-        backend
-            .run_migrations()
-            .await
-            .map_err(|error| error.to_string())?;
-        let runtime_store: Arc<dyn thinclaw_core::db::Database> = Arc::new(backend);
+
+        #[cfg(feature = "runtime-libsql")]
+        let runtime_store = {
+            use thinclaw_core::db::Database as _;
+
+            let backend = thinclaw_core::db::libsql::LibSqlBackend::new_local(&runtime_path)
+                .await
+                .map_err(|error| error.to_string())?;
+            backend
+                .run_migrations()
+                .await
+                .map_err(|error| error.to_string())?;
+            Arc::new(backend) as Arc<dyn thinclaw_core::db::Database>
+        };
 
         let database_url = format!("sqlite://{}?mode=rwc", runtime_path.to_string_lossy());
         let pool = SqlitePoolOptions::new()
@@ -150,14 +158,18 @@ impl SharedHistoryStore {
             .await
             .map_err(|error| error.to_string())?;
 
+        ensure_shared_history_schema(&pool).await?;
+
         let store = Self {
             pool,
+            #[cfg(feature = "runtime-libsql")]
             runtime_store,
         };
         store.migrate_legacy_history(legacy_pool).await?;
         Ok(store)
     }
 
+    #[cfg(feature = "runtime-libsql")]
     pub fn runtime_store(&self) -> Arc<dyn thinclaw_core::db::Database> {
         Arc::clone(&self.runtime_store)
     }
@@ -408,6 +420,32 @@ impl SharedHistoryStore {
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
+}
+
+async fn ensure_shared_history_schema(pool: &SqlitePool) -> Result<(), String> {
+    for statement in [
+        "CREATE TABLE IF NOT EXISTS conversations (\
+         id TEXT PRIMARY KEY, channel TEXT NOT NULL, user_id TEXT NOT NULL, actor_id TEXT, \
+         conversation_scope_id TEXT, conversation_kind TEXT NOT NULL DEFAULT 'direct', \
+         surface TEXT NOT NULL DEFAULT 'agent_cockpit', thread_id TEXT, \
+         stable_external_conversation_key TEXT, started_at TEXT NOT NULL DEFAULT (datetime('now')), \
+         last_activity TEXT NOT NULL DEFAULT (datetime('now')), metadata TEXT NOT NULL DEFAULT '{}')",
+        "CREATE INDEX IF NOT EXISTS idx_conversations_surface_activity \
+         ON conversations(surface, last_activity DESC)",
+        "CREATE TABLE IF NOT EXISTS conversation_messages (\
+         id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, \
+         role TEXT NOT NULL, content TEXT NOT NULL, actor_id TEXT, actor_display_name TEXT, \
+         raw_sender_id TEXT, metadata TEXT NOT NULL DEFAULT '{}', \
+         created_at TEXT NOT NULL DEFAULT (datetime('now')))",
+        "CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation_created_at \
+         ON conversation_messages(conversation_id, created_at DESC)",
+    ] {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, sqlx::FromRow)]
