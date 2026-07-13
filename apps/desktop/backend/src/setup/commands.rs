@@ -514,10 +514,7 @@ mod tests {
                 let imports_raw_invoke = source
                     .lines()
                     .any(|line| line.contains("@tauri-apps/api/core") && line.contains("invoke"));
-                if imports_raw_invoke
-                    || source.contains("invoke(")
-                    || source.contains("invoke<")
-                {
+                if imports_raw_invoke || source.contains("invoke(") || source.contains("invoke<") {
                     violations.push(path.display().to_string());
                 }
             }

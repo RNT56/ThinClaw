@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (185)
+### Local only (186)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -136,6 +136,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_add_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_agents_list` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_broadcast_command` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_canvas_dispatch_event` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_navigate` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_panel_dismiss` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_panel_get` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
