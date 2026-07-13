@@ -3006,6 +3006,22 @@ async thinclawLearningProviderHealth() : Promise<Result<JsonValue, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async thinclawExternalMemoryConfigure(request: ExternalMemoryConfigureRequest) : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_external_memory_configure", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawExternalMemoryDisable() : Promise<Result<JsonValue, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_external_memory_disable") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async thinclawLearningCodeProposals(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_code_proposals", { status, limit }) };
@@ -3869,6 +3885,15 @@ export type ExtensionInfoItem = { name: string; kind: string; description: strin
  * Extensions list response
  */
 export type ExtensionsListResponse = { extensions: ExtensionInfoItem[]; total: number }
+/**
+ * Secret-safe external-memory setup request.
+ *
+ * Desktop intentionally accepts an environment-variable *name*, never an API
+ * key value. Provider credentials therefore stay out of the settings database
+ * and can be supplied through the existing process environment / secret
+ * injection boundary.
+ */
+export type ExternalMemoryConfigureRequest = { provider: string; base_url: string | null; api_key_env: string | null; embedding_url: string | null; embedding_api_key_env: string | null; collection: string | null; collection_id: string | null; agent_id: string | null; provider_user_id: string | null; enabled: boolean; activate: boolean; cadence: number | null; depth: number | null; user_modeling_enabled: boolean }
 export type FrontendMessage = { id: string; conversation_id: string; role: string; content: string; images: string[] | null; assets: AssetRef[] | null; attached_docs: DirectAttachedDocument[] | null; web_search_results: WebSearchResult[] | null; created_at: number }
 export type GGUFMetadata = { architecture: string; context_length: number; embedding_length: number; block_count: number; head_count: number; head_count_kv: number; file_type: number;
 /**

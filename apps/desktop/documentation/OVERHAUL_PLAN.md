@@ -239,7 +239,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
 | ~~No `/personality` (`/vibe`) overlay~~ **DONE** | The canonical session command is available through an accessible Agent Chat control with inspect, preset, and clear actions; it reuses the persisted command path instead of duplicating state through a second IPC API | `commands.rs`, `chat/PersonalityControl.tsx` | S |
-| External-memory providers no UI | setup/status commands + panel (Mem0/Letta/Zep/…) | `external_memory_*` tools | M |
+| ~~External-memory providers no UI~~ **DONE** | Learning Review configures/activates/deactivates Honcho, Zep, Mem0, OpenMemory, Letta, Chroma, Qdrant, and custom HTTP providers; raw API keys are never accepted or persisted, only validated environment-variable references | `rpc_experiments_learning.rs`, `learning/ExternalMemoryPanel.tsx` | M |
 | ~~Inline MemoryEditor partial~~ **DONE** | Reads and saves the canonical memory document through registered commands | `MemoryEditor.tsx`, `commands/sessions.rs` | S |
 
 ### 5e. Repo-projects / fleet / remote (finish partials)

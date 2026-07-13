@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (193)
+### Local only (195)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -150,6 +150,8 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_cron_lint` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_experiments_list_envs` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_experiments_run_eval` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_external_memory_configure` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_external_memory_disable` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_anthropic_key` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_bedrock_credentials` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_get_brave_key` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |

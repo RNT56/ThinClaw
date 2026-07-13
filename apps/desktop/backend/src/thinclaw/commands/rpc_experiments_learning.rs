@@ -3,7 +3,9 @@
 //! These IPC commands keep the alpha `thinclaw_*` command names while routing
 //! to either the embedded ThinClaw API modules or the remote gateway HTTP API.
 
-use serde::Serialize;
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 use uuid::Uuid;
@@ -12,6 +14,143 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 const USER_ID: &str = "local_user";
 const DEFAULT_LIMIT: usize = 50;
+const EXTERNAL_MEMORY_PROVIDERS: &[&str] = &[
+    "honcho",
+    "zep",
+    "mem0",
+    "openmemory",
+    "letta",
+    "chroma",
+    "qdrant",
+    "custom_http",
+];
+
+/// Secret-safe external-memory setup request.
+///
+/// Desktop intentionally accepts an environment-variable *name*, never an API
+/// key value. Provider credentials therefore stay out of the settings database
+/// and can be supplied through the existing process environment / secret
+/// injection boundary.
+#[derive(Clone, Debug, Deserialize, specta::Type)]
+pub struct ExternalMemoryConfigureRequest {
+    pub provider: String,
+    pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
+    pub embedding_url: Option<String>,
+    pub embedding_api_key_env: Option<String>,
+    pub collection: Option<String>,
+    pub collection_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub provider_user_id: Option<String>,
+    pub enabled: bool,
+    pub activate: bool,
+    pub cadence: Option<u32>,
+    pub depth: Option<u32>,
+    pub user_modeling_enabled: bool,
+}
+
+fn optional_trimmed(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn validate_env_name(label: &str, value: &Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = optional_trimmed(value) else {
+        return Ok(None);
+    };
+    let mut chars = value.chars();
+    let valid_start = chars
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic());
+    if !valid_start || !chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        return Err(format!(
+            "{label} must be an environment variable name such as THINCLAW_MEMORY_API_KEY"
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn validate_http_url(label: &str, value: &Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = optional_trimmed(value) else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&value).map_err(|_| {
+        format!("{label} must be an absolute HTTP or HTTPS URL, for example http://localhost:8888")
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(format!(
+            "{label} must be an absolute HTTP or HTTPS URL, for example http://localhost:8888"
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!(
+            "{label} must not contain embedded credentials; use an API-key environment variable"
+        ));
+    }
+    Ok(Some(value.trim_end_matches('/').to_string()))
+}
+
+fn build_external_memory_settings(
+    request: &ExternalMemoryConfigureRequest,
+) -> Result<(String, thinclaw_core::settings::LearningProviderSettings), String> {
+    let provider = request.provider.trim().to_ascii_lowercase();
+    if !EXTERNAL_MEMORY_PROVIDERS.contains(&provider.as_str()) {
+        return Err(format!(
+            "Unsupported external-memory provider '{provider}'. Choose one of: {}",
+            EXTERNAL_MEMORY_PROVIDERS.join(", ")
+        ));
+    }
+    if request.activate && !request.enabled {
+        return Err(
+            "An external-memory provider must be enabled before it can be activated".to_string(),
+        );
+    }
+    if request.cadence == Some(0) || request.depth == Some(0) {
+        return Err("Provider cadence and depth must be at least 1 when supplied".to_string());
+    }
+
+    let mut config = HashMap::new();
+    if let Some(value) = validate_http_url("Provider base URL", &request.base_url)? {
+        config.insert("base_url".to_string(), value);
+    }
+    if let Some(value) = validate_env_name("API key reference", &request.api_key_env)? {
+        config.insert("api_key_env".to_string(), value);
+    }
+    if let Some(value) = validate_http_url("Embedding URL", &request.embedding_url)? {
+        config.insert("embedding_url".to_string(), value);
+    }
+    if let Some(value) = validate_env_name(
+        "Embedding API key reference",
+        &request.embedding_api_key_env,
+    )? {
+        config.insert("embedding_api_key_env".to_string(), value);
+    }
+    for (key, value) in [
+        ("collection", &request.collection),
+        ("collection_id", &request.collection_id),
+        ("agent_id", &request.agent_id),
+        ("user_id", &request.provider_user_id),
+    ] {
+        if let Some(value) = optional_trimmed(value) {
+            config.insert(key.to_string(), value);
+        }
+    }
+
+    Ok((
+        provider,
+        thinclaw_core::settings::LearningProviderSettings {
+            enabled: request.enabled,
+            config,
+            cadence: request.cadence,
+            depth: request.depth,
+            user_modeling_enabled: request.user_modeling_enabled,
+        },
+    ))
+}
 
 fn unavailable(reason: impl Into<String>) -> Value {
     json!({
@@ -187,6 +326,57 @@ pub async fn thinclaw_learning_provider_health(
     }
     let orchestrator = learning_orchestrator(&ironclaw).await?;
     api_result_to_json(thinclaw_core::api::learning::provider_health(&orchestrator, USER_ID).await)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_external_memory_configure(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    request: ExternalMemoryConfigureRequest,
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
+    use crate::thinclaw::bridge::{gated, RouteMode};
+
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(gated(
+            "external-memory setup",
+            "The connected gateway exposes provider health but does not expose credential-bearing provider configuration over HTTP.",
+            "switch to the local embedded runtime and configure the provider on that host",
+            RouteMode::LocalOnly,
+        ));
+    }
+    let (provider, settings) = build_external_memory_settings(&request)?;
+    let orchestrator = learning_orchestrator(&ironclaw).await?;
+    let providers = orchestrator
+        .configure_memory_provider(USER_ID, &provider, settings, request.activate)
+        .await?;
+    Ok(json!({
+        "provider": provider,
+        "active": request.activate,
+        "providers": providers,
+    }))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_external_memory_disable(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
+    use crate::thinclaw::bridge::{gated, RouteMode};
+
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(gated(
+            "external-memory setup",
+            "The connected gateway exposes provider health but does not expose credential-bearing provider configuration over HTTP.",
+            "switch to the local embedded runtime and disable the provider on that host",
+            RouteMode::LocalOnly,
+        ));
+    }
+    let orchestrator = learning_orchestrator(&ironclaw).await?;
+    let providers = orchestrator.disable_active_memory_provider(USER_ID).await?;
+    Ok(json!({
+        "active": false,
+        "providers": providers,
+    }))
 }
 
 #[tauri::command]
@@ -792,5 +982,69 @@ pub async fn thinclaw_experiments_run_eval(
             "call thinclaw_experiments_list_envs to discover available environments",
             RouteMode::LocalOnly,
         )),
+    }
+}
+
+#[cfg(test)]
+mod external_memory_tests {
+    use super::*;
+
+    fn request(provider: &str) -> ExternalMemoryConfigureRequest {
+        ExternalMemoryConfigureRequest {
+            provider: provider.to_string(),
+            base_url: None,
+            api_key_env: None,
+            embedding_url: None,
+            embedding_api_key_env: None,
+            collection: None,
+            collection_id: None,
+            agent_id: None,
+            provider_user_id: None,
+            enabled: true,
+            activate: true,
+            cadence: None,
+            depth: None,
+            user_modeling_enabled: false,
+        }
+    }
+
+    #[test]
+    fn external_memory_settings_keep_secret_values_out_of_the_request_contract() {
+        let mut request = request(" qdrant ");
+        request.base_url = Some(" http://localhost:6333/ ".to_string());
+        request.api_key_env = Some("QDRANT_API_KEY".to_string());
+        request.embedding_url = Some("https://embeddings.example/v1/embeddings".to_string());
+        request.embedding_api_key_env = Some("EMBEDDING_API_KEY".to_string());
+        request.collection = Some(" thinclaw ".to_string());
+
+        let (provider, settings) =
+            build_external_memory_settings(&request).expect("valid provider settings");
+
+        assert_eq!(provider, "qdrant");
+        assert_eq!(settings.config["base_url"], "http://localhost:6333");
+        assert_eq!(settings.config["api_key_env"], "QDRANT_API_KEY");
+        assert_eq!(settings.config["collection"], "thinclaw");
+        assert!(!settings.config.contains_key("api_key"));
+        assert!(!settings.config.contains_key("embedding_api_key"));
+    }
+
+    #[test]
+    fn external_memory_settings_reject_unsupported_providers_and_unsafe_urls() {
+        let unsupported = request("mystery");
+        assert!(build_external_memory_settings(&unsupported)
+            .expect_err("unsupported provider must fail")
+            .contains("Unsupported external-memory provider"));
+
+        let mut unsafe_url = request("zep");
+        unsafe_url.base_url = Some("https://token@example.com".to_string());
+        assert!(build_external_memory_settings(&unsafe_url)
+            .expect_err("embedded credentials must fail")
+            .contains("must not contain embedded credentials"));
+
+        let mut invalid_env = request("mem0");
+        invalid_env.api_key_env = Some("not a variable".to_string());
+        assert!(build_external_memory_settings(&invalid_env)
+            .expect_err("invalid environment reference must fail")
+            .contains("environment variable name"));
     }
 }

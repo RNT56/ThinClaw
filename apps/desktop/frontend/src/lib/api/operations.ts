@@ -779,6 +779,35 @@ export async function getLearningProviderHealth(): Promise<ThinClawJson> {
     return compatibilityCommands.thinclawLearningProviderHealth();
 }
 
+export interface ExternalMemoryConfigureRequest {
+    provider: string;
+    base_url: string | null;
+    api_key_env: string | null;
+    embedding_url: string | null;
+    embedding_api_key_env: string | null;
+    collection: string | null;
+    collection_id: string | null;
+    agent_id: string | null;
+    provider_user_id: string | null;
+    enabled: boolean;
+    activate: boolean;
+    cadence: number | null;
+    depth: number | null;
+    user_modeling_enabled: boolean;
+}
+
+/** Configure a local external-memory provider without persisting raw credentials. */
+export async function configureExternalMemoryProvider(
+    request: ExternalMemoryConfigureRequest,
+): Promise<ThinClawJson> {
+    return compatibilityCommands.thinclawExternalMemoryConfigure(request);
+}
+
+/** Deactivate the local external-memory provider while preserving its settings. */
+export async function disableExternalMemoryProvider(): Promise<ThinClawJson> {
+    return compatibilityCommands.thinclawExternalMemoryDisable();
+}
+
 export async function getLearningCodeProposals(status: string | null = null, limit = 50): Promise<ThinClawJson> {
     return compatibilityCommands.thinclawLearningCodeProposals(status, limit);
 }

@@ -284,6 +284,8 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_cron_lint", RouteMode::LocalOnly),
     ("thinclaw_experiments_list_envs", RouteMode::LocalOnly),
     ("thinclaw_experiments_run_eval", RouteMode::LocalOnly),
+    ("thinclaw_external_memory_configure", RouteMode::LocalOnly),
+    ("thinclaw_external_memory_disable", RouteMode::LocalOnly),
     ("thinclaw_get_anthropic_key", RouteMode::LocalOnly),
     ("thinclaw_get_bedrock_credentials", RouteMode::LocalOnly),
     ("thinclaw_get_brave_key", RouteMode::LocalOnly),

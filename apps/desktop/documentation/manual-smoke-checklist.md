@@ -178,6 +178,11 @@ set in the report.
   CLI-only, and no normal chat thread is created or modified.
 - Open Learning and verify status, history, candidates, outcomes, proposals,
   reviews, and rollbacks.
+- In External Memory, select a provider, enter only an environment-variable name
+  for its credential, save + activate, and verify the selected provider health
+  updates. Deactivate it and verify no provider remains active. Repeat with a
+  remote gateway connected and verify setup is visibly local-only while health
+  remains readable. Never paste a raw API key into this panel.
 - In Agent Chat, use the personality menu to inspect the current overlay, select
   a preset, and restore the base identity; verify each command response appears
   without discarding any draft already present in the composer.

@@ -325,6 +325,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_learning_candidates,
         crate::thinclaw::commands::thinclaw_learning_artifact_versions,
         crate::thinclaw::commands::thinclaw_learning_provider_health,
+        crate::thinclaw::commands::thinclaw_external_memory_configure,
+        crate::thinclaw::commands::thinclaw_external_memory_disable,
         crate::thinclaw::commands::thinclaw_learning_code_proposals,
         crate::thinclaw::commands::thinclaw_learning_outcomes,
         crate::thinclaw::commands::thinclaw_learning_rollbacks,

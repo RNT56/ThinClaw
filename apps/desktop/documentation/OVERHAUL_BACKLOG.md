@@ -205,7 +205,7 @@ characterization test added before the split; no behavior change.
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
 | TDO-130 ✅ | `/personality` (`/vibe`) overlay command + accessible session control in Agent Chat | S | TDO-001 | `commands.rs`, `chat/PersonalityControl.tsx` |
-| TDO-131 | External-memory provider setup/status commands + panel | M | TDO-001 | `external_memory_*` |
+| TDO-131 ✅ | Secret-safe external-memory setup/disable commands + provider health/configuration panel | M | TDO-001 | `rpc_experiments_learning.rs`, `learning/ExternalMemoryPanel.tsx` |
 | TDO-132 ✅ | Inline `MemoryEditor` wired to `get_memory`/`save_memory` | S | — | `MemoryEditor.tsx`, `commands/sessions.rs` |
 
 ### Repo-projects / fleet / remote

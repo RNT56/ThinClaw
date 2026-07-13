@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { ProfileEvolutionPanel } from './learning/ProfileEvolutionPanel';
+import { ExternalMemoryPanel } from './learning/ExternalMemoryPanel';
 
 type JsonMap = Record<string, any>;
 
@@ -201,6 +202,8 @@ export function ThinClawLearning() {
             </div>
 
             <ProfileEvolutionPanel />
+
+            <ExternalMemoryPanel providers={providers} onChanged={load} />
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
                 <Panel title="Code Proposals" icon={FileCode2}>
