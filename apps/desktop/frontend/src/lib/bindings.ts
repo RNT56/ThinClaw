@@ -2643,7 +2643,7 @@ async thinclawChannelConfigSchemas() : Promise<Result<JsonValue, string>> {
  * values to the live channel's `update_runtime_config`. WASM channels apply the
  * change live; native channels (Signal, Discord, …) use the default no-op and
  * persist but require a channel restart to take effect (reported via the note).
- * Embedded-only (D-3): a remote gateway owns its own channels.
+ * Remote mode forwards to the gateway because that runtime owns its channels.
  */
 async thinclawChannelConfigSubmit(channelId: string, values: JsonValue) : Promise<Result<JsonValue, BridgeError>> {
     try {
