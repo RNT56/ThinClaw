@@ -102,6 +102,9 @@ Primary user surfaces:
 - Lifecycle Hooks follows the same boundary: `components/thinclaw/hooks/use-hooks.ts`
   owns generated-command interactions while cards, the custom editor, and the
   built-in template catalog remain presentation modules.
+- Automations keeps routine polling, lifecycle events, CRUD, history, and cron
+  lint state in `components/thinclaw/automations/use-automations.ts`; its job
+  card, create modal, and schedule helpers do not own runtime state.
 
 Primary backend ownership:
 

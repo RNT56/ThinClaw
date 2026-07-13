@@ -127,7 +127,7 @@ app palette without changing status-color meaning.
 | TDO-021 ✅ | Split `runtime_builder.rs` → environment/sandbox/bg-tasks/event-forwarder modules | L | ∞ | — | `thinclaw/runtime_builder.rs`, `thinclaw/runtime_builder/*` |
 | TDO-022 ✅ | Split `ThinClawRepoProjects.tsx` into fixtures, sub-panels, hook, and utilities | M | P1 | — | `ThinClawRepoProjects.tsx`, `thinclaw/repo-projects/*` |
 | TDO-023 ✅ | Split `ThinClawHooks.tsx` into catalog, cards, modal, and data hook | M | ∞ | — | `ThinClawHooks.tsx`, `thinclaw/hooks/*` |
-| TDO-024 | Split `ThinClawAutomations.tsx` | M | P1 | — | component |
+| TDO-024 ✅ | Split `ThinClawAutomations.tsx` into job card, create modal, schedule helpers, and data hook | M | P1 | — | `ThinClawAutomations.tsx`, `thinclaw/automations/*` |
 | TDO-025 | Split `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` | M | ∞ | — | components |
 
 **Split acceptance:** public import paths preserved via `pub use` / barrel re-exports;

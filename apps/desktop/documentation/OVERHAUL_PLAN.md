@@ -147,8 +147,10 @@ Triggered on-touch, but schedule the worst offenders:
 - Oversized panel components: ✅ `ThinClawRepoProjects.tsx` now delegates to a
   focused data hook plus fixture, utility, and panel modules. ✅ `ThinClawHooks.tsx`
   now composes a tested template catalog, cards, custom editor, and data hook.
-  `ThinClawAutomations.tsx`, `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, and
-  `ThinClawSkills.tsx` remain scheduled for the same treatment.
+  ✅ `ThinClawAutomations.tsx` now composes a job card, create modal, tested
+  schedule helpers, and runtime data hook. `SubAgentPanel.tsx`,
+  `ThinClawChannels.tsx`, and `ThinClawSkills.tsx` remain scheduled for the same
+  treatment.
 - ✅ Retired `src/tauri_commands.rs`; reusable helpers now live in `src/desktop_api.rs` and registration stays in typed Desktop command modules.
 
 ### WS-4 — Test/QA & Observability
