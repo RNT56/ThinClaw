@@ -511,7 +511,7 @@ First parity-closure batch (merged or in-flight; see `OVERHAUL_BACKLOG.md` for p
 
 | Capability | Status | Surface |
 |---|---|---|
-| Dual-mode bridge contract: `RouteMode`, typed `BridgeError`, `gated()`, `ROUTE_TABLE` linter | in-flight — `ROUTE_TABLE` now classifies **all** registered commands with a total-coverage guard (`all_registered_commands_are_classified`); per-command `BridgeError` error-type migration still pending | `thinclaw/bridge.rs` |
+| Dual-mode bridge contract: `RouteMode`, typed `BridgeError`, `gated()`, `ROUTE_TABLE` linter | in-flight — `ROUTE_TABLE` classifies **all** registered commands, generates the committed per-command route matrix with a drift guard, and enforces total coverage; per-command `BridgeError` error-type migration still pending | `thinclaw/bridge.rs`, `remote-gateway-route-matrix.md` |
 | Undo / redo | in-flight | `thinclaw_undo`/`_redo` commands + cockpit toolbar buttons |
 | Session search | merged | `thinclaw_session_search` + Session Search panel |
 | Checkpoints / rollback | merged | `list`/`diff`/`restore` commands + Rollback panel |

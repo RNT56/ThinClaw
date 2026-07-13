@@ -586,6 +586,101 @@ pub fn route_mode(command: &str) -> Option<RouteMode> {
         .map(|(_, mode)| *mode)
 }
 
+// ---------------------------------------------------------------------------
+// Generated route matrix (TDO-003)
+// ---------------------------------------------------------------------------
+
+pub const ROUTE_MATRIX_BEGIN_MARKER: &str = "<!-- BEGIN GENERATED ROUTE TABLE -->";
+pub const ROUTE_MATRIX_END_MARKER: &str = "<!-- END GENERATED ROUTE TABLE -->";
+
+/// Render the exhaustive, code-authoritative portion of the remote gateway
+/// route matrix. The prose and endpoint-family notes around this block remain
+/// human-authored; every per-command classification comes directly from
+/// [`ROUTE_TABLE`].
+pub fn render_route_matrix_section() -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    writeln!(output, "{ROUTE_MATRIX_BEGIN_MARKER}").expect("write to String");
+    writeln!(output, "## Generated Per-Command Classification\n").expect("write to String");
+    writeln!(
+        output,
+        "> Generated from `apps/desktop/backend/src/thinclaw/bridge.rs`. Do not edit this block by hand. Regenerate it with `cargo run --locked --example export_bindings`.\n"
+    )
+    .expect("write to String");
+
+    let groups = [
+        (
+            RouteMode::RemoteOnly,
+            "Remote only",
+            "Embedded mode returns a typed unavailable reason; connect a remote gateway.",
+        ),
+        (
+            RouteMode::LocalOnly,
+            "Local only",
+            "Remote mode returns a typed unavailable reason; use the embedded runtime.",
+        ),
+        (
+            RouteMode::LocalAndRemote,
+            "Local and remote",
+            "Supported in both embedded and remote-gateway modes.",
+        ),
+    ];
+
+    for (mode, heading, behavior) in groups {
+        let mut commands = ROUTE_TABLE
+            .iter()
+            .filter_map(|(command, entry_mode)| (*entry_mode == mode).then_some(*command))
+            .collect::<Vec<_>>();
+        commands.sort_unstable();
+
+        writeln!(output, "### {heading} ({})\n", commands.len()).expect("write to String");
+        writeln!(
+            output,
+            "| Command | Route mode | Unsupported-mode behavior |"
+        )
+        .expect("write to String");
+        writeln!(output, "| --- | --- | --- |").expect("write to String");
+        for command in commands {
+            writeln!(output, "| `{command}` | `{mode:?}` | {behavior} |").expect("write to String");
+        }
+        output.push('\n');
+    }
+
+    writeln!(output, "{ROUTE_MATRIX_END_MARKER}").expect("write to String");
+    output
+}
+
+/// Replace only the generated block in the route-matrix document.
+pub fn update_route_matrix_document(document: &str) -> Result<String, String> {
+    let begin = document
+        .find(ROUTE_MATRIX_BEGIN_MARKER)
+        .ok_or_else(|| format!("missing route matrix marker: {ROUTE_MATRIX_BEGIN_MARKER}"))?;
+    let end_start = document[begin..]
+        .find(ROUTE_MATRIX_END_MARKER)
+        .map(|offset| begin + offset)
+        .ok_or_else(|| format!("missing route matrix marker: {ROUTE_MATRIX_END_MARKER}"))?;
+    let end = end_start + ROUTE_MATRIX_END_MARKER.len();
+
+    Ok(format!(
+        "{}{}{}",
+        &document[..begin],
+        render_route_matrix_section().trim_end(),
+        &document[end..]
+    ))
+}
+
+/// Regenerate the committed route-matrix block in place.
+pub fn write_route_matrix_document(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let document = std::fs::read_to_string(path)?;
+    let updated = update_route_matrix_document(&document).map_err(std::io::Error::other)?;
+    if updated != document {
+        std::fs::write(path, updated)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,6 +849,34 @@ mod tests {
     #[test]
     fn route_mode_unknown_command_returns_none() {
         assert_eq!(route_mode("nope"), None);
+    }
+
+    #[test]
+    fn generated_route_matrix_covers_every_classified_command() {
+        let generated = render_route_matrix_section();
+        let generated_rows = generated
+            .lines()
+            .filter(|line| line.starts_with("| `"))
+            .count();
+
+        assert_eq!(generated_rows, ROUTE_TABLE.len());
+        for (command, mode) in ROUTE_TABLE {
+            assert!(
+                generated.contains(&format!("| `{command}` | `{mode:?}` |")),
+                "generated route matrix is missing {command} ({mode:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_route_matrix_matches_the_registry() {
+        let document = include_str!("../../../documentation/remote-gateway-route-matrix.md");
+        let regenerated = update_route_matrix_document(document)
+            .expect("route matrix document should contain generation markers");
+        assert_eq!(
+            document, regenerated,
+            "remote-gateway-route-matrix.md is stale; run `cargo run --locked --example export_bindings` from apps/desktop/backend"
+        );
     }
 
     /// TOTAL-coverage linter (B4): EVERY registered command (each `async NAME(` in

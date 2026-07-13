@@ -11,6 +11,7 @@ tree. ✅ = merged to `main`.
 |---|---|---|---|
 | TDO-001 | `RouteMode` enum + typed `BridgeError` + `gated()` helper | ✅ | `bridge.rs` (`RouteMode`:22, `BridgeError`:35) |
 | TDO-002 | Bridge linter (`ROUTE_TABLE` + `all_gated_commands_are_classified`) | ✅ | `bridge.rs` (`ROUTE_TABLE`:116 + linter tests) |
+| TDO-003 | Generated per-command remote route matrix + drift assertion | ✅ | `bridge.rs` (`render_route_matrix_section` + `committed_route_matrix_matches_the_registry`) |
 | TDO-100 | Real per-thread compaction (`thinclaw_compact_session`) | ✅ | `rpc_extensions.rs` (drives core `ContextCompactor`) |
 | TDO-102 | Self-repair lifecycle events → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `agent_loop`, `ThinClawEventInspector.tsx` |
 | TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | `rpc_checkpoints.rs`:40/52/65 |
@@ -69,7 +70,7 @@ P3 = all 1.0 DoD gates.
 |---|---|---|---|---|---|
 | TDO-001 | Introduce `RouteBehavior` enum (`LocalAndRemote`/`RemoteOnly(reason)`/`LocalOnly(reason)`) on every command | L | ∞ | — | `thinclaw/commands/*`, `runtime_bridge.rs` |
 | TDO-002 | Bridge linter CI test: fail if a command lacks {binding, wrapper, route-behavior, reason-on-gate} | M | ∞ | TDO-001 | extend `setup/commands.rs` test |
-| TDO-003 | Generate `remote-gateway-route-matrix.md` from code; assert in test | M | ∞ | TDO-001 | `remote-gateway-route-matrix.md` |
+| TDO-003 ✅ | Generate `remote-gateway-route-matrix.md` from code; assert in test | M | ∞ | TDO-001 | `remote-gateway-route-matrix.md` |
 | TDO-004 | Single calling convention: make generated `bindings.ts` (`commands.*`) the source of truth; reduce `lib/thinclaw.ts` to re-exports + types | L | ∞ | TDO-002 | `lib/thinclaw.ts`, `lib/bindings.ts` |
 | TDO-005 | Typed `UiEvent` discriminated union + one React event-bus hook; replace scattered `listen('thinclaw-event')` | M | ∞ | TDO-004 | `ui_types.rs`, `hooks/use-thinclaw-stream.ts` |
 | TDO-006 | Retire/shrink root `src/tauri_commands.rs` facade | M | ∞ | TDO-004 | `src/tauri_commands.rs` |

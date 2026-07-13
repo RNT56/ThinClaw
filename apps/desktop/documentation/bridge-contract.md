@@ -59,10 +59,12 @@ from "failed":
 - **`ROUTE_TABLE`** — a `&[(&str, RouteMode)]` registry mapping command names to their mode.
   It is the bridge linter's ground truth: the test suite asserts every command that calls
   `gated()` is classified, and every `ROUTE_TABLE` command is registered in the binding surface.
-  The table is additive — commands are enrolled as they are audited.
+  The committed per-command route matrix is generated from this table and guarded against drift.
 
 When adding or gating a command, call `gated(...)` for the unavailable path and add the
-command to `ROUTE_TABLE`, then update [`remote-gateway-route-matrix.md`](remote-gateway-route-matrix.md).
+command to `ROUTE_TABLE`, then run `cargo run --locked --example export_bindings` from
+`apps/desktop/backend`. Do not edit the generated block in
+[`remote-gateway-route-matrix.md`](remote-gateway-route-matrix.md) by hand.
 
 ## Event Contract
 
