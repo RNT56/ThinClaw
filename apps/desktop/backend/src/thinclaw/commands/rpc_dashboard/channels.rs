@@ -3,6 +3,7 @@
 
 use tauri::State;
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use super::helpers::{json_bool_field, json_string_vec_field, setting_value};
 use crate::thinclaw::commands::types::*;
@@ -233,6 +234,7 @@ pub async fn thinclaw_channel_status_list(
 #[specta::specta]
 pub async fn thinclaw_gmail_oauth_start(
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
 ) -> Result<GmailOAuthResult, String> {
     if ironclaw.remote_proxy().await.is_some() {
         return Ok(GmailOAuthResult {
@@ -253,24 +255,58 @@ pub async fn thinclaw_gmail_oauth_start(
     // 3. Opens browser
     // 4. Binds localhost callback listener
     // 5. Exchanges code for tokens
-    let ic_result = thinclaw_core::desktop_api::gmail_oauth_start()
+    let mut ic_result = thinclaw_core::desktop_api::gmail_oauth_start()
         .await
         .map_err(|e| format!("Gmail OAuth failed: {}", e))?;
 
-    // If successful, persist refresh token in Keychain for future use
+    let access_token = ic_result.access_token.take().map(Zeroizing::new);
+    let refresh_token = ic_result.refresh_token.take().map(Zeroizing::new);
+
+    // Persist OAuth credentials in the authenticated Keychain envelope. They
+    // are intentionally not returned over broad IPC or written into the
+    // runtime settings database.
     if ic_result.success {
-        if let Some(ref refresh_token) = ic_result.refresh_token {
-            // Store via ThinClaw's agent secrets store if available
-            if let Ok(agent) = ironclaw.agent().await {
-                if let Some(store) = agent.store() {
-                    let _ = store
-                        .set_setting(
-                            "local_user",
-                            "gmail_refresh_token",
-                            &serde_json::json!(refresh_token),
-                        )
-                        .await;
-                }
+        let previous_access = secret_store.get("gmail_oauth_token").map(Zeroizing::new);
+        let previous_refresh = secret_store
+            .get("gmail_refresh_token")
+            .map(Zeroizing::new);
+        let persist_result = (|| {
+            if let Some(access_token) = access_token.as_ref().map(|token| token.as_str()) {
+                secret_store.set("gmail_oauth_token", Some(access_token))?;
+            }
+            if let Some(refresh_token) = refresh_token.as_ref().map(|token| token.as_str()) {
+                secret_store.set("gmail_refresh_token", Some(refresh_token))?;
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(persist_error) = persist_result {
+            let access_rollback = secret_store
+                .set(
+                    "gmail_oauth_token",
+                    previous_access.as_ref().map(|token| token.as_str()),
+                )
+                .err();
+            let refresh_rollback = secret_store
+                .set(
+                    "gmail_refresh_token",
+                    previous_refresh.as_ref().map(|token| token.as_str()),
+                )
+                .err();
+            if access_rollback.is_some() || refresh_rollback.is_some() {
+                return Err(format!(
+                    "Gmail OAuth credential save failed ({persist_error}); rollback also failed (access={access_rollback:?}, refresh={refresh_rollback:?})"
+                ));
+            }
+            return Err(format!(
+                "Gmail OAuth credential save failed: {persist_error}"
+            ));
+        }
+        // Clean up the legacy plaintext setting if an older build created it.
+        if let Ok(agent) = ironclaw.agent().await {
+            if let Some(store) = agent.store() {
+                let _ = store
+                    .delete_setting("local_user", "gmail_refresh_token")
+                    .await;
             }
         }
         info!("[thinclaw-runtime] Gmail OAuth completed successfully");
@@ -279,14 +315,15 @@ pub async fn thinclaw_gmail_oauth_start(
         warn!("[thinclaw-runtime] Gmail OAuth failed: {}", err_msg);
     }
 
-    Ok(GmailOAuthResult {
+    let result = GmailOAuthResult {
         success: ic_result.success,
-        access_token: ic_result.access_token,
-        refresh_token: ic_result.refresh_token,
+        access_token: None,
+        refresh_token: None,
         expires_in: ic_result.expires_in.map(|e| e as u32),
-        scope: ic_result.scope,
-        error: ic_result.error,
-    })
+        scope: ic_result.scope.take(),
+        error: ic_result.error.take(),
+    };
+    Ok(result)
 }
 
 /// Get Gmail channel configuration status.
@@ -294,6 +331,7 @@ pub async fn thinclaw_gmail_oauth_start(
 #[specta::specta]
 pub async fn thinclaw_gmail_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
 ) -> Result<GmailStatusResponse, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
@@ -305,7 +343,6 @@ pub async fn thinclaw_gmail_status(
     let mut subscription_id = String::new();
     let mut label_filters: Vec<String> = Vec::new();
     let mut allowed_senders: Vec<String> = Vec::new();
-    let mut oauth_configured = false;
     let mut missing_fields: Vec<String> = Vec::new();
 
     // Read Gmail config from environment variables (ThinClaw pattern)
@@ -394,11 +431,20 @@ pub async fn thinclaw_gmail_status(
                     }
                 }
             }
-            if let Ok(Some(_)) = store.get_setting("local_user", "gmail_refresh_token").await {
-                oauth_configured = true;
+            if let Ok(Some(value)) = store.get_setting("local_user", "gmail_refresh_token").await {
+                if let Some(token) = value.as_str().filter(|token| !token.trim().is_empty()) {
+                    secret_store.set("gmail_refresh_token", Some(token))?;
+                    store
+                        .delete_setting("local_user", "gmail_refresh_token")
+                        .await
+                        .map_err(|error| format!("legacy Gmail credential cleanup failed: {error}"))?;
+                }
             }
         }
     }
+
+    let oauth_configured = secret_store.has("gmail_oauth_token")
+        || secret_store.has("gmail_refresh_token");
 
     let configured = !project_id.is_empty() && !subscription_id.is_empty();
     let status = if !enabled {

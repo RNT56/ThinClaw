@@ -147,6 +147,16 @@ Security boundary:
   stopped modes report that evidence is unavailable instead of synthesizing a
   healthy posture.
 - Raw provider secrets must not be returned in remote mode.
+- Broad status and OAuth completion IPC is presence-only for remote gateway,
+  profile, custom-LLM, provider, and Gmail credentials. The local pairing
+  handshake token is exposed only for its explicit copy/pair workflow.
+- Remote bearer credentials are attached only to validated gateway origins.
+  Public origins require HTTPS; redirects are refused; authenticated status is
+  proven before SSE activation. Private/Tailscale HTTP remains an explicit
+  local-first exception and is documented as plaintext transport.
+- Runtime output remains untrusted after authentication. Remote response, SSE,
+  session-key, Markdown-link, and tool-display boundaries are bounded and
+  validated before reaching privileged host actions or React rendering.
 - Host-executing behavior such as autonomy, shell, browser, local filesystem
   writes, and arbitrary skill install must remain gated.
 

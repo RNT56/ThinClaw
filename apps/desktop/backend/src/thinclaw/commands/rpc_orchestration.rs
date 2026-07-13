@@ -427,7 +427,7 @@ pub async fn thinclaw_agents_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Vec<AgentProfile>, String> {
     let cfg = state.get_config().await.ok_or("Config not loaded")?;
-    let mut profiles = cfg.profiles.clone();
+    let mut profiles: Vec<_> = cfg.profiles.iter().map(AgentProfile::redacted).collect();
 
     if ironclaw.is_initialized() && !profiles.iter().any(|p| p.id == "local-core") {
         profiles.insert(

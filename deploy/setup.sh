@@ -25,6 +25,7 @@
 #   --image <image>          Docker image for Compose
 #   --tailscale <auth-key>   Install Tailscale VPN and join the network
 #   --systemd                Create a systemd service for ThinClaw
+#   --credentials-stdin      Read gateway token and Tailscale key from two stdin lines
 #
 # Usage:
 #   sudo bash setup.sh --token <gateway_token> [--mode auto|native|docker] [--tailscale <ts-key>] [--systemd]
@@ -45,6 +46,7 @@ set -euo pipefail
 TOKEN=""
 TAILSCALE_KEY=""
 ENABLE_SYSTEMD=false
+CREDENTIALS_STDIN=false
 MODE="auto"
 BINARY_PATH=""
 NATIVE_PROFILE="${THINCLAW_NATIVE_PROFILE:-edge}"
@@ -62,6 +64,7 @@ while [[ "$#" -gt 0 ]]; do
         --static) PREFER_STATIC=true ;;
         --image) THINCLAW_IMAGE="$2"; shift ;;
         --tailscale) TAILSCALE_KEY="$2"; shift ;;
+        --credentials-stdin) CREDENTIALS_STDIN=true ;;
         --systemd) ENABLE_SYSTEMD=true ;;
         --help|-h)
             echo "Usage: sudo bash setup.sh --token <token> [--mode auto|native|docker] [--profile edge|full] [--version <tag>|latest] [--static] [--binary <path>] [--image <image>] [--tailscale <auth-key>] [--systemd]"
@@ -75,6 +78,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "  --image <image>         Docker image for Compose (default: $THINCLAW_IMAGE)"
             echo "  --tailscale <auth-key>  Install Tailscale VPN and authenticate with this key"
             echo "  --systemd               In docker mode, create a systemd service for auto-start management"
+            echo "  --credentials-stdin     Read token and optional Tailscale key from two stdin lines"
             echo ""
             exit 0
             ;;
@@ -82,6 +86,11 @@ while [[ "$#" -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ "$CREDENTIALS_STDIN" == true ]]; then
+    IFS= read -r TOKEN || { echo "ERROR: failed to read gateway token from stdin"; exit 1; }
+    IFS= read -r TAILSCALE_KEY || { echo "ERROR: failed to read Tailscale key from stdin"; exit 1; }
+fi
 
 if [[ -z "$TOKEN" ]]; then
     echo "ERROR: --token parameter is required"
@@ -764,7 +773,7 @@ SYSTEMD_UNIT
     echo "  Config:       /var/lib/thinclaw/.thinclaw/.env"
     echo "  Service:      systemctl status thinclaw"
     echo "  Gateway URL:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<pi-ip>'):$THINCLAW_PORT"
-    echo "  Token:        $TOKEN"
+    echo "  Token:        stored in /var/lib/thinclaw/.thinclaw/.env"
     echo ""
     echo "  Next:"
     echo "    1. Edit /var/lib/thinclaw/.thinclaw/.env and replace OPENROUTER_API_KEY=CHANGE_ME or configure another LLM."
@@ -975,7 +984,8 @@ if [[ -n "$TAILSCALE_KEY" ]]; then
         echo ""
         echo "    ┌──────────────────────────────────────────────────────┐"
         echo "    │  SECURE CONNECTION:                                  │"
-        echo "    │  Use http://$TS_IP:$THINCLAW_PORT in Scrappy        │"
+        echo "    │  Open in ThinClaw Desktop:                           │"
+        printf '    │    %-50s│\n' "http://$TS_IP:$THINCLAW_PORT"
         echo "    │  (encrypted via Tailscale — no public port needed)  │"
         echo "    └──────────────────────────────────────────────────────┘"
 
@@ -1117,7 +1127,7 @@ if [[ -n "$TAILSCALE_KEY" ]] && command -v tailscale &> /dev/null; then
     echo "  ┌────────────────────────────────────────────────────────┐"
     echo "  │  Connect via Tailscale (recommended, encrypted):       │"
     echo "  │    URL:   http://$TS_IP:$THINCLAW_PORT                │"
-    echo "  │    Token: $TOKEN                                       │"
+    echo "  │    Token: stored in the ThinClaw environment file      │"
     echo "  └────────────────────────────────────────────────────────┘"
 fi
 
@@ -1127,7 +1137,7 @@ echo ""
 echo "  ┌────────────────────────────────────────────────────────┐"
 echo "  │  Connect via public IP:                                │"
 echo "  │    URL:   http://$PUBLIC_IP:$THINCLAW_PORT             │"
-echo "  │    Token: $TOKEN                                       │"
+echo "  │    Token: stored in the ThinClaw environment file      │"
 echo "  └────────────────────────────────────────────────────────┘"
 echo ""
 echo "  Verify:"

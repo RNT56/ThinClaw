@@ -14,6 +14,20 @@ pub(super) async fn configure(
     use thinclaw_core::config::{bridge_var_exists, inject_bridge_vars};
     let mut bridge_config = std::collections::HashMap::<String, String>::new();
 
+    // OAuth credentials remain encrypted at rest and enter the core runtime
+    // only through the in-memory bridge overlay. They are never serialized to
+    // runtime.toml, settings rows, status payloads, or process-global env.
+    {
+        use tauri::Manager;
+        let secrets = app_handle.state::<crate::secret_store::SecretStore>();
+        if let Some(token) = secrets.get("gmail_oauth_token") {
+            bridge_config.insert("GMAIL_OAUTH_TOKEN".into(), token);
+        }
+        if let Some(token) = secrets.get("gmail_refresh_token") {
+            bridge_config.insert("GMAIL_REFRESH_TOKEN".into(), token);
+        }
+    }
+
     // Database — only set defaults if user hasn't explicitly configured
     if !bridge_var_exists("DATABASE_BACKEND") {
         bridge_config.insert("DATABASE_BACKEND".into(), "libsql".into());

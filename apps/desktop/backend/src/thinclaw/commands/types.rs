@@ -93,7 +93,10 @@ pub struct ThinClawStatus {
     pub port: u16,
     pub gateway_mode: String,
     pub remote_url: Option<String>,
+    /// Compatibility field. Persisted bearer credentials are never returned
+    /// through the broad status command; use `has_remote_token` for presence.
     pub remote_token: Option<String>,
+    pub has_remote_token: bool,
     pub device_id: String,
     pub auth_token: String,
     pub state_dir: String,
@@ -126,7 +129,10 @@ pub struct ThinClawStatus {
     /// Whether the first-run identity bootstrap ritual has been completed.
     pub bootstrap_completed: bool,
     pub custom_llm_url: Option<String>,
+    /// Compatibility field. Persisted API keys are never returned through the
+    /// broad status command; use `has_custom_llm_key` for presence.
     pub custom_llm_key: Option<String>,
+    pub has_custom_llm_key: bool,
     pub custom_llm_model: Option<String>,
     pub custom_llm_enabled: bool,
     pub enabled_cloud_providers: Vec<String>,

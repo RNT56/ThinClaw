@@ -260,7 +260,8 @@ export interface GmailOAuthResult {
 /**
  * Start the Gmail OAuth PKCE flow via ThinClaw.
  * Opens a browser for Google consent, waits for callback, exchanges for tokens.
- * Returns the full result — caller should check `success` field.
+ * Returns non-secret completion metadata — caller should check `success`.
+ * OAuth credentials remain in the encrypted desktop secret store.
  */
 export async function startGmailOAuth(): Promise<GmailOAuthResult> {
     return compatibilityCommands.thinclawGmailOauthStart();

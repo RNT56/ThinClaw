@@ -7,6 +7,31 @@ import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+const MAX_TOOL_DISPLAY_CHARS = 100_000;
+const MAX_SESSION_OUTPUT_CHARS = 1_000_000;
+const MAX_EXTERNAL_URL_CHARS = 2_048;
+
+export function formatToolValue(value: unknown): string {
+    let rendered: string;
+    if (typeof value === 'string') {
+        rendered = value;
+    } else {
+        try {
+            rendered = JSON.stringify(value, null, 2) ?? String(value);
+        } catch {
+            rendered = '[Unserializable tool output]';
+        }
+    }
+    if (rendered.length <= MAX_TOOL_DISPLAY_CHARS) return rendered;
+    return `${rendered.slice(0, MAX_TOOL_DISPLAY_CHARS)}\n… [output truncated]`;
+}
+
+function toolError(value: unknown): string | null {
+    if (!value || typeof value !== 'object') return null;
+    const error = (value as Record<string, unknown>).error;
+    return error === null || error === undefined ? null : formatToolValue(error);
+}
+
 export interface RichToolCardProps {
     name: string;
     status: 'started' | 'completed' | 'failed' | 'in_flight';
@@ -59,7 +84,7 @@ export function RichToolCard({ name, status, input: rawInput, output: rawOutput,
                                 <div>
                                     <div className="text-[9px] uppercase text-muted-foreground font-semibold mb-0.5">Input</div>
                                     <pre className="text-[10px] font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap bg-muted/30 p-2 rounded">
-                                        {typeof input === 'string' ? input : JSON.stringify(input, null, 2)}
+                                        {formatToolValue(input)}
                                     </pre>
                                 </div>
                             )}
@@ -67,7 +92,7 @@ export function RichToolCard({ name, status, input: rawInput, output: rawOutput,
                                 <div>
                                     <div className="text-[9px] uppercase text-muted-foreground font-semibold mb-0.5">Output</div>
                                     <pre className="text-[10px] font-mono text-muted-foreground/70 overflow-x-auto whitespace-pre-wrap bg-muted/30 p-2 rounded">
-                                        {typeof output === 'string' ? output : JSON.stringify(output, null, 2)}
+                                        {formatToolValue(output)}
                                     </pre>
                                 </div>
                             )}
@@ -142,7 +167,7 @@ export function RichToolCard({ name, status, input: rawInput, output: rawOutput,
                             <div className="bg-muted/30 rounded p-2 border border-border/40">
                                 <div className="text-[9px] uppercase text-muted-foreground font-semibold mb-1">Input</div>
                                 <pre className="text-[10px] font-mono text-foreground/80 overflow-x-auto whitespace-pre-wrap">
-                                    {typeof input === 'string' ? input : JSON.stringify(input, null, 2)}
+                                    {formatToolValue(input)}
                                 </pre>
                             </div>
                         )}
@@ -157,17 +182,18 @@ export function RichToolCard({ name, status, input: rawInput, output: rawOutput,
                                     }
 
                                     // Display error prominently
-                                    if (content?.error || (content?.status === 'error' && content?.error)) {
+                                    const error = toolError(content);
+                                    if (error) {
                                         return (
                                             <div className="bg-red-500/10 border border-red-500/20 rounded p-2 text-red-400 text-xs font-mono whitespace-pre-wrap">
-                                                {content.error}
+                                                {error}
                                             </div>
                                         );
                                     }
 
                                     return (
                                         <pre className="text-[10px] font-mono text-emerald-600 dark:text-green-300/80 overflow-x-auto whitespace-pre-wrap">
-                                            {typeof output === 'string' ? output : JSON.stringify(output, null, 2)}
+                                            {formatToolValue(output)}
                                         </pre>
                                     );
                                 })()}
@@ -195,18 +221,43 @@ export function extractSessionKey(output: any): string | null {
     if (!output) return null;
     let data = output;
     if (typeof output === 'string') {
+        if (output.length > MAX_SESSION_OUTPUT_CHARS) return null;
         try {
             data = JSON.parse(output);
         } catch {
             // IC-005: Regex fallback for non-JSON output containing a session key
             const match = output.match(/(?:session[_-]?(?:key|id))\s*[:=]\s*["']?([a-f0-9-]{8,}|agent:\S+)["']?/i);
-            if (match) return match[1];
-            console.warn('[extractSessionKey] Could not parse output:', output.slice(0, 200));
+            if (match) return validatedSessionKey(match[1]);
             return null;
         }
     }
     // Common patterns from sessions_spawn output
-    return data?.sessionKey || data?.session_key || data?.sessionId || data?.session_id || null;
+    if (!data || typeof data !== 'object') return null;
+    const record = data as Record<string, unknown>;
+    return validatedSessionKey(
+        record.sessionKey ?? record.session_key ?? record.sessionId ?? record.session_id,
+    );
+}
+
+function validatedSessionKey(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const candidate = value.trim();
+    if (!candidate || candidate.length > 256) return null;
+    return /^(?:agent:[A-Za-z0-9._:@/-]+|[a-f0-9-]{8,})$/i.test(candidate)
+        ? candidate
+        : null;
+}
+
+export function safeExternalUrl(href: unknown): string | null {
+    if (typeof href !== 'string' || href.length > MAX_EXTERNAL_URL_CHARS) return null;
+    try {
+        const url = new URL(href);
+        if (!['http:', 'https:'].includes(url.protocol)) return null;
+        if (url.username || url.password) return null;
+        return url.href;
+    } catch {
+        return null;
+    }
 }
 
 // Shared markdown components for ThinClaw chat — handles link clicks
@@ -214,19 +265,20 @@ export function extractSessionKey(output: any): string | null {
 // navigating the Tauri webview.
 export const markdownComponents = {
     a: ({ node, href, children, ...props }: any) => {
-        const isExternalUrl = href && (href.startsWith('http://') || href.startsWith('https://'));
+        const externalUrl = safeExternalUrl(href);
         return (
             <a
                 {...props}
                 href={href}
+                rel={externalUrl ? 'noopener noreferrer' : undefined}
                 className="text-primary hover:underline cursor-pointer"
                 onClick={(e: React.MouseEvent) => {
-                    if (isExternalUrl && href) {
+                    if (externalUrl) {
                         e.preventDefault();
                         import('@tauri-apps/plugin-opener').then(({ openUrl }) => {
-                            openUrl(href);
+                            openUrl(externalUrl);
                         }).catch(() => {
-                            window.open(href, '_blank', 'noopener,noreferrer');
+                            window.open(externalUrl, '_blank', 'noopener,noreferrer');
                         });
                     }
                 }}

@@ -31,8 +31,21 @@ keychain cache or secret store.
   later retry.
 - Corrupt, tampered, or unavailable Keychain data fails closed at startup. It is
   never interpreted as an empty vault.
-- Other platforms: the current compatibility implementation is process-local
-  and not durable. A real OS secrets backend is required before Windows/Linux
+- Remote agent profile bearer tokens use namespaced, hashed profile identifiers
+  inside the same encrypted envelope. Profile serialization always redacts the
+  value, so `identity.json`, status/discovery IPC, and debug output contain only
+  non-secret profile metadata. Existing inline tokens migrate before the source
+  document is sanitized; a failed migration preserves the original document.
+- Active remote-gateway tokens, custom-LLM keys, and Gmail OAuth credentials
+  use the same envelope. Broad status/OAuth responses expose only presence and
+  non-secret completion metadata. Redacted forms preserve an existing value
+  when the credential field is omitted; deletion requires an explicit clear.
+- Legacy Gmail refresh tokens found in runtime settings are moved into the
+  encrypted envelope and the plaintext row is deleted before status reports
+  OAuth as configured. The runtime receives OAuth values only through the
+  process-local bridge overlay.
+- Other platforms: secret reads and writes fail closed because no durable OS
+  secure-store backend exists. A real backend is required before Windows/Linux
   Desktop packages can claim persistent credential support.
 - Runtime config files may store provider status, enabled providers, selected models, and grant flags, but must not store raw API keys.
 
@@ -124,6 +137,11 @@ P3 contract tests should cover:
 - Legacy Scrappy aliases migrate to canonical names without overwriting a newer canonical value.
 - Ungranted `get`, `get_for_injection`, `exists`, `list`, and `is_accessible` are denied.
 - Remote save/delete/status never returns a raw secret.
+- Gateway/custom-LLM status and Gmail OAuth completion never return reusable
+  credentials; omitted redacted form values preserve the current secret.
+- Agent profile persistence, status, discovery, and debug serialization never
+  return a raw bearer token; legacy inline-token migration preserves the source
+  document on failure.
 - Deleting a key revokes grants.
 
 ## Operational Checklist

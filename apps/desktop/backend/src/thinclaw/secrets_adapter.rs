@@ -281,6 +281,20 @@ pub const SECRET_POLICIES: &[SecretPolicy] = &[
         grant: GrantFlag::RemoteToken,
     },
     SecretPolicy {
+        thinclaw_names: &["gmail_oauth_token"],
+        provider_slug: "gmail_oauth",
+        env_vars: &["GMAIL_OAUTH_TOKEN"],
+        keychain_key: "gmail_oauth_token",
+        grant: GrantFlag::Unsupported,
+    },
+    SecretPolicy {
+        thinclaw_names: &["gmail_refresh_token"],
+        provider_slug: "gmail_refresh",
+        env_vars: &["GMAIL_REFRESH_TOKEN"],
+        keychain_key: "gmail_refresh_token",
+        grant: GrantFlag::Unsupported,
+    },
+    SecretPolicy {
         thinclaw_names: &["deepseek"],
         provider_slug: "deepseek",
         env_vars: &["DEEPSEEK_API_KEY"],

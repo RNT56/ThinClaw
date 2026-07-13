@@ -26,7 +26,9 @@ export interface ThinClawStatus {
     port: number;
     gateway_mode: string;
     remote_url: string | null;
+    /** Always null in status responses; retained for wire compatibility. */
     remote_token: string | null;
+    has_remote_token: boolean;
     device_id: string;
     auth_token: string;
     state_dir: string;
@@ -60,7 +62,9 @@ export interface ThinClawStatus {
     /** Whether the first-run identity bootstrap ritual has been completed. */
     bootstrap_completed: boolean;
     custom_llm_url: string | null;
+    /** Always null in status responses; retained for wire compatibility. */
     custom_llm_key: string | null;
+    has_custom_llm_key: boolean;
     custom_llm_model: string | null;
     custom_llm_enabled: boolean;
     enabled_cloud_providers: string[];

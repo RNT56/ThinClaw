@@ -1965,8 +1965,8 @@ async thinclawSyncLocalLlm() : Promise<Result<null, string>> {
  * Deploy the ThinClaw remote agent to a Linux server via SSH + Docker Compose.
  *
  * Accepts the SSH host, user, and optional configuration for Tailscale VPN
- * and systemd service. Emits live `deploy-log` events and a final
- * `deploy-status` event with `"success"` | `"failed:<reason>"`.
+ * and systemd service. Emits credential-free `deploy-log` events and returns
+ * the generated credential only to the initiating IPC request.
  *
  * Steps:
  * 1. Find the ThinClaw `deploy/` directory (bundled or source)
@@ -1975,9 +1975,9 @@ async thinclawSyncLocalLlm() : Promise<Result<null, string>> {
  * - Always: Docker, UFW firewall, Fail2ban
  * - Optional: Tailscale VPN (--tailscale <key>)
  * - Optional: systemd service (--systemd)
- * 4. Return the URL + generated token via `deploy-status`
+ * 4. Return the URL + generated token as the command result
  */
-async thinclawDeployRemote(ip: string, user: string, tailscaleKey: string | null, enableSystemd: boolean | null) : Promise<Result<null, string>> {
+async thinclawDeployRemote(ip: string, user: string, tailscaleKey: string | null, enableSystemd: boolean | null) : Promise<Result<RemoteDeployResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_deploy_remote", { ip, user, tailscaleKey, enableSystemd }) };
 } catch (e) {
@@ -3644,7 +3644,12 @@ async thinclawRevealFile(path: string) : Promise<Result<null, string>> {
 
 /** user-defined types **/
 
-export type AgentProfile = { id: string; name: string; url: string; token: string | null; mode: string; auto_connect?: boolean }
+export type AgentProfile = { id: string; name: string; url: string;
+/**
+ * Remote bearer token. Accepted on input, but always redacted from serialized
+ * profile metadata; the durable value lives in the encrypted Keychain envelope.
+ */
+token?: string | null; mode: string; auto_connect?: boolean }
 export type AgentStatusSummary = { id: string; name: string; url: string; online: boolean; latency_ms: number | null; version: string | null; stats: JsonValue | null; current_task: string | null; progress: number | null; logs: string[] | null; parent_id: string | null; children_ids: string[] | null; active_session_id: string | null; active: boolean; capabilities: string[] | null; run_status: string | null; model: string | null }
 export type AssetKind = "image" | "audio" | "video" | "document" | "generated_image" | "other"
 export type AssetNamespace = "direct_workbench" | "thin_claw_agent"
@@ -4020,6 +4025,7 @@ export type PairingListResponse = { pairings: PairingItem[]; total: number }
 export type PermissionStatus = { accessibility: boolean; screen_recording: boolean }
 export type Project = { id: string; name: string; description: string | null; created_at: number; updated_at: number; sort_order: number }
 export type ProviderDiscoveryResult = { provider: string; models: ModelDescriptor[]; fromCache: boolean; error?: string | null }
+export type RemoteDeployResult = { status: string; url: string; token: string; message: string | null }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 /**
  * How a command behaves across the dual-mode runtime.
@@ -4263,7 +4269,12 @@ export type ThinClawSessionsResponse = { sessions: ThinClawSession[] }
 /**
  * ThinClaw status response
  */
-export type ThinClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
+export type ThinClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null;
+/**
+ * Compatibility field. Persisted bearer credentials are never returned
+ * through the broad status command; use `has_remote_token` for presence.
+ */
+remote_token: string | null; has_remote_token: boolean; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
 /**
  * Whether the agent runs tools without individual approval prompts.
  */
@@ -4271,7 +4282,12 @@ auto_approve_tools: boolean;
 /**
  * Whether the first-run identity bootstrap ritual has been completed.
  */
-bootstrap_completed: boolean; custom_llm_url: string | null; custom_llm_key: string | null; custom_llm_model: string | null; custom_llm_enabled: boolean; enabled_cloud_providers: string[]; enabled_cloud_models: { [key in string]: string[] }; profiles: AgentProfile[]; has_xai_key: boolean; xai_granted: boolean; has_venice_key: boolean; venice_granted: boolean; has_together_key: boolean; together_granted: boolean; has_moonshot_key: boolean; moonshot_granted: boolean; has_minimax_key: boolean; minimax_granted: boolean; has_nvidia_key: boolean; nvidia_granted: boolean; has_qianfan_key: boolean; qianfan_granted: boolean; has_mistral_key: boolean; mistral_granted: boolean; has_xiaomi_key: boolean; xiaomi_granted: boolean; has_cohere_key: boolean; cohere_granted: boolean; has_voyage_key: boolean; voyage_granted: boolean; has_deepgram_key: boolean; deepgram_granted: boolean; has_elevenlabs_key: boolean; elevenlabs_granted: boolean; has_stability_key: boolean; stability_granted: boolean; has_fal_key: boolean; fal_granted: boolean; has_bedrock_key: boolean; bedrock_granted: boolean }
+bootstrap_completed: boolean; custom_llm_url: string | null;
+/**
+ * Compatibility field. Persisted API keys are never returned through the
+ * broad status command; use `has_custom_llm_key` for presence.
+ */
+custom_llm_key: string | null; has_custom_llm_key: boolean; custom_llm_model: string | null; custom_llm_enabled: boolean; enabled_cloud_providers: string[]; enabled_cloud_models: { [key in string]: string[] }; profiles: AgentProfile[]; has_xai_key: boolean; xai_granted: boolean; has_venice_key: boolean; venice_granted: boolean; has_together_key: boolean; together_granted: boolean; has_moonshot_key: boolean; moonshot_granted: boolean; has_minimax_key: boolean; minimax_granted: boolean; has_nvidia_key: boolean; nvidia_granted: boolean; has_qianfan_key: boolean; qianfan_granted: boolean; has_mistral_key: boolean; mistral_granted: boolean; has_xiaomi_key: boolean; xiaomi_granted: boolean; has_cohere_key: boolean; cohere_granted: boolean; has_voyage_key: boolean; voyage_granted: boolean; has_deepgram_key: boolean; deepgram_granted: boolean; has_elevenlabs_key: boolean; elevenlabs_granted: boolean; has_stability_key: boolean; stability_granted: boolean; has_fal_key: boolean; fal_granted: boolean; has_bedrock_key: boolean; bedrock_granted: boolean }
 /**
  * Thinking mode configuration
  */

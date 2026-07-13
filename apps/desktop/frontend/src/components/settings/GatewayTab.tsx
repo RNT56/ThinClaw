@@ -28,7 +28,7 @@ interface StatusInfo {
     port: number;
     gatewayMode: string;
     remoteUrl: string | null;
-    remoteToken: string | null;
+    hasRemoteToken: boolean;
     deviceId: string;
     authToken: string;
     stateDir: string;
@@ -68,7 +68,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
         port: 18789,
         gatewayMode: 'local',
         remoteUrl: null,
-        remoteToken: null,
+        hasRemoteToken: false,
         deviceId: '',
         authToken: '',
         stateDir: '',
@@ -131,7 +131,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 port: s.port,
                 gatewayMode: s.gateway_mode,
                 remoteUrl: s.remote_url,
-                remoteToken: s.remote_token,
+                hasRemoteToken: s.has_remote_token,
                 deviceId: s.device_id,
                 authToken: s.auth_token,
                 stateDir: s.state_dir,
@@ -165,7 +165,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
             setPermissions(perms);
 
             if (s.remote_url) setRemoteUrlInput(s.remote_url);
-            if (s.remote_token) setRemoteTokenInput(s.remote_token);
         } catch (e) {
             console.error('Failed to fetch thinclaw status:', e);
         }
@@ -237,11 +236,31 @@ export function GatewayTab({ className }: GatewayTabProps) {
     const handleSaveGateway = async (mode: string, url: string | null, token: string | null) => {
         try {
             await thinclaw.saveGatewaySettings(mode, url, token);
+            if (token) setRemoteTokenInput('');
             await fetchStatus();
             toast.success('Gateway settings updated');
         } catch (e) {
             toast.error('Failed to update gateway settings', { description: String(e) });
         }
+    };
+
+    const handleSwitchProfile = async (profileId: string) => {
+        setIsLoading(true);
+        try {
+            await thinclaw.switchToProfile(profileId);
+            await fetchStatus();
+            toast.success('Agent profile connected');
+        } catch (e) {
+            toast.error('Failed to connect agent profile', { description: String(e) });
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleClearRemoteToken = async () => {
+        if (!window.confirm('Clear the saved remote gateway token?')) return;
+        setRemoteTokenInput('');
+        await handleSaveGateway('remote', remoteUrlInput || null, '');
     };
 
     const copyToClipboard = (text: string, label: string = "Text") => {
@@ -370,7 +389,8 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         )}
                     >
                         <button
-                            onClick={() => handleSaveGateway('remote', profile.url, profile.token)}
+                            onClick={() => handleSwitchProfile(profile.id)}
+                            disabled={isLoading}
                             className="flex items-center gap-4 flex-1 text-left"
                         >
                             <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-500">
@@ -523,24 +543,46 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Gateway Socket URL</label>
                                 <input
                                     type="text"
-                                    placeholder="http://server-ip:18789"
+                                    placeholder="https://server.example.com:3000"
                                     value={remoteUrlInput}
                                     onChange={(e) => setRemoteUrlInput(e.target.value)}
-                                    onBlur={() => handleSaveGateway('remote', remoteUrlInput, remoteTokenInput)}
                                     className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden font-mono"
                                 />
                             </div>
                             <div className="space-y-2">
-                                <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Secure Access Token</label>
+                                <div className="flex items-center justify-between gap-3">
+                                    <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Secure Access Token</label>
+                                    {status.hasRemoteToken && (
+                                        <button
+                                            type="button"
+                                            onClick={handleClearRemoteToken}
+                                            className="text-[10px] font-bold text-rose-500 hover:text-rose-400"
+                                        >
+                                            CLEAR SAVED TOKEN
+                                        </button>
+                                    )}
+                                </div>
                                 <input
                                     type="password"
-                                    placeholder="••••••••••••••••"
+                                    autoComplete="off"
+                                    placeholder={status.hasRemoteToken ? 'Saved — enter a replacement' : 'Enter access token'}
                                     value={remoteTokenInput}
                                     onChange={(e) => setRemoteTokenInput(e.target.value)}
-                                    onBlur={() => handleSaveGateway('remote', remoteUrlInput, remoteTokenInput)}
                                     className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden"
                                 />
                             </div>
+                            <button
+                                type="button"
+                                disabled={!remoteUrlInput.trim()}
+                                onClick={() => handleSaveGateway(
+                                    'remote',
+                                    remoteUrlInput,
+                                    remoteTokenInput.trim() ? remoteTokenInput : null,
+                                )}
+                                className="justify-self-start rounded-lg bg-indigo-500/10 px-4 py-2 text-xs font-bold text-indigo-400 transition-colors hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                SAVE REMOTE SETTINGS
+                            </button>
                         </div>
                     </div>
                 )}

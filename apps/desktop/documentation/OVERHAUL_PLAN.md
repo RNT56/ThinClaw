@@ -189,7 +189,11 @@ Triggered on-touch, but schedule the worst offenders:
   rotation. Rotation persists the replacement core key, re-encrypts and
   verifies the complete Desktop envelope, and rolls both stores back on
   failure. The panel honestly gates persistence to macOS Keychain.
-- Threat-model the bridge (untrusted runtime output → React) and the remote-proxy auth.
+- ✅ The bridge threat model now treats runtime/SSE/Markdown/error content as
+  untrusted, bounds transport and rendering, validates session IDs and external
+  links, requires authenticated remote health, blocks public plaintext bearer
+  transport, redacts profile credentials from disk/IPC/logs, and hardens SSH
+  deployment input, host-key, stdin-secret, and gateway-port behavior.
 
 ### WS-6 — Packaging / Update / Platform (macOS-first)
 - CI: notarized DMG, hardened runtime, stapling; Tauri updater signing key in CI secrets (currently release-operator manual).

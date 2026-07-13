@@ -76,7 +76,7 @@ fn set_generic_password(
     _account: &str,
     _password: &[u8],
 ) -> Result<(), KeychainError> {
-    Ok(())
+    Err(KeychainError)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -164,6 +164,9 @@ pub const PROVIDERS: &[&str] = &[
     "custom_llm_key",
     // Remote gateway token
     "remote_token",
+    // Gmail OAuth credentials
+    "gmail_oauth_token",
+    "gmail_refresh_token",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
