@@ -13,9 +13,11 @@
 //!
 //! ## Security model
 //!
-//! ThinClaw Desktop's Keychain is *not* encrypted at the application level — macOS
-//! Keychain handles encryption transparently. We bypass ThinClaw's AES-256-GCM
-//! crypto layer entirely and return plaintext directly as `DecryptedSecret`.
+//! The shared service encrypts its complete provider-key map with ThinClaw's
+//! `SecretsCrypto` (AES-256-GCM + HKDF-SHA256) before storing the authenticated
+//! envelope in Keychain. The random master key is a separate Keychain item.
+//! Runtime reads still return short-lived `DecryptedSecret` values only after
+//! the live Desktop grant check succeeds.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -502,13 +504,15 @@ impl SecretStore {
             id: Uuid::new_v4(),
             user_id: user_id.to_string(),
             name,
-            encrypted_value: Vec::new(), // Not used — Keychain handles encryption
+            // The Desktop backend encrypts one authenticated envelope rather
+            // than exposing per-row ciphertext through this adapter.
+            encrypted_value: Vec::new(),
             key_salt: Vec::new(),
             provider,
             encryption_version: 2,
-            key_version: 1,
-            cipher: "macos-keychain".to_string(),
-            kdf: "os-managed".to_string(),
+            key_version: keychain::encryption_key_version(),
+            cipher: "aes-256-gcm".to_string(),
+            kdf: "hkdf-sha256".to_string(),
             aad_version: 1,
             created_by: Some("thinclaw-desktop".to_string()),
             rotated_at: None,
@@ -543,8 +547,8 @@ impl SecretsStore for SecretStore {
         ))
     }
 
-    /// Get a secret by name (returns a dummy Secret struct — Keychain doesn't
-    /// expose encrypted bytes, so we use empty placeholders).
+    /// Get a secret by name. Envelope-level ciphertext is intentionally not
+    /// duplicated into the per-secret metadata returned by this adapter.
     async fn get(&self, _user_id: &str, name: &str) -> Result<Secret, SecretError> {
         self.ensure_granted(name)?;
         let thinclaw_key = self.keychain_key_for_name(name);
@@ -554,7 +558,7 @@ impl SecretsStore for SecretStore {
         Ok(Self::secret_record(_user_id, name.to_string(), None, None))
     }
 
-    /// Get and "decrypt" a secret — returns the plaintext from Keychain directly.
+    /// Get a decrypted secret from the authenticated in-process envelope.
     ///
     /// This is the primary method called by `inject_llm_keys_from_secrets()`.
     async fn get_decrypted(
@@ -574,7 +578,7 @@ impl SecretsStore for SecretStore {
         DecryptedSecret::from_bytes(value.into_bytes())
     }
 
-    /// Get and "decrypt" a secret for a runtime injection.
+    /// Get and decrypt a secret for a runtime injection.
     async fn get_for_injection(
         &self,
         user_id: &str,
@@ -635,15 +639,17 @@ impl SecretsStore for SecretStore {
         Ok(existed)
     }
 
-    /// No-op — ThinClaw Desktop delegates encryption and rotation to the OS Keychain.
+    /// Re-encrypt the complete Desktop envelope under the supplied core key.
     async fn rotate_master_key(
         &self,
-        _new_crypto: Arc<SecretsCrypto>,
+        new_crypto: Arc<SecretsCrypto>,
     ) -> Result<MasterKeyRotationReport, SecretError> {
+        let (old_key_version, new_key_version, rotated_secrets) =
+            keychain::rotate_encryption_key(new_crypto).map_err(SecretError::KeychainError)?;
         Ok(MasterKeyRotationReport {
-            old_key_version: 1,
-            new_key_version: 1,
-            rotated_secrets: 0,
+            old_key_version,
+            new_key_version,
+            rotated_secrets,
         })
     }
 
@@ -880,6 +886,22 @@ mod tests {
         cfg.openai_granted = true;
         workbench_store.apply_thinclaw_config(&cfg);
         assert!(runtime_store.is_granted("llm_openai_api_key"));
+    }
+
+    #[test]
+    fn adapter_metadata_reports_the_core_encryption_contract() {
+        let record = SecretStore::secret_record(
+            "user",
+            "llm_openai_api_key".to_string(),
+            Some("openai".to_string()),
+            None,
+        );
+
+        assert_eq!(record.cipher, "aes-256-gcm");
+        assert_eq!(record.kdf, "hkdf-sha256");
+        assert_eq!(record.encryption_version, 2);
+        assert!(record.key_version >= 1);
+        assert!(record.encrypted_value.is_empty());
     }
 
     #[test]

@@ -19,8 +19,21 @@ uses the `SecretsStore` trait implementation on the same service, with agent gra
 checked before every runtime read. Clones share grant state and never create a second
 keychain cache or secret store.
 
-- macOS: Keychain.
-- Other platforms: use the configured Tauri/OS secrets backend when available.
+- macOS: one authenticated AES-256-GCM envelope is stored in Keychain under
+  `api_keys`; its random 32-byte master key uses the shared core
+  `thinclaw/master_key` secure-store item, so CLI/runtime rotation remains
+  durable across restarts. The core `SecretsCrypto` contract uses HKDF-SHA-256 and authenticated
+  envelope metadata. Raw values exist only in the process cache while Desktop
+  is running, never in the persisted JSON envelope.
+- Existing unified plaintext blobs are encrypted in place after authentication;
+  old per-provider Keychain items are deleted only after that encrypted write
+  succeeds. A failed migration retains `identity.json` and legacy items for a
+  later retry.
+- Corrupt, tampered, or unavailable Keychain data fails closed at startup. It is
+  never interpreted as an empty vault.
+- Other platforms: the current compatibility implementation is process-local
+  and not durable. A real OS secrets backend is required before Windows/Linux
+  Desktop packages can claim persistent credential support.
 - Runtime config files may store provider status, enabled providers, selected models, and grant flags, but must not store raw API keys.
 
 ## Grants
@@ -74,6 +87,9 @@ Forbidden:
 
 P3 contract tests should cover:
 
+- Persisted envelopes contain no plaintext values and reject ciphertext or AAD tampering.
+- Legacy plaintext is detected for one-time encryption, and old data is not deleted when the encrypted write fails.
+- Key rotation increments the envelope key version and makes the old master key unusable.
 - New writes use ThinClaw identifiers.
 - Legacy Scrappy aliases migrate to canonical names without overwriting a newer canonical value.
 - Ungranted `get`, `get_for_injection`, `exists`, `list`, and `is_accessible` are denied.

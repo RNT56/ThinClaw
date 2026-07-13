@@ -12,10 +12,11 @@
 //!
 //! ## Storage
 //!
-//! Keys are encrypted at rest in the macOS Keychain as a single JSON blob
-//! (one Keychain item → one unlock prompt on app launch).  At runtime, keys
-//! are cached in `keychain::key_cache()` — a single `Mutex<HashMap>` shared
-//! by both this store and `ThinClawConfig`.
+//! Keys are serialized into one authenticated AES-256-GCM envelope using the
+//! core `SecretsCrypto` implementation. The ciphertext and the random master
+//! key occupy separate macOS Keychain items (one data-blob read at launch).
+//! At runtime, decrypted values are cached only in `keychain::key_cache()` — a
+//! single `Mutex<HashMap>` shared by both this store and `ThinClawConfig`.
 //!
 //! ## Architecture note (2026-02-24)
 //!
@@ -72,8 +73,9 @@ pub struct SecretStore {
 impl SecretStore {
     /// Create the store.
     ///
-    /// Call `keychain::load_all()` before constructing this — it populates the
-    /// module-level cache that `get_key` / `set_key` read from.
+    /// Call `keychain::load_all()` before constructing this — it authenticates
+    /// and decrypts the versioned envelope, then populates the module-level
+    /// cache that `get_key` / `set_key` read from.
     pub fn new() -> Self {
         Self {
             agent_grants: Arc::new(RwLock::new(AgentGrantState::default())),

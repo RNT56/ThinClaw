@@ -424,11 +424,12 @@ pub fn run() {
             migrate_legacy_app_data(&app_data_dir);
             fs::create_dir_all(&app_data_dir).expect("failed to create app data dir");
 
-            // ── Load ALL API keys from Keychain in a single read ─────────────
-            // This triggers exactly one macOS authorization prompt, then caches
-            // everything in memory.  Must happen before ThinClawConfig::new()
-            // or any other code that calls keychain::get_key().
-            thinclaw::config::keychain::load_all();
+            // ── Load ALL API keys from one encrypted Keychain envelope ───────
+            // Normal startup reads the master-key item and the data-envelope
+            // item, then caches decrypted values in memory. Must happen before
+            // ThinClawConfig::new() or any keychain::get_key() call.
+            thinclaw::config::keychain::load_all()
+                .expect("failed to initialize encrypted Desktop secrets");
 
             // ── App-wide secret store (reads from the just-loaded keychain) ───
             let secret_store = secret_store::SecretStore::new();

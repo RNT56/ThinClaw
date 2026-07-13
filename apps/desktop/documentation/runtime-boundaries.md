@@ -161,7 +161,7 @@ These pieces may be shared, but only through explicit adapters:
 | --- | --- |
 | Tauri shell | Hosts both systems and dispatches commands. |
 | React app shell | Provides navigation, settings, theming, windows, and layout. |
-| Keychain / `SecretStore` | One app-wide service stores provider credentials for both modes. Its shared live policy denies agent reads unless ThinClaw grants them. |
+| Keychain / `SecretStore` | One app-wide service stores provider credentials for both modes in one core AES-256-GCM authenticated envelope backed by macOS Keychain (master key in a separate Keychain item). Its shared live policy denies every agent read/probe/mutation unless ThinClaw grants it. Legacy writes migrate transactionally and corrupt/unavailable vaults fail closed. |
 | Local inference engines | Report readiness through `LocalRuntimeSnapshot`; `exposurePolicy=shared_when_enabled` means Direct may use the endpoint immediately and ThinClaw may use it only when the local inference toggle is enabled. |
 | Cloud provider catalog | May provide model discovery to both systems if the contract is provider/model metadata only. |
 | Conversation store | In the default local profile, `SharedHistoryStore` owns one runtime database. Direct rows use `surface=direct_workbench`; embedded-agent rows use `surface=agent_cockpit`; delete/list/project operations are surface-scoped. In the PostgreSQL profile, Direct retains that local store and the agent uses PostgreSQL. |

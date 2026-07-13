@@ -73,13 +73,26 @@ impl ThinClawConfig {
         let raw_json_value: Option<serde_json::Value> = std::fs::read_to_string(&id_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());
+        let mut secrets_migration_succeeded = true;
         if let Some(ref val) = raw_json_value {
             if let Ok(mut legacy) = serde_json::from_value::<keychain::LegacyKeys>(val.clone()) {
-                if keychain::migrate_from_identity(&mut legacy) {
-                    // Merge the now-nulled fields back into identity so save_identity()
-                    // writes the sanitised version (no secrets in JSON).
-                    println!("[keychain] migrated legacy plaintext API keys to Keychain");
+                match keychain::migrate_from_identity(&mut legacy) {
+                    Ok(true) => {
+                        println!("[keychain] migrated legacy plaintext API keys to Keychain");
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        secrets_migration_succeeded = false;
+                        println!(
+                            "[keychain] preserving identity.json after secret migration failed: {}",
+                            error
+                        );
+                    }
                 }
+            } else {
+                // Do not rewrite an identity document containing legacy fields
+                // that we could not safely inspect.
+                secrets_migration_succeeded = false;
             }
 
             // Migrate custom_secrets values: the old JSON had `value` inline.
@@ -95,6 +108,7 @@ impl ThinClawConfig {
                             // Only migrate if the keychain doesn't already have this key
                             if keychain::get_key(id).is_none() {
                                 if let Err(e) = keychain::set_key(id, Some(value)) {
+                                    secrets_migration_succeeded = false;
                                     println!(
                                         "[keychain] custom secret migration failed for '{}': {}",
                                         id, e
@@ -157,10 +171,14 @@ impl ThinClawConfig {
                     .collect();
         }
 
-        // Ensure state dir exists before writing identity (secrets-free JSON)
+        // Ensure state dir exists before writing identity. If any secret could
+        // not be durably migrated, retain the original document for a later
+        // retry instead of sanitising away the only copy of that credential.
         let _ = std::fs::create_dir_all(base_dir.join("state"));
-        if let Ok(json) = serde_json::to_string_pretty(&identity) {
-            let _ = std::fs::write(&id_path, json);
+        if secrets_migration_succeeded {
+            if let Ok(json) = serde_json::to_string_pretty(&identity) {
+                let _ = std::fs::write(&id_path, json);
+            }
         }
 
         let port = Self::find_available_port().unwrap_or(18789);

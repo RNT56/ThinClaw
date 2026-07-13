@@ -173,7 +173,12 @@ Triggered on-touch, but schedule the worst offenders:
   context-pressure header indicator remains the separate TDO-101 scope.
 
 ### WS-5 — Security & Secrets
-- Single encrypted secret path (AES-256-GCM core store ↔ macOS Keychain); grant checks enforced (contract test covers denial).
+- ✅ Single encrypted secret path: the app-wide store serializes all local
+  credentials into one authenticated `SecretsCrypto` AES-256-GCM envelope in
+  macOS Keychain, with a separate random master-key item, transactional legacy
+  migration, fail-closed reads, a rotation seam, and live grant enforcement on
+  every runtime operation. Contract tests cover ciphertext, tamper rejection,
+  key-version rotation, canonical aliases, and grant denial.
 - Surface (read-only, with reasons) core safety internals — sanitizer hits, sandbox network-allowlist, dangerous-tool tracker — in a "Security" panel.
 - Wire master-key rotation + recovery-key into Settings (reuse the cloud-sync recovery-key UI).
 - Threat-model the bridge (untrusted runtime output → React) and the remote-proxy auth.
