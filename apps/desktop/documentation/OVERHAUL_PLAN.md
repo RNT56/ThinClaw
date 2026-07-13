@@ -144,7 +144,10 @@ Triggered on-touch, but schedule the worst offenders:
 - ✅ `backend/src/thinclaw/runtime_builder.rs` is now the 706-line assembly
   coordinator; environment/provider resolution, sandbox/Docker orchestration,
   background-task ownership, and event forwarding live in focused child modules.
-- Oversized panel components: `ThinClawRepoProjects.tsx`, `ThinClawHooks.tsx`, `ThinClawAutomations.tsx`, `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` → extract sub-panels + hooks.
+- Oversized panel components: ✅ `ThinClawRepoProjects.tsx` now delegates to a
+  focused data hook plus fixture, utility, and panel modules. `ThinClawHooks.tsx`,
+  `ThinClawAutomations.tsx`, `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, and
+  `ThinClawSkills.tsx` remain scheduled for the same treatment.
 - ✅ Retired `src/tauri_commands.rs`; reusable helpers now live in `src/desktop_api.rs` and registration stays in typed Desktop command modules.
 
 ### WS-4 — Test/QA & Observability

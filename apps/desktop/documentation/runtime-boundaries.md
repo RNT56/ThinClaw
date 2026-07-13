@@ -96,6 +96,9 @@ Primary user surfaces:
 - `frontend/src/components/thinclaw/*`
 - ThinClaw management pages for memory, routines, skills, MCP, jobs, autonomy,
   channels, routing, cost, learning, experiments, and pairing
+- Repo Projects keeps its command/state orchestration in
+  `components/thinclaw/repo-projects/use-repo-projects.ts`; its public panel is a
+  composition surface, not a second runtime or persistence owner.
 
 Primary backend ownership:
 
