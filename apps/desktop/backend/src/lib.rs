@@ -106,10 +106,8 @@ use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(debug_assertions)]
-pub fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
-    let mut source = std::fs::read_to_string(path)?;
-    let original = source.clone();
-
+pub(crate) fn sanitize_typescript_bindings_source(source: &str) -> String {
+    let mut source = source.to_string();
     source = source.replace(
         "export type TAURI_CHANNEL<TSend> = null",
         "export type TAURI_CHANNEL<TSend> = import(\"@tauri-apps/api/core\").Channel<TSend>",
@@ -183,6 +181,14 @@ export type TokenUsage = DirectTokenUsage & {
     }
     source = lines.join("\n");
     source.push('\n');
+
+    source
+}
+
+#[cfg(debug_assertions)]
+pub fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
+    let original = std::fs::read_to_string(path)?;
+    let source = sanitize_typescript_bindings_source(&original);
 
     if source != original {
         std::fs::write(path, source)?;
