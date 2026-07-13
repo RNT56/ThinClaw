@@ -219,6 +219,15 @@
     font-family: 'Outfit', sans-serif;
   }
 
+  :focus-visible {
+    outline: 2px solid var(--surface-focus);
+    outline-offset: 2px;
+  }
+
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
   /* Spotlight window needs to be fully transparent */
   body.spotlight-window,
   body.spotlight-window #root {
@@ -227,6 +236,35 @@
     border: none !important;
     outline: none !important;
     box-shadow: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:focus-within {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight;
+  }
+
+  button,
+  [role="button"],
+  input,
+  select,
+  textarea {
+    forced-color-adjust: auto;
   }
 }
 

@@ -18,6 +18,7 @@ import { useEngineSetup } from '../../hooks/use-engine-setup';
 import { clearOnboardingProgress, startOnboardingProgress } from '../../lib/local-storage-migration';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { unwrapResult } from '../../lib/guards';
+import { Progress } from '../ui';
 
 // ---------------------------------------------------------------------------
 // HF Hub types (match backend via specta)
@@ -548,21 +549,21 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     };
 
     return (
-        <div className="fixed inset-0 z-50 bg-background/95 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="onboarding-dialog-title"
+            className="fixed inset-0 z-50 bg-background/95 backdrop-blur-xs flex items-center justify-center p-4"
+        >
             <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 className="w-full max-w-4xl bg-card border border-border rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
-                <div className="h-1 bg-muted w-full">
-                    <motion.div
-                        className="h-full bg-primary"
-                        initial={{ width: "0%" }}
-                        animate={{ width: `${progressPct}%` }}
-                    />
-                </div>
+                <h1 id="onboarding-dialog-title" className="sr-only">ThinClaw Desktop setup</h1>
+                <Progress value={progressPct} label={`Setup step ${stepList.indexOf(step) + 1} of ${stepList.length}`} />
 
-                <div className="p-8 flex-1 overflow-y-auto">
+                <div className="p-8 flex-1 overflow-y-auto" aria-live="polite">
                     <AnimatePresence mode="wait">
                         {step === 'welcome' && (
                             <motion.div

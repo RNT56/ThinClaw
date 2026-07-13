@@ -15,6 +15,8 @@ function SyntaxThemeOption({ theme, isActive, onClick }: { theme: SyntaxTheme, i
     return (
         <button
             onClick={onClick}
+            aria-label={`Use ${theme.label} syntax palette`}
+            aria-pressed={isActive}
             className={cn(
                 "group relative flex flex-col items-start p-4 rounded-xl border transition-all duration-200 text-left w-full",
                 isActive
@@ -50,6 +52,8 @@ function AppThemeOption({ theme, isActive, onClick, currentMode }: { theme: AppT
     return (
         <button
             onClick={onClick}
+            aria-label={`Use ${theme.label} application palette`}
+            aria-pressed={isActive}
             className={cn(
                 "group relative flex flex-col items-start p-4 rounded-xl border transition-all duration-200 text-left w-full",
                 isActive
