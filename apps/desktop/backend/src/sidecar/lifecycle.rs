@@ -29,8 +29,13 @@ impl SidecarManager {
         let mlock = options.mlock;
         let quantize_kv = options.quantize_kv;
 
-        // Resolve Template + detect model family from GGUF metadata
-        let gguf_meta = crate::gguf::read_gguf_metadata(&model_path).ok();
+        // Validate the GGUF and its quantization against the bundled llama.cpp
+        // matrix before spawning a native process. Invalid/truncated models used
+        // to be silently treated as ChatML and then failed much later in startup.
+        let gguf_meta = Some(
+            crate::gguf::read_gguf_metadata(&model_path)
+                .map_err(|error| anyhow!("Cannot start incompatible GGUF model: {error}"))?,
+        );
         let detected_family = gguf_meta
             .as_ref()
             .and_then(|m| m.model_family.clone())

@@ -78,7 +78,13 @@ impl VllmEngine {
     }
 
     pub fn is_bootstrapped(&self) -> bool {
-        self.get_python_path().map(|p| p.exists()).unwrap_or(false)
+        let Some(venv) = self.get_venv_path() else {
+            return false;
+        };
+        venv.join("bin/python3").exists()
+            && std::fs::read_to_string(venv.join(".thinclaw-vllm-bootstrap"))
+                .ok()
+                .is_some_and(|value| value.trim() == super::VLLM_BOOTSTRAP_FINGERPRINT)
     }
 
     /// Check if CUDA is available by probing `nvidia-smi`.
@@ -107,10 +113,18 @@ impl VllmEngine {
             return Ok(());
         }
 
-        // Step 1: Create venv
-        println!("[vllm] Creating virtualenv at {:?}", venv);
+        // A missing/stale marker means the managed environment may contain an
+        // incompatible package graph. Recreate it deterministically.
+        if venv.exists() {
+            println!("[vllm] Replacing stale managed environment at {:?}", venv);
+            std::fs::remove_dir_all(&venv)
+                .map_err(|e| format!("Failed to replace stale vLLM environment: {}", e))?;
+        }
+
+        // Step 1: Create a validated Python 3.12 venv.
+        println!("[vllm] Creating Python 3.12 virtualenv at {:?}", venv);
         let output = tokio::process::Command::new(&uv_bin)
-            .args(["venv", &venv.to_string_lossy()])
+            .args(["venv", "--python", "3.12", &venv.to_string_lossy()])
             .output()
             .await
             .map_err(|e| format!("Failed to run uv venv: {}", e))?;
@@ -130,9 +144,10 @@ impl VllmEngine {
             .args([
                 "pip",
                 "install",
+                "--upgrade",
                 "--python",
                 &python.to_string_lossy(),
-                "vllm",
+                super::VLLM_SPEC,
             ])
             .output()
             .await
@@ -144,6 +159,12 @@ impl VllmEngine {
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
+
+        std::fs::write(
+            venv.join(".thinclaw-vllm-bootstrap"),
+            super::VLLM_BOOTSTRAP_FINGERPRINT,
+        )
+        .map_err(|e| format!("Failed to write vLLM bootstrap marker: {}", e))?;
 
         println!("[vllm] Bootstrap complete.");
         Ok(())
@@ -330,5 +351,27 @@ mod tests {
         assert_eq!(engine.engine_id(), "vllm");
         assert_eq!(engine.hf_search_tag(), "awq");
         assert!(!engine.uses_single_file_model());
+    }
+
+    #[test]
+    fn vllm_bootstrap_marker_is_versioned() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join("vllm-env");
+        std::fs::create_dir_all(venv.join("bin")).unwrap();
+        std::fs::write(venv.join("bin/python3"), "").unwrap();
+
+        let engine = VllmEngine::new();
+        engine.set_app_data_dir(dir.path().to_path_buf());
+        assert!(!engine.is_bootstrapped());
+
+        std::fs::write(venv.join(".thinclaw-vllm-bootstrap"), "vllm=old").unwrap();
+        assert!(!engine.is_bootstrapped());
+
+        std::fs::write(
+            venv.join(".thinclaw-vllm-bootstrap"),
+            super::super::VLLM_BOOTSTRAP_FINGERPRINT,
+        )
+        .unwrap();
+        assert!(engine.is_bootstrapped());
     }
 }

@@ -11,6 +11,30 @@ use serde::Serialize;
 use specta::Type;
 use tauri::Emitter;
 
+/// Engine dependency pins validated together on 2026-07-13.
+///
+/// Keep these in sync with `scripts/setup_uv.sh` and the engine compatibility
+/// matrix. Exact top-level Python pins make first-launch bootstraps repeatable;
+/// changing a fingerprint below intentionally invalidates the matching venv
+/// marker and upgrades it on the next setup run.
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const UV_VERSION: &str = "0.11.28";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MLX_OPENAI_SERVER_SPEC: &str = "mlx-openai-server==1.8.1";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MLX_EMBEDDINGS_SPEC: &str = "mlx-embeddings==0.1.0";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MFLUX_SPEC: &str = "mflux==0.18.0";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MLX_WHISPER_SPEC: &str = "mlx-whisper==0.4.3";
+#[cfg(any(feature = "vllm", test))]
+pub(crate) const VLLM_SPEC: &str = "vllm==0.25.0";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MLX_BOOTSTRAP_FINGERPRINT: &str =
+    "mlx-openai-server=1.8.1;mlx-embeddings=0.1.0;mflux=0.18.0;mlx-whisper=0.4.3";
+#[cfg(any(feature = "vllm", test))]
+pub(crate) const VLLM_BOOTSTRAP_FINGERPRINT: &str = "vllm=0.25.0;python=3.12";
+
 // Conditionally compile engine implementations
 #[cfg(feature = "llamacpp")]
 pub mod engine_llamacpp;
@@ -55,7 +79,7 @@ pub trait InferenceEngine: Send + Sync {
 
     /// The model identifier that the engine's server expects in request bodies.
     ///
-    /// For `mlx_lm.server` this must match the `--model` argument (a local path
+    /// For `mlx-openai-server` this must match the model argument (a local path
     /// or HF repo ID); for llama-server it's typically ignored.  If `None`,
     /// the caller should fall back to `"default"`.
     fn model_id(&self) -> Option<String> {
@@ -221,7 +245,7 @@ pub fn direct_runtime_get_active_engine_info() -> EngineInfo {
             display_name: "Ollama".into(),
             available: true,
             requires_setup: false,
-            description: "Community model runner — install from ollama.ai".into(),
+            description: "Community model runner — install from ollama.com".into(),
             hf_tag: "gguf".into(), // Ollama uses GGUF internally
             single_file_model: true,
         };
@@ -821,6 +845,29 @@ mod tests {
         let info = direct_runtime_get_active_engine_info();
         let json = serde_json::to_string(&info).expect("EngineInfo should serialize");
         assert!(json.contains(&info.id));
+    }
+
+    #[test]
+    fn engine_dependency_pins_and_provisioning_scripts_stay_aligned() {
+        let uv_script = include_str!("../../../scripts/setup_uv.sh");
+        let llama_script = include_str!("../../../scripts/setup_llama.sh");
+        assert!(uv_script.contains(&format!("UV_VERSION:-{}", UV_VERSION)));
+        assert!(llama_script.contains("DEFAULT_TAG=\"b9988\""));
+
+        for spec in [
+            MLX_OPENAI_SERVER_SPEC,
+            MLX_EMBEDDINGS_SPEC,
+            MFLUX_SPEC,
+            MLX_WHISPER_SPEC,
+            VLLM_SPEC,
+        ] {
+            assert!(
+                spec.contains("=="),
+                "engine dependency must be exact: {spec}"
+            );
+        }
+        assert!(MLX_BOOTSTRAP_FINGERPRINT.contains("mlx-openai-server=1.8.1"));
+        assert!(VLLM_BOOTSTRAP_FINGERPRINT.contains("vllm=0.25.0"));
     }
 
     #[test]

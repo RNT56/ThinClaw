@@ -3,6 +3,10 @@ use specta::Type;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
+const MAX_GGUF_METADATA_ENTRIES: u64 = 1_000_000;
+const MAX_GGUF_STRING_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_GGUF_ARRAY_ELEMENTS: u64 = 1_000_000;
+
 #[derive(Serialize, Clone, Type, Debug, Default)]
 pub struct GGUFMetadata {
     pub architecture: String,
@@ -25,6 +29,7 @@ pub struct GGUFMetadata {
 
 pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len();
 
     // Read Magic
     let mut magic = [0u8; 4];
@@ -46,14 +51,25 @@ pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
     let mut tensor_count_bytes = [0u8; 8];
     file.read_exact(&mut tensor_count_bytes)
         .map_err(|e| e.to_string())?;
+    let tensor_count = u64::from_le_bytes(tensor_count_bytes);
+    if tensor_count == 0 {
+        return Err("GGUF contains no model tensors".to_string());
+    }
 
     // Metadata KV Count
     let mut kv_count_bytes = [0u8; 8];
     file.read_exact(&mut kv_count_bytes)
         .map_err(|e| e.to_string())?;
     let kv_count = u64::from_le_bytes(kv_count_bytes);
+    if kv_count > MAX_GGUF_METADATA_ENTRIES {
+        return Err(format!(
+            "GGUF metadata entry count {} exceeds the safety limit",
+            kv_count
+        ));
+    }
 
     let mut metadata = GGUFMetadata::default();
+    let mut file_type_present = false;
 
     for _ in 0..kv_count {
         let key = read_gguf_string(&mut file)?;
@@ -91,12 +107,24 @@ pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
             }
             "general.file_type" => {
                 metadata.file_type = read_value_u32(&mut file, val_type)?;
+                file_type_present = true;
             }
             _ => {
                 skip_value(&mut file, val_type)?;
             }
         }
     }
+
+    if file.stream_position().map_err(|e| e.to_string())? > file_len {
+        return Err("GGUF metadata extends beyond the end of the file".to_string());
+    }
+    if metadata.architecture.trim().is_empty() {
+        return Err("GGUF is missing general.architecture".to_string());
+    }
+    if !file_type_present {
+        return Err("GGUF is missing general.file_type".to_string());
+    }
+    gguf_quantization_name(metadata.file_type)?;
 
     if metadata.head_count_kv == 0 {
         metadata.head_count_kv = metadata.head_count;
@@ -108,6 +136,57 @@ pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
     ));
 
     Ok(metadata)
+}
+
+/// Return the quantization represented by `general.file_type` when it is
+/// supported by the pinned llama.cpp sidecar. Removed and future values fail
+/// closed so an incompatible GGUF is rejected before a sidecar is spawned.
+pub fn gguf_quantization_name(file_type: u32) -> Result<&'static str, String> {
+    let name = match file_type {
+        0 => "F32",
+        1 => "F16",
+        2 => "Q4_0",
+        3 => "Q4_1",
+        7 => "Q8_0",
+        8 => "Q5_0",
+        9 => "Q5_1",
+        10 => "Q2_K",
+        11 => "Q3_K_S",
+        12 => "Q3_K_M",
+        13 => "Q3_K_L",
+        14 => "Q4_K_S",
+        15 => "Q4_K_M",
+        16 => "Q5_K_S",
+        17 => "Q5_K_M",
+        18 => "Q6_K",
+        19 => "IQ2_XXS",
+        20 => "IQ2_XS",
+        21 => "Q2_K_S",
+        22 => "IQ3_XS",
+        23 => "IQ3_XXS",
+        24 => "IQ1_S",
+        25 => "IQ4_NL",
+        26 => "IQ3_S",
+        27 => "IQ3_M",
+        28 => "IQ2_S",
+        29 => "IQ2_M",
+        30 => "IQ4_XS",
+        31 => "IQ1_M",
+        32 => "BF16",
+        36 => "TQ1_0",
+        37 => "TQ2_0",
+        38 => "MXFP4_MOE",
+        39 => "NVFP4",
+        40 => "Q1_0",
+        41 => "Q2_0",
+        _ => {
+            return Err(format!(
+                "GGUF file type {} is not supported by bundled llama.cpp b9988",
+                file_type
+            ));
+        }
+    };
+    Ok(name)
 }
 
 /// Detect the model family from GGUF architecture string and/or chat template content.
@@ -204,7 +283,14 @@ pub fn stop_tokens_for_family(family: &str) -> Vec<String> {
 fn read_gguf_string(file: &mut File) -> Result<String, String> {
     let mut len_bytes = [0u8; 8];
     file.read_exact(&mut len_bytes).map_err(|e| e.to_string())?;
-    let len = u64::from_le_bytes(len_bytes) as usize;
+    let len = u64::from_le_bytes(len_bytes);
+    if len > MAX_GGUF_STRING_BYTES {
+        return Err(format!(
+            "GGUF string length {} exceeds the 16 MiB safety limit",
+            len
+        ));
+    }
+    let len = usize::try_from(len).map_err(|_| "GGUF string length does not fit usize")?;
     let mut buf = vec![0u8; len];
     file.read_exact(&mut buf).map_err(|e| e.to_string())?;
     String::from_utf8(buf).map_err(|e| e.to_string())
@@ -265,8 +351,34 @@ fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
             let mut len_bytes = [0u8; 8];
             file.read_exact(&mut len_bytes).map_err(|e| e.to_string())?;
             let len = u64::from_le_bytes(len_bytes);
-            for _ in 0..len {
-                skip_value(file, arr_type)?;
+            if len > MAX_GGUF_ARRAY_ELEMENTS {
+                return Err(format!(
+                    "GGUF array length {} exceeds the safety limit",
+                    len
+                ));
+            }
+            if arr_type == 9 {
+                return Err("Nested GGUF arrays are not supported".to_string());
+            }
+            if arr_type == 8 {
+                for _ in 0..len {
+                    let _ = read_gguf_string(file)?;
+                }
+            } else {
+                let element_size = match arr_type {
+                    0 | 1 | 7 => 1_u64,
+                    2 | 3 => 2,
+                    4 | 5 | 6 => 4,
+                    10..=13 => 8,
+                    _ => return Err(format!("Unknown GGUF array type: {}", arr_type)),
+                };
+                let byte_len = len
+                    .checked_mul(element_size)
+                    .ok_or("GGUF array byte length overflow")?;
+                let offset = i64::try_from(byte_len)
+                    .map_err(|_| "GGUF array byte length exceeds seek range")?;
+                file.seek(SeekFrom::Current(offset))
+                    .map_err(|e| e.to_string())?;
             }
         }
         // 10=UINT64 11=FLOAT64 12=INT64 13=INT64 — all 8 bytes
@@ -281,6 +393,89 @@ fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn push_string(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    fn minimal_gguf(file_type: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&3_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.extend_from_slice(&2_u64.to_le_bytes());
+
+        push_string(&mut bytes, "general.architecture");
+        bytes.extend_from_slice(&8_u32.to_le_bytes());
+        push_string(&mut bytes, "llama");
+
+        push_string(&mut bytes, "general.file_type");
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&file_type.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn pinned_llama_quantization_matrix_is_explicit() {
+        for (file_type, name) in [
+            (0, "F32"),
+            (1, "F16"),
+            (2, "Q4_0"),
+            (7, "Q8_0"),
+            (15, "Q4_K_M"),
+            (19, "IQ2_XXS"),
+            (32, "BF16"),
+            (36, "TQ1_0"),
+            (38, "MXFP4_MOE"),
+            (39, "NVFP4"),
+            (40, "Q1_0"),
+            (41, "Q2_0"),
+        ] {
+            assert_eq!(gguf_quantization_name(file_type).unwrap(), name);
+        }
+        for removed_or_unknown in [4, 5, 6, 33, 34, 35, 42, 1024] {
+            assert!(gguf_quantization_name(removed_or_unknown).is_err());
+        }
+    }
+
+    #[test]
+    fn metadata_reader_accepts_supported_quant_and_rejects_removed_quant() {
+        let dir = tempfile::tempdir().unwrap();
+        let supported = dir.path().join("supported.gguf");
+        File::create(&supported)
+            .unwrap()
+            .write_all(&minimal_gguf(15))
+            .unwrap();
+        let metadata = read_gguf_metadata(supported.to_str().unwrap()).unwrap();
+        assert_eq!(metadata.architecture, "llama");
+        assert_eq!(metadata.file_type, 15);
+
+        let removed = dir.path().join("removed.gguf");
+        File::create(&removed)
+            .unwrap()
+            .write_all(&minimal_gguf(33))
+            .unwrap();
+        assert!(read_gguf_metadata(removed.to_str().unwrap())
+            .unwrap_err()
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn metadata_reader_rejects_unbounded_metadata_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.gguf");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&3_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.extend_from_slice(&(MAX_GGUF_METADATA_ENTRIES + 1).to_le_bytes());
+        File::create(&path).unwrap().write_all(&bytes).unwrap();
+        assert!(read_gguf_metadata(path.to_str().unwrap())
+            .unwrap_err()
+            .contains("entry count"));
+    }
 
     // -----------------------------------------------------------------------
     // detect_model_family — architecture-based

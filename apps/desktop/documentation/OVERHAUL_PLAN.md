@@ -272,7 +272,7 @@ panel wired or honestly gated; contract suite green.
 - **[DONE] Models:** source-verified Claude Fable 5, Opus 4.8, Sonnet 5, and
   Haiku 4.5 catalog; Opus 4.8 is the complex-agent default, Sonnet 5 the balanced
   routing slot, and current IDs/context/pricing flow through onboarding and Bedrock.
-- **Engines:** bump llama.cpp/MLX/vLLM/Ollama sidecars; validate GGUF/quant matrix; MLX-first on Apple Silicon.
+- **[DONE] Engines:** llama.cpp `b9988` and uv `0.11.28` assets are checksum/version verified; MLX/vLLM direct packages are exact and version-marker upgraded; Ollama reports its external daemon version; GGUF metadata and the b9988 quant matrix fail closed before spawn. See [`engine-compatibility.md`](engine-compatibility.md).
 - **Tauri/deps:** v2 capabilities audit (`backend/capabilities/default.json`); npm + Cargo refresh; advisory sweep — fix at source, no `deny`-ignore; no heavy deps for off-by-default features without sign-off.
 - **RAG/inference:** reranker model refresh; embedding-dimension auto-detect hardening.
 

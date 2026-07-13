@@ -42,7 +42,7 @@ export function useAutoStart() {
 
         // For non-llamacpp engines (MLX, vLLM, Ollama): start via EngineManager
         // instead of the llama-server sidecar.  The EngineManager spawns the
-        // engine's own server (e.g. mlx_lm.server) and returns the port/token
+        // engine's own server (e.g. mlx-openai-server) and returns the port/token
         // that resolve_provider() will use in chat.rs.
         if (engineInfo && !engineInfo.single_file_model) {
             // Deduplicate: only restart if path or context changed
@@ -74,7 +74,7 @@ export function useAutoStart() {
                         return;
                     }
 
-                    // Start the engine server (mlx_lm.server / vllm serve / etc.)
+                    // Start the engine server (mlx-openai-server / vllm serve / etc.)
                     const result = await directCommands.directRuntimeStartEngine(cleanPath, maxContext);
                     if (result.status === "error") {
                         throw new Error(bridgeErrorMessage(result.error));

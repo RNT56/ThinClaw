@@ -9,6 +9,8 @@ use serde::Serialize;
 use specta::Type;
 use tauri::{AppHandle, Manager};
 
+const GGUF_QUANT_PATTERN: &str = r"(?i)[-_]((?:UD-)?(?:q[0-9]_[a-z0-9_]+|iq[0-9]_[a-z0-9_]+|tq[12]_0|mxfp4(?:_moe)?|nvfp4|f16|f32|bf16))\.gguf$";
+
 // ---------------------------------------------------------------------------
 // Types exposed to frontend via specta
 // ---------------------------------------------------------------------------
@@ -332,11 +334,9 @@ pub async fn direct_runtime_get_model_files(
 
     if is_single_file {
         // GGUF mode: extract quantization types from filenames
-        // Matches: Q4_K_M, IQ3_XXS, F16, Q8_0, UD-Q5_K_XL, etc.
-        let re = regex::Regex::new(
-            r"(?i)[-_]((?:UD-)?(?:q[0-9]_[a-z0-9_]+|iq[0-9]_[a-z0-9_]+|f16|f32|bf16))\.gguf$",
-        )
-        .unwrap();
+        // Matches the llama.cpp b9988 matrix plus mixed-tensor UD variants:
+        // Q4_K_M, IQ3_XXS, TQ1_0, MXFP4_MOE, NVFP4, UD-Q5_K_XL, etc.
+        let re = regex::Regex::new(GGUF_QUANT_PATTERN).unwrap();
 
         for file in &tree {
             if let Some(path) = file["path"].as_str() {
@@ -768,5 +768,26 @@ mod tests {
         });
         let card = parse_model_card(&json).expect("should parse");
         assert!(card.gated, "gated: 'auto' should be treated as gated=true");
+    }
+
+    #[test]
+    fn gguf_discovery_regex_covers_pinned_quantization_families() {
+        let re = regex::Regex::new(GGUF_QUANT_PATTERN).unwrap();
+        for (filename, expected) in [
+            ("model-Q4_K_M.gguf", "Q4_K_M"),
+            ("model-IQ2_XXS.gguf", "IQ2_XXS"),
+            ("model-TQ1_0.gguf", "TQ1_0"),
+            ("model-MXFP4_MOE.gguf", "MXFP4_MOE"),
+            ("model-NVFP4.gguf", "NVFP4"),
+            ("model-UD-Q8_K_XL.gguf", "UD-Q8_K_XL"),
+            ("model-BF16.gguf", "BF16"),
+        ] {
+            let quant = re
+                .captures(filename)
+                .and_then(|captures| captures.get(1))
+                .map(|value| value.as_str().to_uppercase());
+            assert_eq!(quant.as_deref(), Some(expected));
+        }
+        assert!(!re.is_match("model-unknown.gguf"));
     }
 }

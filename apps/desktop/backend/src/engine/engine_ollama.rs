@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use super::{EngineStartOptions, InferenceEngine};
 
 const OLLAMA_DEFAULT_PORT: u16 = 11434;
+const OLLAMA_VALIDATED_VERSION: &str = "0.31.2";
 
 /// Ollama engine — connects to an existing Ollama daemon.
 pub struct OllamaEngine {
@@ -54,6 +55,28 @@ impl OllamaEngine {
             .map(|r| r.status().is_success())
             .unwrap_or(false)
     }
+
+    /// Query the daemon's official version endpoint. Ollama remains an
+    /// external install, so ThinClaw reports (but does not silently replace)
+    /// a user's version.
+    async fn daemon_version(&self) -> Option<String> {
+        let response = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{}/api/version", self.get_port()))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        response
+            .json::<serde_json::Value>()
+            .await
+            .ok()?
+            .get("version")?
+            .as_str()
+            .map(str::to_owned)
+    }
 }
 
 impl Default for OllamaEngine {
@@ -89,7 +112,7 @@ impl InferenceEngine for OllamaEngine {
     ) -> Result<(u16, String), String> {
         if !self.is_daemon_running().await {
             return Err(
-                "Ollama daemon is not running. Start it with `ollama serve` or install from ollama.ai".into()
+                "Ollama daemon is not running. Start it with `ollama serve` or install from https://ollama.com/download".into()
             );
         }
 
@@ -98,9 +121,13 @@ impl InferenceEngine for OllamaEngine {
         // For Ollama, model_path is the model name (e.g. "llama3:8b-q4_K_M")
         *self.model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path.to_string());
 
+        let version = self
+            .daemon_version()
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
         println!(
-            "[ollama] Connected to Ollama daemon on port {} with model '{}'",
-            port, model_path
+            "[ollama] Connected to daemon {} on port {} with model '{}' (validated baseline {})",
+            version, port, model_path, OLLAMA_VALIDATED_VERSION
         );
 
         Ok((port, String::new())) // No auth token
