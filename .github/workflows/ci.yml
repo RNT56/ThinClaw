@@ -72,7 +72,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Guard Linux deploy port
         run: |
-          if rg -n "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
+          if grep -RInE "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
             echo "Legacy gateway port 18789 must not appear in deploy files or deployment docs."
             exit 1
           fi
@@ -254,7 +254,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo tree --no-default-features --features edge > cargo-tree-edge.txt
-          if rg -n "wasmtime|wasmtime-wasi|wasmparser|bollard|tokio-postgres|deadpool-postgres|chromiumoxide|nostr-sdk|pdf-extract" cargo-tree-edge.txt; then
+          if grep -nE "wasmtime|wasmtime-wasi|wasmparser|bollard|tokio-postgres|deadpool-postgres|chromiumoxide|nostr-sdk|pdf-extract" cargo-tree-edge.txt; then
             echo "edge profile pulled in a heavy dependency"
             exit 1
           fi
