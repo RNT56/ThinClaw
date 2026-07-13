@@ -735,6 +735,26 @@ fn test_status_to_wit_generic_status() {
 }
 
 #[test]
+fn test_status_to_wit_context_pressure() {
+    use super::conversions::status_to_wit;
+
+    let wit = status_to_wit(
+        &thinclaw_channels_core::StatusUpdate::ContextPressure {
+            level: "critical".into(),
+            usage_percent: 97.25,
+        },
+        &serde_json::json!({"thread_id": "thread-1"}),
+    );
+
+    assert!(matches!(
+        wit.status,
+        super::wit_channel::StatusType::ContextPressure
+    ));
+    assert_eq!(wit.message, "Context pressure: critical (97.2%)");
+    assert!(wit.metadata_json.contains("thread-1"));
+}
+
+#[test]
 fn test_status_to_wit_subagent_spawned_uses_structured_payload() {
     use super::conversions::status_to_wit;
 
@@ -1176,6 +1196,7 @@ fn test_clone_wit_status_update_all_variants() {
         wit_channel::StatusType::ToolResult,
         wit_channel::StatusType::ApprovalNeeded,
         wit_channel::StatusType::Status,
+        wit_channel::StatusType::ContextPressure,
         wit_channel::StatusType::JobStarted,
         wit_channel::StatusType::AuthRequired,
         wit_channel::StatusType::AuthCompleted,

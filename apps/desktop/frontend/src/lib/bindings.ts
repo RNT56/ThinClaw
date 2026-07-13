@@ -3784,6 +3784,10 @@ export type CompactSessionResponse = { tokens_before: number; tokens_after: numb
  * Connection test result for the frontend.
  */
 export type ConnectionTestResult = { connected: boolean; provider_name: string; storage_used: number; storage_available: number | null; error: string | null }
+/**
+ * Context-window pressure level carried by [`UiEvent::ContextPressure`].
+ */
+export type ContextPressureLevel = "none" | "warning" | "critical"
 export type Conversation = { id: string; title: string; created_at: number; updated_at: number; project_id: string | null; sort_order: number }
 /**
  * LLM cost tracker summary
@@ -4421,6 +4425,10 @@ export type UiEvent =
  * Run status change
  */
 { kind: "RunStatus"; session_key: string; run_id: string | null; status: RunStatus; error: string | null } |
+/**
+ * Structured context-window capacity transition for the active session.
+ */
+{ kind: "ContextPressure"; session_key: string; level: ContextPressureLevel; usage_percent: number } |
 /**
  * Explicit run lifecycle transition.
  */

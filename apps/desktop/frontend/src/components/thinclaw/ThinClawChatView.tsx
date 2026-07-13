@@ -18,6 +18,7 @@ import SubAgentPanel, { useSubAgentCount } from './SubAgentPanel';
 import AutomationCard from './AutomationCard';
 import { Square, Undo2, Redo2 } from 'lucide-react';
 import { ThinClawModeBadge, useThinClawStatusSnapshot } from './ThinClawModeBadge';
+import { ContextPressureBadge, type ContextPressureLevel } from './ContextPressureBadge';
 
 interface ThinClawChatViewProps {
     sessionKey: string | null;
@@ -129,6 +130,10 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     const [currentRunId, setCurrentRunId] = useState<string | null>(null);
     const [activeRun, setActiveRun] = useState<StreamRun | null>(null);
     const [runTelemetry, setRunTelemetry] = useState<Record<string, RunTelemetry>>({});
+    const [contextPressure, setContextPressure] = useState<{
+        level: Exclude<ContextPressureLevel, 'none'>;
+        usagePercent: number;
+    } | null>(null);
     const [subAgentPanelOpen, setSubAgentPanelOpen] = useState(false);
     const [subAgentPanelDismissed, setSubAgentPanelDismissed] = useState(false);
     const subAgentCount = useSubAgentCount(sessionKey || '');
@@ -159,7 +164,12 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
 
     useEffect(() => {
         setRunTelemetry({});
+        setContextPressure(null);
     }, [effectiveSessionKey]);
+
+    useEffect(() => {
+        if (!gatewayRunning) setContextPressure(null);
+    }, [gatewayRunning]);
 
     const updateRunTelemetry = useCallback((uiEvent: any) => {
         const runId = uiEvent.run_id || uiEvent.message_id || currentRunId;
@@ -356,6 +366,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             toast.error(`Gateway disconnected: ${uiEvent.reason || 'unknown'}`, { duration: 5000 });
             setIsSending(false);
             setActiveRun(null);
+            setContextPressure(null);
             return;
         }
         if (uiEvent.kind === 'BootstrapCompleted') {
@@ -568,6 +579,17 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
 
         // ── Session-scoped events ────────────────────────────────────
         if (!('session_key' in uiEvent) || uiEvent.session_key !== effectiveSessionKey) return;
+
+        if (uiEvent.kind === 'ContextPressure') {
+            const level = uiEvent.level as ContextPressureLevel;
+            const usagePercent = Number(uiEvent.usage_percent);
+            setContextPressure(
+                level === 'warning' || level === 'critical'
+                    ? { level, usagePercent: Number.isFinite(usagePercent) ? usagePercent : 0 }
+                    : null,
+            );
+            return;
+        }
 
         if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'LifecycleUpdate', 'PlanUpdate', 'UsageUpdate', 'ApprovalRequested', 'ApprovalResolved'].includes(uiEvent.kind)) {
             updateRunTelemetry(uiEvent);
@@ -1022,6 +1044,12 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                             </div>
                         </div>
                         <ThinClawModeBadge status={runtimeStatus} compact />
+                        {contextPressure && (
+                            <ContextPressureBadge
+                                level={contextPressure.level}
+                                usagePercent={contextPressure.usagePercent}
+                            />
+                        )}
                     </div>
                     <div className="flex items-center gap-2">
                         {!isCoreView && (

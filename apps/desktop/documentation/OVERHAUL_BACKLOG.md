@@ -175,7 +175,7 @@ characterization test added before the split; no behavior change.
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
 | TDO-100 ✅ | **Compaction** → drives the real core `ContextCompactor` (Summarize) | M | TDO-001 | `rpc_extensions.rs` (`thinclaw_compact_session`) |
-| TDO-101 | Context-pressure `UiEvent` + header indicator | M | TDO-005 | `context_monitor`, `ui_types.rs` |
+| TDO-101 ✅ | Context-pressure `UiEvent` + header indicator | M | TDO-005 | `context_monitor`, `ui_types.rs`, `ContextPressureBadge.tsx` |
 | TDO-102 ✅ | Self-repair status event + panel row | M | TDO-033 | `self_repair.rs` |
 | TDO-103 ✅ | Checkpoints UI: `thinclaw_checkpoints_list`/`checkpoint_diff`/`checkpoint_restore` + Rollback panel | L | TDO-001 | `rpc_checkpoints.rs` |
 | TDO-104 ✅ | Undo/redo commands + control | S | TDO-001 | `commands/sessions.rs` |

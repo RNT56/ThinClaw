@@ -8,7 +8,8 @@ use thinclaw_core::channels::StatusUpdate;
 
 use super::sanitizer::strip_llm_tokens;
 use super::ui_types::{
-    MessageType, RunStatus, SubAgentStatus, SubAgentStatusKnown, ToolStatus, UiEvent, UiUsage,
+    ContextPressureLevel, MessageType, RunStatus, SubAgentStatus, SubAgentStatusKnown, ToolStatus,
+    UiEvent, UiUsage,
 };
 
 fn session_key_from_metadata(metadata: &Value) -> Option<&str> {
@@ -128,6 +129,15 @@ pub fn status_to_ui_event(
             run_id,
             status: RunStatus::from_wire(text),
             error: None,
+        }),
+
+        StatusUpdate::ContextPressure {
+            level,
+            usage_percent,
+        } => Some(UiEvent::ContextPressure {
+            session_key,
+            level: ContextPressureLevel::from_wire(&level),
+            usage_percent,
         }),
 
         StatusUpdate::ApprovalNeeded {
@@ -593,6 +603,13 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
             phase: value_string(&value, "phase").unwrap_or_else(|| "unknown".to_string()),
             label: value_string(&value, "label").unwrap_or_default(),
             detail: value_string(&value, "detail"),
+        }],
+        "context_pressure" => vec![UiEvent::ContextPressure {
+            session_key: session_key.unwrap_or_else(|| "agent:main".to_string()),
+            level: ContextPressureLevel::from_wire(
+                value_string(&value, "level").as_deref().unwrap_or("none"),
+            ),
+            usage_percent: value_f64(&value, "usage_percent").unwrap_or_default(),
         }],
         "plan_update" => {
             let session_key = session_key.unwrap_or_else(|| "agent:main".to_string());
@@ -1306,6 +1323,37 @@ mod tests {
                 if event_type == "future_event"
                     && session_key.as_deref() == Some("thread-x")
                     && run_id.as_deref() == Some("run-x")
+        ));
+    }
+
+    #[test]
+    fn maps_local_and_remote_context_pressure_without_text_parsing() {
+        let local = status_to_ui_event(
+            StatusUpdate::ContextPressure {
+                level: "critical".to_string(),
+                usage_percent: 97.5,
+            },
+            "thread-local",
+            None,
+            "message-1",
+        )
+        .expect("map local pressure");
+        assert!(matches!(
+            local,
+            UiEvent::ContextPressure { session_key, level: ContextPressureLevel::Critical, usage_percent }
+                if session_key == "thread-local" && (usage_percent - 97.5).abs() < f64::EPSILON
+        ));
+
+        let remote = gateway_sse_to_ui_events(serde_json::json!({
+            "type": "context_pressure",
+            "level": "warning",
+            "usage_percent": 88.25,
+            "thread_id": "thread-remote"
+        }));
+        assert!(matches!(
+            remote.as_slice(),
+            [UiEvent::ContextPressure { session_key, level: ContextPressureLevel::Warning, usage_percent }]
+                if session_key == "thread-remote" && (*usage_percent - 88.25).abs() < f64::EPSILON
         ));
     }
 }

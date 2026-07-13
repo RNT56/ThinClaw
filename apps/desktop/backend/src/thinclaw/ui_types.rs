@@ -79,6 +79,27 @@ impl RunStatus {
     }
 }
 
+/// Context-window pressure level carried by [`UiEvent::ContextPressure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPressureLevel {
+    None,
+    Warning,
+    Critical,
+}
+
+impl ContextPressureLevel {
+    /// Parse the gateway/channel wire value, failing closed to the healthy
+    /// state for unknown future labels.
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "warning" => Self::Warning,
+            "critical" => Self::Critical,
+            _ => Self::None,
+        }
+    }
+}
+
 /// Sub-agent progress status carried by [`UiEvent::SubAgentUpdate`].
 ///
 /// Known lifecycle states use their exact wire strings; the running-with-
@@ -233,6 +254,13 @@ pub enum UiEvent {
         /// started | in_flight | ok | error | aborted | done | … | free-form
         status: RunStatus,
         error: Option<String>,
+    },
+
+    /// Structured context-window capacity transition for the active session.
+    ContextPressure {
+        session_key: String,
+        level: ContextPressureLevel,
+        usage_percent: f64,
     },
 
     /// Explicit run lifecycle transition.
@@ -520,6 +548,14 @@ mod tests {
         assert_eq!(round, RunStatus::Known(RunStatusKnown::Done));
         let round_other: RunStatus = serde_json::from_str("\"paused\"").unwrap();
         assert_eq!(round_other, RunStatus::Other("paused".to_string()));
+    }
+
+    #[test]
+    fn context_pressure_level_has_stable_wire_values() {
+        assert_eq!(ContextPressureLevel::from_wire("warning"), ContextPressureLevel::Warning);
+        assert_eq!(ContextPressureLevel::from_wire("critical"), ContextPressureLevel::Critical);
+        assert_eq!(ContextPressureLevel::from_wire("future"), ContextPressureLevel::None);
+        assert_eq!(json(&ContextPressureLevel::Critical), "\"critical\"");
     }
 
     #[test]

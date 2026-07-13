@@ -626,6 +626,7 @@ mod tests {
             "PlanUpdate",
             "UsageUpdate",
             "LifecycleUpdate",
+            "ContextPressure",
             "ObserverRecord",
             "ApprovalRequested",
             "CredentialPrompt",

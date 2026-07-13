@@ -262,6 +262,7 @@ fn event_thread_id(event: &SseEvent) -> Option<&str> {
         SseEvent::ApprovalNeeded { thread_id, .. }
         | SseEvent::ToolStarted { thread_id, .. }
         | SseEvent::Status { thread_id, .. }
+        | SseEvent::ContextPressure { thread_id, .. }
         | SseEvent::AgentLifecycle { thread_id, .. } => thread_id.as_deref(),
         _ => None,
     }
@@ -347,6 +348,7 @@ pub fn can_produce_push(event: &SseEvent) -> bool {
             | SseEvent::JobSessionResult { .. }
             | SseEvent::ToolStarted { .. }
             | SseEvent::Status { .. }
+            | SseEvent::ContextPressure { .. }
             | SseEvent::AgentLifecycle { .. }
     )
 }
@@ -424,7 +426,9 @@ pub fn decide(
             let thread_id = event_thread_id(event)?;
             live_activity_update(state, thread_id, now_secs, "runningTool", None)
         }
-        SseEvent::Status { .. } | SseEvent::AgentLifecycle { .. } => {
+        SseEvent::Status { .. }
+        | SseEvent::ContextPressure { .. }
+        | SseEvent::AgentLifecycle { .. } => {
             let thread_id = event_thread_id(event)?;
             live_activity_update(state, thread_id, now_secs, "thinking", None)
         }
@@ -610,6 +614,14 @@ mod tests {
         }
     }
 
+    fn context_pressure(thread_id: &str, level: &str, usage_percent: f64) -> SseEvent {
+        SseEvent::ContextPressure {
+            level: level.to_string(),
+            usage_percent,
+            thread_id: Some(thread_id.to_string()),
+        }
+    }
+
     /// Serialize `payload` and assert none of the sensitive `needles` appear —
     /// the content-free invariant (D-N1/D-N2).
     fn assert_content_free(payload: &serde_json::Value, needles: &[&str]) {
@@ -724,6 +736,20 @@ mod tests {
         let mut state = DevicePushState::default();
         assert!(decide(&tool_started("t1", "shell.execute"), &mut state, 0).is_none());
         assert!(decide(&status("t1", "thinking hard"), &mut state, 0).is_none());
+        assert!(decide(&context_pressure("t1", "warning", 88.0), &mut state, 0).is_none());
+    }
+
+    #[test]
+    fn tracked_context_pressure_produces_content_free_live_activity_update() {
+        let mut state = DevicePushState::default();
+        state.track_run("t1", "act-1");
+
+        let decision = decide(&context_pressure("t1", "critical", 97.0), &mut state, 0)
+            .expect("tracked pressure update");
+
+        assert_eq!(decision.kind, PushKind::LiveActivityUpdate);
+        assert_eq!(decision.activity_id.as_deref(), Some("act-1"));
+        assert_content_free(&decision.payload, &["critical", "97"]);
     }
 
     #[test]
@@ -830,6 +856,7 @@ mod tests {
             },
             tool_started("t1", "shell.execute"),
             status("t1", "thinking"),
+            context_pressure("t1", "warning", 88.0),
         ] {
             assert!(
                 can_produce_push(&event),

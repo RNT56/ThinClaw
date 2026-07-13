@@ -94,7 +94,7 @@ runtime is dual-mode: embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridg
 | Class | Items |
 |---|---|
 | **Remote-only in local mode** | `learning_evaluate_outcomes` and GPU operations are honestly gated with gateway remediation; `job_restart`/`job_prompt` remain remote-only |
-| **Headless internals (no UI/telemetry)** | advisor auto-consult, pre-compaction flush, context-pressure, config watcher, observability metrics (self-repair, checkpoints/rollback, undo, and trajectory now have commands + UI) |
+| **Headless internals (no UI/telemetry)** | advisor auto-consult, pre-compaction flush, config watcher, observability metrics (context pressure, self-repair, checkpoints/rollback, undo, and trajectory now have commands + UI) |
 | **CLI-only (no command)** | tunnel and Claude-Code/Codex bridge job modes (the eval framework and SFT/DPO trajectory export now have Desktop commands) |
 | **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); no `/personality` or external-memory UI |
 | **Partial flows** | Fleet and Cloud-Brain config |
@@ -170,7 +170,7 @@ Triggered on-touch, but schedule the worst offenders:
   and self-repair start/completion preserve phase, label, and detail as typed
   `AgentLifecycleEvent`s in both embedded and remote modes. The standalone
   client consumes the same structured gateway SSE contract. The earlier
-  context-pressure header indicator remains the separate TDO-101 scope.
+  context-pressure transitions now reach the active-session header through the separate completed TDO-101 scope.
 
 ### WS-5 — Security & Secrets
 - ✅ Single encrypted secret path: the app-wide store serializes all local
@@ -212,7 +212,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
 | ~~Manual compaction is a stub~~ **DONE** | Local path drives the core `ContextCompactor` (Summarize) over each thread and mutates live thread state | `rpc_extensions.rs` (`thinclaw_compact_session`) | M |
-| No context-pressure signal | Add `ContextPressure` `UiEvent` + header indicator | `crates/thinclaw-agent/context_monitor`, `ui_types.rs` | M |
+| ~~No context-pressure signal~~ | ✅ Typed `ContextPressure` channel/SSE/`UiEvent` transitions (including recovery) drive an accessible warning/critical active-session header badge in local and remote modes | `crates/thinclaw-agent/src/context_monitor.rs`, `ui_types.rs`, `ContextPressureBadge.tsx` | M |
 | ~~Self-repair invisible~~ **DONE** | `SelfRepairStarted`/`SelfRepairCompleted` → `AgentLifecycleEvent` | `src/agent/self_repair.rs`, `ui_types.rs` | M |
 | ~~Checkpoints/`/rollback` no UI~~ **DONE** | `thinclaw_checkpoints_list`/`checkpoint_diff`/`checkpoint_restore` + Rollback panel | `rpc_checkpoints.rs` | L |
 | ~~Undo manager no UI~~ **DONE** | `thinclaw_undo`/`thinclaw_redo` commands + control | `commands/sessions.rs` | S |

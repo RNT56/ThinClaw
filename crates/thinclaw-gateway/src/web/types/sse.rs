@@ -64,6 +64,14 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    /// Structured context-window capacity transition.
+    #[serde(rename = "context_pressure")]
+    ContextPressure {
+        level: String,
+        usage_percent: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     /// A structured internal agent lifecycle transition. Keeping these events
     /// distinct from generic status text lets clients render and inspect the
     /// underlying phase without parsing a human-readable message.
@@ -421,6 +429,7 @@ impl SseEvent {
             SseEvent::ToolResult { .. } => "tool_result",
             SseEvent::StreamChunk { .. } => "stream_chunk",
             SseEvent::Status { .. } => "status",
+            SseEvent::ContextPressure { .. } => "context_pressure",
             SseEvent::AgentLifecycle { .. } => "agent_lifecycle",
             SseEvent::PlanUpdate { .. } => "plan_update",
             SseEvent::UsageUpdate { .. } => "usage_update",
