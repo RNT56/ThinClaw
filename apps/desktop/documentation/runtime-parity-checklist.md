@@ -15,7 +15,7 @@ This checklist maps ThinClaw root runtime surfaces to Desktop support status. St
 | --- | --- | --- |
 | Agent dependencies | tested | Desktop uses the root `thinclaw` crate with the `desktop` feature. Agent deps share cost tracker, response cache, routing policy, SSE sender, subagent executor, model override, persistent `AgentRouter`, and persistent `AgentRegistry`. `runtime_ports` remains optional because root runtime has not made explicit ports mandatory. |
 | Tools | fixture-tested | Shared AppBuilder tools are available: memory, files, search, TTS, ComfyUI, learning, MCP/extension tools, LLM model tools, advisor, MoA, vision, routines, skills, jobs, autonomy status, experiments, and subagents. Fixture acceptance must exercise job and send-message command paths. |
-| Secrets | tested | Desktop uses `KeychainSecretsAdapter` and preserves ThinClaw key names and grant checks. Legacy Scrappy/ThinClaw aliases are explicit migration inputs; new runtime writes use ThinClaw identifiers. Contract tests cover denied read/access methods for ungranted keys. |
+| Secrets | tested | Desktop uses one app-wide `SecretStore`; its runtime trait implementation preserves ThinClaw key names and grant checks. Legacy Scrappy/ThinClaw aliases migrate to canonical identifiers; new runtime writes use those identifiers. Contract tests cover denied read/access methods for ungranted keys. |
 | Channels | wired | Tauri local channel is first-class. Slack and Telegram settings are preserved. Remote mode maps gateway `channel_setup` status into desktop channel status entries, including Gmail and Apple Mail availability. Gmail status, Apple Mail settings, and pairing APIs now route through ThinClaw DB/gateway APIs; remote Gmail OAuth returns an explicit gateway-host unavailable response instead of running local OAuth. |
 | Routines | wired | Routine engine is started through ThinClaw background tasks and routine lifecycle SSE events forward to `thinclaw-event`. List/create/toggle/run/history/delete/clear stay backed by ThinClaw DB/runtime APIs in local and remote mode. |
 | Cost / routing / cache | fixture-tested | Desktop exposes cost dashboard, response cache, routing policy, model discovery, `llm_select`, and LLM management surfaces. Remote mode proxies cost summary/export/reset, cache stats, provider routing config/status/simulation, and routing rule mutation through gateway APIs. The routing UI surfaces primary/cheap lanes, advisor readiness, runtime diagnostics, and route simulation. |
@@ -48,6 +48,6 @@ This checklist maps ThinClaw root runtime surfaces to Desktop support status. St
 - Desktop `AgentDeps` includes the same required runtime handles as root `src/main.rs`.
 - Remote proxy route matrix covers every desktop-exposed gateway API.
 - Current matrix: `apps/desktop/documentation/remote-gateway-route-matrix.md`.
-- `KeychainSecretsAdapter` denies ungranted keys for all read/access methods.
+- The shared `SecretStore` runtime view denies ungranted keys for all read/access methods.
 - Route simulation responses preserve ThinClaw planner target, fallback, rejection, score, and diagnostic fields.
 - Generated frontend bindings must be regenerated from Rust and must pass sanitizer tests for Tauri `Channel<T>` and reserved argument names.

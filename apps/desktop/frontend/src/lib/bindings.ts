@@ -901,7 +901,7 @@ async thinclawStopGateway() : Promise<Result<null, string>> {
  * Called by the frontend after API key save/toggle operations so the ThinClaw
  * agent picks up changes without requiring manual restart by the user.
  *
- * **Flow:** stop engine → create fresh KeychainSecretsAdapter → start engine
+ * **Flow:** refresh shared grants → hot reload or restart the runtime
  *
  * This is a no-op if the engine isn't running.
  */
@@ -1395,6 +1395,17 @@ async thinclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
 async thinclawAddCustomSecret(name: string, value: string, description: string | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_add_custom_secret", { name, value, description }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Update an existing custom secret value without changing its identity or grant.
+ */
+async thinclawUpdateCustomSecret(id: string, value: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_custom_secret", { id, value }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

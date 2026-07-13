@@ -346,6 +346,7 @@ pub async fn thinclaw_sync_local_llm(
 #[specta::specta]
 pub async fn thinclaw_start_gateway(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
@@ -470,17 +471,17 @@ pub async fn thinclaw_start_gateway(
     }
 
     // ── Start ThinClaw runtime ────────────────────────────────────────
-    // Create secrets adapter (bridges macOS Keychain to ThinClaw and enforces grants)
+    // Refresh the Agent grant view, then share the existing app-wide
+    // keychain service with the runtime.
     let cfg_for_secrets = if let Some(cfg) = state.get_config().await {
         cfg
     } else {
         state.init_config().await?
     };
+    secret_store.apply_thinclaw_config(&cfg_for_secrets);
     let secrets_store: Option<
         std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
-    > = Some(std::sync::Arc::new(
-        crate::thinclaw::secrets_adapter::KeychainSecretsAdapter::with_config(&cfg_for_secrets),
-    ));
+    > = Some(std::sync::Arc::new((*secret_store).clone()));
 
     match ironclaw.start(secrets_store).await {
         Ok(true) => {
@@ -535,29 +536,29 @@ pub async fn thinclaw_stop_gateway(
 /// Called by the frontend after API key save/toggle operations so the ThinClaw
 /// agent picks up changes without requiring manual restart by the user.
 ///
-/// **Flow:** stop engine → create fresh KeychainSecretsAdapter → start engine
+/// **Flow:** refresh shared grants → hot reload or restart the runtime
 ///
 /// This is a no-op if the engine isn't running.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_reload_secrets(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<(), String> {
     info!("[thinclaw-runtime] Reload secrets requested");
 
-    // Create a fresh secrets adapter (reads live from Keychain, grants from config)
+    // Refresh the grant view on the one app-wide secret service.
     let cfg = state
         .get_config()
         .await
         .ok_or_else(|| "ThinClaw config is not initialized".to_string())?;
-    let secrets_store: Option<
+    secret_store.apply_thinclaw_config(&cfg);
+    let runtime_secrets: Option<
         std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
-    > = Some(std::sync::Arc::new(
-        crate::thinclaw::secrets_adapter::KeychainSecretsAdapter::with_config(&cfg),
-    ));
+    > = Some(std::sync::Arc::new((*secret_store).clone()));
 
-    ironclaw.reload_secrets(secrets_store).await?;
+    ironclaw.reload_secrets(runtime_secrets).await?;
 
     info!("[thinclaw-runtime] Secrets reloaded successfully");
     Ok(())
@@ -631,6 +632,7 @@ pub async fn thinclaw_test_connection(url: String, token: Option<String>) -> Res
 #[specta::specta]
 pub async fn thinclaw_switch_to_profile(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
@@ -675,5 +677,13 @@ pub async fn thinclaw_switch_to_profile(
     );
 
     // Restart with new settings
-    thinclaw_start_gateway(state, ironclaw, sidecar, engine_manager, app_handle).await
+    thinclaw_start_gateway(
+        state,
+        secret_store,
+        ironclaw,
+        sidecar,
+        engine_manager,
+        app_handle,
+    )
+    .await
 }

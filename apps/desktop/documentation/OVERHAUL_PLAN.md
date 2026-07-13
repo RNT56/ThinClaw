@@ -116,7 +116,7 @@ hand-written `lib/thinclaw.ts`, and generated `bindings.ts`.
 
 | Service | Today (duplicated) | Target (unified) |
 |---|---|---|
-| Secrets | `backend/src/secret_store.rs` (Workbench) + `KeychainSecretsAdapter` (Cockpit) | One keychain-backed secret service; one `SecretsTab` |
+| Secrets | One app-wide `SecretStore`; its grant-aware `SecretsStore` implementation feeds the Cockpit while host methods feed Workbench | Unified; one keychain cache, live shared grants, one `SecretsTab` |
 | Models / providers | `model_manager.rs`, `inference/router.rs` (Workbench) + ThinClaw provider catalog (Cockpit) | One model registry + one provider-key vault; `thinclaw_sync_local_llm` is the canonical bridge |
 | History | `backend/src/history.rs` SQLite (Workbench) + ThinClaw session store (Cockpit) | Shared conversation store with a `surface` discriminator |
 | Settings / config | `backend/src/config.rs` UserConfig (Workbench) + `thinclaw_config_*` (Cockpit) | One settings schema, two views |

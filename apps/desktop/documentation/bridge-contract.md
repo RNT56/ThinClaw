@@ -169,6 +169,6 @@ Desktop event routing is metadata-first.
 
 New writes use ThinClaw identifiers. Legacy Scrappy identifiers are read-only fallback inputs for app data, cloud, and keychain migration.
 
-`KeychainSecretsAdapter` must deny ungranted access for `get`, `get_for_injection`, `exists`, `list`, and `is_accessible`.
+The grant-aware `SecretsStore` implementation on the shared `SecretStore` must deny ungranted access for `get`, `get_for_injection`, `exists`, `list`, and `is_accessible`.
 
 Remote mode must never return raw provider secrets. It may expose save/delete/status capability only. Raw local injection commands must remain local-only and unavailable in remote mode.

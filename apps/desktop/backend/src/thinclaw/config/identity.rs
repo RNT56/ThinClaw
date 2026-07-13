@@ -168,7 +168,7 @@ impl ThinClawConfig {
         // ── Load API keys from Keychain into memory ───────────────────────────
         // Keys are never written to disk — they live only in memory (here) and
         // in the OS Keychain (encrypted).
-        let config = Self {
+        Self {
             base_dir,
             device_id: identity.device_id,
             auth_token: identity.auth_token,
@@ -258,9 +258,7 @@ impl ThinClawConfig {
             bedrock_secret_access_key: keychain::get_key("bedrock_secret_access_key"),
             bedrock_region: keychain::get_key("bedrock_region"),
             bedrock_granted: identity.bedrock_granted,
-        };
-        crate::thinclaw::secrets_adapter::update_default_secret_grants(&config);
-        config
+        }
     }
 
     pub(crate) fn find_available_port() -> Option<u16> {

@@ -660,6 +660,7 @@ pub struct CustomLlmConfigInput {
 pub async fn thinclaw_save_cloud_config(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     enabled_providers: Vec<String>,
     enabled_models: std::collections::HashMap<String, Vec<String>>,
     custom_llm: Option<CustomLlmConfigInput>,
@@ -713,15 +714,15 @@ pub async fn thinclaw_save_cloud_config(
         cfg.custom_llm_url = c.url.clone();
         // Store custom LLM key in Keychain, not identity.json
         if remote_mode.is_none() {
-            if let Some(ref key) = c.key {
-                let _ = crate::thinclaw::config::keychain::set_key("custom_llm_key", Some(key));
+            if let Some(key) = c.key.as_deref() {
+                let key = key.trim();
+                let value = (!key.is_empty()).then_some(key);
+                secret_store.set("custom_llm_key", value)?;
+                cfg.custom_llm_key = value.map(str::to_string);
             }
-        }
-        cfg.custom_llm_key = if remote_mode.is_none() {
-            c.key.clone()
         } else {
-            None
-        };
+            cfg.custom_llm_key = None;
+        }
         cfg.custom_llm_model = c.model.clone();
     }
 
@@ -746,6 +747,7 @@ pub async fn thinclaw_save_cloud_config(
     cfg.write_config(&thinclaw_engine, local_llm)
         .map_err(|e| e.to_string())?;
 
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
     Ok(())
 }

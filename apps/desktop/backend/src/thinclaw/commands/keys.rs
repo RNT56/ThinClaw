@@ -12,6 +12,7 @@ use super::remote_provider_config::{apply_remote_selected_brain, normalize_provi
 use super::types::*;
 // ws_rpc removed — ThinClaw is in-process, no remote WS gateway
 use super::ThinClawManager;
+use crate::secret_store::SecretStore;
 use crate::sidecar::SidecarManager;
 use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
@@ -67,6 +68,7 @@ pub async fn thinclaw_get_openai_key(
 pub async fn thinclaw_save_openai_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "openai", key.as_deref()).await? {
@@ -99,6 +101,7 @@ pub async fn thinclaw_save_openai_key(
         .map_err(|e| e.to_string())?;
 
     result.map_err(|e| e.to_string())?;
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())
@@ -124,6 +127,7 @@ pub async fn thinclaw_get_openrouter_key(
 pub async fn thinclaw_save_openrouter_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "openrouter", key.as_deref()).await? {
@@ -156,6 +160,7 @@ pub async fn thinclaw_save_openrouter_key(
         .map_err(|e| e.to_string())?;
 
     result.map_err(|e| e.to_string())?;
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
     Ok(())
 }
@@ -180,6 +185,7 @@ pub async fn thinclaw_get_gemini_key(
 pub async fn thinclaw_save_gemini_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "gemini", key.as_deref()).await? {
@@ -212,6 +218,7 @@ pub async fn thinclaw_save_gemini_key(
         .map_err(|e| e.to_string())?;
 
     result.map_err(|e| e.to_string())?;
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())
@@ -237,6 +244,7 @@ pub async fn thinclaw_get_groq_key(
 pub async fn thinclaw_save_groq_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "groq", key.as_deref()).await? {
@@ -269,6 +277,7 @@ pub async fn thinclaw_save_groq_key(
         .map_err(|e| e.to_string())?;
 
     result.map_err(|e| e.to_string())?;
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())
@@ -308,6 +317,7 @@ pub async fn thinclaw_get_brave_key(
 pub async fn thinclaw_save_anthropic_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     key: Option<String>,
 ) -> Result<(), String> {
     if save_remote_provider_key_if_needed(&ironclaw, "anthropic", key.as_deref()).await? {
@@ -351,6 +361,7 @@ pub async fn thinclaw_save_anthropic_key(
 
     // If running, we might want to update the running config too
     // For now, we'll just update the manager's config so it's used on next start
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())
@@ -362,6 +373,7 @@ pub async fn thinclaw_save_anthropic_key(
 pub async fn thinclaw_save_brave_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     key: Option<String>,
 ) -> Result<(), BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
@@ -406,6 +418,7 @@ pub async fn thinclaw_save_brave_key(
         .map_err(|e| e.to_string())?;
 
     result.map_err(|e| e.to_string())?;
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())
@@ -416,6 +429,7 @@ pub async fn thinclaw_save_brave_key(
 #[specta::specta]
 pub async fn thinclaw_toggle_secret_access(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, SecretStore>,
     secret: String,
     granted: bool,
 ) -> Result<(), String> {
@@ -448,6 +462,7 @@ pub async fn thinclaw_toggle_secret_access(
         .map_err(|e| e.to_string())?;
 
     result.map_err(|e| e.to_string())?;
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())
@@ -510,6 +525,7 @@ pub async fn select_thinclaw_brain(
 pub async fn thinclaw_set_hf_token(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     token: String,
 ) -> Result<(), BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
@@ -561,6 +577,7 @@ pub async fn thinclaw_set_hf_token(
     result.map_err(|e| e.to_string())?;
 
     // Update in-memory state
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
     println!("[thinclaw] set_hf_token: successfully saved and updated state");
 
@@ -575,6 +592,7 @@ pub async fn thinclaw_set_hf_token(
 pub async fn thinclaw_save_implicit_provider_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     provider: String,
     key: String,
 ) -> Result<(), String> {
@@ -654,6 +672,7 @@ pub async fn thinclaw_save_implicit_provider_key(
         .map_err(|e| e.to_string())?;
 
     result.map_err(|e| e.to_string())?;
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     println!(
@@ -684,6 +703,7 @@ pub async fn thinclaw_get_implicit_provider_key(
 pub async fn thinclaw_save_bedrock_credentials(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, SecretStore>,
     access_key_id: String,
     secret_access_key: String,
     region: String,
@@ -763,6 +783,7 @@ pub async fn thinclaw_save_bedrock_credentials(
     cfg.write_config(&thinclaw_engine, local_llm)
         .map_err(|e| e.to_string())?;
 
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     println!("[thinclaw] save_bedrock_credentials: saved successfully");
@@ -790,6 +811,7 @@ pub async fn thinclaw_get_bedrock_credentials(
 #[specta::specta]
 pub async fn thinclaw_add_custom_secret(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, SecretStore>,
     name: String,
     value: String,
     description: Option<String>,
@@ -826,6 +848,51 @@ pub async fn thinclaw_add_custom_secret(
     cfg.write_config(&thinclaw_engine, local_llm)
         .map_err(|e| e.to_string())?;
 
+    secret_store.apply_thinclaw_config(&cfg);
+    *state.config.write().await = Some(cfg);
+
+    Ok(())
+}
+
+/// Update an existing custom secret value without changing its identity or grant.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_update_custom_secret(
+    state: State<'_, ThinClawManager>,
+    secret_store: State<'_, SecretStore>,
+    id: String,
+    value: String,
+) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("Secret value must not be empty".into());
+    }
+
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    let secret = cfg
+        .custom_secrets
+        .iter_mut()
+        .find(|secret| secret.id == id)
+        .ok_or_else(|| "Secret not found".to_string())?;
+
+    crate::thinclaw::config::keychain::set_key(&id, Some(&value))
+        .map_err(|e| format!("Keychain error: {}", e))?;
+    secret.value = value;
+
+    cfg.save_identity().map_err(|e| e.to_string())?;
+    let existing_thinclaw_engine = cfg.load_config().ok();
+    let local_llm = existing_thinclaw_engine
+        .as_ref()
+        .and_then(|model| model.get_local_llm_config());
+    let thinclaw_engine = cfg.generate_config(None, None, local_llm.clone());
+    cfg.write_config(&thinclaw_engine, local_llm)
+        .map_err(|e| e.to_string())?;
+
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())
@@ -836,6 +903,7 @@ pub async fn thinclaw_add_custom_secret(
 #[specta::specta]
 pub async fn thinclaw_remove_custom_secret(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, SecretStore>,
     id: String,
 ) -> Result<(), String> {
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -861,6 +929,7 @@ pub async fn thinclaw_remove_custom_secret(
     cfg.write_config(&thinclaw_engine, local_llm)
         .map_err(|e| e.to_string())?;
 
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())
@@ -871,6 +940,7 @@ pub async fn thinclaw_remove_custom_secret(
 #[specta::specta]
 pub async fn thinclaw_toggle_custom_secret(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, SecretStore>,
     id: String,
     granted: bool,
 ) -> Result<(), String> {
@@ -898,6 +968,7 @@ pub async fn thinclaw_toggle_custom_secret(
     cfg.write_config(&thinclaw_engine, local_llm)
         .map_err(|e| e.to_string())?;
 
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
 
     Ok(())

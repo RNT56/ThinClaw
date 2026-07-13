@@ -1,7 +1,8 @@
-//! Keychain-backed SecretsStore adapter for ThinClaw.
+//! Grant-aware ThinClaw view of Desktop's app-wide `SecretStore`.
 //!
-//! Bridges ThinClaw Desktop's macOS Keychain (`keychain::get_key()` / `set_key()`) to
-//! ThinClaw's `thinclaw_core::secrets::SecretsStore` trait.
+//! Implements ThinClaw's `SecretsStore` trait on the same keychain-backed
+//! service used by the Direct AI Workbench. There is no second cache or store:
+//! this module only maps names and enforces the Agent Cockpit grant boundary.
 //!
 //! ## Secret policy mapping
 //!
@@ -19,8 +20,8 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use secrecy::ExposeSecret;
-use std::borrow::Cow;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::collections::HashSet;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use thinclaw_core::secrets::{
@@ -28,8 +29,11 @@ use thinclaw_core::secrets::{
     SecretError, SecretRef, SecretsCrypto, SecretsStore,
 };
 
+use crate::secret_store::{AgentCustomSecretGrant, SecretStore};
 use crate::thinclaw::config::keychain;
-use crate::thinclaw::config::{CustomSecret, ThinClawConfig};
+#[cfg(test)]
+use crate::thinclaw::config::CustomSecret;
+use crate::thinclaw::config::ThinClawConfig;
 
 #[derive(Debug, Clone, Copy)]
 enum GrantFlag {
@@ -400,32 +404,56 @@ fn secret_name_allowed_by_patterns(secret_name: &str, allowed_secrets: &[String]
     })
 }
 
-/// SecretsStore implementation backed by ThinClaw Desktop's macOS Keychain.
-///
-/// Key values live in the keychain module's global `Mutex<HashMap>` cache.
-/// Grant flags are snapshotted from `ThinClawConfig` when the adapter is
-/// created so stale or denied secrets cannot be returned to ThinClaw.
-pub struct KeychainSecretsAdapter {
-    grants: Option<SecretGrantSnapshot>,
-}
-
-impl Default for KeychainSecretsAdapter {
-    fn default() -> Self {
-        Self::new()
+fn grant_enabled(config: &ThinClawConfig, grant: GrantFlag) -> bool {
+    match grant {
+        GrantFlag::Anthropic => config.anthropic_granted,
+        GrantFlag::Brave => config.brave_granted,
+        GrantFlag::HuggingFace => config.huggingface_granted,
+        GrantFlag::OpenAi => config.openai_granted,
+        GrantFlag::OpenRouter => config.openrouter_granted,
+        GrantFlag::Gemini => config.gemini_granted,
+        GrantFlag::Groq => config.groq_granted,
+        GrantFlag::Xai => config.xai_granted,
+        GrantFlag::Venice => config.venice_granted,
+        GrantFlag::Together => config.together_granted,
+        GrantFlag::Moonshot => config.moonshot_granted,
+        GrantFlag::Minimax => config.minimax_granted,
+        GrantFlag::Nvidia => config.nvidia_granted,
+        GrantFlag::Qianfan => config.qianfan_granted,
+        GrantFlag::Mistral => config.mistral_granted,
+        GrantFlag::Cohere => config.cohere_granted,
+        GrantFlag::Voyage => config.voyage_granted,
+        GrantFlag::Deepgram => config.deepgram_granted,
+        GrantFlag::ElevenLabs => config.elevenlabs_granted,
+        GrantFlag::Stability => config.stability_granted,
+        GrantFlag::Fal => config.fal_granted,
+        GrantFlag::Bedrock => config.bedrock_granted,
+        GrantFlag::CustomLlm => config.custom_llm_enabled,
+        GrantFlag::RemoteToken | GrantFlag::Unsupported => false,
     }
 }
 
-impl KeychainSecretsAdapter {
-    pub fn new() -> Self {
-        Self {
-            grants: default_secret_grants(),
-        }
-    }
-
-    pub fn with_config(config: &ThinClawConfig) -> Self {
-        Self {
-            grants: Some(SecretGrantSnapshot::from_config(config)),
-        }
+impl SecretStore {
+    /// Refresh the Agent Cockpit view from persisted grant metadata.
+    ///
+    /// Direct Workbench access is unaffected. Runtime clones share this grant
+    /// state, so a toggle takes effect without constructing another adapter.
+    pub fn apply_thinclaw_config(&self, config: &ThinClawConfig) {
+        let keychain_keys = SECRET_POLICIES
+            .iter()
+            .filter(|policy| grant_enabled(config, policy.grant))
+            .map(|policy| policy.keychain_key.to_string())
+            .collect::<HashSet<_>>();
+        let custom_secrets = config
+            .custom_secrets
+            .iter()
+            .filter(|secret| secret.granted)
+            .map(|secret| AgentCustomSecretGrant {
+                id: secret.id.clone(),
+                name: secret.name.clone(),
+            })
+            .collect();
+        self.replace_agent_grants(keychain_keys, custom_secrets);
     }
 
     fn ensure_granted(&self, name: &str) -> Result<(), SecretError> {
@@ -437,22 +465,17 @@ impl KeychainSecretsAdapter {
     }
 
     fn is_granted(&self, name: &str) -> bool {
-        self.grants
-            .as_ref()
-            .map(|grants| grants.is_granted(name))
-            .unwrap_or(false)
+        policy_for_name(name)
+            .map(|policy| self.is_agent_key_granted(policy.keychain_key))
+            .unwrap_or_else(|| self.resolve_agent_custom_secret(name).is_some())
     }
 
-    fn keychain_key_for_name<'a>(&'a self, name: &'a str) -> Cow<'a, str> {
-        if let Some(secret) = self
-            .grants
-            .as_ref()
-            .and_then(|grants| grants.granted_custom_secret(name))
-        {
-            return Cow::Borrowed(secret.id.as_str());
+    fn keychain_key_for_name(&self, name: &str) -> String {
+        if let Some(secret) = self.resolve_agent_custom_secret(name) {
+            return secret.id;
         }
 
-        Cow::Borrowed(map_key_name(name))
+        map_key_name(name).to_string()
     }
 
     fn is_allowed(&self, secret_name: &str, allowed_secrets: &[String]) -> bool {
@@ -460,9 +483,7 @@ impl KeychainSecretsAdapter {
             return true;
         }
 
-        self.grants
-            .as_ref()
-            .and_then(|grants| grants.granted_custom_secret(secret_name))
+        self.resolve_agent_custom_secret(secret_name)
             .is_some_and(|secret| {
                 allowed_secrets.iter().any(|pattern| {
                     pattern_matches(pattern, &secret.id) || pattern_matches(pattern, &secret.name)
@@ -500,131 +521,8 @@ impl KeychainSecretsAdapter {
     }
 }
 
-fn default_grants_cell() -> &'static RwLock<Option<SecretGrantSnapshot>> {
-    static GRANTS: OnceLock<RwLock<Option<SecretGrantSnapshot>>> = OnceLock::new();
-    GRANTS.get_or_init(|| RwLock::new(None))
-}
-
-pub fn update_default_secret_grants(config: &ThinClawConfig) {
-    let snapshot = SecretGrantSnapshot::from_config(config);
-    match default_grants_cell().write() {
-        Ok(mut guard) => *guard = Some(snapshot),
-        Err(poisoned) => *poisoned.into_inner() = Some(snapshot),
-    }
-}
-
-fn default_secret_grants() -> Option<SecretGrantSnapshot> {
-    match default_grants_cell().read() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct SecretGrantSnapshot {
-    anthropic: bool,
-    brave: bool,
-    huggingface: bool,
-    openai: bool,
-    openrouter: bool,
-    gemini: bool,
-    groq: bool,
-    xai: bool,
-    venice: bool,
-    together: bool,
-    moonshot: bool,
-    minimax: bool,
-    nvidia: bool,
-    qianfan: bool,
-    mistral: bool,
-    cohere: bool,
-    voyage: bool,
-    deepgram: bool,
-    elevenlabs: bool,
-    stability: bool,
-    fal: bool,
-    bedrock: bool,
-    custom_llm: bool,
-    remote_token: bool,
-    custom_secrets: Vec<CustomSecret>,
-}
-
-impl SecretGrantSnapshot {
-    fn from_config(config: &ThinClawConfig) -> Self {
-        Self {
-            anthropic: config.anthropic_granted,
-            brave: config.brave_granted,
-            huggingface: config.huggingface_granted,
-            openai: config.openai_granted,
-            openrouter: config.openrouter_granted,
-            gemini: config.gemini_granted,
-            groq: config.groq_granted,
-            xai: config.xai_granted,
-            venice: config.venice_granted,
-            together: config.together_granted,
-            moonshot: config.moonshot_granted,
-            minimax: config.minimax_granted,
-            nvidia: config.nvidia_granted,
-            qianfan: config.qianfan_granted,
-            mistral: config.mistral_granted,
-            cohere: config.cohere_granted,
-            voyage: config.voyage_granted,
-            deepgram: config.deepgram_granted,
-            elevenlabs: config.elevenlabs_granted,
-            stability: config.stability_granted,
-            fal: config.fal_granted,
-            bedrock: config.bedrock_granted,
-            custom_llm: config.custom_llm_enabled,
-            remote_token: false,
-            custom_secrets: config.custom_secrets.clone(),
-        }
-    }
-
-    fn is_granted(&self, name: &str) -> bool {
-        if let Some(policy) = policy_for_name(name) {
-            return match policy.grant {
-                GrantFlag::Anthropic => self.anthropic,
-                GrantFlag::Brave => self.brave,
-                GrantFlag::HuggingFace => self.huggingface,
-                GrantFlag::OpenAi => self.openai,
-                GrantFlag::OpenRouter => self.openrouter,
-                GrantFlag::Gemini => self.gemini,
-                GrantFlag::Groq => self.groq,
-                GrantFlag::Xai => self.xai,
-                GrantFlag::Venice => self.venice,
-                GrantFlag::Together => self.together,
-                GrantFlag::Moonshot => self.moonshot,
-                GrantFlag::Minimax => self.minimax,
-                GrantFlag::Nvidia => self.nvidia,
-                GrantFlag::Qianfan => self.qianfan,
-                GrantFlag::Mistral => self.mistral,
-                GrantFlag::Cohere => self.cohere,
-                GrantFlag::Voyage => self.voyage,
-                GrantFlag::Deepgram => self.deepgram,
-                GrantFlag::ElevenLabs => self.elevenlabs,
-                GrantFlag::Stability => self.stability,
-                GrantFlag::Fal => self.fal,
-                GrantFlag::Bedrock => self.bedrock,
-                GrantFlag::CustomLlm => self.custom_llm,
-                GrantFlag::RemoteToken => self.remote_token,
-                GrantFlag::Unsupported => false,
-            };
-        }
-
-        self.custom_secrets
-            .iter()
-            .any(|secret| secret.granted && (secret.id == name || secret.name == name))
-    }
-
-    fn granted_custom_secret(&self, name: &str) -> Option<&CustomSecret> {
-        self.custom_secrets
-            .iter()
-            .find(|secret| secret.granted && (secret.id == name || secret.name == name))
-    }
-}
-
 #[async_trait]
-impl SecretsStore for KeychainSecretsAdapter {
+impl SecretsStore for SecretStore {
     /// Create/update a secret in the Keychain.
     async fn create(
         &self,
@@ -632,7 +530,7 @@ impl SecretsStore for KeychainSecretsAdapter {
         params: CreateSecretParams,
     ) -> Result<Secret, SecretError> {
         self.ensure_granted(&params.name)?;
-        let thinclaw_key = self.keychain_key_for_name(&params.name).into_owned();
+        let thinclaw_key = self.keychain_key_for_name(&params.name);
         let value = params.value.expose_secret();
 
         keychain::set_key(&thinclaw_key, Some(value)).map_err(SecretError::KeychainError)?;
@@ -650,7 +548,7 @@ impl SecretsStore for KeychainSecretsAdapter {
     async fn get(&self, _user_id: &str, name: &str) -> Result<Secret, SecretError> {
         self.ensure_granted(name)?;
         let thinclaw_key = self.keychain_key_for_name(name);
-        let _value = keychain::get_key(thinclaw_key.as_ref())
+        let _value = keychain::get_key(&thinclaw_key)
             .ok_or_else(|| SecretError::NotFound(name.to_string()))?;
 
         Ok(Self::secret_record(_user_id, name.to_string(), None, None))
@@ -666,7 +564,7 @@ impl SecretsStore for KeychainSecretsAdapter {
     ) -> Result<DecryptedSecret, SecretError> {
         self.ensure_granted(name)?;
         let thinclaw_key = self.keychain_key_for_name(name);
-        let value = keychain::get_key(thinclaw_key.as_ref())
+        let value = keychain::get_key(&thinclaw_key)
             .ok_or_else(|| SecretError::NotFound(name.to_string()))?;
 
         if value.is_empty() {
@@ -693,7 +591,7 @@ impl SecretsStore for KeychainSecretsAdapter {
             return Ok(false);
         }
         let thinclaw_key = self.keychain_key_for_name(name);
-        Ok(keychain::get_key(thinclaw_key.as_ref())
+        Ok(keychain::get_key(&thinclaw_key)
             .map(|v| !v.is_empty())
             .unwrap_or(false))
     }
@@ -715,14 +613,12 @@ impl SecretsStore for KeychainSecretsAdapter {
             }
         }
 
-        if let Some(grants) = &self.grants {
-            for secret in grants.custom_secrets.iter().filter(|secret| secret.granted) {
-                if keychain::get_key(&secret.id)
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false)
-                {
-                    refs.push(SecretRef::new(secret.id.clone()));
-                }
+        for secret in self.granted_agent_custom_secrets() {
+            if keychain::get_key(&secret.id)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+            {
+                refs.push(SecretRef::new(secret.id));
             }
         }
 
@@ -733,8 +629,9 @@ impl SecretsStore for KeychainSecretsAdapter {
     async fn delete(&self, _user_id: &str, name: &str) -> Result<bool, SecretError> {
         self.ensure_granted(name)?;
         let thinclaw_key = self.keychain_key_for_name(name);
-        let existed = keychain::get_key(thinclaw_key.as_ref()).is_some();
-        keychain::set_key(thinclaw_key.as_ref(), None).map_err(SecretError::KeychainError)?;
+        let existed = keychain::get_key(&thinclaw_key).is_some();
+        keychain::set_key(&thinclaw_key, None).map_err(SecretError::KeychainError)?;
+        self.revoke_agent_grant(&thinclaw_key);
         Ok(existed)
     }
 
@@ -862,6 +759,12 @@ mod tests {
         }
     }
 
+    fn test_store(config: &ThinClawConfig) -> SecretStore {
+        let store = SecretStore::new();
+        store.apply_thinclaw_config(config);
+        store
+    }
+
     #[test]
     fn every_keychain_provider_has_policy_mapping() {
         for provider in keychain::PROVIDERS {
@@ -955,16 +858,36 @@ mod tests {
     }
 
     #[test]
-    fn grant_snapshot_denies_ungranted_secret_aliases() {
+    fn shared_store_denies_ungranted_secret_aliases() {
         let mut cfg = test_config();
-        let grants = SecretGrantSnapshot::from_config(&cfg);
-        assert!(!grants.is_granted("llm_openai_api_key"));
+        let store = test_store(&cfg);
+        assert!(!store.is_granted("llm_openai_api_key"));
 
         cfg.openai_granted = true;
-        let grants = SecretGrantSnapshot::from_config(&cfg);
-        assert!(grants.is_granted("llm_openai_api_key"));
-        assert!(grants.is_granted("openai"));
-        assert!(!grants.is_granted("llm_anthropic_api_key"));
+        store.apply_thinclaw_config(&cfg);
+        assert!(store.is_granted("llm_openai_api_key"));
+        assert!(store.is_granted("openai"));
+        assert!(!store.is_granted("llm_anthropic_api_key"));
+    }
+
+    #[test]
+    fn cloned_service_shares_live_agent_grants() {
+        let mut cfg = test_config();
+        let workbench_store = test_store(&cfg);
+        let runtime_store = workbench_store.clone();
+        assert!(!runtime_store.is_granted("openai"));
+
+        cfg.openai_granted = true;
+        workbench_store.apply_thinclaw_config(&cfg);
+        assert!(runtime_store.is_granted("llm_openai_api_key"));
+    }
+
+    #[test]
+    fn legacy_adapter_type_is_retired() {
+        let source = include_str!("secrets_adapter.rs");
+        let retired_declaration = ["struct Keychain", "SecretsAdapter"].concat();
+        assert!(!source.contains(&retired_declaration));
+        assert!(source.contains("impl SecretsStore for SecretStore"));
     }
 
     #[test]
@@ -977,13 +900,13 @@ mod tests {
             description: None,
             granted: false,
         });
-        let grants = SecretGrantSnapshot::from_config(&cfg);
-        assert!(!grants.is_granted("slack"));
+        let store = test_store(&cfg);
+        assert!(!store.is_granted("slack"));
 
         cfg.custom_secrets[0].granted = true;
-        let grants = SecretGrantSnapshot::from_config(&cfg);
-        assert!(grants.is_granted("slack"));
-        assert!(grants.is_granted("Slack Bot"));
+        store.apply_thinclaw_config(&cfg);
+        assert!(store.is_granted("slack"));
+        assert!(store.is_granted("Slack Bot"));
     }
 
     #[test]
@@ -997,33 +920,27 @@ mod tests {
             granted: true,
         });
 
-        let adapter = KeychainSecretsAdapter::with_config(&cfg);
-        assert_eq!(
-            adapter.keychain_key_for_name("Slack Bot").as_ref(),
-            "custom-slack"
-        );
-        assert_eq!(
-            adapter.keychain_key_for_name("custom-slack").as_ref(),
-            "custom-slack"
-        );
-        assert!(adapter.is_allowed("Slack Bot", &["custom-slack".to_string()]));
-        assert!(adapter.is_allowed("custom-slack", &["Slack*".to_string()]));
+        let store = test_store(&cfg);
+        assert_eq!(store.keychain_key_for_name("Slack Bot"), "custom-slack");
+        assert_eq!(store.keychain_key_for_name("custom-slack"), "custom-slack");
+        assert!(store.is_allowed("Slack Bot", &["custom-slack".to_string()]));
+        assert!(store.is_allowed("custom-slack", &["Slack*".to_string()]));
     }
 
     #[tokio::test]
     async fn is_accessible_requires_grant_and_allowed_secret_match() {
         let mut cfg = test_config();
         cfg.openai_granted = true;
-        let adapter = KeychainSecretsAdapter::with_config(&cfg);
+        let store = test_store(&cfg);
 
-        assert!(!adapter
+        assert!(!store
             .is_accessible("user", "OPENAI_API_KEY", &["anthropic*".to_string()])
             .await
             .unwrap());
 
         cfg.openai_granted = false;
-        let adapter = KeychainSecretsAdapter::with_config(&cfg);
-        assert!(!adapter
+        store.apply_thinclaw_config(&cfg);
+        assert!(!store
             .is_accessible("user", "OPENAI_API_KEY", &["OPENAI_API_KEY".to_string()])
             .await
             .unwrap());
@@ -1031,19 +948,21 @@ mod tests {
 
     #[tokio::test]
     async fn exists_denies_ungranted_secret_probe() {
-        let adapter = KeychainSecretsAdapter::with_config(&test_config());
+        let store = test_store(&test_config());
 
-        assert!(!adapter.exists("user", "OPENAI_API_KEY").await.unwrap());
+        assert!(!store.exists("user", "OPENAI_API_KEY").await.unwrap());
     }
 
     #[tokio::test]
     async fn read_methods_deny_ungranted_keychain_access() {
-        let adapter = KeychainSecretsAdapter::with_config(&test_config());
+        let store = test_store(&test_config());
 
-        let get_err = adapter.get("user", "OPENAI_API_KEY").await.unwrap_err();
+        let get_err = SecretsStore::get(&store, "user", "OPENAI_API_KEY")
+            .await
+            .unwrap_err();
         assert!(matches!(get_err, SecretError::AccessDenied));
 
-        let inject_err = adapter
+        let inject_err = store
             .get_for_injection(
                 "user",
                 "OPENAI_API_KEY",
@@ -1053,20 +972,20 @@ mod tests {
             .unwrap_err();
         assert!(matches!(inject_err, SecretError::AccessDenied));
 
-        assert!(adapter.list("user").await.unwrap().is_empty());
+        assert!(store.list("user").await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn runtime_mutations_deny_ungranted_keychain_writes() {
-        let adapter = KeychainSecretsAdapter::with_config(&test_config());
+        let store = test_store(&test_config());
 
-        let create_err = adapter
+        let create_err = store
             .create("user", CreateSecretParams::new("OPENAI_API_KEY", "sk-test"))
             .await
             .unwrap_err();
         assert!(matches!(create_err, SecretError::AccessDenied));
 
-        let delete_err = adapter.delete("user", "OPENAI_API_KEY").await.unwrap_err();
+        let delete_err = store.delete("user", "OPENAI_API_KEY").await.unwrap_err();
         assert!(matches!(delete_err, SecretError::AccessDenied));
     }
 }

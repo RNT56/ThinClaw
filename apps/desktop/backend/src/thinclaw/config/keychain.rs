@@ -148,7 +148,7 @@ fn cache_loaded() -> &'static Mutex<bool> {
 /// Current ThinClaw secret identifiers used for new writes.
 ///
 /// The shorter Scrappy/ThinClaw-era provider slugs remain readable as fallback
-/// aliases so existing users do not lose credentials during the rename.
+/// aliases and are canonicalized when the unified keychain blob is loaded.
 pub(crate) fn canonical_key_name(key: &str) -> &str {
     thinclaw_runtime_contracts::canonical_secret_name(key)
 }
@@ -222,6 +222,14 @@ pub fn load_all() {
             if let Err(e) = flush_cache(&cache) {
                 warn!("[keychain] flush after per-key migration failed: {}", e);
             }
+        }
+    }
+
+    // Canonicalize provider aliases inside both current and imported blobs.
+    // Preserve an existing canonical value if a stale alias also exists.
+    if migrate_legacy_aliases(&mut cache) {
+        if let Err(e) = flush_cache(&cache) {
+            warn!("[keychain] flush after alias migration failed: {}", e);
         }
     }
 
@@ -425,6 +433,30 @@ fn migrate_per_key_items(cache: &mut HashMap<String, String>) -> bool {
     migrated
 }
 
+/// Move provider aliases in a unified blob to their canonical ThinClaw names.
+fn migrate_legacy_aliases(cache: &mut HashMap<String, String>) -> bool {
+    let keys: Vec<String> = cache.keys().cloned().collect();
+    let mut migrated = false;
+
+    for key in keys {
+        let canonical = canonical_key_name(&key);
+        if canonical == key {
+            continue;
+        }
+
+        if let Some(value) = cache.remove(&key) {
+            cache.entry(canonical.to_string()).or_insert(value);
+            info!(
+                "[keychain] migrated legacy alias '{}' to '{}'",
+                key, canonical
+            );
+            migrated = true;
+        }
+    }
+
+    migrated
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Migration shim — fields that were previously in ThinClawIdentity
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,4 +550,46 @@ fn flush_cache(cache: &HashMap<String, String>) -> Result<(), String> {
 fn is_not_found(e: &KeychainError) -> bool {
     // errSecItemNotFound = -25300
     e.code() == -25300
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_aliases_are_moved_to_canonical_names() {
+        let mut cache = HashMap::from([
+            ("anthropic".to_string(), "legacy-anthropic".to_string()),
+            ("OPENAI_API_KEY".to_string(), "legacy-openai".to_string()),
+            ("custom-id".to_string(), "custom".to_string()),
+        ]);
+
+        assert!(migrate_legacy_aliases(&mut cache));
+        assert_eq!(
+            cache.get("llm_anthropic_api_key").map(String::as_str),
+            Some("legacy-anthropic")
+        );
+        assert_eq!(
+            cache.get("llm_openai_api_key").map(String::as_str),
+            Some("legacy-openai")
+        );
+        assert_eq!(cache.get("custom-id").map(String::as_str), Some("custom"));
+        assert!(!cache.contains_key("anthropic"));
+        assert!(!cache.contains_key("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn canonical_value_wins_when_alias_also_exists() {
+        let mut cache = HashMap::from([
+            ("llm_anthropic_api_key".to_string(), "canonical".to_string()),
+            ("anthropic".to_string(), "legacy".to_string()),
+        ]);
+
+        assert!(migrate_legacy_aliases(&mut cache));
+        assert_eq!(
+            cache.get("llm_anthropic_api_key").map(String::as_str),
+            Some("canonical")
+        );
+        assert!(!cache.contains_key("anthropic"));
+    }
 }
