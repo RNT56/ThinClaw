@@ -27,9 +27,9 @@ import {
     XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { listen } from '@tauri-apps/api/event';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
+import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 import { ThinClawRepoConnector } from './ThinClawRepoConnector';
 
 const SHELL_PROJECTS: thinclaw.ThinClawRepoProject[] = [
@@ -467,23 +467,16 @@ export function ThinClawRepoProjects() {
         loadSelectedProject(selectedProjectId);
     }, [loadSelectedProject, selectedProjectId]);
 
-    useEffect(() => {
-        const unlistenPromise = listen<any>('thinclaw-event', (event) => {
-            const payload = event.payload;
-            if (!payloadLooksRepoProject(payload)) return;
+    useThinClawEvents((payload) => {
+        if (!payloadLooksRepoProject(payload)) return;
 
-            const projectId = payloadProjectId(payload);
-            setLastLiveRefreshAt(new Date().toISOString());
-            loadProjects();
-            if (selectedProjectId && (!projectId || projectId === selectedProjectId)) {
-                loadSelectedProject(selectedProjectId);
-            }
-        });
-
-        return () => {
-            unlistenPromise.then((unlisten) => unlisten()).catch(() => { });
-        };
-    }, [loadProjects, loadSelectedProject, selectedProjectId]);
+        const projectId = payloadProjectId(payload);
+        setLastLiveRefreshAt(new Date().toISOString());
+        loadProjects();
+        if (selectedProjectId && (!projectId || projectId === selectedProjectId)) {
+            loadSelectedProject(selectedProjectId);
+        }
+    });
 
     const stats = useMemo(() => {
         const activeRuns = projects.reduce((sum, project) => sum + project.active_runs, 0);

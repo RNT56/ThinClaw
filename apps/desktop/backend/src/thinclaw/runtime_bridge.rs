@@ -41,7 +41,7 @@ pub(crate) struct ThinClawRuntimeInner {
     /// Used to fire event-triggered routines on each message (parity with run() loop).
     pub routine_engine: Option<Arc<thinclaw_core::agent::routine_engine::RoutineEngine>>,
 
-    // ── Sprint 13: Backend service objects for tauri_commands facade ────
+    // ── Sprint 13: Backend service objects for the Desktop service API ──
     /// LLM cost tracker — **same Arc** that `AgentDeps.cost_tracker` uses,
     /// so every LLM call in the dispatcher records costs here.
     pub cost_tracker: Arc<TokioMutex<CostTracker>>,
@@ -568,7 +568,7 @@ impl ThinClawRuntimeState {
             .ok_or_else(|| "ThinClaw runtime is not running".to_string())
     }
 
-    // ── Sprint 13: Backend service accessors for tauri_commands ─────────
+    // ── Sprint 13: Backend service accessors for desktop_api ────────────
 
     /// Get the cost tracker, or error if engine is stopped.
     pub async fn cost_tracker(&self) -> Result<Arc<TokioMutex<CostTracker>>, String> {

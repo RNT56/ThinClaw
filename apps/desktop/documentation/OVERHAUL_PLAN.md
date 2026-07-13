@@ -66,7 +66,7 @@ passes the contract suite and a dated entry in
 
 ### Engineering principles
 - **Code-grounded contracts.** Each capability = registered command in `apps/desktop/backend/src/setup/commands.rs` + a `lib/thinclaw.ts` (or generated `bindings.ts`) wrapper + a generated binding, verified by the contract test at `setup/commands.rs` (`generated_bindings_cover_phase_two_desktop_surfaces`). **No UI ships against a mock.**
-- **No new god-files** (repo `CLAUDE.md`): split `lib/thinclaw.ts`, `runtime_builder.rs`, `src/tauri_commands.rs`, and the oversized `ThinClaw*` panel components as they're touched. Preserve public paths with `pub use` re-exports.
+- **No new god-files** (repo `CLAUDE.md`): split `lib/thinclaw.ts`, `runtime_builder.rs`, `src/desktop_api.rs`, and the oversized `ThinClaw*` panel components as they're touched. Preserve public paths with `pub use` re-exports.
 - **Migrations mandatory** for any storage/settings/command rename — ship the migration + a test in the same PR.
 - **Feature-flag risky work** (engine swaps, autonomy, new runtime commands) so each phase build is always shippable.
 - **Parity = "wired AND honest."** A command that returns `unavailable` in local mode is acceptable only if the UI shows the reason; silent stubs are bugs.
@@ -96,7 +96,7 @@ runtime is dual-mode: embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridg
 | **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); only cron routines creatable (not event); no `/personality`, profile-evolution, or external-memory UI |
 | **Partial flows** | Fleet and Cloud-Brain config |
 | **Duplication** | secrets, models, history, settings, theming exist twice (Workbench vs Cockpit) |
-| **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `tauri_commands.rs`, and several `ThinClaw*` panel components |
+| **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `desktop_api.rs`, and several `ThinClaw*` panel components (the root Tauri facade is retired) |
 
 ---
 
@@ -107,7 +107,7 @@ The bridge is three artifacts that can drift: the `#[tauri::command]` surface, t
 hand-written `lib/thinclaw.ts`, and generated `bindings.ts`.
 
 - Adopt **one** calling convention: make generated `bindings.ts` (`commands.*`) the single source; reduce `lib/thinclaw.ts` to thin re-exports + types.
-- Extend the existing domain split under `apps/desktop/backend/src/thinclaw/commands/`; retire/shrink the root `src/tauri_commands.rs` facade.
+- Extend the existing domain split under `apps/desktop/backend/src/thinclaw/commands/`; the root `src/tauri_commands.rs` facade is retired in favor of `src/desktop_api.rs` plus a deprecated alias.
 - Codify the dual-mode contract with a `RouteBehavior` enum per command: `LocalAndRemote | RemoteOnly(reason) | LocalOnly(reason)`. **Generate** `remote-gateway-route-matrix.md` from code and assert it in a test. Kills the silent-`unavailable` class.
 - Generate one typed `UiEvent` discriminated union consumed by a single React event-bus hook (replace scattered `listen('thinclaw-event')`).
 - **Deliverable:** a **bridge linter** CI test that fails if any command lacks {binding + wrapper + route-behavior + reason-on-gate}.
@@ -132,7 +132,7 @@ Triggered on-touch, but schedule the worst offenders:
 - `frontend/src/lib/thinclaw.ts` → `lib/api/{sessions,memory,routines,learning,experiments,mcp,…}.ts`.
 - `backend/src/thinclaw/runtime_builder.rs` → provider/inference setup · sandbox/Docker orchestrator · background-task wiring · channel wiring · deps assembly.
 - Oversized panel components: `ThinClawRepoProjects.tsx`, `ThinClawHooks.tsx`, `ThinClawAutomations.tsx`, `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` → extract sub-panels + hooks.
-- Retire/shrink `src/tauri_commands.rs`.
+- ✅ Retired `src/tauri_commands.rs`; reusable helpers now live in `src/desktop_api.rs` and registration stays in typed Desktop command modules.
 
 ### WS-4 — Test/QA & Observability
 - Contract tests per command (route-behavior matrix, bindings coverage, `Channel<T>`/reserved-arg sanitizer — extend the existing test).

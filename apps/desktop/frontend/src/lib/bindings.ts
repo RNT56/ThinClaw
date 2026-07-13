@@ -2051,6 +2051,17 @@ async thinclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Dispatch an event from the Canvas UI back to the agent session
+ */
+async thinclawCanvasDispatchEvent(sessionKey: string, runId: string | null, eventType: string, payload: JsonValue) : Promise<Result<ThinClawRpcResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_dispatch_event", { sessionKey, runId, eventType, payload }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * List all active canvas panels.
  */
 async thinclawCanvasPanelsList() : Promise<Result<JsonValue, string>> {
@@ -3934,7 +3945,7 @@ export type ModelDiscoveryResult = { providers: ProviderDiscoveryResult[]; total
  */
 export type ModelDownloadInfo = { repo_id: string; is_multi_file: boolean; files: HfFileInfo[]; mmproj_file: HfFileInfo | null; total_size: number; total_size_display: string }
 export type ModelFile = { name: string; size: number; path: string }
-export type ModelPricing = { inputPerMillion: number | null; outputPerMillion: number | null; perImage: number | null; perMinute: number | null; per1KChars: number | null }
+export type ModelPricing = { inputPerMillion: number | null; outputPerMillion: number | null; perImage: number | null; perMinute: number | null; per1kChars: number | null }
 /**
  * OAuth flow start result for the frontend.
  */
@@ -4366,6 +4377,10 @@ export type UiEvent =
  * The frontend Automations panel and Console can display these as live status.
  */
 { kind: "RoutineLifecycle"; routine_name: string; event: string; run_id: string | null; result_summary: string | null } |
+/**
+ * Channel connectivity changed in either the local runtime or remote gateway.
+ */
+{ kind: "ChannelStatus"; channel_id: string; state: string; error: string | null } |
 /**
  * Cost/budget event from the gateway/runtime.
  */

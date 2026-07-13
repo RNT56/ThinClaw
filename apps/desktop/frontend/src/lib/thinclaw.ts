@@ -1,23 +1,16 @@
 /**
- * ThinClaw API - wrappers for Tauri commands
+ * ThinClaw compatibility API
  *
- * These wrappers call the thinclaw Tauri commands. The types match
- * the Rust structs in backend/src/thinclaw/commands.rs
+ * Existing component-friendly names delegate to the generated binding client.
+ * Command names, parameters, and result data are owned by bindings.ts.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { openPath as tauriOpenPath, revealItemInDir } from '@tauri-apps/plugin-opener';
+import { compatibilityCommands } from './command-client';
+import type { JsonValue } from './bindings';
 
-/**
- * Guard wrapper: only call invoke when the Tauri runtime is available.
- * During Vite HMR reloads the IPC bridge can momentarily disappear,
- * which otherwise causes `Cannot read properties of undefined (reading 'invoke')`.
- */
-function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) {
-        return Promise.reject(new Error(`Tauri runtime not available (calling ${cmd})`));
-    }
-    return invoke<T>(cmd, args);
+function jsonValue(value: unknown): JsonValue {
+    return value as JsonValue;
 }
 
 // ============================================================================
@@ -241,28 +234,28 @@ export interface ThinClawDiagnostics {
  * Get current ThinClaw status
  */
 export async function getThinClawStatus(): Promise<ThinClawStatus> {
-    return safeInvoke('thinclaw_get_status');
+    return compatibilityCommands.thinclawGetStatus();
 }
 
 /**
  * Save Slack configuration
  */
 export async function saveSlackConfig(config: SlackConfigInput): Promise<void> {
-    return invoke('thinclaw_save_slack_config', { configInput: config });
+    return compatibilityCommands.thinclawSaveSlackConfig(config);
 }
 
 /**
  * Save Telegram configuration
  */
 export async function saveTelegramConfig(config: TelegramConfigInput): Promise<void> {
-    return invoke('thinclaw_save_telegram_config', { configInput: config });
+    return compatibilityCommands.thinclawSaveTelegramConfig(config);
 }
 
 /**
  * Save Anthropic API key
  */
 export async function saveAnthropicKey(key: string): Promise<void> {
-    return invoke('thinclaw_save_anthropic_key', { key });
+    return compatibilityCommands.thinclawSaveAnthropicKey(key);
 }
 
 /**
@@ -273,21 +266,21 @@ export async function saveGatewaySettings(
     url: string | null,
     token: string | null
 ): Promise<void> {
-    return invoke('thinclaw_save_gateway_settings', { mode, url, token });
+    return compatibilityCommands.thinclawSaveGatewaySettings(mode, url, token);
 }
 
 /**
  * Start the ThinClaw runtime (in-process, no HTTP server)
  */
 export async function startThinClawGateway(): Promise<void> {
-    return invoke('thinclaw_start_gateway');
+    return compatibilityCommands.thinclawStartGateway();
 }
 
 /**
  * Stop the ThinClaw runtime
  */
 export async function stopThinClawGateway(): Promise<void> {
-    return invoke('thinclaw_stop_gateway');
+    return compatibilityCommands.thinclawStopGateway();
 }
 
 /**
@@ -298,7 +291,7 @@ export async function stopThinClawGateway(): Promise<void> {
  * without requiring manual restart.
  */
 export async function reloadSecrets(): Promise<void> {
-    return invoke('thinclaw_reload_secrets');
+    return compatibilityCommands.thinclawReloadSecrets();
 }
 
 export interface CustomLlmConfigInput {
@@ -313,22 +306,22 @@ export async function saveCloudConfig(
     enabledModels: Record<string, string[]>,
     customLlm: CustomLlmConfigInput | null
 ): Promise<void> {
-    return invoke('thinclaw_save_cloud_config', { enabledProviders, enabledModels, customLlm });
+    return compatibilityCommands.thinclawSaveCloudConfig(enabledProviders, enabledModels, customLlm);
 }
 
 /**
  * Get list of ThinClaw sessions
  */
 export async function deleteThinClawSession(sessionKey: string): Promise<void> {
-    await invoke('thinclaw_delete_session', { sessionKey });
+    await compatibilityCommands.thinclawDeleteSession(sessionKey);
 }
 
 export async function resetThinClawSession(sessionKey: string): Promise<void> {
-    await invoke('thinclaw_reset_session', { sessionKey });
+    await compatibilityCommands.thinclawResetSession(sessionKey);
 }
 
 export async function getThinClawSessions(): Promise<ThinClawSessionsResponse> {
-    return invoke('thinclaw_get_sessions');
+    return compatibilityCommands.thinclawGetSessions();
 }
 
 /**
@@ -339,7 +332,7 @@ export async function getThinClawHistory(
     limit: number,
     before?: string
 ): Promise<ThinClawHistoryResponse> {
-    return invoke('thinclaw_get_history', { sessionKey, limit, before: before ?? null });
+    return compatibilityCommands.thinclawGetHistory(sessionKey, limit, before ?? null);
 }
 
 /**
@@ -350,14 +343,14 @@ export async function sendThinClawMessage(
     text: string,
     deliver: boolean = true
 ): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_send_message', { sessionKey, text, deliver });
+    return compatibilityCommands.thinclawSendMessage(sessionKey, text, deliver);
 }
 
 /**
  * Subscribe to a session for live updates
  */
 export async function subscribeThinClawSession(sessionKey: string): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_subscribe_session', { sessionKey });
+    return compatibilityCommands.thinclawSubscribeSession(sessionKey);
 }
 
 /**
@@ -367,7 +360,7 @@ export async function abortThinClawChat(
     sessionKey: string,
     runId?: string
 ): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_abort_chat', { sessionKey, runId: runId ?? null });
+    return compatibilityCommands.thinclawAbortChat(sessionKey, runId ?? null);
 }
 
 /**
@@ -382,14 +375,14 @@ export async function resolveThinClawApproval(
     approved: boolean,
     allowSession: boolean = false
 ): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_resolve_approval', { approvalId, approved, allowSession });
+    return compatibilityCommands.thinclawResolveApproval(approvalId, approved, allowSession);
 }
 
 /**
  * Get diagnostic information
  */
 export async function getThinClawDiagnostics(): Promise<ThinClawDiagnostics> {
-    return invoke('thinclaw_get_diagnostics');
+    return compatibilityCommands.thinclawGetDiagnostics();
 }
 
 /**
@@ -399,35 +392,35 @@ export async function getThinClawDiagnostics(): Promise<ThinClawDiagnostics> {
  * Clear ThinClaw memory (deletes memory directory)
  */
 export async function clearThinClawMemory(target: 'memory' | 'identity' | 'all'): Promise<void> {
-    return invoke('thinclaw_clear_memory', { target });
+    return compatibilityCommands.thinclawClearMemory(target);
 }
 
 /**
  * Get ThinClaw memory content (MEMORY.md)
  */
 export async function getThinClawMemory(): Promise<string> {
-    return invoke('thinclaw_get_memory');
+    return compatibilityCommands.thinclawGetMemory();
 }
 
 /**
  * Get content of a specific file in the ThinClaw workspace
  */
 export async function getThinClawFile(path: string): Promise<string> {
-    return invoke('thinclaw_get_file', { path });
+    return compatibilityCommands.thinclawGetFile(path);
 }
 
 /**
  * List all markdown files in the ThinClaw workspace
  */
 export async function listWorkspaceFiles(): Promise<string[]> {
-    return invoke('thinclaw_list_workspace_files');
+    return compatibilityCommands.thinclawListWorkspaceFiles();
 }
 
 /**
  * Write content to a specific file in the ThinClaw workspace
  */
 export async function writeThinClawFile(path: string, content: string): Promise<void> {
-    return invoke('thinclaw_write_file', { path, content });
+    return compatibilityCommands.thinclawWriteFile(path, content);
 }
 
 /**
@@ -435,7 +428,7 @@ export async function writeThinClawFile(path: string, content: string): Promise<
  * Core seeded files (SOUL.md, IDENTITY.md, etc.) are protected.
  */
 export async function deleteThinClawFile(path: string): Promise<void> {
-    return invoke('thinclaw_delete_file', { path });
+    return compatibilityCommands.thinclawDeleteFile(path);
 }
 
 /**
@@ -454,15 +447,15 @@ export async function revealPath(path: string): Promise<void> {
 // ============================================================================
 
 export async function getThinClawCronList(): Promise<CronJob[]> {
-    return invoke('thinclaw_cron_list');
+    return compatibilityCommands.thinclawCronList();
 }
 
 export async function runThinClawCron(key: string): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_cron_run', { key });
+    return compatibilityCommands.thinclawCronRun(key);
 }
 
 export async function getThinClawCronHistory(key: string, limit: number): Promise<CronHistoryItem[]> {
-    return invoke('thinclaw_cron_history', { key, limit });
+    return compatibilityCommands.thinclawCronHistory(key, limit);
 }
 
 export interface RoutineAuditEntry {
@@ -480,16 +473,12 @@ export async function getRoutineAuditList(
     limit?: number,
     outcome?: string,
 ): Promise<RoutineAuditEntry[]> {
-    return invoke('thinclaw_routine_audit_list', {
-        routineKey,
-        limit: limit ?? null,
-        outcome: outcome ?? null,
-    });
+    return compatibilityCommands.thinclawRoutineAuditList(routineKey, limit ?? null, outcome ?? null);
 }
 
 /** Clear routine run history. If routineKey is provided, clears only that routine's runs. */
 export async function clearRoutineRuns(routineKey?: string): Promise<void> {
-    await invoke('thinclaw_clear_routine_runs', { key: routineKey ?? null });
+    await compatibilityCommands.thinclawClearRoutineRuns(routineKey ?? null);
 }
 
 // ============================================================================
@@ -509,7 +498,7 @@ export interface ChannelsListResponse {
 }
 
 export async function getThinClawChannelsList(): Promise<ChannelsListResponse> {
-    return invoke('thinclaw_channels_list');
+    return compatibilityCommands.thinclawChannelsList();
 }
 
 // ============================================================================
@@ -524,7 +513,7 @@ export interface CronLintResult {
 }
 
 export async function lintCronExpression(expression: string): Promise<CronLintResult> {
-    return invoke('thinclaw_cron_lint', { expression });
+    return compatibilityCommands.thinclawCronLint(expression);
 }
 
 export interface CreateRoutineResult {
@@ -543,51 +532,51 @@ export async function createRoutine(
     schedule: string,
     task: string,
 ): Promise<CreateRoutineResult> {
-    return invoke('thinclaw_routine_create', { name, description, schedule, task });
+    return compatibilityCommands.thinclawRoutineCreate(name, description, schedule, task);
 }
 
 export async function getThinClawSkillsList(): Promise<Skill[]> {
-    return invoke('thinclaw_skills_list');
+    return compatibilityCommands.thinclawSkillsList();
 }
 
 export async function getThinClawSkillsStatus(): Promise<ThinClawSkillsStatus> {
-    return invoke('thinclaw_skills_status');
+    return compatibilityCommands.thinclawSkillsStatus();
 }
 
 export async function toggleThinClawSkill(key: string, enabled: boolean): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_skills_toggle', { key, enabled });
+    return compatibilityCommands.thinclawSkillsToggle(key, enabled);
 }
 
 export async function toggleThinClawLocalTools(enabled: boolean): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_toggle_local_tools', { enabled });
+    return compatibilityCommands.thinclawToggleLocalTools(enabled);
 }
 
 export async function setThinClawWorkspaceMode(mode: string, root: string | null): Promise<string> {
-    return invoke('thinclaw_set_workspace_mode', { mode, root });
+    return compatibilityCommands.thinclawSetWorkspaceMode(mode, root);
 }
 
 export async function toggleThinClawLocalInference(enabled: boolean): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_toggle_local_inference', { enabled });
+    return compatibilityCommands.thinclawToggleLocalInference(enabled);
 }
 
 export async function toggleThinClawExposeInference(enabled: boolean): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_toggle_expose_inference', { enabled });
+    return compatibilityCommands.thinclawToggleExposeInference(enabled);
 }
 
 export async function selectThinClawBrain(brain: string | null): Promise<void> {
-    return invoke('select_thinclaw_brain', { brain });
+    return compatibilityCommands.selectThinclawBrain(brain);
 }
 
 export async function selectThinClawModel(model: string | null): Promise<void> {
-    return invoke('thinclaw_save_selected_cloud_model', { model });
+    return compatibilityCommands.thinclawSaveSelectedCloudModel(model);
 }
 
 export async function installThinClawSkillRepo(repoUrl: string): Promise<string> {
-    return invoke('thinclaw_install_skill_repo', { repoUrl });
+    return compatibilityCommands.thinclawInstallSkillRepo(repoUrl);
 }
 
 export async function installThinClawSkillDeps(name: string, installId?: string): Promise<void> {
-    return invoke('thinclaw_install_skill_deps', { name, installId });
+    return compatibilityCommands.thinclawInstallSkillDeps(name, installId ?? null);
 }
 
 export interface SkillInfo {
@@ -614,44 +603,34 @@ export interface SkillActionResponse {
 }
 
 export async function searchSkillsCatalog(query: string): Promise<SkillSearchResponse> {
-    return invoke('thinclaw_skills_search', { query });
+    return compatibilityCommands.thinclawSkillsSearch(query);
 }
 
 export async function installSkill(name: string, opts: { url?: string | null; content?: string | null; force?: boolean } = {}): Promise<SkillActionResponse> {
-    return invoke('thinclaw_skill_install', {
-        name,
-        url: opts.url ?? null,
-        content: opts.content ?? null,
-        force: opts.force ?? false,
-    });
+    return compatibilityCommands.thinclawSkillInstall(name, opts.url ?? null, opts.content ?? null, opts.force ?? false);
 }
 
 export async function removeSkill(name: string): Promise<SkillActionResponse> {
-    return invoke('thinclaw_skill_remove', { name });
+    return compatibilityCommands.thinclawSkillRemove(name);
 }
 
 export async function setSkillTrust(name: string, trust: string): Promise<SkillActionResponse> {
-    return invoke('thinclaw_skill_trust', { name, trust });
+    return compatibilityCommands.thinclawSkillTrust(name, trust);
 }
 
 export async function reloadSkill(name: string): Promise<SkillActionResponse> {
-    return invoke('thinclaw_skill_reload', { name });
+    return compatibilityCommands.thinclawSkillReload(name);
 }
 
 export async function reloadAllSkills(): Promise<SkillActionResponse> {
-    return invoke('thinclaw_skills_reload_all');
+    return compatibilityCommands.thinclawSkillsReloadAll();
 }
 
 export async function inspectSkill(
     name: string,
     opts: { includeContent?: boolean; includeFiles?: boolean; audit?: boolean } = {},
 ): Promise<any> {
-    return invoke('thinclaw_skill_inspect', {
-        name,
-        includeContent: opts.includeContent ?? false,
-        includeFiles: opts.includeFiles ?? true,
-        audit: opts.audit ?? true,
-    });
+    return compatibilityCommands.thinclawSkillInspect(name, opts.includeContent ?? false, opts.includeFiles ?? true, opts.audit ?? true);
 }
 
 export async function publishSkill(
@@ -659,30 +638,23 @@ export async function publishSkill(
     targetRepo: string,
     opts: { dryRun?: boolean; remoteWrite?: boolean; confirmRemoteWrite?: boolean; approveRisky?: boolean } = {},
 ): Promise<any> {
-    return invoke('thinclaw_skill_publish', {
-        name,
-        targetRepo,
-        dryRun: opts.dryRun ?? true,
-        remoteWrite: opts.remoteWrite ?? false,
-        confirmRemoteWrite: opts.confirmRemoteWrite ?? false,
-        approveRisky: opts.approveRisky ?? false,
-    });
+    return compatibilityCommands.thinclawSkillPublish(name, targetRepo, opts.dryRun ?? true, opts.remoteWrite ?? false, opts.confirmRemoteWrite ?? false, opts.approveRisky ?? false);
 }
 
 export async function getThinClawConfigSchema(): Promise<Record<string, any>> {
-    return invoke('thinclaw_config_schema');
+    return compatibilityCommands.thinclawConfigSchema();
 }
 
 export async function getThinClawConfig(): Promise<Record<string, any>> {
-    return invoke('thinclaw_config_get');
+    return compatibilityCommands.thinclawConfigGet();
 }
 
 export async function patchThinClawConfig(patch: any): Promise<void> {
-    return invoke('thinclaw_config_patch', { patch });
+    return compatibilityCommands.thinclawConfigPatch(patch);
 }
 
 export async function getThinClawSystemPresence(): Promise<AgentRuntimePresence> {
-    return invoke('thinclaw_system_presence');
+    return compatibilityCommands.thinclawSystemPresence();
 }
 
 /** Live runtime data for the Agent Runtime / Presence panel. */
@@ -707,69 +679,69 @@ export interface LogLine {
 }
 
 export async function getThinClawLogsTail(limit: number): Promise<{ logs: LogLine[]; lines: string[] }> {
-    return invoke('thinclaw_logs_tail', { limit });
+    return compatibilityCommands.thinclawLogsTail(limit);
 }
 
 export async function runThinClawUpdate(): Promise<void> {
-    return invoke('thinclaw_update_run');
+    return compatibilityCommands.thinclawUpdateRun();
 }
 
 export async function loginThinClawWhatsapp(): Promise<void> {
-    return invoke('thinclaw_web_login_whatsapp');
+    return compatibilityCommands.thinclawWebLoginWhatsapp();
 }
 
 export async function loginThinClawTelegram(): Promise<void> {
-    return invoke('thinclaw_web_login_telegram');
+    return compatibilityCommands.thinclawWebLoginTelegram();
 }
 
 
 
 export async function getPermissionStatus(): Promise<{ accessibility: boolean, screen_recording: boolean }> {
-    return invoke('get_permission_status');
+    return compatibilityCommands.getPermissionStatus();
 }
 
 export async function requestPermission(permission: string): Promise<{ accessibility: boolean, screen_recording: boolean }> {
-    return invoke('request_permission', { permission });
+    return compatibilityCommands.requestPermission(permission);
 }
 
 export async function openPermissionSettings(permission: string): Promise<void> {
-    return invoke('open_permission_settings', { permission });
+    return compatibilityCommands.openPermissionSettings(permission);
 }
 
 export async function setSetupCompleted(completed: boolean): Promise<void> {
-    return invoke('thinclaw_set_setup_completed', { completed });
+    return compatibilityCommands.thinclawSetSetupCompleted(completed);
 }
 
 export async function addAgentProfile(profile: AgentProfile): Promise<void> {
-    return invoke('thinclaw_add_agent_profile', { profile });
+    return compatibilityCommands.thinclawAddAgentProfile(profile);
 }
 
 export async function removeAgentProfile(id: string): Promise<void> {
-    return invoke('thinclaw_remove_agent_profile', { id });
+    return compatibilityCommands.thinclawRemoveAgentProfile(id);
 }
 
 export async function setHfToken(token: string): Promise<void> {
-    return invoke('thinclaw_set_hf_token', { token });
+    return compatibilityCommands.thinclawSetHfToken(token);
 }
 
 export async function toggleThinClawAutoStart(enabled: boolean): Promise<void> {
-    return invoke('thinclaw_toggle_auto_start', { enabled });
+    return compatibilityCommands.thinclawToggleAutoStart(enabled);
 }
 
 export async function setDevModeWizard(enabled: boolean): Promise<void> {
-    return invoke('thinclaw_set_dev_mode_wizard', { enabled });
+    return compatibilityCommands.thinclawSetDevModeWizard(enabled);
 }
 
 export async function switchToProfile(profileId: string): Promise<void> {
-    return invoke('thinclaw_switch_to_profile', { profileId });
+    return compatibilityCommands.thinclawSwitchToProfile(profileId);
 }
 
 export async function broadcastCommand(command: string): Promise<void> {
-    return invoke('thinclaw_broadcast_command', { command });
+    return compatibilityCommands.thinclawBroadcastCommand(command);
 }
 
 export async function verifyConnection(url: string, token: string | null): Promise<boolean> {
-    return invoke('thinclaw_test_connection', { url, token });
+    return compatibilityCommands.thinclawTestConnection(url, token);
 }
 
 export interface AgentStatusSummary {
@@ -793,7 +765,7 @@ export interface AgentStatusSummary {
 }
 
 export async function getFleetStatus(): Promise<AgentStatusSummary[]> {
-    return invoke('thinclaw_get_fleet_status');
+    return compatibilityCommands.thinclawGetFleetStatus();
 }
 
 // ── Sub-agent spawning types ─────────────────────────────────────────────
@@ -824,18 +796,14 @@ export async function spawnSession(
     task: string,
     parentSession?: string
 ): Promise<SpawnSessionResponse> {
-    return invoke('thinclaw_spawn_session', {
-        agentId,
-        task,
-        parentSession: parentSession ?? null,
-    });
+    return compatibilityCommands.thinclawSpawnSession(agentId, task, parentSession ?? null);
 }
 
 /**
  * List all child sessions spawned by a parent session.
  */
 export async function listChildSessions(parentSession: string): Promise<ChildSessionInfo[]> {
-    return invoke('thinclaw_list_child_sessions', { parentSession });
+    return compatibilityCommands.thinclawListChildSessions(parentSession);
 }
 
 /**
@@ -846,23 +814,19 @@ export async function updateSubAgentStatus(
     status: 'running' | 'completed' | 'failed',
     resultSummary?: string
 ): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_update_sub_agent_status', {
-        childSession,
-        status,
-        resultSummary: resultSummary ?? null,
-    });
+    return compatibilityCommands.thinclawUpdateSubAgentStatus(childSession, status, resultSummary ?? null);
 }
 
 export async function getAgentsList(): Promise<AgentProfile[]> {
-    return invoke('thinclaw_agents_list');
+    return compatibilityCommands.thinclawAgentsList();
 }
 
 export async function canvasPush(content: string): Promise<void> {
-    return invoke('thinclaw_canvas_push', { content });
+    return compatibilityCommands.thinclawCanvasPush(content);
 }
 
 export async function canvasNavigate(url: string): Promise<void> {
-    return invoke('thinclaw_canvas_navigate', { url });
+    return compatibilityCommands.thinclawCanvasNavigate(url);
 }
 
 // --- Canvas / A2UI Types ---
@@ -932,11 +896,11 @@ export async function canvasDispatchAction(
     payload: any,
     runId?: string
 ): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_canvas_dispatch_event', { sessionKey, runId: runId ?? null, eventType, payload });
+    return compatibilityCommands.thinclawCanvasDispatchEvent(sessionKey, runId ?? null, eventType, payload);
 }
 
 export async function abortSession(sessionKey: string, runId?: string): Promise<void> {
-    return invoke('thinclaw_abort_chat', { sessionKey, runId: runId ?? null });
+    return compatibilityCommands.thinclawAbortChat(sessionKey, runId ?? null);
 }
 
 export async function dispatchCanvasEvent(
@@ -945,11 +909,11 @@ export async function dispatchCanvasEvent(
     payload: any,
     runId?: string
 ): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_canvas_dispatch_event', { sessionKey, runId, eventType, payload });
+    return compatibilityCommands.thinclawCanvasDispatchEvent(sessionKey, runId ?? null, eventType, payload);
 }
 
 export async function syncLocalLlm(): Promise<void> {
-    return invoke('thinclaw_sync_local_llm');
+    return compatibilityCommands.thinclawSyncLocalLlm();
 }
 
 // ============================================================================
@@ -971,10 +935,7 @@ export async function setThinking(
     enabled: boolean,
     budgetTokens?: number
 ): Promise<ThinkingConfigResult> {
-    return invoke('thinclaw_set_thinking', {
-        enabled,
-        budgetTokens: budgetTokens ?? null,
-    });
+    return compatibilityCommands.thinclawSetThinking(enabled, budgetTokens ?? null);
 }
 
 export interface MemorySearchResult {
@@ -997,7 +958,7 @@ export async function searchMemory(
     query: string,
     limit?: number
 ): Promise<MemorySearchResponse> {
-    return invoke('thinclaw_memory_search', { query, limit: limit ?? null });
+    return compatibilityCommands.thinclawMemorySearch(query, limit ?? null);
 }
 
 /** Rendered cross-session transcript search results. */
@@ -1016,11 +977,7 @@ export async function searchSessions(
     limit?: number | null,
     summarize?: boolean | null,
 ): Promise<SessionSearchResult> {
-    return invoke('thinclaw_session_search', {
-        query,
-        limit: limit ?? null,
-        summarize: summarize ?? null,
-    });
+    return compatibilityCommands.thinclawSessionSearch(query, limit ?? null, summarize ?? null);
 }
 
 export interface SessionExportResponse {
@@ -1037,7 +994,7 @@ export async function exportSession(
     sessionKey: string,
     format: string = 'md'
 ): Promise<SessionExportResponse> {
-    return invoke('thinclaw_export_session', { sessionKey, format });
+    return compatibilityCommands.thinclawExportSession(sessionKey, format);
 }
 
 // ============================================================================
@@ -1059,7 +1016,7 @@ export interface HooksListResponse {
 
 /** List all registered lifecycle hooks. */
 export async function listHooks(): Promise<HooksListResponse> {
-    return invoke('thinclaw_hooks_list');
+    return compatibilityCommands.thinclawHooksList();
 }
 
 export interface HookRegisterResponse {
@@ -1078,12 +1035,12 @@ export interface HookUnregisterResponse {
 
 /** Register a hook bundle from a JSON configuration. */
 export async function registerHookBundle(bundleJson: string, source?: string): Promise<HookRegisterResponse> {
-    return invoke('thinclaw_hooks_register', { input: { bundle_json: bundleJson, source: source || null } });
+    return compatibilityCommands.thinclawHooksRegister({ bundle_json: bundleJson, source: source || null });
 }
 
 /** Unregister (remove) a hook by name. */
 export async function unregisterHook(hookName: string): Promise<HookUnregisterResponse> {
-    return invoke('thinclaw_hooks_unregister', { hookName });
+    return compatibilityCommands.thinclawHooksUnregister(hookName);
 }
 
 export interface ExtensionInfoItem {
@@ -1128,94 +1085,89 @@ export interface ExtensionActionResponse {
 
 /** List all installed extensions/plugins. */
 export async function listExtensions(): Promise<ExtensionsListResponse> {
-    return invoke('thinclaw_extensions_list');
+    return compatibilityCommands.thinclawExtensionsList();
 }
 
 export async function installExtension(name: string, url?: string | null, kind?: string | null): Promise<ExtensionActionResponse> {
-    return invoke('thinclaw_extension_install', { name, url: url ?? null, kind: kind ?? null });
+    return compatibilityCommands.thinclawExtensionInstall(name, url ?? null, kind ?? null);
 }
 
 export async function searchExtensionRegistry(query?: string): Promise<{ entries: any[] }> {
-    return invoke('thinclaw_extension_registry_search', { query: query ?? null });
+    return compatibilityCommands.thinclawExtensionRegistrySearch(query ?? null);
 }
 
 /** Activate an extension by name. */
 export async function activateExtension(name: string): Promise<ExtensionActionResponse> {
-    return invoke('thinclaw_extension_activate', { name });
+    return compatibilityCommands.thinclawExtensionActivate(name);
 }
 
 export async function reconnectExtension(name: string): Promise<ExtensionActionResponse> {
-    return invoke('thinclaw_extension_reconnect', { name });
+    return compatibilityCommands.thinclawExtensionReconnect(name);
 }
 
 export async function getExtensionSetup(name: string): Promise<any> {
-    return invoke('thinclaw_extension_setup_get', { name });
+    return compatibilityCommands.thinclawExtensionSetupGet(name);
 }
 
 export async function submitExtensionSetup(name: string, secrets: Record<string, string>): Promise<ExtensionActionResponse> {
-    return invoke('thinclaw_extension_setup_submit', { name, secrets });
+    return compatibilityCommands.thinclawExtensionSetupSubmit(name, secrets);
 }
 
 export async function validateExtensionSetup(name: string): Promise<ExtensionActionResponse> {
-    return invoke('thinclaw_extension_validate_setup', { name });
+    return compatibilityCommands.thinclawExtensionValidateSetup(name);
 }
 
 /** Remove an extension by name. */
 export async function removeExtension(name: string): Promise<ExtensionActionResponse> {
-    return invoke('thinclaw_extension_remove', { name });
+    return compatibilityCommands.thinclawExtensionRemove(name);
 }
 
 export async function listMcpServers(): Promise<any> {
-    return invoke('thinclaw_mcp_servers');
+    return compatibilityCommands.thinclawMcpServers();
 }
 
 export async function getMcpServer(name: string): Promise<any> {
-    return invoke('thinclaw_mcp_server', { name });
+    return compatibilityCommands.thinclawMcpServer(name);
 }
 
 export async function listMcpServerTools(name: string): Promise<any> {
-    return invoke('thinclaw_mcp_server_tools', { name });
+    return compatibilityCommands.thinclawMcpServerTools(name);
 }
 
 export async function listMcpServerResources(name: string): Promise<any> {
-    return invoke('thinclaw_mcp_server_resources', { name });
+    return compatibilityCommands.thinclawMcpServerResources(name);
 }
 
 export async function readMcpResource(name: string, uri: string): Promise<any> {
-    return invoke('thinclaw_mcp_read_resource', { name, uri });
+    return compatibilityCommands.thinclawMcpReadResource(name, uri);
 }
 
 export async function listMcpResourceTemplates(name: string): Promise<any> {
-    return invoke('thinclaw_mcp_resource_templates', { name });
+    return compatibilityCommands.thinclawMcpResourceTemplates(name);
 }
 
 export async function listMcpServerPrompts(name: string): Promise<any> {
-    return invoke('thinclaw_mcp_server_prompts', { name });
+    return compatibilityCommands.thinclawMcpServerPrompts(name);
 }
 
 export async function getMcpPrompt(serverName: string, promptName: string, args?: any): Promise<any> {
-    return invoke('thinclaw_mcp_get_prompt', { serverName, promptName, promptArgs: args ?? null });
+    return compatibilityCommands.thinclawMcpGetPrompt(serverName, promptName, args ?? null);
 }
 
 export async function discoverMcpOauth(name: string): Promise<any> {
-    return invoke('thinclaw_mcp_oauth', { name });
+    return compatibilityCommands.thinclawMcpOauth(name);
 }
 
 export async function setMcpLogLevel(name: string, level: string): Promise<ExtensionActionResponse> {
-    return invoke('thinclaw_mcp_set_log_level', { name, level });
+    return compatibilityCommands.thinclawMcpSetLogLevel(name, level);
 }
 
 export async function listMcpInteractions(): Promise<any> {
-    return invoke('thinclaw_mcp_interactions');
+    return compatibilityCommands.thinclawMcpInteractions();
 }
 
 export async function respondMcpInteraction(interactionId: string, action: string, response?: any, message?: string): Promise<ExtensionActionResponse> {
-    return invoke('thinclaw_mcp_interaction_respond', {
-        interactionId,
-        action,
-        response: response ?? null,
-        message: message ?? null,
-    });
+    return compatibilityCommands.thinclawMcpInteractionRespond(interactionId, action, response ?? null, message ?? null);
 }
 
 // ============================================================================
@@ -1234,17 +1186,17 @@ export interface SettingsListResponse {
 
 /** List all ThinClaw config settings. */
 export async function listSettings(): Promise<SettingsListResponse> {
-    return invoke('thinclaw_config_get');
+    return compatibilityCommands.thinclawConfigGet();
 }
 
 /** Set a single config setting. */
 export async function setSetting(key: string, value: any): Promise<{ ok: boolean }> {
-    return invoke('thinclaw_config_set', { key, value });
+    return compatibilityCommands.thinclawConfigSet(key, value);
 }
 
 /** Bulk-update settings. */
 export async function patchSettings(patch: Record<string, any>): Promise<{ ok: boolean }> {
-    return invoke('thinclaw_config_patch', { patch });
+    return compatibilityCommands.thinclawConfigPatch(patch);
 }
 
 // ============================================================================
@@ -1266,7 +1218,7 @@ export interface DiagnosticsResponse {
 
 /** Run system diagnostics. */
 export async function runDiagnostics(): Promise<DiagnosticsResponse> {
-    return invoke('thinclaw_diagnostics');
+    return compatibilityCommands.thinclawDiagnostics();
 }
 
 // ============================================================================
@@ -1287,17 +1239,17 @@ export interface ToolsListResponse {
 
 /** List all registered tools with their status. */
 export async function listTools(): Promise<ToolsListResponse> {
-    return invoke('thinclaw_tools_list');
+    return compatibilityCommands.thinclawToolsList();
 }
 
 /** Get the list of globally disabled tool names. */
 export async function getDisabledTools(): Promise<string[]> {
-    return invoke('thinclaw_tool_policy_get');
+    return compatibilityCommands.thinclawToolPolicyGet();
 }
 
 /** Overwrite the list of globally disabled tool names. */
 export async function setDisabledTools(disabledTools: string[]): Promise<void> {
-    return invoke('thinclaw_tool_policy_set', { disabledTools });
+    return compatibilityCommands.thinclawToolPolicySet(disabledTools);
 }
 
 /** Toggle a single tool on/off. Returns the new enabled state. */
@@ -1333,12 +1285,12 @@ export interface PairingListResponse {
 
 /** List pairings for a channel (pending + approved). */
 export async function listPairings(channel: string): Promise<PairingListResponse> {
-    return invoke('thinclaw_pairing_list', { channel });
+    return compatibilityCommands.thinclawPairingList(channel);
 }
 
 /** Approve a pairing code for a channel. */
 export async function approvePairing(channel: string, code: string): Promise<{ ok: boolean }> {
-    return invoke('thinclaw_pairing_approve', { channel, code });
+    return compatibilityCommands.thinclawPairingApprove(channel, code);
 }
 
 // ============================================================================
@@ -1354,7 +1306,7 @@ export interface CompactSessionResponse {
 
 /** Trigger context compaction for a session. */
 export async function compactSession(sessionKey: string): Promise<CompactSessionResponse> {
-    return invoke('thinclaw_compact_session', { sessionKey });
+    return compatibilityCommands.thinclawCompactSession(sessionKey);
 }
 
 // ----------------------------------------------------------------------------
@@ -1370,12 +1322,12 @@ export interface CheckpointEntry {
 
 /** List filesystem checkpoints (newest first) for a project directory. */
 export async function listCheckpoints(projectDir: string): Promise<CheckpointEntry[]> {
-    return invoke('thinclaw_checkpoints_list', { projectDir });
+    return compatibilityCommands.thinclawCheckpointsList(projectDir);
 }
 
 /** Unified diff of the current project state vs a checkpoint commit. */
 export async function diffCheckpoint(projectDir: string, commitHash: string): Promise<string> {
-    return invoke('thinclaw_checkpoint_diff', { projectDir, commitHash });
+    return compatibilityCommands.thinclawCheckpointDiff(projectDir, commitHash);
 }
 
 /** Restore a project (or a single file) to a checkpoint commit. */
@@ -1384,7 +1336,7 @@ export async function restoreCheckpoint(
     commitHash: string,
     file?: string | null,
 ): Promise<void> {
-    return invoke('thinclaw_checkpoint_restore', { projectDir, commitHash, file: file ?? null });
+    return compatibilityCommands.thinclawCheckpointRestore(projectDir, commitHash, file ?? null);
 }
 
 // ----------------------------------------------------------------------------
@@ -1406,12 +1358,12 @@ export interface TrajectoryStats {
 
 /** Aggregate stats (counts, span, outcomes) over the local trajectory archive. */
 export async function getTrajectoryStats(): Promise<TrajectoryStats> {
-    return invoke('thinclaw_trajectory_stats');
+    return compatibilityCommands.thinclawTrajectoryStats();
 }
 
 /** The most recent trajectory turn records (default 100) as raw JSON. */
 export async function getTrajectoryRecords(limit?: number | null): Promise<ThinClawJson[]> {
-    return invoke('thinclaw_trajectory_records', { limit: limit ?? null });
+    return compatibilityCommands.thinclawTrajectoryRecords(limit ?? null);
 }
 
 // ============================================================================
@@ -1436,17 +1388,17 @@ export interface CostSummary {
 
 /** Get LLM cost summary with daily/monthly/per-model breakdowns. */
 export async function getCostSummary(): Promise<CostSummary> {
-    return invoke('thinclaw_cost_summary');
+    return compatibilityCommands.thinclawCostSummary();
 }
 
 /** Export cost data as CSV string. */
 export async function exportCostCsv(): Promise<string> {
-    return invoke('thinclaw_cost_export_csv');
+    return compatibilityCommands.thinclawCostExportCsv();
 }
 
 /** Reset (clear) all cost tracking data. Persists empty state to DB. */
 export async function resetCostData(): Promise<void> {
-    return invoke('thinclaw_cost_reset');
+    return compatibilityCommands.thinclawCostReset();
 }
 
 // --- Channel Status ---
@@ -1466,14 +1418,14 @@ export interface ChannelStatusEntry {
 
 /** Get all channel statuses with live state and counters. */
 export async function getChannelStatusList(): Promise<ChannelStatusEntry[]> {
-    return invoke('thinclaw_channel_status_list');
+    return compatibilityCommands.thinclawChannelStatusList();
 }
 
 // --- Agent Management ---
 
 /** Set the default agent profile. */
 export async function setDefaultAgent(agentId: string): Promise<void> {
-    return invoke('thinclaw_agents_set_default', { agentId });
+    return compatibilityCommands.thinclawAgentsSetDefault(agentId);
 }
 
 // --- ClawHub ---
@@ -1491,7 +1443,7 @@ export interface ClawHubEntry {
 
 /** Search ClawHub plugin catalog (proxied through ThinClaw). */
 export async function searchClawHub(query: string): Promise<{ entries: ClawHubEntry[] }> {
-    return invoke('thinclaw_clawhub_search', { query });
+    return compatibilityCommands.thinclawClawhubSearch(query);
 }
 
 /** Result of a ClawHub install request. In local/embedded mode this is
@@ -1510,7 +1462,7 @@ export interface ClawHubInstallResult {
 /** Request a ClawHub plugin install. Returns the runtime's result (see
  *  {@link ClawHubInstallResult}) so callers can report the real outcome. */
 export async function installFromClawHub(pluginId: string): Promise<ClawHubInstallResult> {
-    return invoke('thinclaw_clawhub_install', { pluginId });
+    return compatibilityCommands.thinclawClawhubInstall(pluginId);
 }
 
 
@@ -1527,7 +1479,7 @@ export interface CacheStats {
 
 /** Get response cache statistics. */
 export async function getCacheStats(): Promise<CacheStats> {
-    return invoke('thinclaw_cache_stats');
+    return compatibilityCommands.thinclawCacheStats();
 }
 
 // --- Plugin Lifecycle ---
@@ -1541,7 +1493,7 @@ export interface LifecycleEventItem {
 
 /** List plugin lifecycle events. */
 export async function getPluginLifecycleList(): Promise<LifecycleEventItem[]> {
-    return invoke('thinclaw_plugin_lifecycle_list');
+    return compatibilityCommands.thinclawPluginLifecycleList();
 }
 
 // --- Manifest Validation ---
@@ -1553,19 +1505,19 @@ export interface ManifestValidation {
 
 /** Validate a plugin's manifest. */
 export async function validateManifest(pluginId: string): Promise<ManifestValidation> {
-    return invoke('thinclaw_manifest_validate', { pluginId });
+    return compatibilityCommands.thinclawManifestValidate(pluginId);
 }
 
 // --- Smart Routing ---
 
 /** Get current smart routing configuration. */
 export async function getRoutingConfig(): Promise<{ smart_routing_enabled: boolean }> {
-    return invoke('thinclaw_routing_get');
+    return compatibilityCommands.thinclawRoutingGet();
 }
 
 /** Enable or disable smart routing. */
 export async function setRoutingConfig(smartRoutingEnabled: boolean): Promise<void> {
-    return invoke('thinclaw_routing_set', { smartRoutingEnabled });
+    return compatibilityCommands.thinclawRoutingSet(smartRoutingEnabled);
 }
 
 // --- Routing Rules ---
@@ -1588,12 +1540,12 @@ export interface RoutingRulesResponse {
 
 /** List all routing rules along with smart routing toggle state. */
 export async function getRoutingRules(): Promise<RoutingRulesResponse> {
-    return invoke('thinclaw_routing_rules_list');
+    return compatibilityCommands.thinclawRoutingRulesList();
 }
 
 /** Save routing rules (full replace — ordered by priority). */
 export async function saveRoutingRules(rules: RoutingRule[]): Promise<void> {
-    return invoke('thinclaw_routing_rules_save', { rules });
+    return compatibilityCommands.thinclawRoutingRulesSave(rules);
 }
 
 // --- Gmail OAuth PKCE ---
@@ -1613,32 +1565,29 @@ export interface GmailOAuthResult {
  * Returns the full result — caller should check `success` field.
  */
 export async function startGmailOAuth(): Promise<GmailOAuthResult> {
-    return invoke('thinclaw_gmail_oauth_start');
+    return compatibilityCommands.thinclawGmailOauthStart();
 }
 
 // --- Routing Rule CRUD ---
 
 /** Add a routing rule at position (or at the end). Returns updated rules list. */
 export async function addRoutingRule(rule: RoutingRule, position?: number): Promise<RoutingRule[]> {
-    return invoke('thinclaw_routing_rules_add', { rule, position: position ?? null });
+    return compatibilityCommands.thinclawRoutingRulesAdd(rule, position ?? null);
 }
 
 /** Remove a routing rule by index. Returns updated rules list. */
 export async function removeRoutingRule(index: number): Promise<RoutingRule[]> {
-    return invoke('thinclaw_routing_rules_remove', { index });
+    return compatibilityCommands.thinclawRoutingRulesRemove(index);
 }
 
 /** Reorder a routing rule (move from one position to another). Returns updated rules list. */
 export async function reorderRoutingRule(from: number, to: number): Promise<RoutingRule[]> {
-    return invoke('thinclaw_routing_rules_reorder', { from, to });
+    return compatibilityCommands.thinclawRoutingRulesReorder(from, to);
 }
 
 /** Save explicit primary and cheap provider pool order. */
 export async function saveRoutingPools(primaryPoolOrder: string[], cheapPoolOrder: string[]): Promise<void> {
-    return invoke('thinclaw_routing_pools_save', {
-        primaryPoolOrder,
-        cheapPoolOrder,
-    });
+    return compatibilityCommands.thinclawRoutingPoolsSave(primaryPoolOrder, cheapPoolOrder);
 }
 
 // --- Routing Status ---
@@ -1679,7 +1628,7 @@ export interface RoutingStatusResponse {
 
 /** Get full routing policy status including latency data. */
 export async function getRoutingStatus(): Promise<RoutingStatusResponse> {
-    return invoke('thinclaw_routing_status');
+    return compatibilityCommands.thinclawRoutingStatus();
 }
 
 export interface RouteSimulationRequest {
@@ -1712,7 +1661,7 @@ export interface RouteSimulationResponse {
 
 /** Simulate how ThinClaw will route a prompt without executing a model call. */
 export async function simulateRouting(request: RouteSimulationRequest): Promise<RouteSimulationResponse> {
-    return invoke('thinclaw_routing_simulate', { request });
+    return compatibilityCommands.thinclawRoutingSimulate(request);
 }
 
 // --- Gmail Status ---
@@ -1731,7 +1680,7 @@ export interface GmailStatusResponse {
 
 /** Get Gmail channel configuration status. */
 export async function getGmailStatus(): Promise<GmailStatusResponse> {
-    return invoke('thinclaw_gmail_status');
+    return compatibilityCommands.thinclawGmailStatus();
 }
 
 // ============================================================================
@@ -1752,17 +1701,17 @@ export interface CanvasPanelData {
 
 /** List all active canvas panels. */
 export async function listCanvasPanels(): Promise<{ panels: CanvasPanelSummary[] }> {
-    return safeInvoke('thinclaw_canvas_panels_list');
+    return compatibilityCommands.thinclawCanvasPanelsList();
 }
 
 /** Get full data for a specific canvas panel. */
 export async function getCanvasPanel(panelId: string): Promise<CanvasPanelData | null> {
-    return safeInvoke('thinclaw_canvas_panel_get', { panelId });
+    return compatibilityCommands.thinclawCanvasPanelGet(panelId);
 }
 
 /** Dismiss (remove) a canvas panel. */
 export async function dismissCanvasPanel(panelId: string): Promise<boolean> {
-    return safeInvoke('thinclaw_canvas_panel_dismiss', { panelId });
+    return compatibilityCommands.thinclawCanvasPanelDismiss(panelId);
 }
 
 // ============================================================================
@@ -1771,12 +1720,12 @@ export async function dismissCanvasPanel(panelId: string): Promise<boolean> {
 
 /** Delete a routine by ID or name. */
 export async function deleteRoutine(routineId: string): Promise<{ ok: boolean; deleted_id: string }> {
-    return safeInvoke('thinclaw_routine_delete', { routineId });
+    return compatibilityCommands.thinclawRoutineDelete(routineId);
 }
 
 /** Toggle a routine enabled/disabled. */
 export async function toggleRoutine(routineId: string, enabled: boolean): Promise<{ ok: boolean; id: string; enabled: boolean }> {
-    return safeInvoke('thinclaw_routine_toggle', { routineId, enabled });
+    return compatibilityCommands.thinclawRoutineToggle(routineId, enabled);
 }
 
 // ============================================================================
@@ -1790,12 +1739,12 @@ export async function toggleRoutine(routineId: string, enabled: boolean): Promis
  * Takes effect on the next engine start.
  */
 export async function setAutonomyMode(enabled: boolean): Promise<void> {
-    return safeInvoke('thinclaw_set_autonomy_mode', { enabled });
+    return compatibilityCommands.thinclawSetAutonomyMode(enabled);
 }
 
 /** Get the current autonomy mode setting. */
 export async function getAutonomyMode(): Promise<boolean> {
-    return safeInvoke('thinclaw_get_autonomy_mode');
+    return compatibilityCommands.thinclawGetAutonomyMode();
 }
 
 // ============================================================================
@@ -1859,39 +1808,39 @@ export interface ThinClawJobFileEntry {
 }
 
 export async function listJobs(): Promise<{ jobs: ThinClawJob[]; capabilities?: Record<string, boolean>; unavailable?: Record<string, string> }> {
-    return safeInvoke('thinclaw_jobs_list');
+    return compatibilityCommands.thinclawJobsList();
 }
 
 export async function getJobsSummary(): Promise<ThinClawJobSummary> {
-    return safeInvoke('thinclaw_jobs_summary');
+    return compatibilityCommands.thinclawJobsSummary();
 }
 
 export async function getJobDetail(jobId: string): Promise<ThinClawJobDetail> {
-    return safeInvoke('thinclaw_job_detail', { jobId });
+    return compatibilityCommands.thinclawJobDetail(jobId);
 }
 
 export async function cancelJob(jobId: string): Promise<unknown> {
-    return safeInvoke('thinclaw_job_cancel', { jobId });
+    return compatibilityCommands.thinclawJobCancel(jobId);
 }
 
 export async function restartJob(jobId: string): Promise<unknown> {
-    return safeInvoke('thinclaw_job_restart', { jobId });
+    return compatibilityCommands.thinclawJobRestart(jobId);
 }
 
 export async function promptJob(jobId: string, content: string | null, done = false): Promise<unknown> {
-    return safeInvoke('thinclaw_job_prompt', { jobId, content, done });
+    return compatibilityCommands.thinclawJobPrompt(jobId, content, done);
 }
 
 export async function getJobEvents(jobId: string): Promise<{ job_id: string; events: ThinClawJobEvent[]; events_available?: boolean; unavailable_reason?: string | null }> {
-    return safeInvoke('thinclaw_job_events', { jobId });
+    return compatibilityCommands.thinclawJobEvents(jobId);
 }
 
 export async function listJobFiles(jobId: string, path?: string): Promise<{ entries: ThinClawJobFileEntry[] }> {
-    return safeInvoke('thinclaw_job_files_list', { jobId, path: path || null });
+    return compatibilityCommands.thinclawJobFilesList(jobId, path || null);
 }
 
 export async function readJobFile(jobId: string, path: string): Promise<{ path: string; content: string }> {
-    return safeInvoke('thinclaw_job_file_read', { jobId, path });
+    return compatibilityCommands.thinclawJobFileRead(jobId, path);
 }
 
 // ============================================================================
@@ -1960,39 +1909,39 @@ export interface AutonomyEvidenceSummary {
 }
 
 export async function getAutonomyStatus(): Promise<AutonomyStatus> {
-    return safeInvoke('thinclaw_autonomy_status');
+    return compatibilityCommands.thinclawAutonomyStatus();
 }
 
 export async function bootstrapAutonomy(): Promise<unknown> {
-    return safeInvoke('thinclaw_autonomy_bootstrap');
+    return compatibilityCommands.thinclawAutonomyBootstrap();
 }
 
 export async function pauseAutonomy(reason?: string): Promise<unknown> {
-    return safeInvoke('thinclaw_autonomy_pause', { reason: reason || null });
+    return compatibilityCommands.thinclawAutonomyPause(reason || null);
 }
 
 export async function resumeAutonomy(): Promise<unknown> {
-    return safeInvoke('thinclaw_autonomy_resume');
+    return compatibilityCommands.thinclawAutonomyResume();
 }
 
 export async function getAutonomyPermissions(): Promise<unknown> {
-    return safeInvoke('thinclaw_autonomy_permissions');
+    return compatibilityCommands.thinclawAutonomyPermissions();
 }
 
 export async function rollbackAutonomy(): Promise<unknown> {
-    return safeInvoke('thinclaw_autonomy_rollback');
+    return compatibilityCommands.thinclawAutonomyRollback();
 }
 
 export async function getAutonomyRollouts(): Promise<AutonomyRolloutSummary> {
-    return safeInvoke('thinclaw_autonomy_rollouts');
+    return compatibilityCommands.thinclawAutonomyRollouts();
 }
 
 export async function getAutonomyChecks(): Promise<AutonomyChecksSummary> {
-    return safeInvoke('thinclaw_autonomy_checks');
+    return compatibilityCommands.thinclawAutonomyChecks();
 }
 
 export async function getAutonomyEvidence(): Promise<AutonomyEvidenceSummary> {
-    return safeInvoke('thinclaw_autonomy_evidence');
+    return compatibilityCommands.thinclawAutonomyEvidence();
 }
 
 // ============================================================================
@@ -2004,7 +1953,7 @@ export async function getAutonomyEvidence(): Promise<AutonomyEvidenceSummary> {
  * Called by the frontend after the agent has finished naming itself.
  */
 export async function setBootstrapCompleted(completed: boolean): Promise<void> {
-    return safeInvoke('thinclaw_set_bootstrap_completed', { completed });
+    return compatibilityCommands.thinclawSetBootstrapCompleted(completed);
 }
 
 /**
@@ -2012,7 +1961,7 @@ export async function setBootstrapCompleted(completed: boolean): Promise<void> {
  * Returns true if the agent has NOT yet completed the identity ritual.
  */
 export async function checkBootstrapNeeded(): Promise<boolean> {
-    return safeInvoke('thinclaw_check_bootstrap_needed');
+    return compatibilityCommands.thinclawCheckBootstrapNeeded();
 }
 
 /**
@@ -2020,19 +1969,19 @@ export async function checkBootstrapNeeded(): Promise<boolean> {
  * Resets bootstrap_completed so the modal shows on next startup.
  */
 export async function triggerBootstrap(): Promise<void> {
-    return safeInvoke('thinclaw_trigger_bootstrap');
+    return compatibilityCommands.thinclawTriggerBootstrap();
 }
 
 // ── Workspace path & Finder reveal ────────────────────────────────────────────
 
 /** Returns the local filesystem workspace root. */
 export async function getWorkspacePath(): Promise<string> {
-    return safeInvoke('thinclaw_get_workspace_path');
+    return compatibilityCommands.thinclawGetWorkspacePath();
 }
 
 /** Opens the local workspace directory in Finder and returns the path. */
 export async function revealWorkspace(): Promise<string> {
-    return safeInvoke('thinclaw_reveal_workspace');
+    return compatibilityCommands.thinclawRevealWorkspace();
 }
 
 export interface WorkspaceFile {
@@ -2044,12 +1993,12 @@ export interface WorkspaceFile {
 
 /** Lists all real files inside the agent_workspace filesystem directory. */
 export async function listAgentWorkspaceFiles(): Promise<WorkspaceFile[]> {
-    return safeInvoke('thinclaw_list_agent_workspace_files');
+    return compatibilityCommands.thinclawListAgentWorkspaceFiles();
 }
 
 /** Reveals a specific file in Finder (macOS) / Explorer (Windows). */
 export async function revealFile(absolutePath: string): Promise<void> {
-    return safeInvoke('thinclaw_reveal_file', { path: absolutePath });
+    return compatibilityCommands.thinclawRevealFile(absolutePath);
 }
 
 /**
@@ -2057,7 +2006,7 @@ export async function revealFile(absolutePath: string): Promise<void> {
  * Returns the absolute path of the written file.
  */
 export async function writeAgentWorkspaceFile(relativePath: string, content: string): Promise<string> {
-    return safeInvoke('thinclaw_write_agent_workspace_file', { relativePath, content });
+    return compatibilityCommands.thinclawWriteAgentWorkspaceFile(relativePath, content);
 }
 
 /**
@@ -2065,7 +2014,7 @@ export async function writeAgentWorkspaceFile(relativePath: string, content: str
  * Takes effect immediately — updates the DB routine schedule and persists to config.
  */
 export async function setHeartbeatInterval(intervalMinutes: number): Promise<any> {
-    return safeInvoke('thinclaw_heartbeat_set_interval', { intervalMinutes });
+    return compatibilityCommands.thinclawHeartbeatSetInterval(intervalMinutes);
 }
 
 // ── Experiments & learning review ───────────────────────────────────────────
@@ -2073,108 +2022,103 @@ export async function setHeartbeatInterval(intervalMinutes: number): Promise<any
 export type ThinClawJson = null | boolean | number | string | ThinClawJson[] | { [key: string]: ThinClawJson };
 
 export async function getLearningStatus(limit = 50): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_status', { limit });
+    return compatibilityCommands.thinclawLearningStatus(limit);
 }
 
 export async function getLearningHistory(limit = 50): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_history', { limit });
+    return compatibilityCommands.thinclawLearningHistory(limit);
 }
 
 export async function getLearningCandidates(limit = 50): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_candidates', { limit });
+    return compatibilityCommands.thinclawLearningCandidates(limit);
 }
 
 export async function getLearningArtifactVersions(limit = 50): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_artifact_versions', { limit });
+    return compatibilityCommands.thinclawLearningArtifactVersions(limit);
 }
 
 export async function getLearningProviderHealth(): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_provider_health');
+    return compatibilityCommands.thinclawLearningProviderHealth();
 }
 
 export async function getLearningCodeProposals(status: string | null = null, limit = 50): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_code_proposals', { status, limit });
+    return compatibilityCommands.thinclawLearningCodeProposals(status, limit);
 }
 
 export async function getLearningOutcomes(status: string | null = null, limit = 50): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_outcomes', { status, limit });
+    return compatibilityCommands.thinclawLearningOutcomes(status, limit);
 }
 
 export async function getLearningRollbacks(limit = 50): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_rollbacks', { limit });
+    return compatibilityCommands.thinclawLearningRollbacks(limit);
 }
 
 export async function reviewLearningCodeProposal(proposalId: string, decision: 'approve' | 'reject', note?: string): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_review_code_proposal', { proposalId, decision, note: note || null });
+    return compatibilityCommands.thinclawLearningReviewCodeProposal(proposalId, decision, note || null);
 }
 
 export async function reviewLearningOutcome(outcomeId: string, decision: 'confirm' | 'dismiss' | 'requeue', verdict?: 'positive' | 'neutral' | 'negative'): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_review_outcome', { outcomeId, decision, verdict: verdict || null });
+    return compatibilityCommands.thinclawLearningReviewOutcome(outcomeId, decision, verdict || null);
 }
 
 export async function recordLearningRollback(artifactType: string, artifactName: string, reason: string, artifactVersionId?: string): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_record_rollback', {
-        artifactType,
-        artifactName,
-        artifactVersionId: artifactVersionId || null,
-        reason,
-    });
+    return compatibilityCommands.thinclawLearningRecordRollback(artifactType, artifactName, artifactVersionId || null, reason);
 }
 
 export async function evaluateLearningOutcomes(): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_learning_evaluate_outcomes');
+    return compatibilityCommands.thinclawLearningEvaluateOutcomes();
 }
 
 export async function getExperimentProjects(): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_projects');
+    return compatibilityCommands.thinclawExperimentsProjects();
 }
 
 export async function getExperimentCampaigns(): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_campaigns');
+    return compatibilityCommands.thinclawExperimentsCampaigns();
 }
 
 export async function getExperimentRunners(): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_runners');
+    return compatibilityCommands.thinclawExperimentsRunners();
 }
 
 export async function getExperimentTargets(): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_targets');
+    return compatibilityCommands.thinclawExperimentsTargets();
 }
 
 export async function getExperimentTrials(campaignId: string): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_trials', { campaignId });
+    return compatibilityCommands.thinclawExperimentsTrials(campaignId);
 }
 
 export async function getExperimentTrialArtifacts(trialId: string): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_trial_artifacts', { trialId });
+    return compatibilityCommands.thinclawExperimentsTrialArtifacts(trialId);
 }
 
 export async function getExperimentModelUsage(limit = 100): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_model_usage', { limit });
+    return compatibilityCommands.thinclawExperimentsModelUsage(limit);
 }
 
 export async function getExperimentOpportunities(limit = 100): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_opportunities', { limit });
+    return compatibilityCommands.thinclawExperimentsOpportunities(limit);
 }
 
 export async function getExperimentGpuClouds(): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_gpu_clouds');
+    return compatibilityCommands.thinclawExperimentsGpuClouds();
 }
 
 export async function validateExperimentRunner(runnerId: string): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_validate_runner', { runnerId });
+    return compatibilityCommands.thinclawExperimentsValidateRunner(runnerId);
 }
 
 export async function runExperimentCampaignAction(campaignId: string, action: 'pause' | 'resume' | 'cancel' | 'promote' | 'reissue-lease'): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_campaign_action', { campaignId, action });
+    return compatibilityCommands.thinclawExperimentsCampaignAction(campaignId, action);
 }
 
 export async function validateExperimentGpuCloud(provider: string): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_gpu_validate', { provider });
+    return compatibilityCommands.thinclawExperimentsGpuValidate(provider);
 }
 
 export async function launchExperimentGpuCloudTest(provider: string): Promise<ThinClawJson> {
-    return safeInvoke('thinclaw_experiments_gpu_launch_test', { provider });
+    return compatibilityCommands.thinclawExperimentsGpuLaunchTest(provider);
 }
 
 // ============================================================================
@@ -2466,32 +2410,32 @@ function futureCommandUnavailable(command: string, err: unknown): ThinClawFuture
 
 async function safeFutureCommand<T>(
     command: string,
-    args: Record<string, unknown> | undefined,
+    call: () => Promise<T>,
     fallback: (unavailable: ThinClawFutureCommandUnavailable) => T,
 ): Promise<T> {
     try {
-        return await safeInvoke<T>(command, args);
+        return await call();
     } catch (err) {
         return fallback(futureCommandUnavailable(command, err));
     }
 }
 
 export async function listRepoProjects(): Promise<ThinClawRepoProjectsListResponse> {
-    return safeFutureCommand('thinclaw_repo_projects_list', undefined, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_projects_list', () => compatibilityCommands.thinclawRepoProjectsList(), (unavailable) => ({
         projects: [],
         unavailable,
     }));
 }
 
 export async function getRepoProject(projectId: string): Promise<ThinClawRepoProjectResponse> {
-    return safeFutureCommand('thinclaw_repo_project_get', { projectId }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_get', () => compatibilityCommands.thinclawRepoProjectGet(projectId), (unavailable) => ({
         project: null,
         unavailable,
     }));
 }
 
 export async function createRepoProject(input: ThinClawRepoProjectCreateInput): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_create', { input }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_create', () => compatibilityCommands.thinclawRepoProjectCreate(jsonValue(input)), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,
@@ -2499,7 +2443,7 @@ export async function createRepoProject(input: ThinClawRepoProjectCreateInput): 
 }
 
 export async function startRepoProject(projectId: string): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_start', { projectId }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_start', () => compatibilityCommands.thinclawRepoProjectStart(projectId), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,
@@ -2507,7 +2451,7 @@ export async function startRepoProject(projectId: string): Promise<ThinClawRepoP
 }
 
 export async function planRepoProject(projectId: string): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_plan', { projectId }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_plan', () => compatibilityCommands.thinclawRepoProjectPlan(projectId), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,
@@ -2515,7 +2459,7 @@ export async function planRepoProject(projectId: string): Promise<ThinClawRepoPr
 }
 
 export async function pauseRepoProject(projectId: string): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_pause', { projectId }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_pause', () => compatibilityCommands.thinclawRepoProjectPause(projectId), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,
@@ -2523,7 +2467,7 @@ export async function pauseRepoProject(projectId: string): Promise<ThinClawRepoP
 }
 
 export async function resumeRepoProject(projectId: string): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_resume', { projectId }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_resume', () => compatibilityCommands.thinclawRepoProjectResume(projectId), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,
@@ -2531,7 +2475,7 @@ export async function resumeRepoProject(projectId: string): Promise<ThinClawRepo
 }
 
 export async function cancelRepoProject(projectId: string, runId?: string): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_cancel', { projectId, runId: runId ?? null }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_cancel', () => compatibilityCommands.thinclawRepoProjectCancel(projectId, runId ?? null), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,
@@ -2542,7 +2486,7 @@ export async function approveRepoProject(
     projectId: string,
     input: ThinClawRepoApprovalInput,
 ): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_approve', { projectId, input }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_approve', () => compatibilityCommands.thinclawRepoProjectApprove(projectId, jsonValue(input)), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,
@@ -2553,7 +2497,7 @@ export async function enqueueRepoProject(
     projectId: string,
     item: ThinClawRepoBacklogEnqueueInput,
 ): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_enqueue', { projectId, item }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_enqueue', () => compatibilityCommands.thinclawRepoProjectEnqueue(projectId, jsonValue(item)), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,
@@ -2561,14 +2505,14 @@ export async function enqueueRepoProject(
 }
 
 export async function getRepoProjectEvents(projectId: string, limit = 100): Promise<ThinClawRepoProjectEventsResponse> {
-    return safeFutureCommand('thinclaw_repo_project_events', { projectId, limit }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_events', () => compatibilityCommands.thinclawRepoProjectEvents(projectId, limit), (unavailable) => ({
         events: [],
         unavailable,
     }));
 }
 
 export async function getRepoProjectMergeGates(projectId: string): Promise<ThinClawRepoProjectMergeGatesResponse> {
-    return safeFutureCommand('thinclaw_repo_project_merge_gates', { projectId }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_merge_gates', () => compatibilityCommands.thinclawRepoProjectMergeGates(projectId), (unavailable) => ({
         gates: [],
         unavailable,
     }));
@@ -2577,7 +2521,7 @@ export async function getRepoProjectMergeGates(projectId: string): Promise<ThinC
 // ── Setup / credentials / GitHub connector ──────────────────────────────
 
 export async function getRepoProjectsReadiness(): Promise<ThinClawRepoProjectsReadiness> {
-    return safeFutureCommand('thinclaw_repo_projects_readiness', undefined, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_projects_readiness', () => compatibilityCommands.thinclawRepoProjectsReadiness(), (unavailable) => ({
         enabled: false,
         credential_mode: 'none',
         auto_merge_default: false,
@@ -2595,7 +2539,7 @@ export async function getRepoProjectsReadiness(): Promise<ThinClawRepoProjectsRe
 export async function setupRepoProjects(
     input: ThinClawRepoProjectsConfigureInput,
 ): Promise<ThinClawRepoProjectsReadiness> {
-    return safeFutureCommand('thinclaw_repo_projects_setup', { input }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_projects_setup', () => compatibilityCommands.thinclawRepoProjectsSetup(jsonValue(input)), (unavailable) => ({
         enabled: false,
         credential_mode: 'none',
         auto_merge_default: false,
@@ -2620,13 +2564,13 @@ export async function setRepoProjectCredential(
 ): Promise<ThinClawRepoCredentialStored> {
     return safeFutureCommand(
         'thinclaw_repo_projects_set_credential',
-        { name, valueSecret },
+        () => compatibilityCommands.thinclawRepoProjectsSetCredential(name, valueSecret),
         (unavailable) => ({ ok: false, name, unavailable }),
     );
 }
 
 export async function listConnectableRepos(): Promise<ThinClawConnectableReposResponse> {
-    return safeFutureCommand('thinclaw_repo_projects_connectable_repos', undefined, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_projects_connectable_repos', () => compatibilityCommands.thinclawRepoProjectsConnectableRepos(), (unavailable) => ({
         source: 'none',
         total: 0,
         repos: [],
@@ -2637,7 +2581,7 @@ export async function listConnectableRepos(): Promise<ThinClawConnectableReposRe
 export async function connectRepoProjects(
     input: ThinClawRepoConnectInput,
 ): Promise<ThinClawRepoConnectResponse> {
-    return safeFutureCommand('thinclaw_repo_projects_connect', { input }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_projects_connect', () => compatibilityCommands.thinclawRepoProjectsConnect(jsonValue(input)), (unavailable) => ({
         ok: false,
         connected: [],
         skipped: [],
@@ -2650,7 +2594,7 @@ export async function enrollRepoProject(
     projectId: string,
     input: ThinClawRepoEnrollInput,
 ): Promise<ThinClawRepoProjectCommandResponse> {
-    return safeFutureCommand('thinclaw_repo_project_enroll', { projectId, input }, (unavailable) => ({
+    return safeFutureCommand('thinclaw_repo_project_enroll', () => compatibilityCommands.thinclawRepoProjectEnroll(projectId, jsonValue(input)), (unavailable) => ({
         ok: false,
         message: unavailable.reason,
         unavailable,

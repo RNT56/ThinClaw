@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { listen } from '@tauri-apps/api/event';
 import {
     Timer,
     Play,
@@ -26,6 +25,7 @@ import {
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
+import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 import { ThinClawModeBadge, useThinClawStatusSnapshot } from './ThinClawModeBadge';
 
 interface JobCardProps {
@@ -557,28 +557,24 @@ export function ThinClawAutomations() {
     }, []);
 
     // Listen for routine lifecycle events from backend SSE forwarder
-    useEffect(() => {
-        const unlistenPromise = listen<any>('thinclaw-event', (event) => {
-            const payload = event.payload;
-            if (payload?.kind === 'RoutineLifecycle') {
-                const { routine_name, event: evType, result_summary } = payload;
-                const snippet = result_summary ? `: ${String(result_summary).slice(0, 80)}` : '';
-                if (evType === 'started') {
-                    toast.info(`⏱ "${routine_name}" started`, { duration: 4000 });
-                } else if (evType === 'dispatched') {
-                    // full_job was queued — worker is running, real result comes later
-                    toast.info(`🔄 "${routine_name}" queued — worker executing`, { duration: 5000 });
-                } else if (evType === 'completed') {
-                    toast.success(`✅ "${routine_name}" completed${snippet}`, { duration: 6000 });
-                    fetchData();
-                } else if (evType === 'failed') {
-                    toast.error(`❌ "${routine_name}" failed${snippet}`, { duration: 8000 });
-                    fetchData();
-                }
+    useThinClawEvents((payload) => {
+        if (payload.kind === 'RoutineLifecycle') {
+            const { routine_name, event: evType, result_summary } = payload;
+            const snippet = result_summary ? `: ${String(result_summary).slice(0, 80)}` : '';
+            if (evType === 'started') {
+                toast.info(`⏱ "${routine_name}" started`, { duration: 4000 });
+            } else if (evType === 'dispatched') {
+                // full_job was queued — worker is running, real result comes later
+                toast.info(`🔄 "${routine_name}" queued — worker executing`, { duration: 5000 });
+            } else if (evType === 'completed') {
+                toast.success(`✅ "${routine_name}" completed${snippet}`, { duration: 6000 });
+                fetchData();
+            } else if (evType === 'failed') {
+                toast.error(`❌ "${routine_name}" failed${snippet}`, { duration: 8000 });
+                fetchData();
             }
-        });
-        return () => { unlistenPromise.then((fn) => fn()).catch(() => { }); };
-    }, [fetchData]);
+        }
+    });
 
     const handleRun = async (key: string) => {
         try {

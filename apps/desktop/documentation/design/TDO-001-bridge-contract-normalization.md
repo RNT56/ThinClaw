@@ -1,6 +1,6 @@
 # Design — Bridge & Command-Surface Normalization (TDO-001…006)
 
-> **Status:** design draft v1 · **Created:** 2026-06-27 · Epic: TDO-EP1 (WS-1)
+> **Status:** TDO-001–006 implemented · **Created:** 2026-06-27 · Epic: TDO-EP1 (WS-1)
 > **Parent:** [`../OVERHAUL_PLAN.md`](../OVERHAUL_PLAN.md) §4 WS-1 · **Backlog:** [`../OVERHAUL_BACKLOG.md`](../OVERHAUL_BACKLOG.md)
 > This is the foundation issue — TDO-EP2/EP3 and most of Phase 1 depend on it.
 
@@ -122,16 +122,22 @@ than documented.
 that export step to also emit:
 
 - **`remote-gateway-route-matrix.md`** — rendered from `ROUTE_TABLE` (command | mode | remediation). Replaces the hand-maintained doc; a test asserts the committed file matches generated output (like the `bindings.ts` "must stay generated" assertion).
-- **`lib/generated/ui-events.ts`** — the `UiEvent` discriminated union. specta already derives `UiEvent` (`ui_types.rs` has `specta::Type`); surface it as an exported TS type so one event-bus hook owns it:
+- **Generated `UiEvent` in `bindings.ts`** — specta derives the discriminated union
+  from `ui_types.rs`. A single native listener owns the Tauri channel and fans
+  typed events out to React subscribers:
 
 ```ts
 // frontend/src/hooks/use-thinclaw-stream.ts  (consolidate)
-export function useThinClawEvents(onEvent: (e: UiEvent) => void) {
-  useEffect(() => listen<UiEvent>('thinclaw-event', e => onEvent(e.payload)), []);
-}
+const subscribers = new Set<(event: UiEvent) => void>();
+listen<UiEvent>('thinclaw-event', ({ payload }) => {
+  subscribers.forEach((subscriber) => subscriber(payload));
+});
+
+export function useThinClawEvents(onEvent: (event: UiEvent) => void) { /* subscribe */ }
 ```
 
-Components stop hand-deriving the union and switch on `e.kind` against the generated type.
+All 11 subscriptions across 10 component files now switch on the generated
+`event.kind`; a contract test rejects any new panel-local native listener.
 
 ## 6. One calling convention: `lib/thinclaw.ts` → `bindings.ts` (TDO-004, TDO-006)
 
@@ -141,7 +147,11 @@ Strangler migration (non-flag-day):
 2. Convert `thinclaw.ts` wrappers into thin re-exports: `export const getLearningStatus = (n:number) => commands.thinclawLearningStatus(n)`. Zero component churn.
 3. Split the re-export shim by domain into `lib/api/{sessions,memory,routines,learning,experiments,mcp,channels,…}.ts` (this is TDO-020 / WS-3).
 4. Codemod components from `thinclaw.foo()` → `api.foo()` per domain; delete each shim once unused.
-5. Retire root `src/tauri_commands.rs` facade (TDO-006): it has 1 real command and is a legacy adapter relic (it maps to the old pre-rename command names from the §17.4 integration contract); fold any remaining helper into the typed command modules.
+5. Retire root `src/tauri_commands.rs` facade (TDO-006): reusable service
+   helpers now live in `src/desktop_api.rs`; Desktop command registration stays
+   in the typed command modules. `lib.rs` retains only a deprecated source-level
+   alias for downstream compatibility, and the unused pre-rename command-name
+   inventory is gone.
 
 ## 7. Rollout sequence & risk
 

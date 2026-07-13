@@ -253,7 +253,7 @@ pub async fn thinclaw_gmail_oauth_start(
     // 3. Opens browser
     // 4. Binds localhost callback listener
     // 5. Exchanges code for tokens
-    let ic_result = thinclaw_core::tauri_commands::gmail_oauth_start()
+    let ic_result = thinclaw_core::desktop_api::gmail_oauth_start()
         .await
         .map_err(|e| format!("Gmail OAuth failed: {}", e))?;
 

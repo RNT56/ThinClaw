@@ -9,7 +9,7 @@ import {
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
-import { listen } from '@tauri-apps/api/event';
+import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 import { ThinClawModeBadge, useThinClawStatusSnapshot } from './ThinClawModeBadge';
 
 // ── Channel icon mapping ────────────────────────────────────────
@@ -224,23 +224,20 @@ export function ThinClawChannelStatus() {
     useEffect(() => {
         fetchData();
         const interval = setInterval(fetchData, 15000);
-
-        const unlisten = listen('thinclaw-event', (event: any) => {
-            const payload = event.payload;
-            if (payload.kind === 'ChannelStatus') {
-                setEntries(prev => prev.map(ch =>
-                    ch.id === payload.channel_id
-                        ? { ...ch, state: payload.state, last_error: payload.error }
-                        : ch
-                ));
-            }
-        });
-
         return () => {
             clearInterval(interval);
-            unlisten.then(fn => fn());
         };
     }, [fetchData]);
+
+    useThinClawEvents((payload) => {
+        if (payload.kind === 'ChannelStatus') {
+            setEntries(prev => prev.map(ch =>
+                ch.id === payload.channel_id
+                    ? { ...ch, state: payload.state as thinclaw.ChannelStatusEntry['state'], last_error: payload.error }
+                    : ch
+            ));
+        }
+    });
 
     const handleStreamModeChange = async (channelId: string, mode: string) => {
         // Runtime reads the namespaced per-channel key (telegram/discord only).

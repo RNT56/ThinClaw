@@ -2,7 +2,7 @@
 
 > **Status:** draft v1 · **Created:** 2026-06-27 · Companion to [`OVERHAUL_PLAN.md`](OVERHAUL_PLAN.md).
 
-## Completion status (verified 2026-07-12)
+## Completion status (verified 2026-07-13)
 
 First parity batch is **merged to `main`**. Every row below is verified present in the
 tree. ✅ = merged to `main`.
@@ -12,6 +12,9 @@ tree. ✅ = merged to `main`.
 | TDO-001 | `RouteMode` enum + typed `BridgeError` + `gated()` helper | ✅ | `bridge.rs` (`RouteMode`:22, `BridgeError`:35) |
 | TDO-002 | Bridge linter (`ROUTE_TABLE` + `all_gated_commands_are_classified`) | ✅ | `bridge.rs` (`ROUTE_TABLE`:116 + linter tests) |
 | TDO-003 | Generated per-command remote route matrix + drift assertion | ✅ | `bridge.rs` (`render_route_matrix_section` + `committed_route_matrix_matches_the_registry`) |
+| TDO-004 | Generated bindings and bindings-derived clients are the sole production frontend command transport | ✅ | `bindings.ts`, `command-client.ts`, `thinclaw.ts`, `production_frontend_has_one_command_calling_convention` |
+| TDO-005 | Generated `UiEvent` union + one native event-bus listener with typed React fan-out | ✅ | `ui_types.rs`, `use-thinclaw-stream.ts`, `event-bus-migration.test.ts` |
+| TDO-006 | Retired root `tauri_commands.rs`; service helpers live in `desktop_api` behind a deprecated compatibility alias | ✅ | `src/desktop_api.rs`, `src/lib.rs`, typed desktop command modules |
 | TDO-100 | Real per-thread compaction (`thinclaw_compact_session`) | ✅ | `rpc_extensions.rs` (drives core `ContextCompactor`) |
 | TDO-102 | Self-repair lifecycle events → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `agent_loop`, `ThinClawEventInspector.tsx` |
 | TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | `rpc_checkpoints.rs`:40/52/65 |
@@ -71,9 +74,9 @@ P3 = all 1.0 DoD gates.
 | TDO-001 | Introduce `RouteBehavior` enum (`LocalAndRemote`/`RemoteOnly(reason)`/`LocalOnly(reason)`) on every command | L | ∞ | — | `thinclaw/commands/*`, `runtime_bridge.rs` |
 | TDO-002 | Bridge linter CI test: fail if a command lacks {binding, wrapper, route-behavior, reason-on-gate} | M | ∞ | TDO-001 | extend `setup/commands.rs` test |
 | TDO-003 ✅ | Generate `remote-gateway-route-matrix.md` from code; assert in test | M | ∞ | TDO-001 | `remote-gateway-route-matrix.md` |
-| TDO-004 | Single calling convention: make generated `bindings.ts` (`commands.*`) the source of truth; reduce `lib/thinclaw.ts` to re-exports + types | L | ∞ | TDO-002 | `lib/thinclaw.ts`, `lib/bindings.ts` |
-| TDO-005 | Typed `UiEvent` discriminated union + one React event-bus hook; replace scattered `listen('thinclaw-event')` | M | ∞ | TDO-004 | `ui_types.rs`, `hooks/use-thinclaw-stream.ts` |
-| TDO-006 | Retire/shrink root `src/tauri_commands.rs` facade | M | ∞ | TDO-004 | `src/tauri_commands.rs` |
+| TDO-004 ✅ | Single calling convention: make generated `bindings.ts` (`commands.*`) the source of truth; reduce `lib/thinclaw.ts` to re-exports + types | L | ∞ | TDO-002 | `lib/thinclaw.ts`, `lib/bindings.ts` |
+| TDO-005 ✅ | Typed `UiEvent` discriminated union + one React event-bus hook; replace scattered `listen('thinclaw-event')` | M | ∞ | TDO-004 | `ui_types.rs`, `hooks/use-thinclaw-stream.ts` |
+| TDO-006 ✅ | Retire/shrink root `src/tauri_commands.rs` facade | M | ∞ | TDO-004 | `src/desktop_api.rs`, `src/lib.rs` |
 
 **TDO-001 acceptance:** each command declares its mode behavior; local-mode `unavailable`
 responses carry a machine-readable `reason`; UI can render the reason. No command returns

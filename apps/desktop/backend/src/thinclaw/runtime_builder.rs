@@ -636,6 +636,18 @@ pub(crate) async fn build_inner(
     // The forwarder below subscribes and forwards RoutineLifecycle events
     // as 'thinclaw-event' Tauri emissions to the frontend.
     let (sse_tx, _sse_rx_seed) = tokio::sync::broadcast::channel::<SseEvent>(64);
+    {
+        let status_tx = sse_tx.clone();
+        channel_manager
+            .set_status_change_sink(move |event| {
+                let _ = status_tx.send(SseEvent::ChannelStatusChange {
+                    channel: event.channel,
+                    status: event.status,
+                    message: event.message,
+                });
+            })
+            .await;
+    }
 
     // ── 5b. Create sub-agent executor ───────────────────────────────
     // Shares the same LLM, safety layer, tool registry, and channel
@@ -1141,6 +1153,15 @@ pub(crate) async fn build_inner(
                                 event: event.clone(),
                                 run_id: run_id.clone(),
                                 result_summary: result_summary.clone(),
+                            }),
+                            SseEvent::ChannelStatusChange {
+                                channel,
+                                status,
+                                message,
+                            } => Some(UiEvent::ChannelStatus {
+                                channel_id: channel.clone(),
+                                state: status.clone(),
+                                error: message.clone(),
                             }),
                             SseEvent::BootstrapCompleted => Some(UiEvent::BootstrapCompleted),
                             SseEvent::ToolResult { name, preview, .. } if name == "write_file" => {

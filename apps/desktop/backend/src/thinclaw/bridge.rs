@@ -267,6 +267,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_add_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_agents_list", RouteMode::LocalOnly),
     ("thinclaw_broadcast_command", RouteMode::LocalOnly),
+    ("thinclaw_canvas_dispatch_event", RouteMode::LocalOnly),
     ("thinclaw_canvas_navigate", RouteMode::LocalOnly),
     ("thinclaw_canvas_panel_dismiss", RouteMode::LocalOnly),
     ("thinclaw_canvas_panel_get", RouteMode::LocalOnly),
@@ -802,6 +803,19 @@ mod tests {
                 "ROUTE_TABLE references `{cmd}` (`{camel}`) which is not a registered command in bindings.ts"
             );
         }
+    }
+
+    #[test]
+    fn generated_pricing_field_matches_wire_contract() {
+        let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
+        assert!(
+            bindings.contains("per1kChars"),
+            "generated pricing bindings must preserve the serialized per1kChars field"
+        );
+        assert!(
+            !bindings.contains("per1KChars"),
+            "generated pricing bindings must not invent a differently-cased field"
+        );
     }
 
     /// TDO-002 linter: every gated command (its generated binding returns

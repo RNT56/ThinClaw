@@ -2,8 +2,8 @@
  * A5-8: useCloudStatus hook — polls cloud_get_status + listens to cloud_migration_progress events.
  */
 import { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { commandClient } from '../lib/command-client';
 
 // ── Types (mirroring Rust cloud::commands types) ─────────────────────────
 
@@ -141,7 +141,7 @@ export function useCloudStatus() {
 
     const refresh = useCallback(async () => {
         try {
-            const s = await invoke<CloudStatusResponse>('cloud_get_status');
+            const s = await commandClient.cloudGetStatus();
             setStatus(s);
             setError(null);
         } catch (e) {
@@ -153,7 +153,7 @@ export function useCloudStatus() {
 
     const refreshBreakdown = useCallback(async () => {
         try {
-            const b = await invoke<StorageCategory[]>('cloud_get_storage_breakdown');
+            const b = await commandClient.cloudGetStorageBreakdown();
             setBreakdown(b);
         } catch (e) {
             console.error('[useCloudStatus] Failed to fetch breakdown:', e);

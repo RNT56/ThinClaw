@@ -1,5 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
-
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronDown, Brain, Loader2, Zap, Trash2, Download, Sliders, FileDown, PanelRight, ListChecks, CircleDollarSign, Cpu, ShieldCheck } from 'lucide-react';
@@ -8,12 +6,12 @@ import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import * as thinclaw from '../../lib/thinclaw';
 import { ThinClawMessage } from '../../lib/thinclaw';
-import { listen } from '@tauri-apps/api/event';
+import { commandClient } from '../../lib/command-client';
+import { StreamRun, useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 
 
 
 import { AssistantMessageContent, ToolHistoryGroup, CopyMessageButton, SystemMessageContent } from './ChatSubComponents';
-import { StreamRun } from '../../hooks/use-thinclaw-stream';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { MemoryEditor } from './MemoryEditor';
 import SubAgentPanel, { useSubAgentCount } from './SubAgentPanel';
@@ -264,7 +262,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             });
 
             // Sync local LLM config first
-            try { await invoke('thinclaw_sync_local_llm'); } catch { /* non-fatal */ }
+            try { await commandClient.thinclawSyncLocalLlm(); } catch { /* non-fatal */ }
 
             const now = new Date();
             const dateStr = now.toISOString().split('T')[0];
@@ -332,445 +330,433 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     // It raced with user messages causing "Turn in progress" errors.
     // The user can manually refresh context via the Wake Up button.
 
-    useEffect(() => {
+    useThinClawEvents((uiEvent) => {
         if (!effectiveSessionKey) return;
-        // IC-020: Guard against events firing after unmount
-        let isMounted = true;
-        // Listen for ALL thinclaw events — don't gate on gatewayRunning
-        // so we never miss events during the polling interval gap.
-        const unlistenPromise = listen<any>('thinclaw-event', (event) => {
-            if (!isMounted) return;
-            const uiEvent = event.payload;
 
-            // ── Skip events owned by other panels ────────────────────────
-            // LogEntry events are consumed by the Logs tab; RoutineLifecycle
-            // by the Automations panel. Don't process them here.
-            if (uiEvent.kind === 'LogEntry') return;
+        // ── Skip events owned by other panels ────────────────────────
+        // LogEntry events are consumed by the Logs tab; RoutineLifecycle
+        // by the Automations panel. Don't process them here.
+        if (uiEvent.kind === 'LogEntry') return;
 
-            // ── Handle global events (no session_key) ────────────────────
-            if (uiEvent.kind === 'Error') {
-                const msg = uiEvent.message || 'Unknown engine error';
-                toast.error(`🔴 Engine Error: ${msg}`, { duration: 8000 });
-                setMessages(prev => [...prev, {
-                    id: `error-${Date.now()}`,
-                    role: 'system',
-                    ts_ms: Date.now(),
-                    text: `⚠️ Engine Error: ${msg} (code: ${uiEvent.code || 'unknown'})`,
-                    source: 'thinclaw',
-                    metadata: { type: 'error' }
-                }]);
-                return;
-            }
-            if (uiEvent.kind === 'Disconnected') {
-                toast.error(`Gateway disconnected: ${uiEvent.reason || 'unknown'}`, { duration: 5000 });
-                setIsSending(false);
-                setActiveRun(null);
-                return;
-            }
-            if (uiEvent.kind === 'BootstrapCompleted') {
-                // Agent deleted BOOTSTRAP.md — mark done in identity.json and refresh parent.
-                thinclawCommands.thinclawSetBootstrapCompleted(true).catch(() => { });
-                onBootstrapComplete?.();
-                toast.success('Identity ritual complete — agent is fully initialized! 🎉', { duration: 6000 });
-                return;
-            }
-            if (uiEvent.kind === 'FileCreated') {
-                const { path, relative_path, bytes } = uiEvent;
-                const displayName = relative_path || path.split('/').pop() || path;
-                const kb = bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
-                // Show persistent toast with Finder link
-                toast.success(`📄 File created: ${displayName} (${kb})`, {
-                    duration: 8000,
-                    action: {
-                        label: 'Reveal',
-                        onClick: () => {
-                            // IC-009: Use typed Specta binding
-                            thinclawCommands.thinclawRevealFile(path).catch(() => { });
-                        },
+        // ── Handle global events (no session_key) ────────────────────
+        if (uiEvent.kind === 'Error') {
+            const msg = uiEvent.message || 'Unknown engine error';
+            toast.error(`🔴 Engine Error: ${msg}`, { duration: 8000 });
+            setMessages(prev => [...prev, {
+                id: `error-${Date.now()}`,
+                role: 'system',
+                ts_ms: Date.now(),
+                text: `⚠️ Engine Error: ${msg} (code: ${uiEvent.code || 'unknown'})`,
+                source: 'thinclaw',
+                metadata: { type: 'error' }
+            }]);
+            return;
+        }
+        if (uiEvent.kind === 'Disconnected') {
+            toast.error(`Gateway disconnected: ${uiEvent.reason || 'unknown'}`, { duration: 5000 });
+            setIsSending(false);
+            setActiveRun(null);
+            return;
+        }
+        if (uiEvent.kind === 'BootstrapCompleted') {
+            // Agent deleted BOOTSTRAP.md — mark done in identity.json and refresh parent.
+            thinclawCommands.thinclawSetBootstrapCompleted(true).catch(() => { });
+            onBootstrapComplete?.();
+            toast.success('Identity ritual complete — agent is fully initialized! 🎉', { duration: 6000 });
+            return;
+        }
+        if (uiEvent.kind === 'FileCreated') {
+            const { path, relative_path, bytes } = uiEvent;
+            const displayName = relative_path || path.split('/').pop() || path;
+            const kb = bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+            // Show persistent toast with Finder link
+            toast.success(`📄 File created: ${displayName} (${kb})`, {
+                duration: 8000,
+                action: {
+                    label: 'Reveal',
+                    onClick: () => {
+                        // IC-009: Use typed Specta binding
+                        thinclawCommands.thinclawRevealFile(path).catch(() => { });
                     },
-                });
-                // Also inject a system message card into the chat so it's permanent
-                setMessages(prev => [...prev, {
-                    id: `file-created-${Date.now()}`,
-                    role: 'system' as const,
-                    ts_ms: Date.now(),
-                    text: `📄 **File created:** \`${displayName}\` (${kb})`,
-                    source: 'thinclaw',
-                    metadata: {
-                        type: 'file_created',
-                        absolute_path: path,
-                        relative_path,
-                        bytes,
-                    },
-                }]);
-                return;
-            }
-            if (uiEvent.kind === 'RoutineLifecycle') {
-                const { routine_name, event: evType, result_summary } = uiEvent as any;
-                const msgId = `routine-${evType}-${routine_name}-${Date.now()}`;
-                const isHeartbeat = routine_name === '__heartbeat__';
+                },
+            });
+            // Also inject a system message card into the chat so it's permanent
+            setMessages(prev => [...prev, {
+                id: `file-created-${Date.now()}`,
+                role: 'system' as const,
+                ts_ms: Date.now(),
+                text: `📄 **File created:** \`${displayName}\` (${kb})`,
+                source: 'thinclaw',
+                metadata: {
+                    type: 'file_created',
+                    absolute_path: path,
+                    relative_path,
+                    bytes,
+                },
+            }]);
+            return;
+        }
+        if (uiEvent.kind === 'RoutineLifecycle') {
+            const { routine_name, event: evType, result_summary } = uiEvent as any;
+            const msgId = `routine-${evType}-${routine_name}-${Date.now()}`;
+            const isHeartbeat = routine_name === '__heartbeat__';
 
-                // ── "message" events carry live output from emit_user_message ──
-                if (evType === 'message' && result_summary) {
-                    const content = String(result_summary).replace(/^\[(progress|interim_result|warning|question)\]\s*/i, '');
+            // ── "message" events carry live output from emit_user_message ──
+            if (evType === 'message' && result_summary) {
+                const content = String(result_summary).replace(/^\[(progress|interim_result|warning|question)\]\s*/i, '');
 
-                    // Skip placeholder/noise messages from the planner pre-fill
-                    if (content.includes('[Bullet') || content.includes('[placeholder') || content.length < 20) {
-                        return;
-                    }
-
-                    // For heartbeat, replace existing heartbeat messages to avoid chat clutter
-                    if (isHeartbeat) {
-                        setMessages(prev => {
-                            const filtered = prev.filter(m =>
-                                !(m.metadata?.type === 'routine_message' && m.metadata?.routine_name === '__heartbeat__')
-                            );
-                            return [...filtered, {
-                                id: msgId,
-                                role: 'assistant' as const,
-                                ts_ms: Date.now(),
-                                text: content,
-                                source: 'thinclaw',
-                                metadata: {
-                                    type: 'automation_card',
-                                    routine_name,
-                                    variant: 'heartbeat',
-                                    status: 'running',
-                                },
-                            }];
-                        });
-                    } else {
-                        setMessages(prev => [...prev, {
-                            id: msgId,
-                            role: 'assistant' as const,
-                            ts_ms: Date.now(),
-                            text: `🤖 *Automation "${routine_name}":*\n\n${content}`,
-                            source: 'thinclaw',
-                            metadata: { type: 'routine_message', routine_name },
-                        }]);
-                    }
-                    if (isAutoScrollPinned.current) scrollToBottom();
+                // Skip placeholder/noise messages from the planner pre-fill
+                if (content.includes('[Bullet') || content.includes('[placeholder') || content.length < 20) {
                     return;
                 }
 
-                // ── "attention" — heartbeat found items needing attention ──────
-                if (evType === 'attention') {
+                // For heartbeat, replace existing heartbeat messages to avoid chat clutter
+                if (isHeartbeat) {
                     setMessages(prev => {
-                        // Remove any interim heartbeat messages
                         const filtered = prev.filter(m =>
-                            !(m.metadata?.type === 'automation_card' && m.metadata?.routine_name === '__heartbeat__' && m.metadata?.status === 'running')
+                            !(m.metadata?.type === 'routine_message' && m.metadata?.routine_name === '__heartbeat__')
                         );
                         return [...filtered, {
                             id: msgId,
                             role: 'assistant' as const,
                             ts_ms: Date.now(),
-                            text: result_summary || '',
+                            text: content,
                             source: 'thinclaw',
                             metadata: {
                                 type: 'automation_card',
                                 routine_name,
-                                variant: isHeartbeat ? 'heartbeat' : 'automation',
-                                status: 'attention',
+                                variant: 'heartbeat',
+                                status: 'running',
                             },
                         }];
                     });
-                    toast('🔔 Heartbeat: items need attention', { duration: 6000, icon: '💓' });
-                    if (isAutoScrollPinned.current) scrollToBottom();
-                    return;
-                }
-
-                // ── "dispatched" — non-heartbeat automations open SubAgentPanel ──
-                if (evType === 'dispatched' && !isHeartbeat) {
-                    setSubAgentPanelOpen(true);
-                    setSubAgentPanelDismissed(false);
-                    toast.info(`🤖 Automation "${routine_name}" running as sub-agent`, { duration: 5000 });
-                    return;
-                }
-
-                // ── "completed" — show AutomationCard with results ────────────
-                if (evType === 'completed' && result_summary && result_summary !== 'Job completed successfully') {
-                    setMessages(prev => {
-                        // Remove interim heartbeat messages for this routine
-                        const filtered = prev.filter(m =>
-                            !(m.metadata?.routine_name === routine_name && (m.metadata?.status === 'running' || m.metadata?.type === 'routine_message'))
-                        );
-                        return [...filtered, {
-                            id: msgId,
-                            role: 'assistant' as const,
-                            ts_ms: Date.now(),
-                            text: result_summary,
-                            source: 'thinclaw',
-                            metadata: {
-                                type: 'automation_card',
-                                routine_name,
-                                variant: isHeartbeat ? 'heartbeat' : 'automation',
-                                status: 'ok',
-                            },
-                        }];
-                    });
-                    toast.success(`✅ Automation "${routine_name}" completed`, { duration: 6000 });
-                    if (isAutoScrollPinned.current) scrollToBottom();
-                    return;
-                }
-
-                // ── "failed" — show AutomationCard with error ─────────────────
-                if (evType === 'failed') {
-                    setMessages(prev => {
-                        const filtered = prev.filter(m =>
-                            !(m.metadata?.routine_name === routine_name && (m.metadata?.status === 'running' || m.metadata?.type === 'routine_message'))
-                        );
-                        return [...filtered, {
-                            id: msgId,
-                            role: 'assistant' as const,
-                            ts_ms: Date.now(),
-                            text: result_summary || 'Automation failed',
-                            source: 'thinclaw',
-                            metadata: {
-                                type: 'automation_card',
-                                routine_name,
-                                variant: isHeartbeat ? 'heartbeat' : 'automation',
-                                status: 'failed',
-                            },
-                        }];
-                    });
-                    const summarySnippet = result_summary ? ` — ${String(result_summary).slice(0, 120)}` : '';
-                    toast.error(`❌ Automation "${routine_name}" failed${summarySnippet}`, { duration: 8000 });
-                    if (isAutoScrollPinned.current) scrollToBottom();
-                    return;
-                }
-
-                // ── Fallback for other events (started, dispatched for heartbeat) ──
-                const summarySnippet = result_summary ? ` — ${String(result_summary).slice(0, 120)}` : '';
-                const textMap: Record<string, string> = {
-                    started: `⏱ Automation **${routine_name}** started`,
-                    dispatched: `🔄 Automation **${routine_name}** dispatched`,
-                    completed: `✅ Automation **${routine_name}** completed${summarySnippet}`,
-                    failed: `❌ Automation **${routine_name}** failed${summarySnippet}`,
-                };
-                const text = textMap[evType] ?? `🔄 Automation **${routine_name}**: ${evType}`;
-                setMessages(prev => [...prev, {
-                    id: msgId,
-                    role: 'system' as const,
-                    ts_ms: Date.now(),
-                    text,
-                    source: 'thinclaw',
-                    metadata: { type: 'routine_lifecycle', routine_name, event: evType, summary: result_summary },
-                }]);
-                if (evType === 'started') toast.info(`⏱ Automation "${routine_name}" started`, { duration: 4000 });
-                return;
-            }
-            if (uiEvent.kind === 'FactoryReset') {
-
-                // Clear all cached frontend state — backend DB has been wiped
-                setMessages([]);
-                setIsSending(false);
-                setActiveRun(null);
-                setCurrentRunId(null);
-                ocStreamStartRef.current = null;
-                ocCharsReceivedRef.current = 0;
-                ocActiveMessageIdRef.current = null;
-                // Notify parent to re-check bootstrap state from identity.json
-                // (backend has now set bootstrap_completed=false)
-                onFactoryReset?.();
-                return;
-            }
-
-            // ── Session-scoped events ────────────────────────────────────
-            if (uiEvent.session_key !== effectiveSessionKey) return;
-
-            if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'LifecycleUpdate', 'PlanUpdate', 'UsageUpdate', 'ApprovalRequested', 'ApprovalResolved'].includes(uiEvent.kind)) {
-                updateRunTelemetry(uiEvent);
-            }
-
-            // Handle message events
-            if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'LifecycleUpdate', 'PlanUpdate', 'UsageUpdate', 'JobUpdate', 'AgentMessage'].includes(uiEvent.kind)) {
-                updateMessagesFromEvent(uiEvent);
-                if (isAutoScrollPinned.current) {
-                    scrollToBottom();
-                }
-            }
-
-            // Track active run for LiveAgentStatus
-            if (uiEvent.kind === 'RunStatus' || uiEvent.kind === 'LifecycleUpdate') {
-                const lowerStatus = uiEvent.status?.toLowerCase?.() ?? '';
-                const TERMINAL_STATUSES = ['ok', 'error', 'aborted', 'done', 'interrupted', 'rejected'];
-
-                if (TERMINAL_STATUSES.includes(lowerStatus)) {
-                    // ── Run finished ──
-                    setIsSending(false);
-                    setCurrentRunId(null);
-
-                    const errorMsg = uiEvent.error || null;
-
-                    setActiveRun(prev => prev ? {
-                        ...prev,
-                        status: (lowerStatus === 'ok' || lowerStatus === 'done') ? 'completed' : 'failed',
-                        error: errorMsg || prev.error,
-                        completedAt: Date.now()
-                    } : null);
-
-                    // Surface RunStatus errors via toast AND inject into chat
-                    if (lowerStatus === 'error' && errorMsg) {
-                        toast.error(errorMsg, { duration: 8000 });
-                        setMessages(prev => [...prev, {
-                            id: `error-${Date.now()}`,
-                            role: 'system',
-                            ts_ms: Date.now(),
-                            text: `⚠️ Agent Error: ${errorMsg}`,
-                            source: 'thinclaw',
-                            metadata: { type: 'error' }
-                        }]);
-                    }
-
-                    // Clear after delay so LiveAgentStatus can show completion
-                    setTimeout(() => setActiveRun(null), errorMsg ? 8000 : 3000);
                 } else {
-                    // ── Run is active (started, in_flight, compacting, awaiting approval, etc.) ──
-                    setIsSending(true);
-                    const rid = uiEvent.run_id || `run-${Date.now()}`;
-                    setCurrentRunId(rid);
-                    setActiveRun(prev => {
-                        if (prev && prev.id === rid) return { ...prev, status: 'running' };
-                        return { id: rid, text: '', tools: [], approvals: [], status: 'running', startedAt: Date.now() };
-                    });
-
-                    // Reset speed tracking for new run
-                    if (!ocStreamStartRef.current) {
-                        ocStreamStartRef.current = null;
-                        ocCharsReceivedRef.current = 0;
-                        ocActiveMessageIdRef.current = null;
-                    }
+                    setMessages(prev => [...prev, {
+                        id: msgId,
+                        role: 'assistant' as const,
+                        ts_ms: Date.now(),
+                        text: `🤖 *Automation "${routine_name}":*\n\n${content}`,
+                        source: 'thinclaw',
+                        metadata: { type: 'routine_message', routine_name },
+                    }]);
                 }
+                if (isAutoScrollPinned.current) scrollToBottom();
+                return;
             }
 
-            // Auto-activate processing indicator from Thinking events
-            if (uiEvent.kind === 'AssistantInternal') {
+            // ── "attention" — heartbeat found items needing attention ──────
+            if (evType === 'attention') {
+                setMessages(prev => {
+                    // Remove any interim heartbeat messages
+                    const filtered = prev.filter(m =>
+                        !(m.metadata?.type === 'automation_card' && m.metadata?.routine_name === '__heartbeat__' && m.metadata?.status === 'running')
+                    );
+                    return [...filtered, {
+                        id: msgId,
+                        role: 'assistant' as const,
+                        ts_ms: Date.now(),
+                        text: result_summary || '',
+                        source: 'thinclaw',
+                        metadata: {
+                            type: 'automation_card',
+                            routine_name,
+                            variant: isHeartbeat ? 'heartbeat' : 'automation',
+                            status: 'attention',
+                        },
+                    }];
+                });
+                toast('🔔 Heartbeat: items need attention', { duration: 6000, icon: '💓' });
+                if (isAutoScrollPinned.current) scrollToBottom();
+                return;
+            }
+
+            // ── "dispatched" — non-heartbeat automations open SubAgentPanel ──
+            if (evType === 'dispatched' && !isHeartbeat) {
+                setSubAgentPanelOpen(true);
+                setSubAgentPanelDismissed(false);
+                toast.info(`🤖 Automation "${routine_name}" running as sub-agent`, { duration: 5000 });
+                return;
+            }
+
+            // ── "completed" — show AutomationCard with results ────────────
+            if (evType === 'completed' && result_summary && result_summary !== 'Job completed successfully') {
+                setMessages(prev => {
+                    // Remove interim heartbeat messages for this routine
+                    const filtered = prev.filter(m =>
+                        !(m.metadata?.routine_name === routine_name && (m.metadata?.status === 'running' || m.metadata?.type === 'routine_message'))
+                    );
+                    return [...filtered, {
+                        id: msgId,
+                        role: 'assistant' as const,
+                        ts_ms: Date.now(),
+                        text: result_summary,
+                        source: 'thinclaw',
+                        metadata: {
+                            type: 'automation_card',
+                            routine_name,
+                            variant: isHeartbeat ? 'heartbeat' : 'automation',
+                            status: 'ok',
+                        },
+                    }];
+                });
+                toast.success(`✅ Automation "${routine_name}" completed`, { duration: 6000 });
+                if (isAutoScrollPinned.current) scrollToBottom();
+                return;
+            }
+
+            // ── "failed" — show AutomationCard with error ─────────────────
+            if (evType === 'failed') {
+                setMessages(prev => {
+                    const filtered = prev.filter(m =>
+                        !(m.metadata?.routine_name === routine_name && (m.metadata?.status === 'running' || m.metadata?.type === 'routine_message'))
+                    );
+                    return [...filtered, {
+                        id: msgId,
+                        role: 'assistant' as const,
+                        ts_ms: Date.now(),
+                        text: result_summary || 'Automation failed',
+                        source: 'thinclaw',
+                        metadata: {
+                            type: 'automation_card',
+                            routine_name,
+                            variant: isHeartbeat ? 'heartbeat' : 'automation',
+                            status: 'failed',
+                        },
+                    }];
+                });
+                const summarySnippet = result_summary ? ` — ${String(result_summary).slice(0, 120)}` : '';
+                toast.error(`❌ Automation "${routine_name}" failed${summarySnippet}`, { duration: 8000 });
+                if (isAutoScrollPinned.current) scrollToBottom();
+                return;
+            }
+
+            // ── Fallback for other events (started, dispatched for heartbeat) ──
+            const summarySnippet = result_summary ? ` — ${String(result_summary).slice(0, 120)}` : '';
+            const textMap: Record<string, string> = {
+                started: `⏱ Automation **${routine_name}** started`,
+                dispatched: `🔄 Automation **${routine_name}** dispatched`,
+                completed: `✅ Automation **${routine_name}** completed${summarySnippet}`,
+                failed: `❌ Automation **${routine_name}** failed${summarySnippet}`,
+            };
+            const text = textMap[evType] ?? `🔄 Automation **${routine_name}**: ${evType}`;
+            setMessages(prev => [...prev, {
+                id: msgId,
+                role: 'system' as const,
+                ts_ms: Date.now(),
+                text,
+                source: 'thinclaw',
+                metadata: { type: 'routine_lifecycle', routine_name, event: evType, summary: result_summary },
+            }]);
+            if (evType === 'started') toast.info(`⏱ Automation "${routine_name}" started`, { duration: 4000 });
+            return;
+        }
+        if (uiEvent.kind === 'FactoryReset') {
+
+            // Clear all cached frontend state — backend DB has been wiped
+            setMessages([]);
+            setIsSending(false);
+            setActiveRun(null);
+            setCurrentRunId(null);
+            ocStreamStartRef.current = null;
+            ocCharsReceivedRef.current = 0;
+            ocActiveMessageIdRef.current = null;
+            // Notify parent to re-check bootstrap state from identity.json
+            // (backend has now set bootstrap_completed=false)
+            onFactoryReset?.();
+            return;
+        }
+
+        // ── Session-scoped events ────────────────────────────────────
+        if (!('session_key' in uiEvent) || uiEvent.session_key !== effectiveSessionKey) return;
+
+        if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'LifecycleUpdate', 'PlanUpdate', 'UsageUpdate', 'ApprovalRequested', 'ApprovalResolved'].includes(uiEvent.kind)) {
+            updateRunTelemetry(uiEvent);
+        }
+
+        // Handle message events
+        if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'LifecycleUpdate', 'PlanUpdate', 'UsageUpdate', 'JobUpdate', 'AgentMessage'].includes(uiEvent.kind)) {
+            updateMessagesFromEvent(uiEvent);
+            if (isAutoScrollPinned.current) {
+                scrollToBottom();
+            }
+        }
+
+        // Track active run for LiveAgentStatus
+        if (uiEvent.kind === 'RunStatus' || uiEvent.kind === 'LifecycleUpdate') {
+            const lowerStatus = uiEvent.status?.toLowerCase?.() ?? '';
+            const TERMINAL_STATUSES = ['ok', 'error', 'aborted', 'done', 'interrupted', 'rejected'];
+
+            if (TERMINAL_STATUSES.includes(lowerStatus)) {
+                // ── Run finished ──
+                setIsSending(false);
+                setCurrentRunId(null);
+
+                const errorMsg = 'error' in uiEvent ? uiEvent.error || null : null;
+
+                setActiveRun(prev => prev ? {
+                    ...prev,
+                    status: (lowerStatus === 'ok' || lowerStatus === 'done') ? 'completed' : 'failed',
+                    error: errorMsg || prev.error,
+                    completedAt: Date.now()
+                } : null);
+
+                // Surface RunStatus errors via toast AND inject into chat
+                if (lowerStatus === 'error' && errorMsg) {
+                    toast.error(errorMsg, { duration: 8000 });
+                    setMessages(prev => [...prev, {
+                        id: `error-${Date.now()}`,
+                        role: 'system',
+                        ts_ms: Date.now(),
+                        text: `⚠️ Agent Error: ${errorMsg}`,
+                        source: 'thinclaw',
+                        metadata: { type: 'error' }
+                    }]);
+                }
+
+                // Clear after delay so LiveAgentStatus can show completion
+                setTimeout(() => setActiveRun(null), errorMsg ? 8000 : 3000);
+            } else {
+                // ── Run is active (started, in_flight, compacting, awaiting approval, etc.) ──
+                setIsSending(true);
+                const rid = uiEvent.run_id || `run-${Date.now()}`;
+                setCurrentRunId(rid);
                 setActiveRun(prev => {
-                    if (prev) return prev;
-                    const rid = uiEvent.run_id || `run-${Date.now()}`;
-                    setIsSending(true);
-                    setCurrentRunId(rid);
+                    if (prev && prev.id === rid) return { ...prev, status: 'running' };
                     return { id: rid, text: '', tools: [], approvals: [], status: 'running', startedAt: Date.now() };
                 });
-            }
 
-            // Accumulate tool data into activeRun (auto-create if needed)
-            if (uiEvent.kind === 'ToolUpdate') {
-                setActiveRun(prev => {
-                    const rid = uiEvent.run_id || currentRunId || `run-${Date.now()}`;
-                    // Auto-create activeRun if it doesn't exist yet
-                    if (!prev) {
-                        setIsSending(true);
-                        setCurrentRunId(rid);
-                        prev = { id: rid, text: '', tools: [], approvals: [], status: 'running', startedAt: Date.now() };
-                    }
-                    // Find the last tool with the same name that isn't already completed/failed
-                    // (allows stream/started → ok/error transitions)
-                    let existingIdx = -1;
-                    for (let i = prev.tools.length - 1; i >= 0; i--) {
-                        if (prev.tools[i].tool === uiEvent.tool_name && prev.tools[i].status !== 'completed' && prev.tools[i].status !== 'failed') {
-                            existingIdx = i;
-                            break;
-                        }
-                    }
-                    const newStatus = uiEvent.status === 'ok' ? 'completed' as const :
-                        uiEvent.status === 'error' ? 'failed' as const :
-                            uiEvent.status === 'started' ? 'started' as const : 'running' as const;
-
-                    // Helper to filter out null/undefined/"null" for display
-                    const cleanValue = (v: any) => (v === null || v === undefined || v === 'null' || v === 'Null') ? undefined : v;
-
-                    if (existingIdx >= 0) {
-                        const updatedTools = [...prev.tools];
-                        updatedTools[existingIdx] = {
-                            ...updatedTools[existingIdx],
-                            status: newStatus,
-                            input: cleanValue(uiEvent.input) ?? updatedTools[existingIdx].input,
-                            output: cleanValue(uiEvent.output) ?? updatedTools[existingIdx].output,
-                        };
-                        return { ...prev, tools: updatedTools };
-                    }
-                    return { ...prev, tools: [...prev.tools, { tool: uiEvent.tool_name, input: cleanValue(uiEvent.input), output: cleanValue(uiEvent.output), status: newStatus, timestamp: Date.now() }] };
-                });
-            }
-
-            // Accumulate text into activeRun + track speed
-            if (uiEvent.kind === 'AssistantDelta') {
-                const delta = uiEvent.delta || '';
-                setActiveRun(prev => prev ? { ...prev, text: prev.text + delta } : prev);
-
-                // Speed tracking
-                if (delta.length > 0) {
-                    if (!ocStreamStartRef.current) {
-                        ocStreamStartRef.current = Date.now();
-                    }
-                    ocCharsReceivedRef.current += delta.length;
-                    ocActiveMessageIdRef.current = uiEvent.message_id;
-
-                    const elapsed = (Date.now() - ocStreamStartRef.current) / 1000;
-                    if (elapsed > 0.3) {
-                        const tokPerSec = Math.round((ocCharsReceivedRef.current / 4 / elapsed) * 10) / 10;
-                        setMessages(prev => prev.map(m =>
-                            m.id === uiEvent.message_id ? { ...m, tokensPerSec: tokPerSec } : m
-                        ));
-                    }
-                }
-            } else if (uiEvent.kind === 'AssistantSnapshot' || uiEvent.kind === 'AssistantFinal') {
-                setActiveRun(prev => prev ? { ...prev, text: uiEvent.text || '' } : prev);
-
-                // Stamp final speed on completion
-                if (uiEvent.kind === 'AssistantFinal' && ocStreamStartRef.current && ocCharsReceivedRef.current > 0) {
-                    const elapsed = (Date.now() - ocStreamStartRef.current) / 1000;
-                    if (elapsed > 0.1) {
-                        const tokPerSec = Math.round((ocCharsReceivedRef.current / 4 / elapsed) * 10) / 10;
-                        const msgId = ocActiveMessageIdRef.current || uiEvent.message_id;
-                        setMessages(prev => prev.map(m =>
-                            m.id === msgId ? { ...m, tokensPerSec: tokPerSec } : m
-                        ));
-                    }
+                // Reset speed tracking for new run
+                if (!ocStreamStartRef.current) {
+                    ocStreamStartRef.current = null;
+                    ocCharsReceivedRef.current = 0;
+                    ocActiveMessageIdRef.current = null;
                 }
             }
+        }
 
-            // Track approvals in activeRun
-            if (uiEvent.kind === 'ApprovalRequested') {
-                setActiveRun(prev => {
-                    if (!prev) return prev;
-                    if (prev.approvals.some(a => a.id === uiEvent.approval_id)) return prev;
-                    return { ...prev, approvals: [...prev.approvals, { id: uiEvent.approval_id, tool: uiEvent.tool_name, input: uiEvent.input, status: 'pending' as const }] };
-                });
-            }
-            if (uiEvent.kind === 'ApprovalResolved') {
-                setActiveRun(prev => {
-                    if (!prev) return prev;
-                    return { ...prev, approvals: prev.approvals.map(a => a.id === uiEvent.approval_id ? { ...a, status: uiEvent.approved ? 'approved' as const : 'denied' as const } : a) };
-                });
-            }
-            // Inline secure credential prompt (masked-input card). The value is
-            // collected by the card straight into the secrets store — it never
-            // travels through this event or the model.
-            if (uiEvent.kind === 'CredentialPrompt') {
-                setActiveRun(prev => {
-                    if (!prev) return prev;
-                    const existing = prev.credentialPrompts || [];
-                    if (existing.some(p => p.id === uiEvent.prompt_id)) return prev;
-                    return {
-                        ...prev,
-                        credentialPrompts: [...existing, {
-                            id: uiEvent.prompt_id,
-                            secretName: uiEvent.secret_name,
-                            provider: uiEvent.provider,
-                            reason: uiEvent.reason,
-                            status: 'pending' as const,
-                        }],
+        // Auto-activate processing indicator from Thinking events
+        if (uiEvent.kind === 'AssistantInternal') {
+            setActiveRun(prev => {
+                if (prev) return prev;
+                const rid = uiEvent.run_id || `run-${Date.now()}`;
+                setIsSending(true);
+                setCurrentRunId(rid);
+                return { id: rid, text: '', tools: [], approvals: [], status: 'running', startedAt: Date.now() };
+            });
+        }
+
+        // Accumulate tool data into activeRun (auto-create if needed)
+        if (uiEvent.kind === 'ToolUpdate') {
+            setActiveRun(prev => {
+                const rid = uiEvent.run_id || currentRunId || `run-${Date.now()}`;
+                // Auto-create activeRun if it doesn't exist yet
+                if (!prev) {
+                    setIsSending(true);
+                    setCurrentRunId(rid);
+                    prev = { id: rid, text: '', tools: [], approvals: [], status: 'running', startedAt: Date.now() };
+                }
+                // Find the last tool with the same name that isn't already completed/failed
+                // (allows stream/started → ok/error transitions)
+                let existingIdx = -1;
+                for (let i = prev.tools.length - 1; i >= 0; i--) {
+                    if (prev.tools[i].tool === uiEvent.tool_name && prev.tools[i].status !== 'completed' && prev.tools[i].status !== 'failed') {
+                        existingIdx = i;
+                        break;
+                    }
+                }
+                const newStatus = uiEvent.status === 'ok' ? 'completed' as const :
+                    uiEvent.status === 'error' ? 'failed' as const :
+                        uiEvent.status === 'started' ? 'started' as const : 'running' as const;
+
+                // Helper to filter out null/undefined/"null" for display
+                const cleanValue = (v: any) => (v === null || v === undefined || v === 'null' || v === 'Null') ? undefined : v;
+
+                if (existingIdx >= 0) {
+                    const updatedTools = [...prev.tools];
+                    updatedTools[existingIdx] = {
+                        ...updatedTools[existingIdx],
+                        status: newStatus,
+                        input: cleanValue(uiEvent.input) ?? updatedTools[existingIdx].input,
+                        output: cleanValue(uiEvent.output) ?? updatedTools[existingIdx].output,
                     };
-                });
+                    return { ...prev, tools: updatedTools };
+                }
+                return { ...prev, tools: [...prev.tools, { tool: uiEvent.tool_name, input: cleanValue(uiEvent.input), output: cleanValue(uiEvent.output), status: newStatus, timestamp: Date.now() }] };
+            });
+        }
+
+        // Accumulate text into activeRun + track speed
+        if (uiEvent.kind === 'AssistantDelta') {
+            const delta = uiEvent.delta || '';
+            setActiveRun(prev => prev ? { ...prev, text: prev.text + delta } : prev);
+
+            // Speed tracking
+            if (delta.length > 0) {
+                if (!ocStreamStartRef.current) {
+                    ocStreamStartRef.current = Date.now();
+                }
+                ocCharsReceivedRef.current += delta.length;
+                ocActiveMessageIdRef.current = uiEvent.message_id;
+
+                const elapsed = (Date.now() - ocStreamStartRef.current) / 1000;
+                if (elapsed > 0.3) {
+                    const tokPerSec = Math.round((ocCharsReceivedRef.current / 4 / elapsed) * 10) / 10;
+                    setMessages(prev => prev.map(m =>
+                        m.id === uiEvent.message_id ? { ...m, tokensPerSec: tokPerSec } : m
+                    ));
+                }
             }
-        });
-        return () => {
-            isMounted = false;
-            unlistenPromise.then(fn => fn());
-        };
-    }, [effectiveSessionKey, scrollToBottom, currentRunId, updateRunTelemetry]);
+        } else if (uiEvent.kind === 'AssistantSnapshot' || uiEvent.kind === 'AssistantFinal') {
+            setActiveRun(prev => prev ? { ...prev, text: uiEvent.text || '' } : prev);
+
+            // Stamp final speed on completion
+            if (uiEvent.kind === 'AssistantFinal' && ocStreamStartRef.current && ocCharsReceivedRef.current > 0) {
+                const elapsed = (Date.now() - ocStreamStartRef.current) / 1000;
+                if (elapsed > 0.1) {
+                    const tokPerSec = Math.round((ocCharsReceivedRef.current / 4 / elapsed) * 10) / 10;
+                    const msgId = ocActiveMessageIdRef.current || uiEvent.message_id;
+                    setMessages(prev => prev.map(m =>
+                        m.id === msgId ? { ...m, tokensPerSec: tokPerSec } : m
+                    ));
+                }
+            }
+        }
+
+        // Track approvals in activeRun
+        if (uiEvent.kind === 'ApprovalRequested') {
+            setActiveRun(prev => {
+                if (!prev) return prev;
+                if (prev.approvals.some(a => a.id === uiEvent.approval_id)) return prev;
+                return { ...prev, approvals: [...prev.approvals, { id: uiEvent.approval_id, tool: uiEvent.tool_name, input: uiEvent.input, status: 'pending' as const }] };
+            });
+        }
+        if (uiEvent.kind === 'ApprovalResolved') {
+            setActiveRun(prev => {
+                if (!prev) return prev;
+                return { ...prev, approvals: prev.approvals.map(a => a.id === uiEvent.approval_id ? { ...a, status: uiEvent.approved ? 'approved' as const : 'denied' as const } : a) };
+            });
+        }
+        // Inline secure credential prompt (masked-input card). The value is
+        // collected by the card straight into the secrets store — it never
+        // travels through this event or the model.
+        if (uiEvent.kind === 'CredentialPrompt') {
+            setActiveRun(prev => {
+                if (!prev) return prev;
+                const existing = prev.credentialPrompts || [];
+                if (existing.some(p => p.id === uiEvent.prompt_id)) return prev;
+                return {
+                    ...prev,
+                    credentialPrompts: [...existing, {
+                        id: uiEvent.prompt_id,
+                        secretName: uiEvent.secret_name,
+                        provider: uiEvent.provider,
+                        reason: uiEvent.reason,
+                        status: 'pending' as const,
+                    }],
+                };
+            });
+        }
+    });
 
     // Pin scroll on NEW messages
     useEffect(() => {

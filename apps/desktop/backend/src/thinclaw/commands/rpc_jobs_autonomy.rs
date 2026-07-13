@@ -383,7 +383,7 @@ pub async fn thinclaw_autonomy_status(
         return proxy.get_autonomy_status().await;
     }
 
-    thinclaw_core::tauri_commands::autonomy_status()
+    thinclaw_core::desktop_api::autonomy_status()
         .await
         .and_then(|status| serde_json::to_value(status).map_err(|e| e.to_string()))
         .map_err(autonomy_unavailable)
@@ -398,7 +398,7 @@ pub async fn thinclaw_autonomy_bootstrap(
         return proxy.bootstrap_autonomy().await;
     }
 
-    thinclaw_core::tauri_commands::autonomy_bootstrap()
+    thinclaw_core::desktop_api::autonomy_bootstrap()
         .await
         .and_then(|report| serde_json::to_value(report).map_err(|e| e.to_string()))
         .map_err(autonomy_unavailable)
@@ -414,7 +414,7 @@ pub async fn thinclaw_autonomy_pause(
         return proxy.pause_autonomy(reason).await;
     }
 
-    thinclaw_core::tauri_commands::autonomy_pause(reason)
+    thinclaw_core::desktop_api::autonomy_pause(reason)
         .await
         .map_err(autonomy_unavailable)
 }
@@ -428,7 +428,7 @@ pub async fn thinclaw_autonomy_resume(
         return proxy.resume_autonomy().await;
     }
 
-    thinclaw_core::tauri_commands::autonomy_resume()
+    thinclaw_core::desktop_api::autonomy_resume()
         .await
         .map_err(autonomy_unavailable)
 }
@@ -442,7 +442,7 @@ pub async fn thinclaw_autonomy_permissions(
         return proxy.get_autonomy_permissions().await;
     }
 
-    thinclaw_core::tauri_commands::desktop_permission_status()
+    thinclaw_core::desktop_api::desktop_permission_status()
         .await
         .map_err(autonomy_unavailable)
 }
@@ -464,7 +464,7 @@ pub async fn thinclaw_autonomy_rollback(
         return proxy.rollback_autonomy().await;
     }
 
-    thinclaw_core::tauri_commands::autonomy_rollback()
+    thinclaw_core::desktop_api::autonomy_rollback()
         .await
         .map_err(autonomy_unavailable)
 }
