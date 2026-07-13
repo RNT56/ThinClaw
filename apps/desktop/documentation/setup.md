@@ -1,8 +1,20 @@
 # ThinClaw Desktop: Development Setup Guide
 
-> **Last updated:** 2026-05-15
+> **Last updated:** 2026-07-13
 
 ThinClaw Desktop is a cross-platform desktop AI application built with Tauri (Rust + React). It supports **multiple inference engines** — the engine is selected at compile time via Cargo feature flags.
+
+## First-run flow
+
+Desktop uses one adaptive wizard for the complete product instead of separate
+Workbench and Agent setup paths. It configures appearance, local versus remote
+deployment, a shared agent name and personality, engine bootstrap when needed,
+local or cloud inference, model downloads or provider credentials, and OS
+permissions. The same agent identity is persisted through the canonical Agent
+settings command in both local and remote mode. The wizard ends with both
+Workbench and Agent Cockpit ready and points optional messaging-channel setup
+to Cockpit → Channels, where credential schemas and encrypted secret handling
+remain authoritative.
 
 For alpha bridge and release-gate details, also see:
 

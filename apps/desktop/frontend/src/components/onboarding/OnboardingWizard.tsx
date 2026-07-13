@@ -60,9 +60,33 @@ interface OnboardingWizardProps {
     onComplete: () => void;
 }
 
-type Step = 'welcome' | 'style' | 'mode' | 'remote_setup' | 'engine_setup' | 'inference' | 'models' | 'api_keys' | 'permissions' | 'complete';
+export type Step = 'welcome' | 'style' | 'mode' | 'remote_setup' | 'agent' | 'engine_setup' | 'inference' | 'models' | 'api_keys' | 'permissions' | 'complete';
 type InferenceChoice = 'local' | 'cloud';
 type ModelCategory = 'llm' | 'embedding' | 'stt' | 'diffusion';
+
+export function buildOnboardingSteps({
+    mode,
+    inference,
+    showEngineSetup,
+}: {
+    mode: 'local' | 'remote';
+    inference: InferenceChoice;
+    showEngineSetup: boolean;
+}): Step[] {
+    const steps: Step[] = ['welcome', 'style', 'mode'];
+    if (mode === 'remote') steps.push('remote_setup');
+    steps.push('agent');
+    if (showEngineSetup) steps.push('engine_setup');
+    steps.push('inference', inference === 'local' ? 'models' : 'api_keys', 'permissions', 'complete');
+    return steps;
+}
+
+const PERSONALITY_PACKS = [
+    { id: 'balanced', label: 'Balanced', description: 'Clear, thoughtful, and adaptable' },
+    { id: 'professional', label: 'Professional', description: 'Precise, structured, and concise' },
+    { id: 'creative_partner', label: 'Creative partner', description: 'Exploratory, generative, and expressive' },
+    { id: 'research_assistant', label: 'Research assistant', description: 'Evidence-oriented and analytical' },
+] as const;
 
 // Pipeline filter definitions — matches HFDiscovery.tsx for consistency
 const ONBOARDING_PIPELINE_FILTERS: Record<ModelCategory, { label: string; tags: string[]; downloadCategory: string | null; placeholder: string }> = {
@@ -101,6 +125,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     });
     const [isLoading, setIsLoading] = useState(false);
     const [inferenceChoice, setInferenceChoice] = useState<InferenceChoice>('local');
+    const [agentName, setAgentName] = useState('ThinClaw');
+    const [personalityPack, setPersonalityPack] = useState('balanced');
 
     // --- Remote setup state ---
     const [remoteDeployMode, setRemoteDeployMode] = useState<'new' | 'existing'>('existing');
@@ -181,19 +207,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const showEngineSetupStep = engineInfo?.id === 'mlx' || engineInfo?.id === 'vllm';
 
     // Dynamic step list based on user choices
-    const stepList = useMemo(() => {
-        const s: Step[] = ['welcome', 'style', 'mode'];
-        if (mode === 'remote') s.push('remote_setup');
-        if (showEngineSetupStep) s.push('engine_setup');
-        s.push('inference');
-        if (inferenceChoice === 'local') {
-            s.push('models');
-        } else {
-            s.push('api_keys');
-        }
-        s.push('permissions', 'complete');
-        return s;
-    }, [showEngineSetupStep, mode, inferenceChoice]);
+    const stepList = useMemo(() => buildOnboardingSteps({
+        mode,
+        inference: inferenceChoice,
+        showEngineSetup: showEngineSetupStep,
+    }), [showEngineSetupStep, mode, inferenceChoice]);
 
     const progressPct = useMemo(() => {
         const idx = stepList.indexOf(step);
@@ -234,6 +252,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     };
 
     const handleNext = () => {
+        if (step === 'agent' && !agentName.trim()) return;
         if (step === 'complete') { handleFinish(); return; }
         const idx = stepList.indexOf(step);
         if (idx < stepList.length - 1) setStep(stepList[idx + 1]);
@@ -425,6 +444,14 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const handleFinish = async () => {
         setIsLoading(true);
         try {
+            unwrapResult(await commands.thinclawConfigPatch({
+                agent: {
+                    'agent.name': agentName.trim(),
+                    'agent.personality_pack': personalityPack,
+                    'agent.persona_seed': personalityPack,
+                },
+            }), 'agent setup');
+
             // Save HF Token if provided
             if (hfToken && hfToken.trim().length > 0) {
                 await thinclaw.setHfToken(hfToken.trim());
@@ -740,6 +767,83 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             </p>
                                         </div>
                                     </button>
+                                </div>
+                            </motion.div>
+                        )}
+
+                        {step === 'agent' && (
+                            <motion.div
+                                key="agent"
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, x: -20 }}
+                                className="space-y-7"
+                            >
+                                <div className="text-center">
+                                    <div className="mx-auto mb-4 grid size-12 place-items-center rounded-xl bg-primary/10 text-primary">
+                                        <Bot className="size-6" aria-hidden="true" />
+                                    </div>
+                                    <h2 className="text-2xl font-bold">Meet your agent</h2>
+                                    <p className="mt-1 text-muted-foreground">
+                                        This identity follows the agent in both Workbench and Agent Cockpit.
+                                    </p>
+                                </div>
+
+                                <div className="mx-auto max-w-2xl space-y-5">
+                                    <div className="space-y-2">
+                                        <label htmlFor="onboarding-agent-name" className="text-sm font-semibold">Agent name</label>
+                                        <input
+                                            id="onboarding-agent-name"
+                                            value={agentName}
+                                            maxLength={48}
+                                            onChange={(event) => setAgentName(event.currentTarget.value)}
+                                            placeholder="ThinClaw"
+                                            aria-invalid={!agentName.trim()}
+                                            className="h-11 w-full rounded-xl border border-border bg-background px-4 text-sm outline-none transition-shadow focus:ring-2 focus:ring-primary/30"
+                                        />
+                                        <p className="text-xs text-muted-foreground">Used in conversations, status, and connected channels.</p>
+                                    </div>
+
+                                    <fieldset className="space-y-3">
+                                        <legend className="text-sm font-semibold">Working style</legend>
+                                        <div className="grid gap-3 sm:grid-cols-2">
+                                            {PERSONALITY_PACKS.map((pack) => {
+                                                const selected = personalityPack === pack.id;
+                                                return (
+                                                    <button
+                                                        key={pack.id}
+                                                        type="button"
+                                                        role="radio"
+                                                        aria-checked={selected}
+                                                        onClick={() => setPersonalityPack(pack.id)}
+                                                        className={cn(
+                                                            "rounded-xl border p-4 text-left transition-colors",
+                                                            selected
+                                                                ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                                                                : "border-border bg-card hover:bg-accent/50",
+                                                        )}
+                                                    >
+                                                        <span className="block text-sm font-semibold">{pack.label}</span>
+                                                        <span className="mt-1 block text-xs text-muted-foreground">{pack.description}</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </fieldset>
+
+                                    <div className="grid gap-3 rounded-xl border border-border bg-muted/30 p-4 text-xs sm:grid-cols-2">
+                                        <div>
+                                            <p className="font-semibold text-foreground">Workbench</p>
+                                            <p className="mt-1 text-muted-foreground">Direct chat, projects, models, and private desktop workflows.</p>
+                                        </div>
+                                        <div>
+                                            <p className="font-semibold text-foreground">Agent Cockpit</p>
+                                            <p className="mt-1 text-muted-foreground">Sessions, tools, approvals, automations, and channels.</p>
+                                        </div>
+                                        <p className="text-muted-foreground sm:col-span-2">
+                                            Channel credentials remain optional and can be added safely after setup from Cockpit → Channels.
+                                        </p>
+                                    </div>
                                 </div>
                             </motion.div>
                         )}
@@ -1440,9 +1544,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                 <div className="w-20 h-20 bg-green-500/10 rounded-full flex items-center justify-center mx-auto mb-6">
                                     <CheckCircle className="w-10 h-10 text-green-500" />
                                 </div>
-                                <h2 className="text-3xl font-bold">You're All Set!</h2>
+                                <h2 className="text-3xl font-bold">{agentName.trim() || 'ThinClaw'} is ready</h2>
                                 <p className="text-lg text-muted-foreground max-w-md mx-auto">
-                                    ThinClaw Desktop is configured and ready to help. You can always change these settings later in the settings menu.
+                                    Your {mode} agent will use {inferenceChoice} inference. Workbench and Agent Cockpit are both ready, and every choice remains editable in Settings.
                                 </p>
                             </motion.div>
                         )}
@@ -1466,7 +1570,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
                     <button
                         onClick={handleNext}
-                        disabled={isLoading}
+                        disabled={isLoading || (step === 'agent' && !agentName.trim())}
                         className="flex items-center gap-2 bg-primary text-primary-foreground hover:bg-primary/90 px-6 py-2.5 rounded-lg font-medium transition-all shadow-xs hover:shadow-sm"
                     >
                         {step === 'complete' ? (
