@@ -39,6 +39,7 @@ name = "thinclaw"
 version = "0.15.0"
 edition = "2024"
 rust-version = "1.92"
+autobins = false
 description = "Secure personal agent that protects your data and expands its capabilities on the fly"
 authors = ["RNT56 (ThinClaw)"]
 license = "MIT OR Apache-2.0"
@@ -393,9 +394,21 @@ name = "html_to_markdown"
 required-features = ["html-to-markdown"]
 
 [[bin]]
+name = "thinclaw"
+path = "src/main.rs"
+
+[[bin]]
 name = "thinclaw-acp"
 path = "src/bin/thinclaw-acp.rs"
 required-features = ["acp"]
+
+[[bin]]
+name = "thinclaw-shell-scan"
+path = "src/bin/thinclaw-shell-scan.rs"
+
+[[example]]
+name = "export-openapi"
+path = "src/bin/export-openapi.rs"
 
 [[bench]]
 name = "safety_sanitize"

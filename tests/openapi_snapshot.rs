@@ -1,6 +1,6 @@
 //! Guards the committed OpenAPI snapshot against silent drift.
 //!
-//! Regenerate with `cargo run --bin export-openapi -- generate`.
+//! Regenerate with `cargo run --example export-openapi -- generate`.
 
 use thinclaw::channels::web::openapi::gateway_openapi;
 
@@ -12,7 +12,7 @@ fn committed_openapi_snapshot_matches_generated_document() {
     );
     let committed = std::fs::read_to_string(committed_path).expect(
         "missing clients/openapi/thinclaw-gateway.openapi.json; run \
-         `cargo run --bin export-openapi -- generate`",
+         `cargo run --example export-openapi -- generate`",
     );
 
     let committed_value: serde_json::Value =
@@ -23,6 +23,6 @@ fn committed_openapi_snapshot_matches_generated_document() {
     assert_eq!(
         committed_value, generated_value,
         "OpenAPI snapshot drifted from the code; run \
-         `cargo run --bin export-openapi -- generate` and commit the result"
+         `cargo run --example export-openapi -- generate` and commit the result"
     );
 }

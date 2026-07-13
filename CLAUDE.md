@@ -173,7 +173,7 @@ Temporary dev note:
 - If you change extension flows, update `docs/EXTENSION_SYSTEM.md`, `src/tools/README.md`, and any affected tool docs.
 - If you change crate boundaries, update `docs/CRATE_OWNERSHIP.md` and keep this file's repo-shape notes aligned.
 - If you change security boundaries, update `src/NETWORK_SECURITY.md` and any top-level trust/safety wording.
-- If you change gateway auth, device identity, or a mobile-contract endpoint/DTO, update `docs/MOBILE_APP.md` and `docs/MOBILE_SECURITY.md`, and regenerate `clients/openapi/thinclaw-gateway.openapi.json` (`cargo run --bin export-openapi -- generate`) in the same PR.
+- If you change gateway auth, device identity, or a mobile-contract endpoint/DTO, update `docs/MOBILE_APP.md` and `docs/MOBILE_SECURITY.md`, and regenerate `clients/openapi/thinclaw-gateway.openapi.json` (`cargo run --example export-openapi -- generate`) in the same PR.
 
 ## Preferred Maintainer Workflow
 
