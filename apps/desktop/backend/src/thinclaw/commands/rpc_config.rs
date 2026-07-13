@@ -228,12 +228,12 @@ pub async fn thinclaw_set_autonomy_mode(
     enabled: bool,
 ) -> Result<(), BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
-        return Err((gated(
+        return Err(gated(
             "autonomy mode mutation",
             "remote autonomy execution is controlled by the gateway host policy; desktop may only read remote autonomy status",
             "change autonomy mode on the gateway host, or run the desktop in local mode",
             RouteMode::LocalOnly,
-        )).into());
+        ));
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {

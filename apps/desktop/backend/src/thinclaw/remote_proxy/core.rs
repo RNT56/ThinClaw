@@ -170,7 +170,7 @@ impl RemoteGatewayProxy {
             let resp = match req.send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    let error = remote_transport_error(&method.to_string(), &url, error);
+                    let error = remote_transport_error(method.as_ref(), &url, error);
                     if attempt < max_attempts && bridge_error_is_retryable(&error) {
                         sleep_before_retry(path, attempt, None).await;
                         continue;

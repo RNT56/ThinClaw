@@ -104,11 +104,10 @@ pub async fn thinclaw_channel_config_submit(
         .filter(|field| field.required && field.field_type != "password")
     {
         if !obj.contains_key(&field.id) {
-            return Err((crate::thinclaw::bridge::BridgeError::from(format!(
+            return Err(crate::thinclaw::bridge::BridgeError::from(format!(
                 "missing required channel config field: {}",
                 field.id
-            )))
-            .into());
+            )));
         }
     }
     for (field_id, value) in &obj {
@@ -139,10 +138,9 @@ pub async fn thinclaw_channel_config_submit(
                 _ => false,
             };
         if required_value_missing || !value_valid {
-            return Err((crate::thinclaw::bridge::BridgeError::from(format!(
+            return Err(crate::thinclaw::bridge::BridgeError::from(format!(
                 "invalid value for channel config field: {field_id}"
-            )))
-            .into());
+            )));
         }
     }
 
@@ -169,8 +167,7 @@ pub async fn thinclaw_channel_config_submit(
             &field.id,
             value,
         )
-        .await
-        .map_err(crate::thinclaw::bridge::BridgeError::from)?;
+        .await?;
         secrets_updated += 1;
     }
 

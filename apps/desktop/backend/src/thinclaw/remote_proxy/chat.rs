@@ -49,11 +49,10 @@ impl RemoteGatewayProxy {
         session_key: &str,
     ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         if session_key == "agent:main" {
-            return Err((Self::unavailable(
+            return Err(Self::unavailable(
                 "session delete",
                 "the gateway assistant thread is pinned and cannot be deleted",
-            ))
-            .into());
+            ));
         }
         self.delete_json(&format!(
             "/api/chat/thread/{}",

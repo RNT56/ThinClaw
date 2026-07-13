@@ -433,13 +433,12 @@ pub async fn thinclaw_save_brave_key(
     key: Option<String>,
 ) -> Result<(), BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
-        return Err((gated(
+        return Err(gated(
             "Brave Search API key save",
             "saving the Brave Search API key has no ThinClaw gateway endpoint in remote mode",
             "switch ThinClaw Desktop to embedded (local) mode to save the Brave Search API key",
             RouteMode::LocalOnly,
-        ))
-        .into());
+        ));
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -586,13 +585,12 @@ pub async fn thinclaw_set_hf_token(
     token: String,
 ) -> Result<(), BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
-        return Err((gated(
+        return Err(gated(
             "Hugging Face token save",
             "saving the Hugging Face token has no ThinClaw gateway endpoint in remote mode",
             "switch ThinClaw Desktop to embedded (local) mode to save the Hugging Face token",
             RouteMode::LocalOnly,
-        ))
-        .into());
+        ));
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -776,12 +774,12 @@ pub async fn thinclaw_save_bedrock_credentials(
                 return Ok(());
             }
         }
-        return Err((gated(
+        return Err(gated(
             "Bedrock AWS credential save",
             "saving Amazon Bedrock AWS credentials (access key id, secret access key, region) has no ThinClaw gateway endpoint in remote mode",
             "switch ThinClaw Desktop to embedded (local) mode to save Bedrock AWS credentials",
             RouteMode::LocalOnly,
-        )).into());
+        ));
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {

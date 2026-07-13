@@ -924,7 +924,7 @@ pub async fn thinclaw_routing_simulate(
             Err(err) if err.to_string().contains("HTTP 503") => Ok(unavailable_route_simulation(
                 "unavailable: remote ThinClaw LLM runtime is not running",
             )),
-            Err(err) => Err((err).into()),
+            Err(err) => Err(err),
         };
     }
 

@@ -237,7 +237,7 @@ pub async fn thinclaw_get_fleet_status(
     };
 
     let active_remote_url = (cfg.gateway_mode == "remote")
-        .then(|| cfg.remote_url.as_deref())
+        .then_some(cfg.remote_url.as_deref())
         .flatten();
     let profiles = cfg.profiles.clone();
 

@@ -206,7 +206,7 @@ fn validate_start_request(request: &RemoteAccessStartRequest) -> Result<(), Brid
 async fn config_port(manager: &State<'_, ThinClawManager>) -> Result<u16, BridgeError> {
     let config = match manager.get_config().await {
         Some(config) => config,
-        None => manager.init_config().await.map_err(BridgeError::from)?,
+        None => manager.init_config().await?,
     };
     Ok(config.port)
 }

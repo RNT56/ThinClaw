@@ -280,19 +280,15 @@ pub async fn thinclaw_reveal_gateway_token(
 ) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let config = match state.get_config().await {
         Some(config) => config,
-        None => state
-            .init_config()
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from)?,
+        None => state.init_config().await?,
     };
     if config.gateway_mode == "remote" {
-        return Err((crate::thinclaw::bridge::gated(
+        return Err(crate::thinclaw::bridge::gated(
             "local gateway credential",
             "Desktop is connected to a remote gateway",
             "Switch to Local Core before revealing its credential",
             crate::thinclaw::bridge::RouteMode::LocalOnly,
-        ))
-        .into());
+        ));
     }
     Ok(config.auth_token.clone())
 }

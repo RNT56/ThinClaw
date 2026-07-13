@@ -128,14 +128,14 @@ async fn local_job_by_id(
 ) -> Result<thinclaw_core::context::JobContext, crate::thinclaw::bridge::BridgeError> {
     let parsed = Uuid::parse_str(job_id).map_err(|_| "Invalid job ID".to_string())?;
     let agent = ironclaw.agent().await?;
-    Ok(agent
+    agent
         .context_manager()
         .get_context(parsed)
         .await
         .map_err(|_| BridgeError::NotFound {
             resource: format!("job:{job_id}"),
             message: "Job not found".to_string(),
-        })?)
+        })
 }
 
 #[tauri::command]
@@ -253,19 +253,15 @@ pub async fn thinclaw_job_restart(
     job_id: String,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .restart_job(&job_id)
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+        return proxy.restart_job(&job_id).await;
     }
 
-    Err((crate::thinclaw::bridge::gated(
+    Err(crate::thinclaw::bridge::gated(
         "job restart",
         "only remote gateway sandbox jobs expose restartable stored job specs",
         "connect a remote gateway",
         crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
-    .into())
 }
 
 #[tauri::command]
@@ -279,17 +275,15 @@ pub async fn thinclaw_job_prompt(
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .prompt_job(&job_id, content, done.unwrap_or(false))
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+            .await;
     }
 
-    Err((crate::thinclaw::bridge::gated(
+    Err(crate::thinclaw::bridge::gated(
         "job prompt",
         "only remote gateway interactive sandbox jobs accept follow-up prompts",
         "connect a remote gateway",
         crate::thinclaw::bridge::RouteMode::RemoteOnly,
     ))
-    .into())
 }
 
 #[tauri::command]
@@ -346,19 +340,15 @@ pub async fn thinclaw_job_files_list(
     path: Option<String>,
 ) -> Result<serde_json::Value, BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .list_job_files(&job_id, path.as_deref())
-            .await
-            .map_err(BridgeError::from);
+        return proxy.list_job_files(&job_id, path.as_deref()).await;
     }
 
-    Err((gated(
+    Err(gated(
         "job files",
         "only remote gateway sandbox jobs expose project file browsing",
         "connect a remote gateway",
         RouteMode::RemoteOnly,
     ))
-    .into())
 }
 
 #[tauri::command]
@@ -369,19 +359,15 @@ pub async fn thinclaw_job_file_read(
     path: String,
 ) -> Result<serde_json::Value, BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .read_job_file(&job_id, &path)
-            .await
-            .map_err(BridgeError::from);
+        return proxy.read_job_file(&job_id, &path).await;
     }
 
-    Err((gated(
+    Err(gated(
         "job file read",
         "only remote gateway sandbox jobs expose project file reads",
         "connect a remote gateway",
         RouteMode::RemoteOnly,
     ))
-    .into())
 }
 
 #[tauri::command]
@@ -485,20 +471,16 @@ pub async fn thinclaw_autonomy_rollouts(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .get_autonomy_rollouts()
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+        return proxy.get_autonomy_rollouts().await;
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
-        return Err((crate::thinclaw::bridge::gated(
+        return Err(crate::thinclaw::bridge::gated(
             "desktop autonomy execution",
             "desktop autonomy manager is not active",
             "enable reckless desktop autonomy in host config and grant OS permissions",
             crate::thinclaw::bridge::RouteMode::LocalAndRemote,
-        ))
-        .into());
+        ));
     };
     let summary = manager
         .rollout_summary()
@@ -513,20 +495,16 @@ pub async fn thinclaw_autonomy_checks(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .get_autonomy_checks()
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+        return proxy.get_autonomy_checks().await;
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
-        return Err((crate::thinclaw::bridge::gated(
+        return Err(crate::thinclaw::bridge::gated(
             "desktop autonomy execution",
             "desktop autonomy manager is not active",
             "enable reckless desktop autonomy in host config and grant OS permissions",
             crate::thinclaw::bridge::RouteMode::LocalAndRemote,
-        ))
-        .into());
+        ));
     };
     let summary = manager
         .checks_summary()
@@ -541,20 +519,16 @@ pub async fn thinclaw_autonomy_evidence(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy
-            .get_autonomy_evidence()
-            .await
-            .map_err(crate::thinclaw::bridge::BridgeError::from);
+        return proxy.get_autonomy_evidence().await;
     }
 
     let Some(manager) = thinclaw_core::desktop_autonomy::desktop_autonomy_manager() else {
-        return Err((crate::thinclaw::bridge::gated(
+        return Err(crate::thinclaw::bridge::gated(
             "desktop autonomy execution",
             "desktop autonomy manager is not active",
             "enable reckless desktop autonomy in host config and grant OS permissions",
             crate::thinclaw::bridge::RouteMode::LocalAndRemote,
-        ))
-        .into());
+        ));
     };
     let summary = manager
         .evidence_summary()

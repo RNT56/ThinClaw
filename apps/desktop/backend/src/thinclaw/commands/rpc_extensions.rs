@@ -573,12 +573,12 @@ pub async fn thinclaw_extension_reconnect(
         return Ok(extension_action_from_json(raw));
     }
 
-    Err((gated(
+    Err(gated(
         "extension reconnect",
         "local desktop mode does not expose a channel manager restart handle yet",
         "activate the extension or restart the gateway, or connect a remote gateway that supports reconnect",
         RouteMode::RemoteOnly,
-    )).into())
+    ))
 }
 
 /// Fetch an extension setup schema.

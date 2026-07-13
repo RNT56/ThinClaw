@@ -368,7 +368,7 @@ fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
                 let element_size = match arr_type {
                     0 | 1 | 7 => 1_u64,
                     2 | 3 => 2,
-                    4 | 5 | 6 => 4,
+                    4..=6 => 4,
                     10..=13 => 8,
                     _ => return Err(format!("Unknown GGUF array type: {}", arr_type)),
                 };

@@ -59,13 +59,12 @@ pub async fn thinclaw_skills_toggle(
     enabled: bool,
 ) -> Result<serde_json::Value, BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
-        return Err((gated(
+        return Err(gated(
             "skill enable/disable",
             "the gateway exposes skill install/remove/trust/reload but no enable toggle",
             "toggle skills from the local (embedded) runtime",
             RouteMode::LocalOnly,
-        ))
-        .into());
+        ));
     }
 
     let agent = ironclaw.agent().await?;
@@ -493,12 +492,12 @@ pub async fn thinclaw_install_skill_repo(
     repo_url: String,
 ) -> Result<String, BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
-        return Err((gated(
+        return Err(gated(
             "skill repository install",
             "the gateway install endpoint accepts catalog names, raw content, or direct SKILL.md URLs; cloning arbitrary git repositories is local-only",
             "clone git skill repositories from the local (embedded) runtime",
             RouteMode::LocalOnly,
-        )).into());
+        ));
     }
 
     let cfg_guard = state.config.read().await;

@@ -595,10 +595,10 @@ pub async fn direct_inference_refresh_cloud_models(
     provider: String,
 ) -> Result<model_discovery::types::ProviderDiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        return Ok(proxy
+        return proxy
             .get_provider_models(&provider)
             .await
-            .map(remote_provider_models_to_discovery)?);
+            .map(remote_provider_models_to_discovery);
     }
 
     tracing::info!("[model_discovery] Refreshing models for '{}'", provider);

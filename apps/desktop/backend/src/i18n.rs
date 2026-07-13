@@ -35,7 +35,10 @@ mod tests {
         let german = direct_i18n_get_catalog("de-DE".to_string());
         let english = direct_i18n_get_catalog("en".to_string());
         assert_eq!(german.locale, "de");
-        assert_eq!(german.messages.get("nav.settings").unwrap(), "Einstellungen");
+        assert_eq!(
+            german.messages.get("nav.settings").unwrap(),
+            "Einstellungen"
+        );
         assert_eq!(german.messages.len(), english.messages.len());
         assert!(german.available_locales.contains(&"ko".to_string()));
     }

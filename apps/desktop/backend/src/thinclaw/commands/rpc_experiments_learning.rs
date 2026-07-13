@@ -360,12 +360,12 @@ pub async fn thinclaw_external_memory_configure(
     use crate::thinclaw::bridge::{gated, RouteMode};
 
     if ironclaw.remote_proxy().await.is_some() {
-        return Err((gated(
+        return Err(gated(
             "external-memory setup",
             "The connected gateway exposes provider health but does not expose credential-bearing provider configuration over HTTP.",
             "switch to the local embedded runtime and configure the provider on that host",
             RouteMode::LocalOnly,
-        )).into());
+        ));
     }
     let (provider, settings) = build_external_memory_settings(&request)?;
     let orchestrator = learning_orchestrator(&ironclaw).await?;
@@ -387,12 +387,12 @@ pub async fn thinclaw_external_memory_disable(
     use crate::thinclaw::bridge::{gated, RouteMode};
 
     if ironclaw.remote_proxy().await.is_some() {
-        return Err((gated(
+        return Err(gated(
             "external-memory setup",
             "The connected gateway exposes provider health but does not expose credential-bearing provider configuration over HTTP.",
             "switch to the local embedded runtime and disable the provider on that host",
             RouteMode::LocalOnly,
-        )).into());
+        ));
     }
     let orchestrator = learning_orchestrator(&ironclaw).await?;
     let providers = orchestrator.disable_active_memory_provider(USER_ID).await?;
@@ -610,15 +610,14 @@ pub async fn thinclaw_learning_evaluate_outcomes(
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .post_json("/api/learning/outcomes/evaluate-now", &json!({}))
-            .await
-            .map_err(|e| e.into());
+            .await;
     }
-    Err((crate::thinclaw::bridge::gated(
+    Err(crate::thinclaw::bridge::gated(
         "manual outcome evaluation",
         "Manual outcome evaluation requires the gateway outcome service; the Desktop local engine exposes outcome review state but not direct evaluator execution.",
         "connect a remote gateway",
         crate::thinclaw::bridge::RouteMode::RemoteOnly,
-    )).into())
+    ))
 }
 
 // ── Experiments reads ──────────────────────────────────────────────────────
@@ -851,15 +850,14 @@ pub async fn thinclaw_experiments_gpu_validate(
                 &format!("/api/experiments/providers/gpu-clouds/{provider}/validate"),
                 &json!({}),
             )
-            .await
-            .map_err(|e| e.into());
+            .await;
     }
-    Err((crate::thinclaw::bridge::gated(
+    Err(crate::thinclaw::bridge::gated(
         "GPU credential validation",
         "GPU cloud credential validation is only available through a ThinClaw gateway because it requires the gateway secrets service.",
         "connect a remote gateway",
         crate::thinclaw::bridge::RouteMode::RemoteOnly,
-    )).into())
+    ))
 }
 
 #[tauri::command]
@@ -874,15 +872,14 @@ pub async fn thinclaw_experiments_gpu_launch_test(
                 &format!("/api/experiments/providers/gpu-clouds/{provider}/launch-test"),
                 &json!({}),
             )
-            .await
-            .map_err(|e| e.into());
+            .await;
     }
-    Err((crate::thinclaw::bridge::gated(
+    Err(crate::thinclaw::bridge::gated(
         "GPU launch test",
         "GPU cloud launch tests are only available through a ThinClaw gateway because Desktop local mode does not expose provider credentials for remote compute launch.",
         "connect a remote gateway",
         crate::thinclaw::bridge::RouteMode::RemoteOnly,
-    )).into())
+    ))
 }
 
 // ── Agent eval (agent-loop environment) ─────────────────────────────────────
@@ -941,12 +938,12 @@ pub async fn thinclaw_experiments_run_eval(
 
     // Agent-loop eval drives the embedded local agent; unreachable in remote mode.
     if ironclaw.remote_proxy().await.is_some() {
-        return Err((gated(
+        return Err(gated(
             "experiment eval",
             "Agent-loop evaluation runs against the embedded local agent, which is not reachable when connected to a remote gateway.",
             "switch to the local embedded runtime to run evals",
             RouteMode::LocalOnly,
-        )).into());
+        ));
     }
 
     match env_id.to_ascii_lowercase().as_str() {
@@ -993,18 +990,18 @@ pub async fn thinclaw_experiments_run_eval(
                 "trajectories": trajectories,
             }))
         }
-        "terminal_bench" | "skill_bench" => Err((gated(
+        "terminal_bench" | "skill_bench" => Err(gated(
             "benchmark eval",
             "Terminal and skill benchmarks need case definitions, which Desktop cannot supply yet — run them through the `thinclaw` CLI experiment runner.",
             "use the CLI experiment runner",
             RouteMode::LocalOnly,
-        )).into()),
-        other => Err((gated(
+        )),
+        other => Err(gated(
             "experiment eval",
             format!("Unknown environment '{other}'."),
             "call thinclaw_experiments_list_envs to discover available environments",
             RouteMode::LocalOnly,
-        )).into()),
+        )),
     }
 }
 
