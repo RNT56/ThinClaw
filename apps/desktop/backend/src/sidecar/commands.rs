@@ -207,7 +207,7 @@ pub async fn start_embedding_server_core(
             let config_mgr = app.state::<crate::config::ConfigManager>();
             let mut cfg = config_mgr.get_config();
             cfg.vector_dimensions = dim as u32;
-            config_mgr.save_config(&cfg);
+            config_mgr.save_config(&cfg).await?;
             println!(
                 "[embedding] Vector store reinitialized at dimension {}.",
                 dim

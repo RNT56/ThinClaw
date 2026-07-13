@@ -73,6 +73,7 @@ mod tests {
             "handle.manage(secret_store);",
             "handle.manage(inference_router);",
             "handle.manage(model_registry);",
+            ".attach_database(shared_history.runtime_store())",
             "handle.manage(shared_history);",
             "handle.manage(pool);",
             "handle.manage(ironclaw_state);",

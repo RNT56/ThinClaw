@@ -423,8 +423,7 @@ pub fn run() {
 
             // ── Shared model/provider registry + inference router ───
             // The router clone shares this registry's discovery cache and key vault.
-            let model_registry =
-                inference::ModelProviderRegistry::new(shared_secret_store);
+            let model_registry = inference::ModelProviderRegistry::new(shared_secret_store);
             let inference_router = inference::InferenceRouter::new(model_registry.clone());
             handle.manage(inference_router);
             handle.manage(model_registry);
@@ -485,6 +484,11 @@ pub fn run() {
             let shared_history = history::SharedHistoryStore::open(&app_data_dir, &pool)
                 .await
                 .expect("failed to initialize shared history store");
+            handle
+                .state::<config::ConfigManager>()
+                .attach_database(shared_history.runtime_store())
+                .await
+                .expect("failed to initialize canonical settings store");
             handle.manage(shared_history);
             handle.manage(pool);
 

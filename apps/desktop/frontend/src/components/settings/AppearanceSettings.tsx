@@ -98,7 +98,7 @@ export function AppearanceSettings() {
         if (!config) return;
         const newConfig = { ...config, spotlight_shortcut: val };
         setConfig(newConfig);
-        await commands.updateUserConfig(newConfig);
+        await commands.updateUserConfig({ spotlight_shortcut: val });
     };
 
     const effectiveMode = theme === 'system'

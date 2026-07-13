@@ -278,7 +278,7 @@ pub async fn direct_inference_update_backend(
         Modality::Stt => config.stt_backend = Some(backend_id.clone()),
         Modality::Diffusion => config.diffusion_backend = Some(backend_id.clone()),
     }
-    config_manager.save_config(&config);
+    config_manager.save_config(&config).await?;
 
     // Reconfigure the entire router from the updated config.
     // This constructs cloud backends immediately (they only need an API key)

@@ -151,6 +151,7 @@ These pieces may be shared, but only through explicit adapters:
 | Local inference engines | Report readiness through `LocalRuntimeSnapshot`; `exposurePolicy=shared_when_enabled` means Direct may use the endpoint immediately and ThinClaw may use it only when the local inference toggle is enabled. |
 | Cloud provider catalog | May provide model discovery to both systems if the contract is provider/model metadata only. |
 | Conversation store | `SharedHistoryStore` owns one local runtime database. Direct rows use `surface=direct_workbench`; embedded agent rows use `surface=agent_cockpit`. Delete/list/project operations are surface-scoped. |
+| Settings schema | `ConfigManager` owns one versioned settings envelope in the shared runtime database. `desktop.workbench` is the typed Direct view; agent key/value rows are the Cockpit view. `user_config.json` is merged once and retained only as a recovery mirror. |
 | Runtime contracts | `crates/thinclaw-runtime-contracts` is the Desktop-first DTO source, with WebUI as the future adopter. The iOS surface does **not** use it — it generates its client from the gateway OpenAPI spec (`clients/openapi/thinclaw-gateway.openapi.json`) via swift-openapi-generator. |
 | Generated bindings | Direct Workbench uses `direct_*` command wrappers. Agent Cockpit uses `thinclaw_*` wrappers and `thinclaw-event`. |
 | OS permissions | Camera, mic, screen, filesystem, and accessibility prompts may be shared at the host level, but authority must be checked per system. |

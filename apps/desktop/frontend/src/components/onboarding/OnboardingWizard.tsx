@@ -445,7 +445,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         if (dim && dim > 0) {
                             const userConfig = await commands.getUserConfig();
                             if (userConfig.vector_dimensions !== dim) {
-                                await commands.updateUserConfig({ ...userConfig, vector_dimensions: dim });
+                                await commands.updateUserConfig({ vector_dimensions: dim });
                                 console.log(`[onboarding] Pre-set vector_dimensions to ${dim} for ${embeddingEntry.repoId}`);
                             }
                         }
