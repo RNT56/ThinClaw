@@ -4,13 +4,21 @@ set -euo pipefail
 
 manifest="apps/desktop/backend/Cargo.toml"
 
+# These fixtures exercise bridge routing and proxy contracts only; they do not
+# open the embedded runtime database. Build the Desktop crate against the
+# PostgreSQL runtime profile so the Linux test linker does not combine the
+# independent bundled SQLite implementations from libsql and sqlx. The libsql
+# runtime itself is covered by the dedicated profile and DB-contract jobs.
+desktop_test_features="llamacpp,runtime-postgres"
+
 run_fixture() {
   local test_name="$1"
   local output
   local status=0
   if output="$(
     CARGO_PROFILE_TEST_DEBUG=0 \
-      cargo test --manifest-path "$manifest" --locked --lib "$test_name" -- --exact --nocapture 2>&1
+      cargo test --manifest-path "$manifest" --locked --no-default-features \
+        --features "$desktop_test_features" --lib "$test_name" -- --exact --nocapture 2>&1
   )"; then
     status=0
   else
