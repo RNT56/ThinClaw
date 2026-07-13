@@ -262,7 +262,10 @@ panel wired or honestly gated; contract suite green.
 - **[DONE]** Bridge resilience: bounded retries for idempotent reads only (including
   capped `Retry-After`), typed transport/HTTP failures, shutdown-safe SSE reconnect,
   and deduplicated failover/recovery UX.
-- Performance budgets: cold start; `UiEvent` stream throughput (30 variants); large-history virtualization; sidecar memory ceilings.
+- **[DONE]** Performance budgets: measured backend/renderer readiness, ordered
+  one-frame `AssistantDelta` coalescing without delaying other `UiEvent` variants,
+  virtualized histories in both chat surfaces, enforced chunk size, and visible
+  Desktop/sidecar memory ceiling state.
 - Crash reporting + structured logs surfaced in the Doctor panel.
 
 **Upgrade**

@@ -1,10 +1,17 @@
 use serde::Serialize;
 use specta::Type;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex, OnceLock,
+};
+use std::time::Duration;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessesToUpdate, RefreshKind, System};
-use tauri::command;
+use tauri::{command, State};
 
 static SYS: OnceLock<Mutex<System>> = OnceLock::new();
+static STARTUP_READY_MS: AtomicU64 = AtomicU64::new(0);
+const STARTUP_BUDGET_MS: u64 = 8_000;
+const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 fn get_sys() -> &'static Mutex<System> {
     SYS.get_or_init(|| {
@@ -26,13 +33,25 @@ pub struct SystemSpecs {
     pub cpu_usage: f32,
     pub cpu_cores: u16,
     pub platform: String,
+    /// Resident memory of the Tauri desktop process alone.
+    pub desktop_memory: f64,
+    /// Resident memory of all descendant sidecar processes.
+    pub sidecar_memory: f64,
+    /// Desktop + descendant sidecar resident memory.
     pub app_memory: f64,
+    /// Configured app+sidecar memory budget (zero when disabled).
+    pub memory_ceiling: f64,
+    pub memory_budget_exceeded: bool,
+    /// Backend initialization time captured immediately before the event loop.
+    pub startup_ready_ms: u64,
+    pub startup_budget_ms: u64,
+    pub startup_budget_exceeded: bool,
     pub memory_bandwidth_gbps: f32,
 }
 
 #[command]
 #[specta::specta]
-pub fn get_system_specs() -> SystemSpecs {
+pub fn get_system_specs(config: State<'_, crate::config::ConfigManager>) -> SystemSpecs {
     let mut sys = get_sys().lock().unwrap_or_else(|e| e.into_inner());
 
     // Refresh CPU usage
@@ -52,19 +71,29 @@ pub fn get_system_specs() -> SystemSpecs {
     let my_pid = sysinfo::get_current_pid().ok();
     sys.refresh_processes(ProcessesToUpdate::All, true);
 
-    let mut total_app_memory = 0.0;
+    let mut desktop_memory = 0.0;
+    let mut sidecar_memory = 0.0;
     if let Some(my_pid) = my_pid {
         if let Some(process) = sys.process(my_pid) {
-            total_app_memory += process.memory() as f64;
+            desktop_memory = process.memory() as f64;
         }
 
-        // Include child processes (sidecars)
-        for p in sys.processes().values() {
-            if p.parent() == Some(my_pid) {
-                total_app_memory += p.memory() as f64;
+        // Include every descendant, not only direct children: Python and model
+        // launchers commonly fork the actual inference worker one level deeper.
+        for (pid, process) in sys.processes() {
+            if *pid != my_pid && is_descendant_of(&sys, *pid, my_pid) {
+                sidecar_memory += process.memory() as f64;
             }
         }
     }
+    let total_app_memory = desktop_memory + sidecar_memory;
+    let user_config = config.get_config();
+    let memory_ceiling = if user_config.enable_memory_reservation {
+        user_config.memory_reservation_gb as f64 * BYTES_PER_GIB
+    } else {
+        0.0
+    };
+    let startup_ready_ms = STARTUP_READY_MS.load(Ordering::Relaxed);
 
     SystemSpecs {
         total_memory: sys.total_memory() as f64,
@@ -74,7 +103,51 @@ pub fn get_system_specs() -> SystemSpecs {
         cpu_usage,
         cpu_cores: sys.cpus().len() as u16,
         platform,
+        desktop_memory,
+        sidecar_memory,
         app_memory: total_app_memory,
+        memory_ceiling,
+        memory_budget_exceeded: exceeds_memory_budget(total_app_memory, memory_ceiling),
+        startup_ready_ms,
+        startup_budget_ms: STARTUP_BUDGET_MS,
+        startup_budget_exceeded: startup_ready_ms > STARTUP_BUDGET_MS,
+    }
+}
+
+pub fn record_startup_ready(duration: Duration) {
+    STARTUP_READY_MS.store(
+        duration.as_millis().min(u64::MAX as u128) as u64,
+        Ordering::Relaxed,
+    );
+}
+
+fn is_descendant_of(system: &System, pid: sysinfo::Pid, ancestor: sysinfo::Pid) -> bool {
+    let mut current = system.process(pid).and_then(|process| process.parent());
+    for _ in 0..64 {
+        let Some(parent) = current else { return false };
+        if parent == ancestor {
+            return true;
+        }
+        current = system.process(parent).and_then(|process| process.parent());
+    }
+    false
+}
+
+fn exceeds_memory_budget(usage_bytes: f64, ceiling_bytes: f64) -> bool {
+    ceiling_bytes > 0.0 && usage_bytes > ceiling_bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_memory_budget_is_strictly_bounded() {
+        let ceiling = 8.0 * BYTES_PER_GIB;
+        assert!(!exceeds_memory_budget(7.9 * BYTES_PER_GIB, ceiling));
+        assert!(!exceeds_memory_budget(ceiling, ceiling));
+        assert!(exceeds_memory_budget(8.1 * BYTES_PER_GIB, ceiling));
+        assert!(!exceeds_memory_budget(100.0 * BYTES_PER_GIB, 0.0));
     }
 }
 

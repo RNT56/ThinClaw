@@ -11,6 +11,7 @@ import { ModelProvider } from "./components/model-context";
 import { ChatProvider } from "./components/chat/chat-context";
 import { ConfigProvider } from "./components/config-context";
 import { ServicesProvider } from "./components/services-context";
+import { recordRendererReady } from "./lib/performance-budgets";
 
 const ChatLayout = lazy(() =>
   import("./components/chat/ChatLayout").then((module) => ({ default: module.ChatLayout })),
@@ -61,6 +62,10 @@ function App() {
       setWindowLabel("");
     }
   }, []);
+
+  useEffect(() => {
+    if (checked) recordRendererReady();
+  }, [checked]);
 
   const checkSetup = async () => {
     try {

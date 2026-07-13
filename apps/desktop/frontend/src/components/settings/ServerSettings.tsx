@@ -497,10 +497,14 @@ export function ServerSettings() {
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-3 gap-2 text-[10px] text-muted-foreground/80">
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px] text-muted-foreground/80">
                                 <div className="flex items-center gap-1.5">
                                     <div className="w-1.5 h-1.5 rounded-full bg-primary" />
-                                    <span>AI Active: {(systemSpecs.app_memory / GB).toFixed(1)}GB</span>
+                                    <span>Desktop: {(systemSpecs.desktop_memory / GB).toFixed(1)}GB</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                                    <span>Sidecars: {(systemSpecs.sidecar_memory / GB).toFixed(1)}GB</span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                     <div className="w-1.5 h-1.5 rounded-full bg-primary/20 border border-primary/30" />
@@ -511,6 +515,23 @@ export function ServerSettings() {
                                     <span>System: {((systemSpecs.used_memory - systemSpecs.app_memory) / GB).toFixed(1)}GB</span>
                                 </div>
                             </div>
+                            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2 text-[10px] text-muted-foreground">
+                                <span>
+                                    Backend ready: <b className={systemSpecs.startup_budget_exceeded ? 'text-amber-500' : 'text-emerald-500'}>
+                                        {systemSpecs.startup_ready_ms.toLocaleString()}ms
+                                    </b> / {systemSpecs.startup_budget_ms.toLocaleString()}ms budget
+                                </span>
+                                <span>
+                                    App + sidecars: {(systemSpecs.app_memory / GB).toFixed(1)}GB
+                                    {systemSpecs.memory_ceiling > 0 ? ` / ${(systemSpecs.memory_ceiling / GB).toFixed(0)}GB ceiling` : ' / no configured ceiling'}
+                                </span>
+                            </div>
+                            {systemSpecs.memory_budget_exceeded && (
+                                <div className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-500">
+                                    <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                                    <span>Desktop and inference sidecars exceed the configured memory ceiling. Stop the local runtime or raise the quota before starting another model.</span>
+                                </div>
+                            )}
                         </div>
                     );
                 })()}

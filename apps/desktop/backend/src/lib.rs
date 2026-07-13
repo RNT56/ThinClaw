@@ -295,6 +295,7 @@ fn copy_dir_contents(from: &std::path::Path, to: &std::path::Path) -> std::io::R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let startup_started = std::time::Instant::now();
     // ── Tracing / Logging init ───────────────────────────────────────────
     // ThinClaw's init_tracing() installs:
     //   1. A reloadable EnvFilter (ironclaw=debug by default)
@@ -689,6 +690,22 @@ pub fn run() {
 
         // 3. Global Shortcuts
         setup::shortcuts::register_shortcuts(&app);
+    }
+
+    system::record_startup_ready(startup_started.elapsed());
+    let startup_ready_ms = startup_started.elapsed().as_millis();
+    if startup_ready_ms > 8_000 {
+        tracing::warn!(
+            startup_ready_ms,
+            budget_ms = 8_000,
+            "desktop backend startup exceeded its performance budget"
+        );
+    } else {
+        tracing::info!(
+            startup_ready_ms,
+            budget_ms = 8_000,
+            "desktop backend startup ready"
+        );
     }
 
     app.run(|_app_handle, _event| {

@@ -4357,7 +4357,27 @@ string
  * The recognised, closed set of [`SubAgentStatus`] values.
  */
 export type SubAgentStatusKnown = "running" | "completed" | "failed"
-export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string; app_memory: number; memory_bandwidth_gbps: number }
+export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string;
+/**
+ * Resident memory of the Tauri desktop process alone.
+ */
+desktop_memory: number;
+/**
+ * Resident memory of all descendant sidecar processes.
+ */
+sidecar_memory: number;
+/**
+ * Desktop + descendant sidecar resident memory.
+ */
+app_memory: number;
+/**
+ * Configured app+sidecar memory budget (zero when disabled).
+ */
+memory_ceiling: number; memory_budget_exceeded: boolean;
+/**
+ * Backend initialization time captured immediately before the event loop.
+ */
+startup_ready_ms: number; startup_budget_ms: number; startup_budget_exceeded: boolean; memory_bandwidth_gbps: number }
 export type TAURI_CHANNEL<TSend> = import("@tauri-apps/api/core").Channel<TSend>
 /**
  * Telegram configuration input

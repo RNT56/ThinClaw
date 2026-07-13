@@ -29,6 +29,7 @@
     "test:watch": "cd frontend && vitest",
     "test:ui": "cd frontend && vitest --ui",
     "test:coverage": "cd frontend && vitest run --coverage",
+    "test:performance": "cd frontend && vitest run src/lib/performance-budgets.test.ts src/lib/thinclaw-event-buffer.test.ts src/lib/thinclaw-timeline.test.ts",
     "test:e2e:browser": "node scripts/run_browser_e2e.mjs",
     "test:backend": "cd backend && cargo test --no-default-features --features \"llamacpp runtime-postgres\" -- --skip web_search",
     "test:backend:all-engines": "cd backend && cargo test --no-default-features --features \"llamacpp runtime-postgres\" -- --skip web_search && cargo test --no-default-features --features \"mlx runtime-postgres\" -- engine && cargo test --no-default-features --features \"vllm runtime-postgres\" -- engine && cargo test --no-default-features --features \"ollama runtime-postgres\" -- engine",

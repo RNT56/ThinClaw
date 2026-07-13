@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronDown, Brain, Loader2, Zap, Trash2, Download, Sliders, FileDown, PanelRight, ListChecks, CircleDollarSign, Cpu, ShieldCheck } from 'lucide-react';
 import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import { cn } from '../../lib/utils';
@@ -7,6 +8,7 @@ import { toast } from 'sonner';
 import * as thinclaw from '../../lib/thinclaw';
 import { ThinClawMessage } from '../../lib/thinclaw';
 import { commandClient } from '../../lib/command-client';
+import { buildThinClawTimeline } from '../../lib/thinclaw-timeline';
 import { StreamRun, useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 
 
@@ -147,8 +149,7 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         }
     }, [subAgentCount, subAgentPanelDismissed]);
 
-    const messagesEndRef = useRef<HTMLDivElement>(null);
-    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const timelineRef = useRef<VirtuosoHandle>(null);
     // IC-028: Renamed from isUserScrolling (inverted logic) to isAutoScrollPinned
     const isAutoScrollPinned = useRef(true);
     const gatewayReconnectPending = useRef(false);
@@ -216,18 +217,9 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
 
 
 
-    const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
-        messagesEndRef.current?.scrollIntoView({ behavior });
+    const scrollToBottom = useCallback((behavior: 'auto' | 'smooth' = 'smooth') => {
+        timelineRef.current?.scrollToIndex({ index: 'LAST', behavior });
     }, []);
-
-    const handleScroll = () => {
-        if (!scrollContainerRef.current) return;
-        const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
-        const distFromBottom = scrollHeight - scrollTop - clientHeight;
-
-        // IC-028: Simplified — pinned when near bottom, unpinned when user scrolls up
-        isAutoScrollPinned.current = distFromBottom < 15;
-    };
 
     const fetchHistory = useCallback(async () => {
         // Don't gate on gatewayRunning — the DB has history even if the
@@ -792,10 +784,10 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         }
     });
 
-    // Pin scroll on NEW messages
+    // Follow new messages only while the user remains at the bottom. Sending a
+    // message explicitly re-pins; scrolling up is respected during long runs.
     useEffect(() => {
-        isAutoScrollPinned.current = true;
-        scrollToBottom();
+        if (isAutoScrollPinned.current) scrollToBottom();
     }, [messages.length, scrollToBottom]);
 
     const updateMessagesFromEvent = (uiEvent: any) => {
@@ -1002,32 +994,10 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     };
 
-    // GROUPING LOGIC
-    const groupedGroups: { type: 'msg' | 'group', items: ThinClawMessage[] }[] = [];
-    let currentSystemGroup: ThinClawMessage[] = [];
-
-    messages
-        .filter(m => !m.text.trim().startsWith('NO_REPL'))
-        .filter(m => m.text.trim().length > 0 || m.role === 'system')
-        .forEach(msg => {
-            const isProgressEvent = msg.metadata?.type === 'plan' || msg.metadata?.type === 'usage';
-            const isSystemTool = (msg.role === 'system' && !isProgressEvent) || (msg.metadata?.type === 'tool') || (msg.text.includes('[Tool'));
-            // Brain/Thoughts are technically system but we might want them standalone?
-            // The user requested tool calls to be condensed.
-            // Let's explicitly check for TOOL traits.
-            const isTool = isSystemTool && !msg.text.includes('🧠'); // heuristic
-
-            if (isTool) {
-                currentSystemGroup.push(msg);
-            } else {
-                if (currentSystemGroup.length > 0) {
-                    groupedGroups.push({ type: 'group', items: [...currentSystemGroup] });
-                    currentSystemGroup = [];
-                }
-                groupedGroups.push({ type: 'msg', items: [msg] });
-            }
-        });
-    if (currentSystemGroup.length > 0) groupedGroups.push({ type: 'group', items: [...currentSystemGroup] });
+    const timelineItems = useMemo(
+        () => buildThinClawTimeline(messages, coreTab === 'chat' && isCoreView),
+        [messages, coreTab, isCoreView],
+    );
 
     const telemetryItems = Object.values(runTelemetry)
         .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -1219,202 +1189,142 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                         <div className="absolute inset-0 top-[105px] z-10">
                             <MemoryEditor />
                         </div>
-                    ) : (
-                        <div
-                            ref={scrollContainerRef}
-                            onScroll={handleScroll}
-                            className={cn("absolute inset-0 overflow-y-auto px-6 pt-20 space-y-6 scroll-smooth", isCoreView ? "top-[40px] pt-32 pb-10" : "pb-32")}
-                        >
-                            {isLoading && messages.length === 0 ? (
-                                <div className="flex flex-col items-center justify-center h-full gap-4 text-muted-foreground opacity-50">
-                                    <RefreshCw className="w-10 h-10 animate-spin" />
-                                    <p>Loading history...</p>
-                                </div>
-                            ) : (
-                                <div className="max-w-4xl mx-auto space-y-6">
-                                    <RunTelemetryStrip items={telemetryItems} />
-
-                                    {/* Message Timeline */}
-                                    <AnimatePresence initial={false}>
-                                        {(() => {
-                                            const timelineItems = groupedGroups.map((g, i) => ({ type: 'msg_group' as const, ts: g.items[0].ts_ms, data: g, index: i }))
-                                                .sort((a, b) => a.ts !== b.ts ? a.ts - b.ts : a.index - b.index);
-
-                                            // Filter for Chat Tab (Human/Agent only)
-                                            const filteredItems = coreTab === 'chat' && isCoreView
-                                                ? timelineItems.filter(item => {
-                                                    const group = item.data;
-                                                    if (group.type === 'group') return false;
-                                                    const msg = group.items[0];
-
-                                                    // Hide clearly internal agent states
-                                                    if (msg.text.includes('🧠')) return false;
-                                                    if (msg.text.includes('HEARTBEAT_POLL')) return false;
-                                                    if (msg.text.includes('SYSTEM_CONTEXT_REFRESH')) return false;
-                                                    if (msg.text.includes('[SYSTEM_CONTEXT_UPDATE]')) return false;
-                                                    if (msg.text.trim().startsWith('[Tool Call:')) return false;
-                                                    if (msg.text.includes('Pre-compaction memory flush')) return false;
-                                                    if (msg.text.includes('Store durable memories now')) return false;
-                                                    if (msg.text.includes('NO_REPL')) return false;
-
-                                                    // Hide assistant messages that are purely tool calls
-                                                    if (msg.role === 'assistant' && msg.text.includes('[TOOL_CALLS]')) {
-                                                        // Check if there's any real content besides tool calls
-                                                        const withoutToolCalls = msg.text.replace(/\[TOOL_CALLS\]\w+\[ARGS\]\{.*?\}[\s]*/gm, '').trim();
-                                                        if (!withoutToolCalls) return false;
-                                                    }
-
-
-                                                    // Hide all system messages in Chat view
-                                                    if (msg.role === 'system') return false;
-
-                                                    // Only human prompts and agent replies
-                                                    return msg.role === 'user' || msg.role === 'assistant';
-                                                })
-                                                : timelineItems;
-
-                                            return filteredItems.map((item, idx) => {
-
-                                                const group = item.data;
-                                                if (group.type === 'group') {
-                                                    return (
-                                                        <motion.div key={`group - ${idx} `} initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                                                            <ToolHistoryGroup messages={group.items} onViewSession={onViewSession} />
-                                                        </motion.div>
-                                                    );
-                                                }
-
-                                                const msg = group.items[0];
-                                                return (
-                                                    <motion.div
-                                                        key={msg.id}
-                                                        initial={{ opacity: 0, y: 10 }}
-                                                        animate={{ opacity: 1, y: 0 }}
-                                                        className={cn("flex gap-4 group", msg.role === 'user' ? "justify-end" : "justify-start")}
-                                                    >
-                                                        {/* AutomationCard gets its own layout — no bot avatar or bubble */}
-                                                        {msg.metadata?.type === 'automation_card' ? (
-                                                            <div className="w-full max-w-[85%]">
-                                                                <AutomationCard
-                                                                    routineName={msg.metadata.routine_name || ''}
-                                                                    variant={msg.metadata.variant || 'automation'}
-                                                                    status={msg.metadata.status || 'ok'}
-                                                                    content={msg.text}
-                                                                    timestamp={msg.ts_ms}
-                                                                />
-                                                            </div>
-                                                        ) : (
-                                                            <>
-                                                                {msg.role !== 'user' && (
-                                                                    <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 border border-primary/20 shadow-xs mt-1">
-                                                                        {msg.role === 'assistant' ? <Bot className="w-4 h-4 text-primary" /> : <Settings className="w-4 h-4 text-muted-foreground" />}
-                                                                    </div>
-                                                                )}
-                                                                <div className={cn(
-                                                                    "max-w-[85%] rounded-2xl px-5 py-3 shadow-md relative group",
-                                                                    msg.role === 'user' ? "bg-primary text-primary-foreground rounded-tr-none"
-                                                                        : msg.role === 'assistant' ? "bg-card/80 backdrop-blur-md border border-border/50 rounded-tl-none text-card-foreground"
-                                                                            : "bg-muted/50 border border-border/50 text-foreground/80 font-mono text-xs rounded-lg py-2 px-3 shadow-inner"
-                                                                )}>
-                                                                    {msg.role === 'system'
-                                                                        ? <SystemMessageContent text={msg.text} metadata={msg.metadata} onViewSession={onViewSession} />
-                                                                        : <AssistantMessageContent text={msg.text} />
-                                                                    }
-                                                                    <div className={cn("flex items-center gap-3 mt-2 text-[10px] opacity-0 group-hover:opacity-100 uppercase transition-opacity duration-200", msg.role === 'user' ? "text-primary-foreground/50" : "text-muted-foreground/60")}>
-                                                                        <span><Clock className="w-3 h-3 inline mr-1" /> {formatTime(msg.ts_ms)}</span>
-                                                                        {msg.role === 'assistant' && msg.tokensPerSec != null && msg.tokensPerSec > 0 && (
-                                                                            <span className="flex items-center gap-1 text-emerald-400/70">
-                                                                                <Zap className="w-2.5 h-2.5" />
-                                                                                {msg.tokensPerSec} tok/s
-                                                                            </span>
-                                                                        )}
-                                                                        {msg.role !== 'user' && (
-                                                                            <CopyMessageButton text={msg.text} />
-                                                                        )}
-                                                                    </div>
-                                                                </div>
-                                                                {msg.role === 'user' && <div className="w-8 h-8 rounded-xl bg-muted flex items-center justify-center shrink-0 mt-1"><User className="w-4 h-4 text-muted-foreground" /></div>}
-                                                            </>
-                                                        )}
-                                                    </motion.div>
-                                                );
-                                            });
-                                        })()}
-                                    </AnimatePresence>
-
-                                    {/* CHAT TAB: Empty state — agent is booting */}
-                                    {isCoreView && coreTab === 'chat' && messages.length === 0 && !isLoading && gatewayRunning && (
-                                        <div className="flex flex-col items-center justify-center py-20 gap-5">
-                                            <div className="w-16 h-16 rounded-full bg-muted/30 flex items-center justify-center relative">
-                                                <div className="absolute inset-0 rounded-full border border-emerald-500/20 animate-ping" />
-                                                <Bot className="w-8 h-8 text-emerald-500" />
-                                            </div>
-                                            <div className="text-center">
-                                                <h3 className="text-lg font-medium text-foreground">
-                                                    {bootstrapNeeded ? 'Awakening…' : 'Coming online…'}
-                                                </h3>
-                                                <p className="text-sm text-muted-foreground mt-1">
-                                                    {bootstrapNeeded
-                                                        ? 'Your agent is waking up for the first time.'
-                                                        : 'Your agent is preparing to greet you.'}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* CORE VIEW: Console tab controls */}
-                                    {isCoreView && coreTab === 'console' && (
-                                        <div className="space-y-4 pt-4 border-t border-border/30 mt-4">
-                                            {/* Empty State / Refresh Button */}
-                                            <div className="text-center space-y-4 pt-10 border-t border-border/30">
-                                                {messages.length === 0 ? (
-                                                    <>
-                                                        <div className="w-16 h-16 rounded-full bg-muted/30 mx-auto flex items-center justify-center relative">
-                                                            <div className="absolute inset-0 rounded-full border border-emerald-500/20 animate-ping" />
-                                                            <Radio className="w-8 h-8 text-emerald-500" />
-                                                        </div>
-                                                        <div>
-                                                            <h3 className="text-lg font-medium text-foreground">System Consoles Online</h3>
-                                                            <p className="text-sm text-muted-foreground">Waiting for system events...</p>
-                                                        </div>
-                                                    </>
-                                                ) : (
-                                                    <div className="flex items-center gap-2 justify-center py-4 border-b border-border/30 mb-4">
-                                                        <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                                                        <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Context Active</span>
-                                                    </div>
-                                                )}
-                                                <button
-                                                    onClick={() => handleWakeUp(bootstrapNeeded)}
-                                                    className="px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-mono uppercase tracking-wider rounded border border-emerald-500/20 transition-all flex items-center justify-center gap-2 mx-auto"
-                                                >
-                                                    <Zap className="w-3.5 h-3.5" />
-                                                    {bootstrapNeeded ? 'Trigger Boot Sequence' : 'Refresh Context'}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* Live Agent Status — rich real-time run view */}
-                                    {activeRun && (
-                                        <LiveAgentStatus
-                                            run={activeRun}
-                                            persistent={isCoreView && coreTab === 'console'}
-                                        />
-                                    )}
-
-                                    {/* Fallback: minimal indicator when no activeRun but still sending */}
-                                    {!activeRun && isSending && (
-                                        <div className="py-4 flex items-center gap-2 justify-center">
-                                            <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
-                                            <span className="text-[10px] font-mono uppercase tracking-widest text-blue-400/80">Agent Processing...</span>
-                                        </div>
-                                    )}
-
-                                    <div ref={messagesEndRef} className="h-10" />
-                                </div>
-                            )}
+                    ) : isLoading && messages.length === 0 ? (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-muted-foreground opacity-50">
+                            <RefreshCw className="w-10 h-10 animate-spin" />
+                            <p>Loading history...</p>
                         </div>
+                    ) : (
+                        <Virtuoso
+                            ref={timelineRef}
+                            data={timelineItems}
+                            className={cn('absolute inset-0 custom-scrollbar', isCoreView && 'top-[40px]')}
+                            followOutput="smooth"
+                            atBottomStateChange={(atBottom) => { isAutoScrollPinned.current = atBottom; }}
+                            computeItemKey={(_, item) => `${item.data.type}-${item.data.items[0]?.id ?? item.index}`}
+                            components={{
+                                Header: () => (
+                                    <div className={cn('max-w-4xl mx-auto px-6 space-y-6', isCoreView ? 'pt-32' : 'pt-20')}>
+                                        <RunTelemetryStrip items={telemetryItems} />
+                                    </div>
+                                ),
+                                Footer: () => (
+                                    <div className="max-w-4xl mx-auto px-6 space-y-6 pb-36">
+                                        {isCoreView && coreTab === 'chat' && messages.length === 0 && !isLoading && gatewayRunning && (
+                                            <div className="flex flex-col items-center justify-center py-20 gap-5">
+                                                <div className="w-16 h-16 rounded-full bg-muted/30 flex items-center justify-center relative">
+                                                    <div className="absolute inset-0 rounded-full border border-emerald-500/20 animate-ping" />
+                                                    <Bot className="w-8 h-8 text-emerald-500" />
+                                                </div>
+                                                <div className="text-center">
+                                                    <h3 className="text-lg font-medium text-foreground">{bootstrapNeeded ? 'Awakening…' : 'Coming online…'}</h3>
+                                                    <p className="text-sm text-muted-foreground mt-1">
+                                                        {bootstrapNeeded ? 'Your agent is waking up for the first time.' : 'Your agent is preparing to greet you.'}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        )}
+                                        {isCoreView && coreTab === 'console' && (
+                                            <div className="space-y-4 pt-4 border-t border-border/30 mt-4">
+                                                <div className="text-center space-y-4 pt-10 border-t border-border/30">
+                                                    {messages.length === 0 ? (
+                                                        <>
+                                                            <div className="w-16 h-16 rounded-full bg-muted/30 mx-auto flex items-center justify-center relative">
+                                                                <div className="absolute inset-0 rounded-full border border-emerald-500/20 animate-ping" />
+                                                                <Radio className="w-8 h-8 text-emerald-500" />
+                                                            </div>
+                                                            <div>
+                                                                <h3 className="text-lg font-medium text-foreground">System Consoles Online</h3>
+                                                                <p className="text-sm text-muted-foreground">Waiting for system events...</p>
+                                                            </div>
+                                                        </>
+                                                    ) : (
+                                                        <div className="flex items-center gap-2 justify-center py-4 border-b border-border/30 mb-4">
+                                                            <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                                                            <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Context Active</span>
+                                                        </div>
+                                                    )}
+                                                    <button
+                                                        onClick={() => handleWakeUp(bootstrapNeeded)}
+                                                        className="px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-mono uppercase tracking-wider rounded border border-emerald-500/20 transition-all flex items-center justify-center gap-2 mx-auto"
+                                                    >
+                                                        <Zap className="w-3.5 h-3.5" />
+                                                        {bootstrapNeeded ? 'Trigger Boot Sequence' : 'Refresh Context'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                        {activeRun && (
+                                            <LiveAgentStatus run={activeRun} persistent={isCoreView && coreTab === 'console'} />
+                                        )}
+                                        {!activeRun && isSending && (
+                                            <div className="py-4 flex items-center gap-2 justify-center">
+                                                <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
+                                                <span className="text-[10px] font-mono uppercase tracking-widest text-blue-400/80">Agent Processing...</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                ),
+                            }}
+                            itemContent={(_, item) => {
+                                const group = item.data;
+                                if (group.type === 'group') {
+                                    return (
+                                        <div className="max-w-4xl mx-auto px-6 py-3">
+                                            <ToolHistoryGroup messages={group.items} onViewSession={onViewSession} />
+                                        </div>
+                                    );
+                                }
+
+                                const msg = group.items[0];
+                                return (
+                                    <div className="max-w-4xl mx-auto px-6 py-3">
+                                        <div className={cn('flex gap-4 group', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
+                                            {msg.metadata?.type === 'automation_card' ? (
+                                                <div className="w-full max-w-[85%]">
+                                                    <AutomationCard
+                                                        routineName={msg.metadata.routine_name || ''}
+                                                        variant={msg.metadata.variant || 'automation'}
+                                                        status={msg.metadata.status || 'ok'}
+                                                        content={msg.text}
+                                                        timestamp={msg.ts_ms}
+                                                    />
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    {msg.role !== 'user' && (
+                                                        <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 border border-primary/20 shadow-xs mt-1">
+                                                            {msg.role === 'assistant' ? <Bot className="w-4 h-4 text-primary" /> : <Settings className="w-4 h-4 text-muted-foreground" />}
+                                                        </div>
+                                                    )}
+                                                    <div className={cn(
+                                                        'max-w-[85%] rounded-2xl px-5 py-3 shadow-md relative group',
+                                                        msg.role === 'user' ? 'bg-primary text-primary-foreground rounded-tr-none'
+                                                            : msg.role === 'assistant' ? 'bg-card/80 backdrop-blur-md border border-border/50 rounded-tl-none text-card-foreground'
+                                                                : 'bg-muted/50 border border-border/50 text-foreground/80 font-mono text-xs rounded-lg py-2 px-3 shadow-inner',
+                                                    )}>
+                                                        {msg.role === 'system'
+                                                            ? <SystemMessageContent text={msg.text} metadata={msg.metadata} onViewSession={onViewSession} />
+                                                            : <AssistantMessageContent text={msg.text} />}
+                                                        <div className={cn('flex items-center gap-3 mt-2 text-[10px] opacity-0 group-hover:opacity-100 uppercase transition-opacity duration-200', msg.role === 'user' ? 'text-primary-foreground/50' : 'text-muted-foreground/60')}>
+                                                            <span><Clock className="w-3 h-3 inline mr-1" /> {formatTime(msg.ts_ms)}</span>
+                                                            {msg.role === 'assistant' && msg.tokensPerSec != null && msg.tokensPerSec > 0 && (
+                                                                <span className="flex items-center gap-1 text-emerald-400/70">
+                                                                    <Zap className="w-2.5 h-2.5" />
+                                                                    {msg.tokensPerSec} tok/s
+                                                                </span>
+                                                            )}
+                                                            {msg.role !== 'user' && <CopyMessageButton text={msg.text} />}
+                                                        </div>
+                                                    </div>
+                                                    {msg.role === 'user' && <div className="w-8 h-8 rounded-xl bg-muted flex items-center justify-center shrink-0 mt-1"><User className="w-4 h-4 text-muted-foreground" /></div>}
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            }}
+                        />
                     )
                 }
 
