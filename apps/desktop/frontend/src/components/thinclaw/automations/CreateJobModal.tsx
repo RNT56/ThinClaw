@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertCircle, CheckCircle2, FileText, Plus, RefreshCw, Terminal, Timer, X } from 'lucide-react';
+import { Activity, AlertCircle, CheckCircle2, FileText, Plus, RefreshCw, Terminal, Timer, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { cn } from '../../../lib/utils';
@@ -17,6 +17,7 @@ export interface CreateJobModalProps {
 export function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
+    const [triggerType, setTriggerType] = useState<thinclaw.RoutineTriggerType>('cron');
     const [schedule, setSchedule] = useState('0 0 * * * * *');
     const [task, setTask] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -60,6 +61,7 @@ export function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                 description.trim(),
                 schedule.trim(),
                 task.trim(),
+                triggerType,
             );
             toast.success(`Routine "${name}" created successfully`);
             onCreated();
@@ -96,11 +98,11 @@ export function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                             <Timer className="w-4 h-4 text-primary" />
                         </div>
                         <div>
-                            <h2 className="text-base font-bold">Create Scheduled Job</h2>
-                            <p className="text-[11px] text-muted-foreground">Stored in ThinClaw RoutineStore — survives restarts</p>
+                            <h2 className="text-base font-bold">Create Routine</h2>
+                            <p className="text-[11px] text-muted-foreground">Schedule an agent job or heartbeat system event</p>
                         </div>
                     </div>
-                    <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-muted-foreground hover:text-white">
+                    <button aria-label="Close create routine" onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-muted-foreground hover:text-white">
                         <X className="w-4 h-4" />
                     </button>
                 </div>
@@ -110,10 +112,11 @@ export function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                     <div className="px-6 py-5 space-y-5">
                         {/* Name */}
                         <div className="space-y-1.5">
-                            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">
+                            <label htmlFor="routine-name" className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">
                                 Job Name <span className="text-red-400">*</span>
                             </label>
                             <input
+                                id="routine-name"
                                 type="text"
                                 value={name}
                                 onChange={e => setName(e.target.value)}
@@ -125,10 +128,11 @@ export function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
 
                         {/* Description */}
                         <div className="space-y-1.5">
-                            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">
+                            <label htmlFor="routine-description" className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">
                                 Description
                             </label>
                             <input
+                                id="routine-description"
                                 type="text"
                                 value={description}
                                 onChange={e => setDescription(e.target.value)}
@@ -137,9 +141,42 @@ export function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                             />
                         </div>
 
+                        {/* Trigger type */}
+                        <fieldset className="space-y-2">
+                            <legend className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">
+                                Trigger Type
+                            </legend>
+                            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Routine trigger type">
+                                {([
+                                    ['cron', Timer, 'Agent job', 'Run the task as a full agent job.'],
+                                    ['system_event', Activity, 'System event', 'Queue a message for the next heartbeat.'],
+                                ] as const).map(([value, Icon, label, help]) => (
+                                    <button
+                                        key={value}
+                                        type="button"
+                                        role="radio"
+                                        aria-checked={triggerType === value}
+                                        onClick={() => setTriggerType(value)}
+                                        className={cn(
+                                            'rounded-xl border p-3 text-left transition-all',
+                                            triggerType === value
+                                                ? 'border-primary/40 bg-primary/10 text-zinc-100'
+                                                : 'border-border/30 bg-white/2 text-muted-foreground hover:bg-white/5',
+                                        )}
+                                    >
+                                        <span className="flex items-center gap-2 text-xs font-semibold">
+                                            <Icon className="h-3.5 w-3.5" />
+                                            {label}
+                                        </span>
+                                        <span className="mt-1 block text-[10px] leading-relaxed opacity-70">{help}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        </fieldset>
+
                         {/* Schedule presets */}
                         <div className="space-y-2">
-                            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">
+                            <label htmlFor="routine-schedule" className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">
                                 Schedule Presets
                             </label>
                             <div className="flex flex-wrap gap-1.5">
@@ -168,6 +205,7 @@ export function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                             </label>
                             <div className="relative">
                                 <input
+                                    id="routine-schedule"
                                     type="text"
                                     value={schedule}
                                     onChange={e => setSchedule(e.target.value)}
@@ -212,23 +250,28 @@ export function CreateJobModal({ onClose, onCreated }: CreateJobModalProps) {
                             </AnimatePresence>
                         </div>
 
-                        {/* Task prompt */}
+                        {/* Task prompt / system event message */}
                         <div className="space-y-1.5">
-                            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70 flex items-center gap-1.5">
-                                <Terminal className="w-3 h-3" />
-                                Agent Task Prompt <span className="text-red-400">*</span>
+                            <label htmlFor="routine-task" className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70 flex items-center gap-1.5">
+                                {triggerType === 'cron' ? <Terminal className="w-3 h-3" /> : <Activity className="w-3 h-3" />}
+                                {triggerType === 'cron' ? 'Agent Task Prompt' : 'System Event Message'} <span className="text-red-400">*</span>
                             </label>
                             <textarea
+                                id="routine-task"
                                 value={task}
                                 onChange={e => setTask(e.target.value)}
-                                placeholder="Describe what the agent should do when this job fires. E.g: 'Summarize yesterday's logs and write a report to /workspace/reports/daily.md'"
+                                placeholder={triggerType === 'cron'
+                                    ? "Describe what the agent should do when this job fires. E.g: 'Summarize yesterday's logs and write a report.'"
+                                    : "Describe the reminder or check to queue for the heartbeat. E.g: 'Review stalled pull requests and alert me if action is needed.'"}
                                 rows={4}
                                 className={cn(inputCls, 'h-auto py-2 resize-y text-xs leading-relaxed')}
                                 required
                             />
                             <p className="text-[10px] text-muted-foreground/50 flex items-center gap-1.5">
                                 <FileText className="w-3 h-3" />
-                                This prompt is sent to the agent automatically when the schedule fires.
+                                {triggerType === 'cron'
+                                    ? 'This prompt starts a full agent job when the schedule fires.'
+                                    : 'This message enters the heartbeat queue when the schedule fires.'}
                             </p>
                         </div>
                     </div>

@@ -293,27 +293,50 @@ pub async fn thinclaw_routine_create(
     description: String,
     schedule: String,
     task: String,
+    trigger_type: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let trigger_type = trigger_type.unwrap_or_else(|| "cron".to_string());
+    if !matches!(trigger_type.as_str(), "cron" | "system_event") {
+        return Err(format!(
+            "Invalid routine trigger type '{}'; expected 'cron' or 'system_event'",
+            trigger_type
+        ));
+    }
+    if trigger_type == "system_event" && task.trim().is_empty() {
+        return Err("System event message cannot be empty".to_string());
+    }
+
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
-            .create_routine(&name, &description, &schedule, &task)
+            .create_routine(&name, &description, &schedule, &task, &trigger_type)
             .await;
     }
 
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
-    // Normalize 5/6-field cron to 7-field, then validate
-    let schedule = thinclaw_core::agent::routine::normalize_cron_expr(&schedule);
-    let _ = thinclaw_core::agent::routine::next_cron_fire(&schedule)
-        .map_err(|e| format!("Invalid cron expression '{}': {}", schedule, e))?;
+    // Use the runtime's canonical parser so local and remote creation accept
+    // the same cron and interval schedule forms.
+    let schedule = thinclaw_core::agent::routine::canonicalize_schedule_expr(&schedule)
+        .map_err(|e| format!("Invalid schedule '{}': {}", schedule, e))?;
+
+    let trigger = if trigger_type == "system_event" {
+        thinclaw_core::agent::routine::Trigger::SystemEvent {
+            message: task.trim().to_string(),
+            schedule: Some(schedule.clone()),
+        }
+    } else {
+        thinclaw_core::agent::routine::Trigger::Cron {
+            schedule: schedule.clone(),
+        }
+    };
 
     // Build a full Routine object
     let now = chrono::Utc::now();
     let routine_id = uuid::Uuid::new_v4();
 
-    // Compute next fire time from cron schedule
-    let next_fire = thinclaw_core::agent::routine::next_cron_fire(&schedule)
+    // Compute next fire time from the canonical schedule.
+    let next_fire = thinclaw_core::agent::routine::next_schedule_fire(&schedule)
         .map_err(|e| format!("Failed to compute next fire time: {}", e))?;
 
     let routine = thinclaw_core::agent::routine::Routine {
@@ -323,9 +346,7 @@ pub async fn thinclaw_routine_create(
         user_id: "local_user".to_string(), // Matches Tauri chat channel user_id (api/chat.rs)
         actor_id: "local_user".to_string(),
         enabled: true,
-        trigger: thinclaw_core::agent::routine::Trigger::Cron {
-            schedule: schedule.clone(),
-        },
+        trigger,
         action: thinclaw_core::agent::routine::RoutineAction::FullJob {
             title: name.clone(),
             description: task.clone(),
@@ -354,8 +375,8 @@ pub async fn thinclaw_routine_create(
         .map_err(|e| format!("Failed to create routine: {}", e))?;
 
     info!(
-        "[thinclaw-runtime] Created routine '{}' (id={}) with schedule '{}'",
-        name, routine_id, schedule
+        "[thinclaw-runtime] Created {} routine '{}' (id={}) with schedule '{}'",
+        trigger_type, name, routine_id, schedule
     );
 
     Ok(serde_json::json!({

@@ -3,6 +3,22 @@
 
 use super::core::RemoteGatewayProxy;
 
+fn routine_create_payload(
+    name: &str,
+    description: &str,
+    schedule: &str,
+    task: &str,
+    trigger_type: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "description": description,
+        "schedule": schedule,
+        "task": task,
+        "trigger_type": trigger_type,
+    })
+}
+
 impl RemoteGatewayProxy {
     /// List all routines.
     pub async fn list_routines(&self) -> Result<serde_json::Value, String> {
@@ -39,15 +55,11 @@ impl RemoteGatewayProxy {
         description: &str,
         schedule: &str,
         task: &str,
+        trigger_type: &str,
     ) -> Result<serde_json::Value, String> {
         self.post_json(
             "/api/routines",
-            &serde_json::json!({
-                "name": name,
-                "description": description,
-                "schedule": schedule,
-                "task": task,
-            }),
+            &routine_create_payload(name, description, schedule, task, trigger_type),
         )
         .await
     }
@@ -86,5 +98,30 @@ impl RemoteGatewayProxy {
             &serde_json::json!({ "routine_id": routine_id }),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::routine_create_payload;
+
+    #[test]
+    fn routine_create_payload_preserves_system_event_trigger() {
+        assert_eq!(
+            routine_create_payload(
+                "Heartbeat reminder",
+                "Check stalled work",
+                "0 0 9 * * * *",
+                "Review stalled pull requests",
+                "system_event",
+            ),
+            serde_json::json!({
+                "name": "Heartbeat reminder",
+                "description": "Check stalled work",
+                "schedule": "0 0 9 * * * *",
+                "task": "Review stalled pull requests",
+                "trigger_type": "system_event",
+            })
+        );
     }
 }

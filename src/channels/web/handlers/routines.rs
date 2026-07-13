@@ -30,6 +30,7 @@ use thinclaw_gateway::web::routines::{
     verify_routine_webhook_signature,
 };
 use thinclaw_gateway::web::submission::submit_gateway_message;
+use thinclaw_gateway::web::types::RoutineCreateTriggerType;
 
 async fn refresh_event_cache_if_present(state: &GatewayState) {
     if let Some(ref engine) = state.routine_engine {
@@ -82,6 +83,23 @@ pub(crate) async fn routines_create_handler(
         .map_err(routine_invalid_schedule_error)?;
     let now = chrono::Utc::now();
     let routine_id = Uuid::new_v4();
+    let trigger = match req.trigger_type {
+        RoutineCreateTriggerType::Cron => crate::agent::routine::Trigger::Cron {
+            schedule: schedule.clone(),
+        },
+        RoutineCreateTriggerType::SystemEvent => {
+            if req.task.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "System event message cannot be empty".to_string(),
+                ));
+            }
+            crate::agent::routine::Trigger::SystemEvent {
+                message: req.task.trim().to_string(),
+                schedule: Some(schedule.clone()),
+            }
+        }
+    };
     let routine = crate::agent::routine::Routine {
         id: routine_id,
         name: req.name.clone(),
@@ -89,9 +107,7 @@ pub(crate) async fn routines_create_handler(
         user_id: request_identity.principal_id.clone(),
         actor_id: request_identity.actor_id.clone(),
         enabled: true,
-        trigger: crate::agent::routine::Trigger::Cron {
-            schedule: schedule.clone(),
-        },
+        trigger,
         action: crate::agent::routine::RoutineAction::FullJob {
             title: req.name.clone(),
             description: req.task.clone(),

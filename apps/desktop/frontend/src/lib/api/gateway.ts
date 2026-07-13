@@ -97,14 +97,23 @@ export interface CreateRoutineResult {
     created_at: string;
 }
 
-/** Create a new scheduled routine. */
+export type RoutineTriggerType = 'cron' | 'system_event';
+
+/** Create a scheduled agent job or heartbeat system event. */
 export async function createRoutine(
     name: string,
     description: string,
     schedule: string,
     task: string,
+    triggerType: RoutineTriggerType = 'cron',
 ): Promise<CreateRoutineResult> {
-    return compatibilityCommands.thinclawRoutineCreate(name, description, schedule, task);
+    return compatibilityCommands.thinclawRoutineCreate(
+        name,
+        description,
+        schedule,
+        task,
+        triggerType,
+    );
 }
 
 export async function getThinClawSkillsList(): Promise<Skill[]> {

@@ -1191,9 +1191,9 @@ async thinclawCronLint(expression: string) : Promise<Result<JsonValue, string>> 
  * Stores the routine in ThinClaw's RoutineStore so it persists
  * and is picked up by the RoutineEngine on its next tick.
  */
-async thinclawRoutineCreate(name: string, description: string, schedule: string, task: string) : Promise<Result<JsonValue, string>> {
+async thinclawRoutineCreate(name: string, description: string, schedule: string, task: string, triggerType: string | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_create", { name, description, schedule, task }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_create", { name, description, schedule, task, triggerType }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

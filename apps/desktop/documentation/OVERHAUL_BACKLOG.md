@@ -185,7 +185,7 @@ characterization test added before the split; no behavior change.
 ### Proactive / learning / experiments
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
-| TDO-110 | Event-triggered routine creation (`Trigger::SystemEvent`) + UI | M | TDO-024 | `rpc_routines.rs:326`, `ThinClawAutomations.tsx` |
+| TDO-110 ✅ | Event-triggered routine creation (`Trigger::SystemEvent`) + UI | M | TDO-024 | `rpc_routines.rs`, `automations/CreateJobModal.tsx` |
 | TDO-111 ✅ | `evaluate_outcomes`: typed remote-only gate with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:394` |
 | TDO-112 ✅ | GPU validate/launch: typed remote-only gates with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:631-675` |
 | TDO-113 | Eval framework commands are wired; Benchmarks panel and runtime smoke-test remain | L | TDO-001 | `rpc_experiments_learning.rs`, frontend |
