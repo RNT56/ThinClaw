@@ -213,7 +213,7 @@ characterization test added before the split; no behavior change.
 |---|---|---|---|---|
 | TDO-140 ✅ | Repo-projects enroll→plan→merge-gate + readiness gates | L | TDO-022 | `rpc_repo_projects.rs`, component |
 | TDO-141 ✅ | Authenticated multi-agent fleet status, real remote task routing, and one-delivery-per-node broadcast receipts | L | TDO-001 | `fleet.rs`, `rpc_orchestration.rs`, `fleet/FleetCommandCenter.tsx` |
-| TDO-142 | Tunnel/Tailscale commands + Remote-access panel | M | TDO-001 | `src/tunnel/` |
+| TDO-142 ✅ | Authenticated loopback gateway + typed Tailscale Serve/Funnel commands + Remote Access panel | M | TDO-001 | `runtime_builder.rs`, `remote_access.rs`, `ThinClawRemoteAccess.tsx`, `src/tunnel/` |
 | TDO-143 ✅ | Real local/remote session subscription semantics | S | TDO-001 | `sessions.rs`, `runtime_bridge.rs` |
 
 ---

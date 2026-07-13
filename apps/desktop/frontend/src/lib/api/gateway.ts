@@ -353,6 +353,40 @@ export async function getFleetStatus(): Promise<AgentStatusSummary[]> {
     return compatibilityCommands.thinclawGetFleetStatus();
 }
 
+export type RemoteAccessExposure = 'tailnet' | 'public';
+
+export interface RemoteAccessStatus {
+    runtime_mode: string;
+    gateway_running: boolean;
+    gateway_port: number;
+    gateway_url: string;
+    tailscale_installed: boolean;
+    tailscale_authenticated: boolean;
+    tailscale_dns_name: string | null;
+    tailscale_error: string | null;
+    tunnel_running: boolean;
+    exposure: RemoteAccessExposure | null;
+    access_url: string | null;
+}
+
+export async function getRemoteAccessStatus(): Promise<RemoteAccessStatus> {
+    return compatibilityCommands.thinclawRemoteAccessStatus();
+}
+
+export async function startRemoteAccess(
+    exposure: RemoteAccessExposure,
+    confirmPublic: boolean,
+): Promise<RemoteAccessStatus> {
+    return compatibilityCommands.thinclawRemoteAccessStart({
+        exposure,
+        confirm_public: confirmPublic,
+    });
+}
+
+export async function stopRemoteAccess(): Promise<RemoteAccessStatus> {
+    return compatibilityCommands.thinclawRemoteAccessStop();
+}
+
 // ── Sub-agent spawning types ─────────────────────────────────────────────
 
 export interface SpawnSessionResponse {

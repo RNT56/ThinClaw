@@ -13,6 +13,7 @@ agent tool-policy threat models remain authoritative for their own internals.
 | --- | --- |
 | Local or remote runtime output -> React | Untrusted. Tool output, Markdown, SSE events, error bodies, and session metadata may be malformed, hostile, or arbitrarily large. Authentication does not make content safe. |
 | React -> Tauri command | Privileged request. Generated command bindings define the shape, but Rust must still validate every host, URL, credential, confirmation, and filesystem/process argument. |
+| Embedded gateway -> host network | Loopback-only by default. Desktop chooses an available local port and binds the gateway to `127.0.0.1`; remote exposure is a separate, explicit Tailscale operation. |
 | Desktop -> remote gateway | Bearer-authenticated transport. A public gateway requires HTTPS. Plain HTTP is accepted only for loopback, private/link-local IPs, `.local`, or Tailscale hosts. |
 | Remote gateway -> Desktop | Untrusted server response. Redirects are refused and response/event sizes are bounded before parsing or rendering. |
 | Desktop -> SSH deployment target | User-authorized remote mutation. Host/user/key input is validated, SSH uses trust-on-first-use (`accept-new`) and rejects changed host keys, and credentials travel over stdin rather than process arguments. |
@@ -28,6 +29,8 @@ agent tool-policy threat models remain authoritative for their own internals.
 | Bearer disclosure through redirects, URL credentials, logs, or debug output | The HTTP client refuses redirects, URL userinfo/query/fragment/path input, stores a sensitive `HeaderValue` rather than a raw token string, and does not expose a token accessor. SSE payloads are not debug-logged. Error bodies are bounded and control characters are collapsed. |
 | False-positive connection test with an invalid token | Health checks call the authenticated `/api/gateway/status` route. `401`/`403` returns an explicit rejected-credential result; gateway activation stops instead of starting an unauthorized SSE retry loop. |
 | Bearer interception over public plaintext HTTP | Public hosts require HTTPS. HTTP remains available for private, loopback, link-local, `.local`, and Tailscale routes so local-first and tailnet deployments work. The UI uses the root gateway default port `3000`. |
+| Local gateway token exposed by routine status polling or plaintext identity storage | The bearer token migrates from legacy `identity.json` data into the encrypted credential envelope before the source is redacted. Broad status responses never contain it; only the explicit local `thinclaw_reveal_gateway_token` command returns it after an operator clicks Copy. |
+| Embedded gateway unintentionally exposed to the internet | Gateway startup remains loopback-only. Remote Access defaults to private tailnet exposure, validates gateway and Tailscale readiness, accepts no caller-supplied credentials, and requires a separate warning confirmation before public Funnel exposure. Stop, profile switch, and app shutdown reset the tunnel. |
 | Profile tokens persisted in `identity.json` or returned to the webview | Existing plaintext profile tokens migrate to namespaced keys in the encrypted Keychain envelope. The source document is rewritten only after migration succeeds. Serialization emits `null`, status/list commands return redacted profiles, and in-memory profile tokens are zeroized on drop. |
 | Saved secret erased when a redacted settings form is submitted | Gateway and custom-LLM credential inputs use patch semantics: omitted values preserve the encrypted credential and an explicit clear action deletes it. Profile selection uses the profile ID and the privileged backend credential lookup rather than resubmitting a redacted profile object. |
 | OAuth credentials exposed through IPC or plaintext runtime settings | Gmail OAuth completion returns only non-secret status metadata. Access/refresh tokens are stored in the authenticated Keychain envelope, legacy plaintext settings migrate and are deleted, and runtime injection uses the in-memory bridge overlay. Token buffers are zeroized after storage. |
@@ -46,10 +49,9 @@ agent tool-policy threat models remain authoritative for their own internals.
 - The initiating webview necessarily holds a newly generated deployment token
   long enough to save or copy it. It is never sent through the broadcast log or
   status-event channels.
-- `thinclaw_get_status` returns the local gateway handshake token because the
-  pairing UI explicitly lets the local operator copy it to another device.
-  This is an intentional privileged local reveal; provider, remote gateway,
-  custom LLM, profile, and OAuth credentials remain presence-only.
+- The initiating webview receives the local gateway token only after an explicit
+  copy action. A compromised local webview can invoke the same privileged reveal
+  command; the Tauri/webview process boundary is not an authorization boundary.
 - Durable Desktop secret persistence is currently macOS-only. Windows and Linux
   fail closed for secret writes until a real OS secure-store backend exists.
 - A compromised remote gateway can return misleading but bounded content. The

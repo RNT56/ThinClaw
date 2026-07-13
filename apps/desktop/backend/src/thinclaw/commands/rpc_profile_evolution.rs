@@ -78,18 +78,24 @@ pub async fn thinclaw_profile_evolution_status(
         .await
         .map_err(|error| error.to_string())?;
 
-    let (profile_parse_error, preferred_name, confidence, message_count, profile_updated_at, profile) =
-        match profile_view {
-            Some(view) => (
-                view.parse_error,
-                view.preferred_name,
-                view.confidence,
-                view.message_count,
-                view.updated_at,
-                view.value,
-            ),
-            None => (None, None, None, None, None, None),
-        };
+    let (
+        profile_parse_error,
+        preferred_name,
+        confidence,
+        message_count,
+        profile_updated_at,
+        profile,
+    ) = match profile_view {
+        Some(view) => (
+            view.parse_error,
+            view.preferred_name,
+            view.confidence,
+            view.message_count,
+            view.updated_at,
+            view.value,
+        ),
+        None => (None, None, None, None, None, None),
+    };
 
     Ok(ProfileEvolutionStatusItem {
         profile_path,
@@ -127,10 +133,7 @@ pub async fn thinclaw_profile_evolution_run(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<ProfileEvolutionRunItem, String> {
     let agent = ironclaw.agent().await?;
-    let store = agent
-        .store()
-        .cloned()
-        .ok_or("Database not available")?;
+    let store = agent.store().cloned().ok_or("Database not available")?;
     let workspace = agent
         .workspace()
         .cloned()
@@ -155,9 +158,7 @@ pub async fn thinclaw_profile_evolution_run(
         )
         .await
         .map_err(|error| error.to_string())?
-        .ok_or(
-            "Profile evolution is unavailable until USER.md or a populated profile exists",
-        )?;
+        .ok_or("Profile evolution is unavailable until USER.md or a populated profile exists")?;
     if !routine.enabled {
         return Err(
             "Profile evolution is disabled until USER.md or a populated profile exists".to_string(),
@@ -206,7 +207,11 @@ fn profile_view_from_content(content: &str) -> Result<ProfileView, String> {
         Ok(profile) => Ok(ProfileView {
             parse_error: None,
             preferred_name: non_empty(&profile.preferred_name),
-            confidence: Some(profile.confidence.max(profile.analysis_metadata.confidence_score)),
+            confidence: Some(
+                profile
+                    .confidence
+                    .max(profile.analysis_metadata.confidence_score),
+            ),
             message_count: Some(profile.analysis_metadata.message_count),
             updated_at: non_empty(&profile.updated_at),
             value: serde_json::to_value(profile).ok(),
@@ -229,11 +234,12 @@ fn non_empty(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PROFILE_VIEW_MAX_BYTES, profile_view_from_content};
+    use super::{profile_view_from_content, PROFILE_VIEW_MAX_BYTES};
 
     #[test]
     fn invalid_profile_is_visible_without_exposing_unparsed_content() {
-        let view = profile_view_from_content("{not-json}").expect("invalid JSON should be reported");
+        let view =
+            profile_view_from_content("{not-json}").expect("invalid JSON should be reported");
         assert!(view.parse_error.is_some());
         assert!(view.value.is_none());
     }

@@ -13,6 +13,7 @@ pub mod deploy;
 pub mod desktop_observer;
 pub mod event_mapping; // StatusUpdate → UiEvent conversion
 pub mod fleet;
+pub mod remote_access; // Tailscale Serve/Funnel lifecycle for the local gateway
 pub mod remote_proxy; // HTTP/SSE proxy client for remote ThinClaw gateway
 pub mod runtime_bridge; // ThinClaw lifecycle manager (ThinClawRuntimeState)
 pub(crate) mod runtime_builder; // Engine construction logic (extracted from runtime_bridge)

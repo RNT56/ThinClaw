@@ -585,6 +585,17 @@ async thinclawGetStatus() : Promise<Result<ThinClawStatus, string>> {
 }
 },
 /**
+ * Reveal the local gateway bearer token for an explicit user copy action.
+ */
+async thinclawRevealGatewayToken() : Promise<Result<string, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_reveal_gateway_token") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Save Slack configuration
  */
 async thinclawSaveAnthropicKey(key: string | null) : Promise<Result<null, string>> {
@@ -852,6 +863,30 @@ async thinclawGetFleetStatus() : Promise<Result<AgentStatusSummary[], string>> {
 async thinclawBroadcastCommand(command: string) : Promise<Result<FleetBroadcastResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_broadcast_command", { command }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRemoteAccessStatus() : Promise<Result<RemoteAccessStatus, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_remote_access_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRemoteAccessStart(request: RemoteAccessStartRequest) : Promise<Result<RemoteAccessStatus, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_remote_access_start", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawRemoteAccessStop() : Promise<Result<RemoteAccessStatus, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_remote_access_stop") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -4079,6 +4114,14 @@ export type ProfileEvolutionRunItem = { routine_id: string; run_id: string }
 export type ProfileEvolutionStatusItem = { profile_path: string; profile_exists: boolean; profile_parse_error: string | null; preferred_name: string | null; confidence: number | null; message_count: number | null; profile_updated_at: string | null; profile: JsonValue | null; routine_exists: boolean; routine_id: string | null; routine_enabled: boolean; last_run_at: string | null; next_fire_at: string | null; run_count: number; consecutive_failures: number }
 export type Project = { id: string; name: string; description: string | null; created_at: number; updated_at: number; sort_order: number }
 export type ProviderDiscoveryResult = { provider: string; models: ModelDescriptor[]; fromCache: boolean; error?: string | null }
+export type RemoteAccessExposure = "tailnet" | "public"
+export type RemoteAccessStartRequest = { exposure: RemoteAccessExposure;
+/**
+ * Public Funnel changes the trust boundary and must be acknowledged for
+ * each start. The private tailnet mode never requires this flag.
+ */
+confirm_public: boolean }
+export type RemoteAccessStatus = { runtime_mode: string; gateway_running: boolean; gateway_port: number; gateway_url: string; tailscale_installed: boolean; tailscale_authenticated: boolean; tailscale_dns_name: string | null; tailscale_error: string | null; tunnel_running: boolean; exposure: RemoteAccessExposure | null; access_url: string | null }
 export type RemoteDeployResult = { status: string; url: string; token: string; message: string | null }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 /**
@@ -4328,7 +4371,12 @@ export type ThinClawStatus = { engine_running: boolean; engine_connected: boolea
  * Compatibility field. Persisted bearer credentials are never returned
  * through the broad status command; use `has_remote_token` for presence.
  */
-remote_token: string | null; has_remote_token: boolean; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
+remote_token: string | null; has_remote_token: boolean; device_id: string;
+/**
+ * Compatibility field. Always empty in broad status responses; use the
+ * explicit reveal command for a user-initiated copy action.
+ */
+auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
 /**
  * Whether the agent runs tools without individual approval prompts.
  */

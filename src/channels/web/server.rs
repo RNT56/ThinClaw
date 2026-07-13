@@ -182,8 +182,11 @@ pub struct GatewayState {
     /// Shared response cache for remote dashboard cache stats.
     pub response_cache:
         Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
-    /// Routine engine for webhook-triggered routine execution.
-    pub routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
+    /// Routine engine for webhook-triggered routine execution. The shared cell
+    /// lets embedded hosts mount the gateway before the agent has created its
+    /// background routine engine, then attach it without rebuilding routes.
+    pub routine_engine:
+        Arc<std::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
     /// Repository project supervisor wake handle for GitHub webhooks. Held in a
     /// shared cell so the agent loop can populate it after the gateway is built
     /// (the supervisor is constructed during background-task startup, which
@@ -207,6 +210,25 @@ pub struct GatewayState {
     /// Best-effort pending-approvals cache backing `GET /api/chat/approvals`.
     /// See [`PendingApprovalsCache`].
     pub pending_approvals: PendingApprovalsCache,
+}
+
+impl GatewayState {
+    pub fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
+        match self.routine_engine.read() {
+            Ok(engine) => engine.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    pub fn set_routine_engine(
+        &self,
+        engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
+    ) {
+        match self.routine_engine.write() {
+            Ok(mut current) => *current = engine,
+            Err(poisoned) => *poisoned.into_inner() = engine,
+        }
+    }
 }
 
 #[async_trait]

@@ -267,9 +267,7 @@ pub async fn thinclaw_gmail_oauth_start(
     // runtime settings database.
     if ic_result.success {
         let previous_access = secret_store.get("gmail_oauth_token").map(Zeroizing::new);
-        let previous_refresh = secret_store
-            .get("gmail_refresh_token")
-            .map(Zeroizing::new);
+        let previous_refresh = secret_store.get("gmail_refresh_token").map(Zeroizing::new);
         let persist_result = (|| {
             if let Some(access_token) = access_token.as_ref().map(|token| token.as_str()) {
                 secret_store.set("gmail_oauth_token", Some(access_token))?;
@@ -437,14 +435,16 @@ pub async fn thinclaw_gmail_status(
                     store
                         .delete_setting("local_user", "gmail_refresh_token")
                         .await
-                        .map_err(|error| format!("legacy Gmail credential cleanup failed: {error}"))?;
+                        .map_err(|error| {
+                            format!("legacy Gmail credential cleanup failed: {error}")
+                        })?;
                 }
             }
         }
     }
 
-    let oauth_configured = secret_store.has("gmail_oauth_token")
-        || secret_store.has("gmail_refresh_token");
+    let oauth_configured =
+        secret_store.has("gmail_oauth_token") || secret_store.has("gmail_refresh_token");
 
     let configured = !project_id.is_empty() && !subscription_id.is_empty();
     let status = if !enabled {

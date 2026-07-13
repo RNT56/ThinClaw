@@ -407,6 +407,7 @@ pub fn run() {
     app.manage(model_manager::DownloadManager::new());
     app.manage(config::ConfigManager::new(app.handle()));
     app.manage(thinclaw::ThinClawManager::new(app.handle().clone()));
+    app.manage(thinclaw::remote_access::RemoteAccessState::new());
     app.manage(rig_cache::RigManagerCache::new());
 
     // FileStore — centralized file I/O abstraction (local-first, cloud-ready)
@@ -706,6 +707,12 @@ pub fn run() {
                 // instead of being orphaned on exit.
                 if let Some(cloud) = _app_handle.try_state::<cloud::CloudManager>() {
                     tauri::async_runtime::block_on(cloud.stop_sync());
+                }
+                // Remove network exposure before stopping the loopback gateway.
+                if let Some(remote_access) =
+                    _app_handle.try_state::<thinclaw::remote_access::RemoteAccessState>()
+                {
+                    tauri::async_runtime::block_on(remote_access.shutdown());
                 }
                 // Shutdown ThinClaw runtime gracefully
                 if let Some(state) =

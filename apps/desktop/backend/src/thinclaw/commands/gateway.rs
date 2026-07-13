@@ -48,10 +48,10 @@ pub async fn thinclaw_get_status(
             .as_ref()
             .map(|c| c.device_id.clone())
             .unwrap_or_default(),
-        auth_token: config
-            .as_ref()
-            .map(|c| c.auth_token.clone())
-            .unwrap_or_default(),
+        // Broad polling status is presence/metadata only. Reveal is a separate,
+        // explicit command so a reusable bearer credential is not copied into
+        // renderer state every three seconds.
+        auth_token: String::new(),
         state_dir: config
             .as_ref()
             .map(|c| c.base_dir.to_string_lossy().to_string())
@@ -180,12 +180,7 @@ pub async fn thinclaw_get_status(
             .unwrap_or_default(),
         profiles: config
             .as_ref()
-            .map(|cfg| {
-                cfg.profiles
-                    .iter()
-                    .map(AgentProfile::redacted)
-                    .collect()
-            })
+            .map(|cfg| cfg.profiles.iter().map(AgentProfile::redacted).collect())
             .unwrap_or_default(),
         // Implicit cloud provider status
         has_xai_key: config
@@ -275,6 +270,30 @@ pub async fn thinclaw_get_status(
             .unwrap_or(false),
         bedrock_granted: config.as_ref().map(|c| c.bedrock_granted).unwrap_or(false),
     })
+}
+
+/// Reveal the local gateway bearer token for an explicit user copy action.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_reveal_gateway_token(
+    state: State<'_, ThinClawManager>,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    let config = match state.get_config().await {
+        Some(config) => config,
+        None => state
+            .init_config()
+            .await
+            .map_err(crate::thinclaw::bridge::BridgeError::from)?,
+    };
+    if config.gateway_mode == "remote" {
+        return Err(crate::thinclaw::bridge::gated(
+            "local gateway credential",
+            "Desktop is connected to a remote gateway",
+            "Switch to Local Core before revealing its credential",
+            crate::thinclaw::bridge::RouteMode::LocalOnly,
+        ));
+    }
+    Ok(config.auth_token.clone())
 }
 
 /// Sync Local LLM config (llama-server) to ThinClaw config.

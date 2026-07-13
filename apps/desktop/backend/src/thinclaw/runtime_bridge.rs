@@ -301,8 +301,8 @@ impl ThinClawRuntimeState {
         //     to run BOOT.md tasks or greet the user proactively
         //
         // Uses `handle_message_external()` — the same path as send_message —
-        // because `agent.run()` is never called in Tauri mode (there's no
-        // channel message loop). The inject_tx stream is not consumed.
+        // because boot injection needs its result immediately. The embedded
+        // channel loop separately consumes Tauri/gateway/injected messages.
         {
             let (agent_opt, boot_md_content) = {
                 let guard = self.inner.read().await;
@@ -538,6 +538,15 @@ impl ThinClawRuntimeState {
     /// If already stopped, this is a no-op.
     /// Returns `true` if the engine was stopped, `false` if already stopped.
     pub async fn stop(&self) -> bool {
+        // Remove any Tailscale exposure before tearing down the authenticated
+        // loopback gateway. This also covers local→remote profile switches.
+        use tauri::Manager as _;
+        if let Some(remote_access) =
+            self.app_handle
+                .try_state::<crate::thinclaw::remote_access::RemoteAccessState>()
+        {
+            remote_access.shutdown().await;
+        }
         let inner = self.inner.write().await.take();
         if let Some(inner) = inner {
             // Shutdown background tasks

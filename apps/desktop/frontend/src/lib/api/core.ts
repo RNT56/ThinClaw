@@ -30,6 +30,7 @@ export interface ThinClawStatus {
     remote_token: string | null;
     has_remote_token: boolean;
     device_id: string;
+    /** Always empty in status responses; retained for wire compatibility. */
     auth_token: string;
     state_dir: string;
     has_huggingface_token: boolean;
@@ -233,6 +234,11 @@ export interface ThinClawDiagnostics {
  */
 export async function getThinClawStatus(): Promise<ThinClawStatus> {
     return compatibilityCommands.thinclawGetStatus();
+}
+
+/** Reveal the local gateway token only for an explicit user copy action. */
+export async function revealGatewayToken(): Promise<string> {
+    return compatibilityCommands.thinclawRevealGatewayToken();
 }
 
 /**

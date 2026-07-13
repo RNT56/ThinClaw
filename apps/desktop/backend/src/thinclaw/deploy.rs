@@ -180,10 +180,7 @@ pub async fn thinclaw_deploy_remote(
         Some(format!(
             "{}\n{}\n",
             token,
-            tailscale_key
-                .as_ref()
-                .map(|key| key.as_str())
-                .unwrap_or("")
+            tailscale_key.as_ref().map(|key| key.as_str()).unwrap_or("")
         )),
         vec![
             token.clone(),
@@ -210,11 +207,7 @@ pub async fn thinclaw_deploy_remote(
     } else {
         ip.clone()
     };
-    let gateway_url = format!(
-        "http://{}:{}",
-        url_host(&gateway_host),
-        REMOTE_GATEWAY_PORT
-    );
+    let gateway_url = format!("http://{}:{}", url_host(&gateway_host), REMOTE_GATEWAY_PORT);
     let mut connected = false;
 
     // Give Docker a moment to start
@@ -222,16 +215,14 @@ pub async fn thinclaw_deploy_remote(
 
     for attempt in 1..=6 {
         emit(&app, &format!("[3/5] Connection attempt {}/6...", attempt));
-        let proxy = match crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(
-            &gateway_url,
-            &token,
-        ) {
-            Ok(proxy) => proxy,
-            Err(error) => {
-                connection_note = Some(error);
-                break;
-            }
-        };
+        let proxy =
+            match crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&gateway_url, &token) {
+                Ok(proxy) => proxy,
+                Err(error) => {
+                    connection_note = Some(error);
+                    break;
+                }
+            };
         match proxy.health_check().await {
             Ok(true) => {
                 connected = true;
@@ -346,9 +337,8 @@ fn validate_ssh_user(raw: &str) -> Result<String, String> {
     let valid_start = bytes
         .next()
         .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-    let valid_rest = bytes.all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
-    });
+    let valid_rest =
+        bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
     if user.len() > 32 || !valid_start || !valid_rest {
         return Err("SSH user contains unsupported characters".to_string());
     }
@@ -410,7 +400,9 @@ async fn discover_tailscale_ip(ssh_target: &str) -> Result<String, String> {
         .map_err(|_| "the remote host reported an invalid Tailscale address".to_string())?;
     let octets = address.octets();
     if octets[0] != 100 || !(64..=127).contains(&octets[1]) {
-        return Err("the remote host reported an address outside Tailscale CGNAT space".to_string());
+        return Err(
+            "the remote host reported an address outside Tailscale CGNAT space".to_string(),
+        );
     }
     Ok(address.to_string())
 }
@@ -590,11 +582,16 @@ fn redact_line(mut line: String, redactions: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_line, url_host, validate_ssh_host, validate_ssh_user, validate_tailscale_key};
+    use super::{
+        redact_line, url_host, validate_ssh_host, validate_ssh_user, validate_tailscale_key,
+    };
 
     #[test]
     fn deployment_targets_reject_shell_and_option_injection() {
-        assert_eq!(validate_ssh_host("agent.tailnet.ts.net").unwrap(), "agent.tailnet.ts.net");
+        assert_eq!(
+            validate_ssh_host("agent.tailnet.ts.net").unwrap(),
+            "agent.tailnet.ts.net"
+        );
         assert!(validate_ssh_host("-oProxyCommand=evil").is_err());
         assert!(validate_ssh_host("host; touch /tmp/pwned").is_err());
         assert_eq!(validate_ssh_user("deploy-user").unwrap(), "deploy-user");

@@ -164,6 +164,8 @@ pub const PROVIDERS: &[&str] = &[
     "custom_llm_key",
     // Remote gateway token
     "remote_token",
+    // Local Desktop gateway bearer token
+    "gateway_auth_token",
     // Gmail OAuth credentials
     "gmail_oauth_token",
     "gmail_refresh_token",

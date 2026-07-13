@@ -185,7 +185,7 @@ async fn start_ui_gateway(
         response_cache: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
-        routine_engine: None,
+        routine_engine: Arc::new(std::sync::RwLock::new(None)),
         repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         secrets_store: None,
         channel_manager: None,

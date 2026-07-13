@@ -111,6 +111,23 @@ pub(super) async fn configure(
         bridge_config.insert("ALLOW_LOCAL_TOOLS".into(), allow_local.to_string());
         bridge_config.insert("WORKSPACE_MODE".into(), workspace_mode.clone());
 
+        // The Desktop runtime is embedded, but remote access still needs a real,
+        // authenticated loopback gateway for Tailscale Serve/Funnel and other
+        // ThinClaw clients to reach. Keep it loopback-only; the tunnel is the
+        // explicit exposure boundary. The token and ephemeral free port are the
+        // same values already owned by ThinClawConfig, so the Gateway settings
+        // surface and the mounted HTTP gateway cannot drift apart.
+        if let Some(cfg) = oc_config.as_ref() {
+            bridge_config.insert("GATEWAY_ENABLED".into(), "true".into());
+            bridge_config.insert("GATEWAY_HOST".into(), "127.0.0.1".into());
+            bridge_config.insert("GATEWAY_PORT".into(), cfg.port.to_string());
+            bridge_config.insert("GATEWAY_AUTH_TOKEN".into(), cfg.auth_token.clone());
+            tracing::info!(
+                port = cfg.port,
+                "[thinclaw-runtime] Authenticated loopback gateway configured"
+            );
+        }
+
         // ── Workspace root resolution ─────────────────────────────────
         // Priority: user config → agent_workspace in app data dir.
         // WORKSPACE_ROOT is a ThinClaw bridge overlay value, not a dependable

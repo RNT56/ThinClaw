@@ -377,12 +377,7 @@ fn is_private_transport_host(host: &str) -> bool {
     }
 
     normalized.parse::<IpAddr>().is_ok_and(|ip| match ip {
-        IpAddr::V4(ip) => {
-            ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || is_cgnat(ip)
-        }
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local() || is_cgnat(ip),
         IpAddr::V6(ip) => ip.is_loopback() || is_unique_local(ip) || is_ipv6_link_local(ip),
     })
 }

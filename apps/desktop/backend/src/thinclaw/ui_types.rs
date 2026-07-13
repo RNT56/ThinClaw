@@ -552,9 +552,18 @@ mod tests {
 
     #[test]
     fn context_pressure_level_has_stable_wire_values() {
-        assert_eq!(ContextPressureLevel::from_wire("warning"), ContextPressureLevel::Warning);
-        assert_eq!(ContextPressureLevel::from_wire("critical"), ContextPressureLevel::Critical);
-        assert_eq!(ContextPressureLevel::from_wire("future"), ContextPressureLevel::None);
+        assert_eq!(
+            ContextPressureLevel::from_wire("warning"),
+            ContextPressureLevel::Warning
+        );
+        assert_eq!(
+            ContextPressureLevel::from_wire("critical"),
+            ContextPressureLevel::Critical
+        );
+        assert_eq!(
+            ContextPressureLevel::from_wire("future"),
+            ContextPressureLevel::None
+        );
         assert_eq!(json(&ContextPressureLevel::Critical), "\"critical\"");
     }
 

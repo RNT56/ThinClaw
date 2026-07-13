@@ -302,9 +302,15 @@ work continues:
   tests must treat them as separate command families.
 - Desktop has two chat histories. That is acceptable only while the product
   exposes direct chat and agent chat as different modes.
-- The names `startThinClawGateway` and `thinclaw_start_gateway` are legacy
-  compatibility names. In local mode they start the embedded agent runtime, not
-  necessarily an HTTP gateway.
+- The names `startThinClawGateway` and `thinclaw_start_gateway` remain legacy
+  compatibility names for starting the embedded agent runtime. That runtime now
+  also mounts the root authenticated HTTP gateway on a loopback-only free port,
+  sharing its database, sessions, tools, credentials, and channel manager. Network
+  exposure remains a separate explicit action in Remote Access.
+- Remote Access is a Desktop-local host-process capability. It wraps the mounted
+  loopback gateway with Tailscale Serve (private by default) or Funnel (public,
+  confirmation required on every start). Remote mode cannot control another
+  host's Tailscale process; configure exposure on that host instead.
 - llama.cpp startup still lives in `SidecarManager` because it depends on Tauri
   sidecar process handling. It is intentionally bridged into the shared runtime
   snapshot instead of being hidden behind a fake `EngineManager` process.

@@ -33,6 +33,7 @@ const ThinClawRouting = lazy(() => import('../../thinclaw/ThinClawRouting').then
 const ThinClawExperiments = lazy(() => import('../../thinclaw/ThinClawExperiments').then((module) => ({ default: module.ThinClawExperiments })));
 const ThinClawLearning = lazy(() => import('../../thinclaw/ThinClawLearning').then((module) => ({ default: module.ThinClawLearning })));
 const ThinClawRepoProjects = lazy(() => import('../../thinclaw/ThinClawRepoProjects').then((module) => ({ default: module.ThinClawRepoProjects })));
+const ThinClawRemoteAccess = lazy(() => import('../../thinclaw/ThinClawRemoteAccess').then((module) => ({ default: module.ThinClawRemoteAccess })));
 
 function ThinClawPageSkeleton() {
     return <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">Loading control surface…</div>;
@@ -108,6 +109,7 @@ export function ThinClawView() {
             case 'routing': return <ThinClawRouting />;
             case 'experiments': return <ThinClawExperiments />;
             case 'learning': return <ThinClawLearning />;
+            case 'remote-access': return <ThinClawRemoteAccess />;
             default: return (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
                     Select a page from the sidebar.

@@ -209,13 +209,45 @@ impl ThinClawConfig {
             }
         }
 
-        if identity.auth_token.is_empty() {
-            identity.auth_token =
+        // `auth_token` was historically a local-only bridge value and older
+        // builds persisted it in identity.json. It now protects the real
+        // loopback/remote-access gateway, so migrate it into the encrypted
+        // credential envelope before sanitizing the JSON document.
+        let has_legacy_gateway_token = !identity.auth_token.is_empty();
+        let gateway_auth_token = if let Some(token) = keychain::get_key("gateway_auth_token") {
+            identity.auth_token.clear();
+            token
+        } else {
+            let token = if identity.auth_token.is_empty() {
                 rand::Rng::sample_iter(rand::thread_rng(), &rand::distributions::Alphanumeric)
                     .take(32)
                     .map(char::from)
-                    .collect();
-        }
+                    .collect()
+            } else {
+                identity.auth_token.clone()
+            };
+            match keychain::set_key("gateway_auth_token", Some(&token)) {
+                Ok(()) => identity.auth_token.clear(),
+                Err(error) => {
+                    if has_legacy_gateway_token {
+                        secrets_migration_succeeded = false;
+                        println!(
+                            "[keychain] preserving identity.json after gateway token migration failed: {}",
+                            error
+                        );
+                    } else {
+                        // A freshly generated token has no durable plaintext
+                        // source to preserve. Keep it process-local for this
+                        // run, but still persist non-secret identity settings.
+                        println!(
+                            "[keychain] local gateway token is ephemeral because secure storage is unavailable: {}",
+                            error
+                        );
+                    }
+                }
+            }
+            token
+        };
 
         // Ensure state dir exists before writing identity. If any secret could
         // not be durably migrated, retain the original document for a later
@@ -235,7 +267,7 @@ impl ThinClawConfig {
         Self {
             base_dir,
             device_id: identity.device_id,
-            auth_token: identity.auth_token,
+            auth_token: gateway_auth_token,
             // Sensitive fields: load from Keychain
             anthropic_api_key: keychain::get_key("anthropic"),
             anthropic_granted: identity.anthropic_granted,
@@ -758,7 +790,8 @@ impl ThinClawConfig {
         );
         let identity = ThinClawIdentity {
             device_id: self.device_id.clone(),
-            auth_token: self.auth_token.clone(),
+            // Gateway bearer credential lives in the encrypted Keychain envelope.
+            auth_token: String::new(),
             // API key fields are intentionally omitted — stored in Keychain
             // Only the boolean `*_granted` flags are kept in JSON so the UI
             // knows whether a key has been configured without exposing the value.
@@ -905,6 +938,26 @@ mod tests {
         );
         assert!(!format!("{profile:?}").contains("top-secret-token"));
         assert!(redacted_profiles(&[profile])[0].token.is_none());
+    }
+
+    #[test]
+    fn local_gateway_token_is_never_serialized_to_identity_json() {
+        let identity = ThinClawIdentity {
+            auth_token: "local-gateway-secret".to_string(),
+            ..ThinClawIdentity::default()
+        };
+
+        let serialized = serde_json::to_string(&identity).expect("serialize identity");
+        assert!(!serialized.contains("local-gateway-secret"));
+        assert!(serde_json::from_str::<serde_json::Value>(&serialized)
+            .expect("identity JSON")
+            .get("auth_token")
+            .is_none());
+
+        let legacy: ThinClawIdentity =
+            serde_json::from_str(r#"{"device_id":"desktop","auth_token":"legacy-token"}"#)
+                .expect("legacy identity remains readable for migration");
+        assert_eq!(legacy.auth_token, "legacy-token");
     }
 
     #[test]

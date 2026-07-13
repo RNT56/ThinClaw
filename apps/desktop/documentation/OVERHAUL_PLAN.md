@@ -247,7 +247,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 |---|---|---|---|
 | ~~Repo-projects partial~~ **DONE** | Enroll→plan→merge-gate flow and readiness gates are wired end to end | `ThinClawRepoProjects.tsx`, `rpc_repo_projects.rs`, `src/repo_projects` | L |
 | ~~Fleet partial~~ **DONE** | Saved remote profiles are probed through authenticated gateway status, task assignment routes to the selected agent's gateway, and broadcast targets each local/remote node once with per-node delivery receipts | `thinclaw/fleet.rs`, `rpc_orchestration.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
-| Tunnel/Tailscale no UI | `thinclaw_tunnel_*` + Remote-access panel | `src/tunnel/` | M |
+| ~~Tunnel/Tailscale no UI~~ **DONE** | Desktop mounts the root authenticated gateway on loopback, then local-only typed commands own Tailscale Serve/Funnel lifecycle; the Remote Access panel defaults to private tailnet access, requires per-start public confirmation, and never accepts Tailscale auth keys | `runtime_builder.rs`, `remote_access.rs`, `ThinClawRemoteAccess.tsx`, `src/tunnel/` | M |
 | ~~`subscribe_session` stub~~ **DONE** | Activates local/remote live-event routing with real subscription semantics | `thinclaw/commands/sessions.rs`, `runtime_bridge.rs` | S |
 
 **Phase 1 exit gate:** parity matrix shows zero stub / zero silent-unavailable; every

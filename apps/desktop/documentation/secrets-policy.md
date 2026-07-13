@@ -142,6 +142,9 @@ P3 contract tests should cover:
 - Agent profile persistence, status, discovery, and debug serialization never
   return a raw bearer token; legacy inline-token migration preserves the source
   document on failure.
+- The local Desktop gateway bearer token is stored in the encrypted credential
+  envelope, not `identity.json`; migration preserves the plaintext source file
+  when the encrypted write cannot be proven durable.
 - Deleting a key revokes grants.
 
 ## Operational Checklist

@@ -90,6 +90,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::rig_lib::agent_chat,
         // ── ThinClaw Agent Cockpit ──────────────────────────────────────
         crate::thinclaw::commands::thinclaw_get_status,
+        crate::thinclaw::commands::thinclaw_reveal_gateway_token,
         crate::thinclaw::commands::thinclaw_save_anthropic_key,
         crate::thinclaw::commands::thinclaw_get_anthropic_key,
         crate::thinclaw::commands::thinclaw_save_brave_key,
@@ -115,6 +116,9 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_test_connection,
         crate::thinclaw::fleet::thinclaw_get_fleet_status,
         crate::thinclaw::fleet::thinclaw_broadcast_command,
+        crate::thinclaw::remote_access::thinclaw_remote_access_status,
+        crate::thinclaw::remote_access::thinclaw_remote_access_start,
+        crate::thinclaw::remote_access::thinclaw_remote_access_stop,
         crate::thinclaw::commands::thinclaw_start_gateway,
         crate::thinclaw::commands::thinclaw_stop_gateway,
         crate::thinclaw::commands::thinclaw_reload_secrets,

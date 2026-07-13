@@ -108,7 +108,7 @@ hkdf = "0.13"
 zstd = "0.13"
 
 # ThinClaw agent engine (root crate; runtime DB backend is selected by features)
-thinclaw_core = { path = "../../..", package = "thinclaw", default-features = false }
+thinclaw_core = { path = "../../..", package = "thinclaw", default-features = false, features = ["tunnel"] }
 thinclaw-config = { path = "../../../crates/thinclaw-config" }
 thinclaw-runtime-contracts = { path = "../../../crates/thinclaw-runtime-contracts", features = ["specta"] }
 
