@@ -123,7 +123,7 @@ app palette without changing status-color meaning.
 
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
-| TDO-020 | Split `lib/thinclaw.ts` → `lib/api/{domain}.ts` | L | ∞ | TDO-004 | `lib/thinclaw.ts` |
+| TDO-020 ✅ | Split `lib/thinclaw.ts` → `lib/api/{domain}.ts` | L | ∞ | TDO-004 | `lib/thinclaw.ts`, `lib/api/*` |
 | TDO-021 | Split `runtime_builder.rs` → inference/sandbox/bg-tasks/channels/deps modules | L | ∞ | — | `thinclaw/runtime_builder.rs` |
 | TDO-022 | Split `ThinClawRepoProjects.tsx` into sub-panels + hooks | M | P1 | — | component |
 | TDO-023 | Split `ThinClawHooks.tsx` | M | ∞ | — | component |

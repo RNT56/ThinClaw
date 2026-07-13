@@ -138,7 +138,9 @@ ownership.
 
 ### WS-3 — Architecture Hygiene (god-file decomposition)
 Triggered on-touch, but schedule the worst offenders:
-- `frontend/src/lib/thinclaw.ts` → `lib/api/{sessions,memory,routines,learning,experiments,mcp,…}.ts`.
+- ✅ `frontend/src/lib/thinclaw.ts` is now a stable 13-line barrel over focused
+  `lib/api/{core,gateway,integrations,operations,repo-projects}.ts` modules; the
+  existing component import path remains compatible.
 - `backend/src/thinclaw/runtime_builder.rs` → provider/inference setup · sandbox/Docker orchestrator · background-task wiring · channel wiring · deps assembly.
 - Oversized panel components: `ThinClawRepoProjects.tsx`, `ThinClawHooks.tsx`, `ThinClawAutomations.tsx`, `SubAgentPanel.tsx`, `ThinClawChannels.tsx`, `ThinClawSkills.tsx` → extract sub-panels + hooks.
 - ✅ Retired `src/tauri_commands.rs`; reusable helpers now live in `src/desktop_api.rs` and registration stays in typed Desktop command modules.
