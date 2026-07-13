@@ -175,13 +175,12 @@ impl SharedHistoryStore {
         .await
         .map_err(|error| error.to_string())?;
 
-        let already_applied: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM desktop_history_migrations WHERE id = ?",
-        )
-        .bind(LEGACY_HISTORY_MIGRATION)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| error.to_string())?;
+        let already_applied: Option<String> =
+            sqlx::query_scalar("SELECT id FROM desktop_history_migrations WHERE id = ?")
+                .bind(LEGACY_HISTORY_MIGRATION)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| error.to_string())?;
         if already_applied.is_some() {
             return Ok(());
         }
@@ -797,8 +796,7 @@ pub async fn direct_history_save_message(
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-    let mut conversation_metadata: Value =
-        serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+    let mut conversation_metadata: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
     set_direct_metadata_value(&mut conversation_metadata, "updated_at", json!(now));
     sqlx::query(
         "UPDATE conversations SET last_activity = ?, metadata = ? WHERE id = ? AND surface = ?",
@@ -837,10 +835,10 @@ pub async fn direct_history_edit_message(
     .bind(&migrated_message_id)
     .bind(DIRECT_SURFACE)
     .bind(&exact_message_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("Message not found")?;
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or("Message not found")?;
     let message_id = msg.id.clone();
 
     // 2. Update content
@@ -857,12 +855,12 @@ pub async fn direct_history_edit_message(
         "DELETE FROM conversation_messages \
          WHERE conversation_id = ? AND created_at >= ? AND id != ?",
     )
-        .bind(&msg.conversation_id)
-        .bind(msg.created_at)
-        .bind(&message_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    .bind(&msg.conversation_id)
+    .bind(msg.created_at)
+    .bind(&message_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     // 4. Update conversation timestamp
     let now = std::time::SystemTime::now()
@@ -1066,19 +1064,24 @@ mod tests {
 
         let expected_conversation_id = legacy_conversation_id("legacy-chat");
         let expected_message_id = legacy_message_id("legacy-message");
-        let conversation: (String, String, String) = sqlx::query_as(
-            "SELECT id, surface, metadata FROM conversations WHERE id = ?",
-        )
-        .bind(&expected_conversation_id)
-        .fetch_one(store.pool())
-        .await
-        .expect("migrated conversation");
+        let conversation: (String, String, String) =
+            sqlx::query_as("SELECT id, surface, metadata FROM conversations WHERE id = ?")
+                .bind(&expected_conversation_id)
+                .fetch_one(store.pool())
+                .await
+                .expect("migrated conversation");
         assert_eq!(conversation.0, expected_conversation_id);
         assert_eq!(conversation.1, DIRECT_SURFACE);
         let metadata: Value = serde_json::from_str(&conversation.2).expect("conversation metadata");
         let direct = direct_metadata(&metadata).expect("direct metadata");
-        assert_eq!(direct.get("title").and_then(Value::as_str), Some("Imported chat"));
-        assert_eq!(direct.get("project_id").and_then(Value::as_str), Some("project-1"));
+        assert_eq!(
+            direct.get("title").and_then(Value::as_str),
+            Some("Imported chat")
+        );
+        assert_eq!(
+            direct.get("project_id").and_then(Value::as_str),
+            Some("project-1")
+        );
         assert_eq!(direct.get("sort_order").and_then(Value::as_i64), Some(7));
 
         let message: (String, String, String) = sqlx::query_as(
@@ -1099,14 +1102,13 @@ mod tests {
 
         let namespaced_uuid_id = legacy_conversation_id(legacy_uuid);
         assert_ne!(namespaced_uuid_id, legacy_uuid);
-        let uuid_conversation_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM conversations WHERE id = ? AND surface = ?",
-        )
-        .bind(namespaced_uuid_id)
-        .bind(DIRECT_SURFACE)
-        .fetch_one(store.pool())
-        .await
-        .expect("UUID legacy conversation count");
+        let uuid_conversation_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversations WHERE id = ? AND surface = ?")
+                .bind(namespaced_uuid_id)
+                .bind(DIRECT_SURFACE)
+                .fetch_one(store.pool())
+                .await
+                .expect("UUID legacy conversation count");
         assert_eq!(uuid_conversation_count, 1);
 
         let conversation_count: i64 =
@@ -1115,11 +1117,10 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .expect("conversation count");
-        let message_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
-                .fetch_one(store.pool())
-                .await
-                .expect("message count");
+        let message_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversation_messages")
+            .fetch_one(store.pool())
+            .await
+            .expect("message count");
         assert_eq!(conversation_count, 2);
         assert_eq!(message_count, 1);
     }
@@ -1132,7 +1133,10 @@ mod tests {
             .await
             .expect("open shared store");
 
-        for (id, surface) in [("agent-chat", "agent_cockpit"), ("direct-chat", DIRECT_SURFACE)] {
+        for (id, surface) in [
+            ("agent-chat", "agent_cockpit"),
+            ("direct-chat", DIRECT_SURFACE),
+        ] {
             sqlx::query(
                 "INSERT INTO conversations (\
                  id, channel, user_id, conversation_kind, surface, metadata\
@@ -1168,13 +1172,19 @@ mod tests {
         .execute(store.pool())
         .await
         .expect("insert second Direct conversation");
-        store.delete_all_direct().await.expect("delete Direct history");
+        store
+            .delete_all_direct()
+            .await
+            .expect("delete Direct history");
         let remaining: Vec<(String, String)> =
             sqlx::query_as("SELECT id, surface FROM conversations ORDER BY id")
                 .fetch_all(store.pool())
                 .await
                 .expect("remaining surfaces");
-        assert_eq!(remaining, vec![("agent-chat".to_string(), "agent_cockpit".to_string())]);
+        assert_eq!(
+            remaining,
+            vec![("agent-chat".to_string(), "agent_cockpit".to_string())]
+        );
         let remaining_messages: Vec<(String, String)> =
             sqlx::query_as("SELECT id, conversation_id FROM conversation_messages ORDER BY id")
                 .fetch_all(store.pool())
@@ -1182,10 +1192,7 @@ mod tests {
                 .expect("remaining messages");
         assert_eq!(
             remaining_messages,
-            vec![(
-                "agent-chat-message".to_string(),
-                "agent-chat".to_string()
-            )]
+            vec![("agent-chat-message".to_string(), "agent-chat".to_string())]
         );
     }
 }

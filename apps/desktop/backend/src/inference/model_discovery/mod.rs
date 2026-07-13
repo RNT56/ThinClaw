@@ -50,8 +50,8 @@ use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tokio::sync::RwLock;
 
-use crate::secret_store::SecretStore;
 use super::{BackendInfo, Modality};
+use crate::secret_store::SecretStore;
 use types::*;
 
 /// Cache TTL — models change infrequently, so 30 min is plenty.
@@ -191,7 +191,11 @@ impl ModelProviderRegistry {
     pub fn provider_secret(&self, provider: &str) -> Option<String> {
         let secret_name = provider_secret_name(provider).unwrap_or(provider);
         descriptor_secret(&self.secret_store, secret_name)
-            .or_else(|| (secret_name != provider).then(|| descriptor_secret(&self.secret_store, provider)).flatten())
+            .or_else(|| {
+                (secret_name != provider)
+                    .then(|| descriptor_secret(&self.secret_store, provider))
+                    .flatten()
+            })
             .filter(|value| !value.trim().is_empty())
     }
 
@@ -220,15 +224,19 @@ impl ModelProviderRegistry {
             available: true,
         }];
 
-        backends.extend(provider_ids_for_modality(modality).into_iter().filter_map(|provider| {
-            Some(BackendInfo {
-                id: provider.to_string(),
-                display_name: provider_display_name(provider)?.to_string(),
-                is_local: false,
-                model_id: None,
-                available: self.has_provider_secret(provider),
-            })
-        }));
+        backends.extend(
+            provider_ids_for_modality(modality)
+                .into_iter()
+                .filter_map(|provider| {
+                    Some(BackendInfo {
+                        id: provider.to_string(),
+                        display_name: provider_display_name(provider)?.to_string(),
+                        is_local: false,
+                        model_id: None,
+                        available: self.has_provider_secret(provider),
+                    })
+                }),
+        );
         backends
     }
 
@@ -502,9 +510,15 @@ mod tests {
         let provider_ids = provider_ids_for_modality(Modality::Chat);
         let ids: HashSet<_> = provider_ids.iter().copied().collect();
 
-        assert_eq!(provider_ids.len(), thinclaw_config::provider_catalog::catalog().len());
+        assert_eq!(
+            provider_ids.len(),
+            thinclaw_config::provider_catalog::catalog().len()
+        );
         for provider in thinclaw_config::provider_catalog::all_provider_ids() {
-            assert!(ids.contains(provider), "missing catalog provider {provider}");
+            assert!(
+                ids.contains(provider),
+                "missing catalog provider {provider}"
+            );
         }
     }
 
@@ -519,7 +533,11 @@ mod tests {
         ] {
             let provider_ids = provider_ids_for_modality(modality);
             let ids: HashSet<_> = provider_ids.iter().copied().collect();
-            assert_eq!(ids.len(), provider_ids.len(), "duplicate {modality} backend");
+            assert_eq!(
+                ids.len(),
+                provider_ids.len(),
+                "duplicate {modality} backend"
+            );
         }
     }
 
@@ -532,8 +550,14 @@ mod tests {
             Modality::Diffusion,
         ] {
             for provider in modality_provider_ids(modality) {
-                assert!(provider_display_name(provider).is_some(), "missing display name for {provider}");
-                assert!(provider_secret_name(provider).is_some(), "missing secret name for {provider}");
+                assert!(
+                    provider_display_name(provider).is_some(),
+                    "missing display name for {provider}"
+                );
+                assert!(
+                    provider_secret_name(provider).is_some(),
+                    "missing secret name for {provider}"
+                );
             }
         }
     }
