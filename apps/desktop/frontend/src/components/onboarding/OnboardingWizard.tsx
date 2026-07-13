@@ -86,7 +86,7 @@ function normaliseHttpUrl(raw: string): string {
 
 // Cloud providers shown in API keys step
 const CLOUD_PROVIDERS = [
-    { id: 'anthropic', label: 'Anthropic', desc: 'Claude Sonnet, Opus & Haiku models', placeholder: 'sk-ant-api03-...', color: 'text-purple-500', keyUrl: 'https://console.anthropic.com/settings/keys', save: 'thinclawSaveAnthropicKey' as const },
+    { id: 'anthropic', label: 'Anthropic', desc: 'Claude Fable 5, Opus 4.8, Sonnet 5 & Haiku 4.5', placeholder: 'sk-ant-api03-...', color: 'text-purple-500', keyUrl: 'https://console.anthropic.com/settings/keys', save: 'thinclawSaveAnthropicKey' as const },
     { id: 'openai', label: 'OpenAI', desc: 'GPT-5, reasoning & coding models', placeholder: 'sk-...', color: 'text-emerald-500', keyUrl: 'https://platform.openai.com/api-keys', save: 'thinclawSaveOpenaiKey' as const },
     { id: 'gemini', label: 'Google Gemini', desc: 'Gemini Flash, Pro & frontier models', placeholder: 'AIza...', color: 'text-cyan-500', keyUrl: 'https://aistudio.google.com/app/apikey', save: 'thinclawSaveGeminiKey' as const },
     { id: 'groq', label: 'Groq', desc: 'Ultra-fast Llama, Mixtral inference', placeholder: 'gsk_...', color: 'text-orange-400', keyUrl: 'https://console.groq.com/keys', save: 'thinclawSaveGroqKey' as const },

@@ -269,7 +269,9 @@ panel wired or honestly gated; contract suite green.
 - Crash reporting + structured logs surfaced in the Doctor panel.
 
 **Upgrade**
-- **Models:** default to the latest Claude family (Opus/Sonnet/Haiku 4.x, Fable 5) in provider catalog + onboarding; verify pricing/caching via the `claude-api` reference.
+- **[DONE] Models:** source-verified Claude Fable 5, Opus 4.8, Sonnet 5, and
+  Haiku 4.5 catalog; Opus 4.8 is the complex-agent default, Sonnet 5 the balanced
+  routing slot, and current IDs/context/pricing flow through onboarding and Bedrock.
 - **Engines:** bump llama.cpp/MLX/vLLM/Ollama sidecars; validate GGUF/quant matrix; MLX-first on Apple Silicon.
 - **Tauri/deps:** v2 capabilities audit (`backend/capabilities/default.json`); npm + Cargo refresh; advisory sweep — fix at source, no `deny`-ignore; no heavy deps for off-by-default features without sign-off.
 - **RAG/inference:** reranker model refresh; embedding-dimension auto-detect hardening.

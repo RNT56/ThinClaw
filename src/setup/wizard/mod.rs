@@ -562,8 +562,8 @@ mod tests {
             .provider_models
             .get("anthropic")
             .expect("anthropic slots should be created");
-        assert_eq!(slots.primary.as_deref(), Some("claude-opus-4-7"));
-        assert_eq!(slots.cheap.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(slots.primary.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(slots.cheap.as_deref(), Some("claude-sonnet-5"));
     }
 
     #[test]
@@ -686,10 +686,14 @@ mod tests {
         // With no API key, should return static defaults
         let _guard = EnvGuard::clear("ANTHROPIC_API_KEY");
         let models = fetch_anthropic_models(None).await;
-        assert!(!models.is_empty());
-        assert!(
-            models.iter().any(|(id, _)| id.contains("claude")),
-            "static defaults should include a Claude model"
+        assert_eq!(
+            models.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec![
+                "claude-fable-5",
+                "claude-opus-4-8",
+                "claude-sonnet-5",
+                "claude-haiku-4-5",
+            ]
         );
     }
 

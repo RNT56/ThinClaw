@@ -70,15 +70,15 @@ fn auth_result_to_gateway_preserves_setup_metadata() {
 fn test_provider_model_options_from_discovery_prefers_catalog_default_primary() {
     let discovered = vec![
         crate::llm::discovery::DiscoveredModel {
-            id: "claude-sonnet-4-6".to_string(),
-            name: "claude-sonnet-4-6".to_string(),
+            id: "claude-sonnet-5".to_string(),
+            name: "claude-sonnet-5".to_string(),
             provider: "anthropic".to_string(),
             is_chat: true,
             context_length: None,
         },
         crate::llm::discovery::DiscoveredModel {
-            id: "claude-opus-4-7".to_string(),
-            name: "claude-opus-4-7".to_string(),
+            id: "claude-opus-4-8".to_string(),
+            name: "claude-opus-4-8".to_string(),
             provider: "anthropic".to_string(),
             is_chat: true,
             context_length: None,
@@ -88,15 +88,15 @@ fn test_provider_model_options_from_discovery_prefers_catalog_default_primary() 
     let (_models, suggested_primary, suggested_cheap, has_live_models) =
         provider_model_options_from_discovery(
             "anthropic",
-            "claude-opus-4-7",
+            "claude-opus-4-8",
             discovered,
             None,
             None,
         );
 
     assert!(has_live_models);
-    assert_eq!(suggested_primary.as_deref(), Some("claude-opus-4-7"));
-    assert_eq!(suggested_cheap.as_deref(), Some("claude-sonnet-4-6"));
+    assert_eq!(suggested_primary.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(suggested_cheap.as_deref(), Some("claude-sonnet-5"));
 }
 
 #[test]
@@ -180,15 +180,12 @@ fn test_sync_legacy_llm_settings_clears_legacy_when_no_primary_provider() {
 fn test_sync_legacy_llm_settings_updates_legacy_for_primary_provider() {
     let mut settings = crate::settings::Settings::default();
     settings.providers.primary = Some("anthropic".to_string());
-    settings.providers.primary_model = Some("claude-sonnet-4-6".to_string());
+    settings.providers.primary_model = Some("claude-sonnet-5".to_string());
 
     sync_legacy_llm_settings(&mut settings);
 
     assert_eq!(settings.llm_backend.as_deref(), Some("anthropic"));
-    assert_eq!(
-        settings.selected_model.as_deref(),
-        Some("claude-sonnet-4-6")
-    );
+    assert_eq!(settings.selected_model.as_deref(), Some("claude-sonnet-5"));
 }
 
 #[test]

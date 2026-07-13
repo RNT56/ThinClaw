@@ -319,21 +319,16 @@ pub fn static_fallback_provider_models(slug: &str) -> Vec<(String, String)> {
     match slug {
         "anthropic" => vec![
             (
-                "claude-opus-4-7".to_string(),
-                "Claude Opus 4.7 (recommended)".to_string(),
+                "claude-fable-5".to_string(),
+                "Claude Fable 5 (highest capability)".to_string(),
             ),
             (
-                "claude-opus-4-6".to_string(),
-                "Claude Opus 4.6 (latest)".to_string(),
+                "claude-opus-4-8".to_string(),
+                "Claude Opus 4.8 (recommended)".to_string(),
             ),
             (
-                "claude-sonnet-4-6".to_string(),
-                "Claude Sonnet 4.6".to_string(),
-            ),
-            ("claude-opus-4-5".to_string(), "Claude Opus 4.5".to_string()),
-            (
-                "claude-sonnet-4-5".to_string(),
-                "Claude Sonnet 4.5".to_string(),
+                "claude-sonnet-5".to_string(),
+                "Claude Sonnet 5 (balanced)".to_string(),
             ),
             (
                 "claude-haiku-4-5".to_string(),

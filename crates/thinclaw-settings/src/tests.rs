@@ -546,13 +546,13 @@ fn test_provider_models_db_round_trip() {
     settings.providers.provider_models.insert(
         "anthropic".to_string(),
         ProviderModelSlots {
-            primary: Some("claude-opus-4-7".to_string()),
-            cheap: Some("claude-sonnet-4-6".to_string()),
+            primary: Some("claude-opus-4-8".to_string()),
+            cheap: Some("claude-sonnet-5".to_string()),
         },
     );
     settings.providers.enabled = vec!["openai".to_string(), "anthropic".to_string()];
     settings.providers.primary = Some("anthropic".to_string());
-    settings.providers.primary_model = Some("claude-opus-4-7".to_string());
+    settings.providers.primary_model = Some("claude-opus-4-8".to_string());
     settings.providers.cheap_model = Some("openai/gpt-4o-mini".to_string());
     settings.providers.preferred_cheap_provider = Some("openai".to_string());
 
@@ -563,7 +563,7 @@ fn test_provider_models_db_round_trip() {
     assert_eq!(restored.providers.primary, Some("anthropic".to_string()));
     assert_eq!(
         restored.providers.primary_model,
-        Some("claude-opus-4-7".to_string())
+        Some("claude-opus-4-8".to_string())
     );
 
     // Cheap model settings survive
@@ -590,8 +590,8 @@ fn test_provider_models_db_round_trip() {
         .provider_models
         .get("anthropic")
         .expect("anthropic provider_models entry must survive roundtrip");
-    assert_eq!(anthropic_slots.primary, Some("claude-opus-4-7".to_string()));
-    assert_eq!(anthropic_slots.cheap, Some("claude-sonnet-4-6".to_string()));
+    assert_eq!(anthropic_slots.primary, Some("claude-opus-4-8".to_string()));
+    assert_eq!(anthropic_slots.cheap, Some("claude-sonnet-5".to_string()));
 }
 
 #[test]

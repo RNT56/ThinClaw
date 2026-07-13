@@ -973,20 +973,29 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
     // are deduplicated against the API-fetched models.
     // See: hooks/use-cloud-models.ts, inference/model_discovery/
     {
-        id: "anthropic-claude-sonnet-4-5",
-        name: "Claude Sonnet 4.5",
-        description: "Anthropic's most intelligent model. Superior reasoning, coding, and creative writing.",
+        id: "anthropic-claude-fable-5",
+        name: "Claude Fable 5",
+        description: "Anthropic's highest-capability broadly available model for long-running agents and frontier work.",
         family: "Anthropic",
-        tags: ["Cloud", "SOTA", "Sonnet"],
+        tags: ["Cloud", "Frontier", "Fable"],
         category: "Cloud",
         variants: []
     },
     {
-        id: "anthropic-claude-opus-4-6",
-        name: "Claude Opus 4.6",
-        description: "Anthropic's most powerful model for highly complex tasks.",
+        id: "anthropic-claude-opus-4-8",
+        name: "Claude Opus 4.8",
+        description: "Anthropic's recommended model for complex agentic coding and enterprise work.",
         family: "Anthropic",
-        tags: ["Cloud", "Opus", "4.6"],
+        tags: ["Cloud", "Recommended", "Opus"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "anthropic-claude-sonnet-5",
+        name: "Claude Sonnet 5",
+        description: "Anthropic's balanced model for fast, capable agentic work at scale.",
+        family: "Anthropic",
+        tags: ["Cloud", "Balanced", "Sonnet"],
         category: "Cloud",
         variants: []
     },

@@ -155,7 +155,7 @@ pub struct BedrockDirectConfig {
     pub proxy_url: Option<String>,
     /// Optional legacy API key/token for the Bedrock proxy.
     pub proxy_api_key: Option<SecretString>,
-    /// Bedrock model ID (default: "anthropic.claude-3-sonnet-20240229-v1:0").
+    /// Bedrock model ID (default: "anthropic.claude-opus-4-8").
     pub model_id: String,
     /// AWS access key ID.
     pub access_key_id: Option<String>,
@@ -357,7 +357,7 @@ impl LlmConfig {
             let api_key = api_keys.first().cloned();
             let model = optional_env("ANTHROPIC_MODEL")?
                 .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "claude-opus-4-7".to_string());
+                .unwrap_or_else(|| "claude-opus-4-8".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
             Some(AnthropicDirectConfig {
                 api_key,
@@ -459,7 +459,7 @@ impl LlmConfig {
             let proxy_api_key = optional_env("BEDROCK_PROXY_API_KEY")?.map(SecretString::from);
             let model_id = optional_env("BEDROCK_MODEL_ID")?
                 .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "anthropic.claude-3-sonnet-20240229-v1:0".to_string());
+                .unwrap_or_else(|| "anthropic.claude-opus-4-8".to_string());
             let access_key_id = optional_env("AWS_ACCESS_KEY_ID")?;
             let secret_access_key = optional_env("AWS_SECRET_ACCESS_KEY")?.map(SecretString::from);
             let max_tokens: u32 = parse_optional_env("BEDROCK_MAX_TOKENS", 4096)?;
@@ -566,7 +566,7 @@ impl LlmConfig {
                 .anthropic
                 .as_ref()
                 .map(|c| c.model.as_str())
-                .unwrap_or("claude-opus-4-7"),
+                .unwrap_or("claude-opus-4-8"),
             LlmBackend::Ollama => self
                 .ollama
                 .as_ref()
@@ -591,7 +591,7 @@ impl LlmConfig {
                 .bedrock
                 .as_ref()
                 .map(|c| c.model_id.as_str())
-                .unwrap_or("anthropic.claude-3-sonnet-20240229-v1:0"),
+                .unwrap_or("anthropic.claude-opus-4-8"),
             LlmBackend::LlamaCpp => self
                 .llama_cpp
                 .as_ref()

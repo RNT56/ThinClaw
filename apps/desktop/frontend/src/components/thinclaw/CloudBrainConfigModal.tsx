@@ -14,7 +14,10 @@ interface CloudBrainConfigModalProps {
 // Fallback models when discovery hasn't completed yet or fails
 const FALLBACK_MODELS: Record<string, { id: string; label: string; recommended?: boolean }[]> = {
     anthropic: [
-        { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5', recommended: true },
+        { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', recommended: true },
+        { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
+        { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+        { id: 'claude-fable-5', label: 'Claude Fable 5' },
     ],
     openai: [
         { id: 'gpt-5-mini', label: 'GPT-5 Mini', recommended: true },

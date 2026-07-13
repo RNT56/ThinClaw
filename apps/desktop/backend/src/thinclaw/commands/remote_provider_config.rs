@@ -329,8 +329,8 @@ mod tests {
                     "primary": false,
                     "preferred_cheap": false,
                     "primary_model": null,
-                    "suggested_primary_model": "claude-sonnet-4-6",
-                    "default_model": "claude-sonnet-4-6"
+                    "suggested_primary_model": "claude-opus-4-8",
+                    "default_model": "claude-opus-4-8"
                 },
                 {
                     "slug": "openai_compatible",
@@ -346,7 +346,7 @@ mod tests {
             "cheap_pool_order": []
         });
         let mut enabled_models = HashMap::new();
-        enabled_models.insert("anthropic".to_string(), vec!["claude-opus-4-7".to_string()]);
+        enabled_models.insert("anthropic".to_string(), vec!["claude-opus-4-8".to_string()]);
 
         apply_remote_cloud_config(
             &mut config,
@@ -358,11 +358,11 @@ mod tests {
         );
 
         assert_eq!(config["primary_provider"], "anthropic");
-        assert_eq!(config["primary_model"], "claude-opus-4-7");
+        assert_eq!(config["primary_model"], "claude-opus-4-8");
         assert_eq!(config["primary_pool_order"], json!(["anthropic"]));
         assert_eq!(config["providers"][0]["enabled"], true);
         assert_eq!(config["providers"][0]["primary"], true);
-        assert_eq!(config["providers"][0]["primary_model"], "claude-opus-4-7");
+        assert_eq!(config["providers"][0]["primary_model"], "claude-opus-4-8");
     }
 
     #[test]
@@ -412,8 +412,8 @@ mod tests {
                     "enabled": false,
                     "primary": false,
                     "primary_model": null,
-                    "suggested_primary_model": "anthropic.claude-3-sonnet",
-                    "default_model": "anthropic.claude-3-sonnet"
+                    "suggested_primary_model": "anthropic.claude-opus-4-8",
+                    "default_model": "anthropic.claude-opus-4-8"
                 }
             ],
             "primary_pool_order": ["anthropic"]
@@ -422,7 +422,7 @@ mod tests {
         apply_remote_selected_brain(&mut config, Some("amazon-bedrock"));
 
         assert_eq!(config["primary_provider"], "bedrock");
-        assert_eq!(config["primary_model"], "anthropic.claude-3-sonnet");
+        assert_eq!(config["primary_model"], "anthropic.claude-opus-4-8");
         assert_eq!(config["providers"][0]["enabled"], true);
         assert_eq!(config["providers"][0]["primary"], true);
         assert_eq!(config["primary_pool_order"], json!(["bedrock"]));

@@ -227,7 +227,7 @@ characterization test added before the split; no behavior change.
 | TDO-200 | Error taxonomy + user-facing error surfaces (no raw `String` errors) — ✅ complete | M | bridge + UI |
 | TDO-201 ✅ | Bridge resilience: bounded idempotent retries, typed transport/HTTP failures, shutdown-safe SSE reconnect, and visible failover/recovery UX | M | `remote_proxy/`, `ThinClawChatView.tsx` |
 | TDO-202 ✅ | Observable performance budgets: backend/renderer readiness, frame-batched event stream, two-surface history virtualization, frontend chunks, and app/sidecar memory ceiling status | L | `performance-budgets.md`, frontend + backend |
-| TDO-203 | Model upgrade: default to latest Claude family in catalog + onboarding | M | provider catalog, onboarding |
+| TDO-203 ✅ | Current Claude family: Fable 5, Opus 4.8 default, Sonnet 5 balanced slot, Haiku 4.5 fast slot across catalog, discovery fallback, onboarding, Bedrock, and cost metadata | M | provider catalog, onboarding |
 | TDO-204 | Engine bump (llama.cpp/MLX/vLLM/Ollama) + GGUF/quant matrix validation | L | `engine/*`, sidecars |
 | TDO-205 | Tauri v2 capabilities audit + npm/Cargo dep refresh + advisory sweep (fix-at-source) | M | `capabilities/default.json`, manifests |
 | TDO-206 | RAG/inference upgrades: reranker refresh, embedding-dim auto-detect hardening | M | `rag.rs`, `reranker.rs`, `hf_hub.rs` |

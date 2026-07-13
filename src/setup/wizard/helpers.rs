@@ -45,16 +45,17 @@ pub(super) fn mask_password_in_url(url: &str) -> String {
 pub(super) async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
         (
-            "claude-opus-4-7".into(),
-            "Claude Opus 4.7 (recommended flagship)".into(),
+            "claude-fable-5".into(),
+            "Claude Fable 5 (highest capability)".into(),
         ),
         (
-            "claude-opus-4-6".into(),
-            "Claude Opus 4.6 (latest flagship)".into(),
+            "claude-opus-4-8".into(),
+            "Claude Opus 4.8 (recommended for complex agents)".into(),
         ),
-        ("claude-sonnet-4-6".into(), "Claude Sonnet 4.6".into()),
-        ("claude-opus-4-5".into(), "Claude Opus 4.5".into()),
-        ("claude-sonnet-4-5".into(), "Claude Sonnet 4.5".into()),
+        (
+            "claude-sonnet-5".into(),
+            "Claude Sonnet 5 (balanced)".into(),
+        ),
         ("claude-haiku-4-5".into(), "Claude Haiku 4.5 (fast)".into()),
     ];
 

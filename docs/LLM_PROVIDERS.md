@@ -42,12 +42,12 @@ These providers have dedicated `LLM_BACKEND` values with first-class support:
 
 | Provider | `LLM_BACKEND` | API Key Env | Default Model |
 |---|---|---|---|
-| [Anthropic](#anthropic) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-7` |
+| [Anthropic](#anthropic) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-8` |
 | [OpenAI](#openai) | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
 | [Google Gemini](#google-gemini) | `gemini` | `GEMINI_API_KEY` | `gemini-2.5-flash` |
 | [Tinfoil](#tinfoil) | `tinfoil` | `TINFOIL_API_KEY` | `kimi-k2-5` |
 | [Ollama](#ollama) | `ollama` | — | `llama3` |
-| [AWS Bedrock](#aws-bedrock) | `bedrock` | `BEDROCK_API_KEY` | `anthropic.claude-3-sonnet-20240229-v1:0` |
+| [AWS Bedrock](#aws-bedrock) | `bedrock` | `BEDROCK_API_KEY` | `anthropic.claude-opus-4-8` |
 | [llama.cpp](#llamacpp) | `llama_cpp` | — | `llama-local` |
 | [OpenAI-Compatible](#openai-compatible-endpoints) | `openai_compatible` | `LLM_API_KEY` | — |
 
@@ -97,13 +97,24 @@ LLM_BACKEND=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Popular models: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`
+Current native Claude catalog (verified 2026-07-13 against Anthropic's
+[models overview](https://platform.claude.com/docs/en/about-claude/models/overview)):
+
+| Model | API ID | Role | Context | Standard input/output per MTok |
+|---|---|---|---:|---:|
+| Claude Fable 5 | `claude-fable-5` | Highest broadly available capability | 1M | $10 / $50 |
+| Claude Opus 4.8 | `claude-opus-4-8` | Default for complex agentic work | 1M | $5 / $25 |
+| Claude Sonnet 5 | `claude-sonnet-5` | Balanced/cheap routing slot | 1M | $3 / $15 |
+| Claude Haiku 4.5 | `claude-haiku-4-5` | Lowest-latency option | 200k | $1 / $5 |
+
+ThinClaw uses the standard Sonnet 5 rate in durable cost metadata; temporary
+introductory pricing is intentionally not baked into accounting defaults.
 
 Optional overrides:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ANTHROPIC_MODEL` | `claude-opus-4-7` | Model override |
+| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Model override |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com/v1` | For proxies |
 
 ---
@@ -184,7 +195,7 @@ ThinClaw supports AWS Bedrock via native Mantle endpoints and legacy proxy mode.
 LLM_BACKEND=bedrock
 AWS_REGION=us-east-1
 BEDROCK_API_KEY=...
-BEDROCK_MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0
+BEDROCK_MODEL_ID=anthropic.claude-opus-4-8
 ```
 
 Optional overrides:

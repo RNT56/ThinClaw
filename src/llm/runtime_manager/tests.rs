@@ -94,8 +94,8 @@ fn provider_slot_selectors_prioritize_primary_and_preferred_cheap() {
     providers.provider_models.insert(
         "anthropic".to_string(),
         ProviderModelSlots {
-            primary: Some("claude-opus-4-7".to_string()),
-            cheap: Some("claude-sonnet-4-6".to_string()),
+            primary: Some("claude-opus-4-8".to_string()),
+            cheap: Some("claude-sonnet-5".to_string()),
         },
     );
     providers.provider_models.insert(
@@ -152,8 +152,8 @@ fn provider_slot_selectors_respect_explicit_pool_order() {
     providers.provider_models.insert(
         "anthropic".to_string(),
         ProviderModelSlots {
-            primary: Some("claude-opus-4-7".to_string()),
-            cheap: Some("claude-sonnet-4-6".to_string()),
+            primary: Some("claude-opus-4-8".to_string()),
+            cheap: Some("claude-sonnet-5".to_string()),
         },
     );
     providers.provider_models.insert(
@@ -208,8 +208,8 @@ fn normalize_populates_pool_orders_from_role_preferences() {
     settings.providers.provider_models.insert(
         "anthropic".to_string(),
         ProviderModelSlots {
-            primary: Some("claude-opus-4-7".to_string()),
-            cheap: Some("claude-sonnet-4-6".to_string()),
+            primary: Some("claude-opus-4-8".to_string()),
+            cheap: Some("claude-sonnet-5".to_string()),
         },
     );
 

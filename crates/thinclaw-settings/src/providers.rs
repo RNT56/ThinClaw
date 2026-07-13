@@ -166,7 +166,7 @@ pub struct ProvidersSettings {
     #[serde(default)]
     pub primary: Option<String>,
 
-    /// Primary model for the starred provider (e.g., "claude-opus-4-7").
+    /// Primary model for the starred provider (e.g., "claude-opus-4-8").
     /// If not set, the provider's default model from the catalog is used.
     #[serde(default)]
     pub primary_model: Option<String>,
