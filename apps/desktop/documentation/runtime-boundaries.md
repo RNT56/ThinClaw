@@ -1,6 +1,6 @@
 # ThinClaw Desktop Runtime Boundaries
 
-Last updated: 2026-06-24
+Last updated: 2026-07-13
 
 ThinClaw Desktop intentionally contains two AI systems. They serve different
 jobs and must not be collapsed into one architecture without an explicit
@@ -118,6 +118,15 @@ Security boundary:
   writes, and arbitrary skill install must remain gated.
 
 ## Shared Infrastructure
+
+Desktop exposes the existing host singletons through
+`backend/src/shared_services.rs::SharedServices` and the generated command/event
+transport through `frontend/src/components/services-context.tsx`. These are
+adapter seams, not new stores: they own no duplicate secret cache, database
+pool, provider registry, or agent runtime. Both product modes receive the same
+React provider, while Rust consumers opt into typed accessors one domain at a
+time. Tool authority, persistence ownership, and the non-shared state below do
+not cross this seam.
 
 These pieces may be shared, but only through explicit adapters:
 

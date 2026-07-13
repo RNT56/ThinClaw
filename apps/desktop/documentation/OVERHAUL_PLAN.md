@@ -127,6 +127,11 @@ React `services` context; migrate consumers one PR at a time; delete each duplic
 once both modes use the seam. Data-merging migrations modeled on `cloud/migration.rs`
 + `MigrationProgressDialog.tsx`.
 
+The adapter seam is implemented in `backend/src/shared_services.rs` and
+`frontend/src/components/services-context.tsx`. It delegates to the existing
+managed singletons and generated transport; TDO-011 through TDO-015 migrate
+domain consumers through it without changing product-mode ownership.
+
 ### WS-3 — Architecture Hygiene (god-file decomposition)
 Triggered on-touch, but schedule the worst offenders:
 - `frontend/src/lib/thinclaw.ts` → `lib/api/{sessions,memory,routines,learning,experiments,mcp,…}.ts`.

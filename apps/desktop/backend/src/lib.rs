@@ -88,6 +88,7 @@ pub mod reranker;
 pub mod rig_cache;
 pub mod rig_lib;
 pub mod secret_store;
+pub mod shared_services;
 pub mod setup;
 pub mod sidecar;
 pub mod stt;
@@ -549,6 +550,7 @@ pub fn run() {
                 ironclaw_state_dir,
             );
             handle.manage(ironclaw_state);
+            handle.manage(shared_services::SharedServices::new(handle.clone()));
 
             let ironclaw_handle = handle.clone();
             tauri::async_runtime::spawn(async move {

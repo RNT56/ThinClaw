@@ -15,6 +15,7 @@ tree. ✅ = merged to `main`.
 | TDO-004 | Generated bindings and bindings-derived clients are the sole production frontend command transport | ✅ | `bindings.ts`, `command-client.ts`, `thinclaw.ts`, `production_frontend_has_one_command_calling_convention` |
 | TDO-005 | Generated `UiEvent` union + one native event-bus listener with typed React fan-out | ✅ | `ui_types.rs`, `use-thinclaw-stream.ts`, `event-bus-migration.test.ts` |
 | TDO-006 | Retired root `tauri_commands.rs`; service helpers live in `desktop_api` behind a deprecated compatibility alias | ✅ | `src/desktop_api.rs`, `src/lib.rs`, typed desktop command modules |
+| TDO-010 | Typed `SharedServices` Tauri state + injectable React services context | ✅ | `backend/src/shared_services.rs`, `frontend/src/components/services-context.tsx`, `App.tsx` |
 | TDO-100 | Real per-thread compaction (`thinclaw_compact_session`) | ✅ | `rpc_extensions.rs` (drives core `ContextCompactor`) |
 | TDO-102 | Self-repair lifecycle events → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `agent_loop`, `ThinClawEventInspector.tsx` |
 | TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | `rpc_checkpoints.rs`:40/52/65 |
@@ -88,7 +89,7 @@ a bare error string for a gated state.
 
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
-| TDO-010 | `SharedServices` Rust seam + React `services` context (adapter, no behavior change) | L | ∞ | TDO-001 | new module, `App.tsx` |
+| TDO-010 ✅ | `SharedServices` Rust seam + React `services` context (adapter, no behavior change) | L | ∞ | TDO-001 | `backend/src/shared_services.rs`, `components/services-context.tsx`, `App.tsx` |
 | TDO-011 | Unify secrets: one keychain-backed service feeding Workbench + Cockpit; single `SecretsTab` | L | ∞ | TDO-010 | `secret_store.rs`, `KeychainSecretsAdapter`, `SecretsTab.tsx` |
 | TDO-012 | Unify models/providers: one registry + provider-key vault; `sync_local_llm` canonical bridge | L | ∞ | TDO-010 | `model_manager.rs`, `inference/router.rs`, provider catalog |
 | TDO-013 | Unify history: shared conversation store with `surface` discriminator (+ SQLite merge migration) | L | ∞ | TDO-010 | `history.rs`, ThinClaw session store |
