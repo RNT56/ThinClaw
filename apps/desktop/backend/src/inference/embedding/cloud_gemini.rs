@@ -116,25 +116,6 @@ impl GeminiEmbeddingBackend {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retired_embedding_models_migrate_to_current_default() {
-        for retired in [
-            "text-embedding-004",
-            "embedding-001",
-            "gemini-embedding-001",
-        ] {
-            let backend = GeminiEmbeddingBackend::new("key".into(), Some(retired.into()));
-            assert_eq!(backend.model, "gemini-embedding-2");
-        }
-        let custom = GeminiEmbeddingBackend::new("key".into(), Some("custom-model".into()));
-        assert_eq!(custom.model, "custom-model");
-    }
-}
-
 #[async_trait]
 impl EmbeddingBackend for GeminiEmbeddingBackend {
     fn info(&self) -> BackendInfo {
@@ -164,5 +145,24 @@ impl EmbeddingBackend for GeminiEmbeddingBackend {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retired_embedding_models_migrate_to_current_default() {
+        for retired in [
+            "text-embedding-004",
+            "embedding-001",
+            "gemini-embedding-001",
+        ] {
+            let backend = GeminiEmbeddingBackend::new("key".into(), Some(retired.into()));
+            assert_eq!(backend.model, "gemini-embedding-2");
+        }
+        let custom = GeminiEmbeddingBackend::new("key".into(), Some("custom-model".into()));
+        assert_eq!(custom.model, "custom-model");
     }
 }

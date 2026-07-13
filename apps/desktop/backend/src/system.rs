@@ -137,20 +137,6 @@ fn exceeds_memory_budget(usage_bytes: f64, ceiling_bytes: f64) -> bool {
     ceiling_bytes > 0.0 && usage_bytes > ceiling_bytes
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn configured_memory_budget_is_strictly_bounded() {
-        let ceiling = 8.0 * BYTES_PER_GIB;
-        assert!(!exceeds_memory_budget(7.9 * BYTES_PER_GIB, ceiling));
-        assert!(!exceeds_memory_budget(ceiling, ceiling));
-        assert!(exceeds_memory_budget(8.1 * BYTES_PER_GIB, ceiling));
-        assert!(!exceeds_memory_budget(100.0 * BYTES_PER_GIB, 0.0));
-    }
-}
-
 fn detect_bandwidth(brand: &str) -> f32 {
     let brand_lower = brand.to_lowercase();
 
@@ -174,4 +160,18 @@ fn detect_bandwidth(brand: &str) -> f32 {
 
     // Fallback for PC (DDR4/DDR5 Dual Channel is typically 50-80 GB/s)
     60.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_memory_budget_is_strictly_bounded() {
+        let ceiling = 8.0 * BYTES_PER_GIB;
+        assert!(!exceeds_memory_budget(7.9 * BYTES_PER_GIB, ceiling));
+        assert!(!exceeds_memory_budget(ceiling, ceiling));
+        assert!(exceeds_memory_budget(8.1 * BYTES_PER_GIB, ceiling));
+        assert!(!exceeds_memory_budget(100.0 * BYTES_PER_GIB, 0.0));
+    }
 }
