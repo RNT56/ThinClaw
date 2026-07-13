@@ -8,6 +8,7 @@ import {
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
+import { ProfileEvolutionPanel } from './learning/ProfileEvolutionPanel';
 
 type JsonMap = Record<string, any>;
 
@@ -198,6 +199,8 @@ export function ThinClawLearning() {
                 <Stat icon={ClipboardCheck} label="Open Outcomes" value={status.outcomes_open ?? outcomes.length} />
                 <Stat icon={RotateCcw} label="Rollbacks" value={recent.rollbacks ?? rollbacks.length} tone="text-amber-300" />
             </div>
+
+            <ProfileEvolutionPanel />
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
                 <Panel title="Code Proposals" icon={FileCode2}>

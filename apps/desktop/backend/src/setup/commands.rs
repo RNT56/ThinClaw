@@ -291,6 +291,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_trajectory_stats,
         crate::thinclaw::commands::thinclaw_trajectory_records,
         crate::thinclaw::commands::thinclaw_trajectory_export,
+        crate::thinclaw::commands::thinclaw_profile_evolution_status,
+        crate::thinclaw::commands::thinclaw_profile_evolution_run,
         // Sprint 13 — New backend APIs
         crate::thinclaw::commands::thinclaw_cost_summary,
         crate::thinclaw::commands::thinclaw_cost_export_csv,
@@ -581,6 +583,8 @@ mod tests {
             "thinclawRoutineAuditList",
             "thinclawClearRoutineRuns",
             "thinclawTrajectoryExport",
+            "thinclawProfileEvolutionStatus",
+            "thinclawProfileEvolutionRun",
             "thinclawGmailOauthStart",
             "thinclawGmailStatus",
             "thinclawPairingList",

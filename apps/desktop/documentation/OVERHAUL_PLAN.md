@@ -96,7 +96,7 @@ runtime is dual-mode: embedded `inner` vs `RemoteGatewayProxy` in `runtime_bridg
 | **Remote-only in local mode** | `learning_evaluate_outcomes` and GPU operations are honestly gated with gateway remediation; `job_restart`/`job_prompt` remain remote-only |
 | **Headless internals (no UI/telemetry)** | advisor auto-consult, pre-compaction flush, context-pressure, config watcher, observability metrics (self-repair, checkpoints/rollback, undo, and trajectory now have commands + UI) |
 | **CLI-only (no command)** | tunnel and Claude-Code/Codex bridge job modes (the eval framework and SFT/DPO trajectory export now have Desktop commands) |
-| **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); no `/personality`, profile-evolution, or external-memory UI |
+| **Narrow coverage** | many channels still lack config UI (framework shipped, long tail pending); no `/personality` or external-memory UI |
 | **Partial flows** | Fleet and Cloud-Brain config |
 | **Duplication** | Shared-service duplication is closed: secrets, models/providers, local conversation history, settings storage/schema, and theming are unified |
 | **God-files** | `lib/thinclaw.ts`, `runtime_builder.rs`, `desktop_api.rs`, and several `ThinClaw*` panel components (the root Tauri facade is retired) |
@@ -227,7 +227,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | ~~GPU validate/launch failed opaquely in local mode~~ **DONE** | Typed remote-only gates explain the gateway credential boundary | `rpc_experiments_learning.rs:631-675` | M |
 | Eval framework partially exposed | Commands are wired; add the Benchmarks panel and runtime smoke-test | `rpc_experiments_learning.rs`, frontend | L |
 | ~~SFT/DPO export CLI-only~~ **DONE** | CLI and Desktop share the canonical validated exporter; Desktop adds a bounded local command and explicit SFT/DPO download controls | `src/cli/trajectory.rs`, `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` | M |
-| Profile-evolution no panel | Dedicated viewer + force-run | `src/profile_evolution.rs` | S |
+| ~~Profile-evolution no panel~~ **DONE** | Dedicated Learning Review panel shows bounded parsed profile/routine state and can explicitly upsert + run the reserved routine | `rpc_profile_evolution.rs`, `learning/ProfileEvolutionPanel.tsx` | S |
 
 ### 5c. Channels (breadth) — largest item
 | Gap | Approach | Key files | Size |

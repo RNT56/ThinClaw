@@ -190,7 +190,7 @@ characterization test added before the split; no behavior change.
 | TDO-112 ✅ | GPU validate/launch: typed remote-only gates with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:631-675` |
 | TDO-113 | Eval framework commands are wired; Benchmarks panel and runtime smoke-test remain | L | TDO-001 | `rpc_experiments_learning.rs`, frontend |
 | TDO-114 ✅ | `thinclaw_trajectory_export(format)` (SFT/DPO) + export button | M | TDO-106 | `src/cli/trajectory.rs`, `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` |
-| TDO-115 | Profile-evolution viewer + force-run | S | TDO-001 | `profile_evolution.rs` |
+| TDO-115 ✅ | Profile-evolution viewer + force-run | S | TDO-001 | `rpc_profile_evolution.rs`, `learning/ProfileEvolutionPanel.tsx` |
 
 ### Channels (largest item)
 | ID | Title | Size | Depends | Files |

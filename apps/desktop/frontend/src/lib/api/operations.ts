@@ -79,6 +79,32 @@ export async function exportTrajectory(format: TrajectoryExportFormat): Promise<
     return compatibilityCommands.thinclawTrajectoryExport(format) as Promise<TrajectoryExport>;
 }
 
+export interface ProfileEvolutionStatus {
+    profile_path: string;
+    profile_exists: boolean;
+    profile_parse_error: string | null;
+    preferred_name: string | null;
+    confidence: number | null;
+    message_count: number | null;
+    profile_updated_at: string | null;
+    profile: ThinClawJson | null;
+    routine_exists: boolean;
+    routine_id: string | null;
+    routine_enabled: boolean;
+    last_run_at: string | null;
+    next_fire_at: string | null;
+    run_count: number;
+    consecutive_failures: number;
+}
+
+export async function getProfileEvolutionStatus(): Promise<ProfileEvolutionStatus> {
+    return compatibilityCommands.thinclawProfileEvolutionStatus();
+}
+
+export async function runProfileEvolution(): Promise<{ routine_id: string; run_id: string }> {
+    return compatibilityCommands.thinclawProfileEvolutionRun();
+}
+
 // ============================================================================
 // Sprint 13 — New Backend APIs
 // ============================================================================

@@ -2638,6 +2638,28 @@ async thinclawTrajectoryExport(format: string) : Promise<Result<TrajectoryExport
 }
 },
 /**
+ * Return the current profile plus its reserved evolution routine state.
+ */
+async thinclawProfileEvolutionStatus() : Promise<Result<ProfileEvolutionStatusItem, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_profile_evolution_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Upsert the reserved evolution routine and run it immediately.
+ */
+async thinclawProfileEvolutionRun() : Promise<Result<ProfileEvolutionRunItem, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_profile_evolution_run") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Get LLM cost summary.
  *
  * Returns total spend, daily/monthly breakdowns, per-model costs,
@@ -4038,6 +4060,8 @@ export type PairingItem = { channel: string; user_id: string; paired_at: string;
  */
 export type PairingListResponse = { pairings: PairingItem[]; total: number }
 export type PermissionStatus = { accessibility: boolean; screen_recording: boolean }
+export type ProfileEvolutionRunItem = { routine_id: string; run_id: string }
+export type ProfileEvolutionStatusItem = { profile_path: string; profile_exists: boolean; profile_parse_error: string | null; preferred_name: string | null; confidence: number | null; message_count: number | null; profile_updated_at: string | null; profile: JsonValue | null; routine_exists: boolean; routine_id: string | null; routine_enabled: boolean; last_run_at: string | null; next_fire_at: string | null; run_count: number; consecutive_failures: number }
 export type Project = { id: string; name: string; description: string | null; created_at: number; updated_at: number; sort_order: number }
 export type ProviderDiscoveryResult = { provider: string; models: ModelDescriptor[]; fromCache: boolean; error?: string | null }
 export type RemoteDeployResult = { status: string; url: string; token: string; message: string | null }
