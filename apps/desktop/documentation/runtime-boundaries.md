@@ -108,7 +108,10 @@ Primary backend ownership:
 Runtime model:
 
 - Local mode embeds the root ThinClaw runtime in-process through
-  `ThinClawRuntimeState` and `ThinClawRuntimeInner`.
+  `ThinClawRuntimeState` and `ThinClawRuntimeInner`. The assembly coordinator is
+  `thinclaw/runtime_builder.rs`; its child modules own environment/provider
+  resolution, background tasks, typed event forwarding, and optional Docker
+  sandbox construction.
 - Remote mode talks to a remote ThinClaw HTTP gateway through
   `RemoteGatewayProxy`.
 - The frontend invokes stable `thinclaw_*` Tauri commands in both modes.
