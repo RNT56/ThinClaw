@@ -1,19 +1,23 @@
 # ThinClaw Desktop Secrets Policy
 
-Last updated: 2026-05-15
+Last updated: 2026-07-13
 
 This policy documents how Desktop stores, grants, injects, and migrates secrets.
 
 ## Naming Rules
 
 - Public branding is ThinClaw.
-- New secret writes use ThinClaw provider identifiers such as `anthropic`, `openai`, `gemini`, `groq`, `openrouter`, `brave`, `huggingface`, `bedrock`, and custom OpenAI-compatible provider slugs.
-- Legacy Scrappy/ThinClaw key names remain fallback-only read inputs for migration and rollback.
+- New secret writes use canonical ThinClaw identifiers such as `llm_anthropic_api_key`, `llm_openai_api_key`, `llm_compatible_api_key`, `search_brave_api_key`, and `hf_token`; providers without a renamed contract keep their provider slug, and custom secrets keep their generated ID.
+- Legacy Scrappy/ThinClaw key names are canonicalized when the unified keychain blob is loaded; fallback reads remain for rollback compatibility.
 - Do not add new writes to legacy Scrappy identifiers.
 
 ## Storage
 
-Local Desktop stores provider keys in the OS keychain through the Desktop keychain adapter.
+Local Desktop stores provider keys in the OS keychain through one application-wide
+`SecretStore`. Direct Workbench consumers use its host methods; the ThinClaw runtime
+uses the `SecretsStore` trait implementation on the same service, with agent grants
+checked before every runtime read. Clones share grant state and never create a second
+keychain cache or secret store.
 
 - macOS: Keychain.
 - Other platforms: use the configured Tauri/OS secrets backend when available.
@@ -23,7 +27,7 @@ Local Desktop stores provider keys in the OS keychain through the Desktop keycha
 
 Saving a key is not enough to expose it to ThinClaw tools. The user must also grant access.
 
-The secrets adapter must enforce grants for:
+The grant-aware runtime view must enforce grants for:
 
 - `get`
 - `get_for_injection`
@@ -32,6 +36,8 @@ The secrets adapter must enforce grants for:
 - `is_accessible`
 
 Denied methods should fail closed. UI status may show that a key exists only when the current grant policy allows the status check.
+Saving, deleting, or toggling a local credential refreshes the shared grant state
+immediately. Deleting a provider or custom secret also revokes its persisted grant.
 
 ## Injection
 
@@ -69,7 +75,7 @@ Forbidden:
 P3 contract tests should cover:
 
 - New writes use ThinClaw identifiers.
-- Legacy Scrappy reads remain fallback-only.
+- Legacy Scrappy aliases migrate to canonical names without overwriting a newer canonical value.
 - Ungranted `get`, `get_for_injection`, `exists`, `list`, and `is_accessible` are denied.
 - Remote save/delete/status never returns a raw secret.
 - Deleting a key revokes grants.

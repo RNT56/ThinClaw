@@ -44,23 +44,23 @@ jobs:
       - name: Check crate boundaries
         run: |
           set -euo pipefail
-          if rg -n 'use thinclaw::' crates; then
+          if grep -RIn --include='*.rs' 'use thinclaw::' crates; then
             echo "Internal crates must not import the root thinclaw package."
             exit 1
           fi
-          if rg -n '^\s*thinclaw\s*=|^\s*\[.*\.thinclaw\]' crates -g Cargo.toml; then
+          if grep -RInE --include='Cargo.toml' '^[[:space:]]*thinclaw[[:space:]]*=|^[[:space:]]*\[.*\.thinclaw\]' crates; then
             echo "Internal crates must not depend on the root thinclaw package."
             exit 1
           fi
-          if rg -n 'package\s*=\s*"thinclaw"' crates -g Cargo.toml; then
+          if grep -RInE --include='Cargo.toml' 'package[[:space:]]*=[[:space:]]*"thinclaw"' crates; then
             echo "Internal crates must not depend on package = \"thinclaw\"."
             exit 1
           fi
-          if rg -n 'thinclaw-agent' crates/thinclaw-db/Cargo.toml; then
+          if grep -n 'thinclaw-agent' crates/thinclaw-db/Cargo.toml; then
             echo "thinclaw-db must not depend on thinclaw-agent: persistence must not depend on the agent layer. Routine DTOs live in thinclaw-types (thinclaw_types::routine)."
             exit 1
           fi
-          if rg -n 'thinclaw-tools\b' crates/thinclaw-gateway/Cargo.toml; then
+          if grep -nE 'thinclaw-tools([^[:alnum:]_-]|$)' crates/thinclaw-gateway/Cargo.toml; then
             echo "thinclaw-gateway must not depend on thinclaw-tools: the light gateway crate must not pull the heavyweight tool runtime (wasmtime/chromiumoxide). MCP/execution DTOs live in thinclaw-tools-core."
             exit 1
           fi
@@ -72,7 +72,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Guard Linux deploy port
         run: |
-          if rg -n "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
+          if grep -RInE "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
             echo "Legacy gateway port 18789 must not appear in deploy files or deployment docs."
             exit 1
           fi
@@ -254,7 +254,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo tree --no-default-features --features edge > cargo-tree-edge.txt
-          if rg -n "wasmtime|wasmtime-wasi|wasmparser|bollard|tokio-postgres|deadpool-postgres|chromiumoxide|nostr-sdk|pdf-extract" cargo-tree-edge.txt; then
+          if grep -nE "wasmtime|wasmtime-wasi|wasmparser|bollard|tokio-postgres|deadpool-postgres|chromiumoxide|nostr-sdk|pdf-extract" cargo-tree-edge.txt; then
             echo "edge profile pulled in a heavy dependency"
             exit 1
           fi

@@ -19,6 +19,16 @@ mod platform {
 
     static APP_NAP_GUARD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+    fn increment_guard_count(counter: &AtomicUsize) -> usize {
+        counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn decrement_guard_count(counter: &AtomicUsize) -> usize {
+        let previous = counter.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0, "App Nap guard count underflow");
+        previous
+    }
+
     /// RAII guard that prevents macOS App Nap while alive.
     pub struct AppNapGuard {
         process_info: Retained<NSProcessInfo>,
@@ -43,7 +53,7 @@ mod platform {
                 NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
                 &ns_reason,
             );
-            let prev = APP_NAP_GUARD_COUNT.fetch_add(1, Ordering::SeqCst);
+            let prev = increment_guard_count(&APP_NAP_GUARD_COUNT);
             if prev == 0 {
                 tracing::info!("[cloud/app_nap] Disabling App Nap: {}", reason);
             }
@@ -66,11 +76,22 @@ mod platform {
             unsafe {
                 self.process_info.endActivity(&self.activity);
             }
-            let prev = APP_NAP_GUARD_COUNT.fetch_sub(1, Ordering::SeqCst);
+            let prev = decrement_guard_count(&APP_NAP_GUARD_COUNT);
             if prev == 1 {
                 tracing::info!("[cloud/app_nap] Re-enabling App Nap (last guard dropped)");
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_guard_count_roundtrip() {
+        let counter = AtomicUsize::new(0);
+        assert_eq!(increment_guard_count(&counter), 0);
+        assert_eq!(increment_guard_count(&counter), 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        assert_eq!(decrement_guard_count(&counter), 2);
+        assert_eq!(decrement_guard_count(&counter), 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -90,6 +111,13 @@ mod platform {
             false
         }
     }
+
+    // Preserve the same RAII contract on every platform. The implementation is
+    // intentionally empty, but having a Drop impl lets callers explicitly end
+    // the guard's scope without platform-specific test or control-flow branches.
+    impl Drop for AppNapGuard {
+        fn drop(&mut self) {}
+    }
 }
 
 // ── Public Re-export ─────────────────────────────────────────────────────
@@ -101,33 +129,30 @@ pub use platform::AppNapGuard;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static APP_NAP_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_app_nap_guard_lifecycle() {
-        let _guard_lock = APP_NAP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        // Before: not active
-        assert!(!AppNapGuard::is_active());
+        let guard = AppNapGuard::begin("test sync");
 
-        {
-            let _guard = AppNapGuard::begin("test sync");
+        // A live guard always contributes to the process-wide count on macOS.
+        // Do not assert that the global count is zero before/after this scope:
+        // cloud-sync tests legitimately create guards in parallel.
+        #[cfg(target_os = "macos")]
+        assert!(AppNapGuard::is_active());
 
-            // During: active (on macOS)
-            #[cfg(target_os = "macos")]
-            assert!(AppNapGuard::is_active());
-        }
-
-        // After drop: not active
-        assert!(!AppNapGuard::is_active());
+        drop(guard);
     }
 
     #[test]
     fn test_multiple_guards() {
-        let _guard_lock = APP_NAP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = AppNapGuard::begin("sync 1");
         let _g2 = AppNapGuard::begin("sync 2");
         // Both drop — should not panic
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_guard_count_roundtrip_in_isolation() {
+        super::platform::assert_guard_count_roundtrip();
     }
 }

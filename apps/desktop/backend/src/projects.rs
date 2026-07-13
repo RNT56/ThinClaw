@@ -85,14 +85,18 @@ pub async fn list_projects(pool: State<'_, SqlitePool>) -> Result<Vec<Project>, 
 #[specta::specta]
 pub async fn delete_project(
     pool: State<'_, SqlitePool>,
+    history: State<'_, crate::history::SharedHistoryStore>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     id: String,
 ) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // 1. Delete messages associated with conversations in this project
-    // This is important because while conversations have ON DELETE CASCADE from messages,
-    // we want to be explicit about what's happening.
+    // Remove active history from the canonical shared store. The legacy rows
+    // below are retained only as a rollback source and must follow the same
+    // explicit user deletion.
+    history.delete_project_conversations(&id).await?;
+
+    // 1. Clear the matching legacy snapshot.
     sqlx::query("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id = ?)")
         .bind(&id)
         .execute(&mut *tx)

@@ -103,7 +103,7 @@ export function TroubleshootingSettings() {
                             onClick={async () => unwrap(await commands.openConfigFile())}
                             className="w-full bg-background border border-border/50 hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-xs"
                         >
-                            <Settings className="w-4 h-4 mr-2 text-muted-foreground" /> Open User Config
+                            <Settings className="w-4 h-4 mr-2 text-muted-foreground" /> Reveal Config Recovery Snapshot
                         </button>
                     </div>
                 </div>

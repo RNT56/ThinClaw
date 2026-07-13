@@ -89,6 +89,7 @@ pub mod rig_cache;
 pub mod rig_lib;
 pub mod secret_store;
 pub mod setup;
+pub mod shared_services;
 pub mod sidecar;
 pub mod stt;
 pub mod system;
@@ -415,19 +416,16 @@ pub fn run() {
 
             // ── App-wide secret store (reads from the just-loaded keychain) ───
             let secret_store = secret_store::SecretStore::new();
-            // InferenceRouter needs an Arc handle to the store.  Since
-            // SecretStore is a zero-state wrapper over keychain (module-level
-            // Mutex cache), a second instance is safe — they share the same
-            // underlying cache.
-            let secret_store_for_router = std::sync::Arc::new(secret_store::SecretStore::new());
+            // All consumers share the same grant state and keychain access
+            // path; cloning the service does not construct another store.
+            let shared_secret_store = std::sync::Arc::new(secret_store.clone());
             handle.manage(secret_store);
 
-            // ── Inference Router — routes all AI modalities to backends ───
-            let inference_router = inference::InferenceRouter::new(secret_store_for_router.clone());
+            // ── Shared model/provider registry + inference router ───
+            // The router clone shares this registry's discovery cache and key vault.
+            let model_registry = inference::ModelProviderRegistry::new(shared_secret_store);
+            let inference_router = inference::InferenceRouter::new(model_registry.clone());
             handle.manage(inference_router);
-
-            // ── Cloud Model Discovery Registry ───
-            let model_registry = inference::CloudModelRegistry::new(secret_store_for_router);
             handle.manage(model_registry);
 
             // Engine Manager — singleton inference engine instance
@@ -480,6 +478,19 @@ pub fn run() {
                 .await
                 .expect("failed to run migrations");
 
+            // Direct Workbench and the embedded agent share the canonical
+            // conversation database. Import the legacy Direct history once,
+            // then expose one app-wide service to every conversation consumer.
+            let shared_history = history::SharedHistoryStore::open(&app_data_dir, &pool)
+                .await
+                .expect("failed to initialize shared history store");
+            #[cfg(feature = "runtime-libsql")]
+            handle
+                .state::<config::ConfigManager>()
+                .attach_database(shared_history.runtime_store())
+                .await
+                .expect("failed to initialize canonical settings store");
+            handle.manage(shared_history);
             handle.manage(pool);
 
             // Cloud Storage Manager
@@ -534,10 +545,14 @@ pub fn run() {
 
             // Init ThinClaw config (critical for paths to work before engine start)
             let thinclaw_state = handle.state::<thinclaw::ThinClawManager>();
-            if let Err(e) = thinclaw_state.init_config().await {
-                eprintln!("[main] Failed to init ThinClaw config: {}", e);
-            } else {
-                // ThinClaw is in-process — no separate gateway to auto-start
+            match thinclaw_state.init_config().await {
+                Err(error) => eprintln!("[main] Failed to init ThinClaw config: {error}"),
+                Ok(config) => {
+                    handle
+                        .state::<secret_store::SecretStore>()
+                        .apply_thinclaw_config(&config);
+                    // ThinClaw is in-process — no separate gateway to auto-start
+                }
             }
 
             // ── ThinClaw Engine Init (async — safe now that libsql bootstrap ran) ──
@@ -549,6 +564,7 @@ pub fn run() {
                 ironclaw_state_dir,
             );
             handle.manage(ironclaw_state);
+            handle.manage(shared_services::SharedServices::new(handle.clone()));
 
             let ironclaw_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -626,11 +642,12 @@ pub fn run() {
                     }
                 }
 
-                // Bridge ThinClaw Desktop's macOS Keychain to ThinClaw's SecretsStore trait.
+                // Feed the shared Desktop secret service into ThinClaw's
+                // grant-aware SecretsStore trait view.
                 let secrets_store: Option<
                     std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
                 > = Some(std::sync::Arc::new(
-                    thinclaw::secrets_adapter::KeychainSecretsAdapter::new(),
+                    (*ironclaw_handle.state::<secret_store::SecretStore>()).clone(),
                 ));
 
                 let state =

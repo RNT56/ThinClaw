@@ -445,7 +445,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         if (dim && dim > 0) {
                             const userConfig = await commands.getUserConfig();
                             if (userConfig.vector_dimensions !== dim) {
-                                await commands.updateUserConfig({ ...userConfig, vector_dimensions: dim });
+                                await commands.updateUserConfig({ vector_dimensions: dim });
                                 console.log(`[onboarding] Pre-set vector_dimensions to ${dim} for ${embeddingEntry.repoId}`);
                             }
                         }
@@ -563,12 +563,16 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                 <button
                                                     onClick={() => setUiTheme("light")}
                                                     className={cn("p-1.5 rounded-md transition-all", currentMode === 'light' ? 'bg-background shadow-xs text-primary' : 'text-muted-foreground hover:text-foreground')}
+                                                    aria-label="Use light appearance"
+                                                    aria-pressed={currentMode === 'light'}
                                                 >
                                                     <Sun className="w-3.5 h-3.5" />
                                                 </button>
                                                 <button
                                                     onClick={() => setUiTheme("dark")}
                                                     className={cn("p-1.5 rounded-md transition-all", currentMode === 'dark' ? 'bg-background shadow-xs text-primary' : 'text-muted-foreground hover:text-foreground')}
+                                                    aria-label="Use dark appearance"
+                                                    aria-pressed={currentMode === 'dark'}
                                                 >
                                                     <Moon className="w-3.5 h-3.5" />
                                                 </button>
@@ -583,6 +587,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                     <button
                                                         key={t.id}
                                                         onClick={() => setAppThemeId(t.id)}
+                                                        aria-label={`Use ${t.label} palette`}
+                                                        aria-pressed={isActive}
                                                         className={cn(
                                                             "group p-3 rounded-xl border-2 text-left transition-all space-y-3",
                                                             isActive

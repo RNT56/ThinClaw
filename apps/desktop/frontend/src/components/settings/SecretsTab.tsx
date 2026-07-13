@@ -240,6 +240,16 @@ export function SecretsTab() {
         }
     };
 
+    const handleUpdateCustomSecret = async (id: string, value: string) => {
+        const res = await commands.thinclawUpdateCustomSecret(id, value);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            toast.error("Failed to update secret: " + res.error);
+            throw new Error(res.error);
+        }
+    };
+
     const handleToggleCustomSecret = async (id: string, granted: boolean) => {
         const res = await commands.thinclawToggleCustomSecret(id, granted);
         if (res.status === 'ok') {
@@ -818,11 +828,7 @@ export function SecretsTab() {
                                     placeholder="••••••••••••••••"
                                     hasKey={true}
                                     granted={secret.granted}
-                                    onSave={async (_key) => {
-                                        // Update logic for custom secrets?
-                                        // For now let's just use it as is, maybe disable update if we don't have it implemented.
-                                        toast.info("Update for custom secrets not implemented yet, please re-add if needed.");
-                                    }}
+                                    onSave={(value) => handleUpdateCustomSecret(secret.id, value)}
                                     onToggle={(g) => handleToggleCustomSecret(secret.id, g)}
                                     onFetch={async () => null} // Custom secret values are not sent from backend (#[serde(skip)])
                                     onDelete={() => handleRemoveCustomSecret(secret.id)}
@@ -840,8 +846,8 @@ export function SecretsTab() {
             <div className="p-4 rounded-xl border border-primary/10 bg-primary/5 text-muted-foreground text-sm flex gap-3 items-center">
                 <ShieldCheck className="w-5 h-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
                 <p>
-                    <span className="font-bold text-foreground">Privacy First:</span> Your secrets are stored in a secure local directory and
-                    <strong> strictly isolated</strong> from the agent process unless access is explicitly granted above.
+                    <span className="font-bold text-foreground">Privacy First:</span> Your secrets are stored in the operating system keychain.
+                    <strong> ThinClaw agent access stays denied</strong> unless you explicitly grant it above.
                 </p>
             </div>
         </div>

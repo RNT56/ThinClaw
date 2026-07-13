@@ -375,7 +375,7 @@ async openConfigFile() : Promise<Result<null, string>> {
 async getUserConfig() : Promise<UserConfig> {
     return await TAURI_INVOKE("get_user_config");
 },
-async updateUserConfig(config: UserConfig) : Promise<Result<null, string>> {
+async updateUserConfig(config: UserConfigPatch) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_user_config", { config }) };
 } catch (e) {
@@ -901,7 +901,7 @@ async thinclawStopGateway() : Promise<Result<null, string>> {
  * Called by the frontend after API key save/toggle operations so the ThinClaw
  * agent picks up changes without requiring manual restart by the user.
  *
- * **Flow:** stop engine → create fresh KeychainSecretsAdapter → start engine
+ * **Flow:** refresh shared grants → hot reload or restart the runtime
  *
  * This is a no-op if the engine isn't running.
  */
@@ -1395,6 +1395,17 @@ async thinclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
 async thinclawAddCustomSecret(name: string, value: string, description: string | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_add_custom_secret", { name, value, description }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Update an existing custom secret value without changing its identity or grant.
+ */
+async thinclawUpdateCustomSecret(id: string, value: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_custom_secret", { id, value }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -4482,6 +4493,7 @@ inference_models?: { [key in string]: string } | null;
  * Falls back to the provider's `default_context_size` when `None`.
  */
 selected_model_context_size?: number | null }
+export type UserConfigPatch = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string; ptt_shortcut?: string; disabled_providers?: string[]; mcp_base_url?: string | null; mcp_auth_token?: string | null; mcp_sandbox_enabled?: boolean; mcp_cache_ttl_secs?: number; mcp_tool_result_max_chars?: number; chat_backend?: string | null; embedding_backend?: string | null; tts_backend?: string | null; stt_backend?: string | null; diffusion_backend?: string | null; inference_models?: { [key in string]: string } | null; selected_model_context_size?: number | null }
 /**
  * Voice metadata for TTS backends.
  */

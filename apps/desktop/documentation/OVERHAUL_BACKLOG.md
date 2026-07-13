@@ -4,8 +4,8 @@
 
 ## Completion status (verified 2026-07-13)
 
-First parity batch is **merged to `main`**. Every row below is verified present in the
-tree. ✅ = merged to `main`.
+Every row below is verified in the current implementation branch. ✅ = implemented
+and locally verified; GitHub merge state remains authoritative until each PR lands.
 
 | TDO | Item | State | Verified in code |
 |---|---|---|---|
@@ -15,6 +15,12 @@ tree. ✅ = merged to `main`.
 | TDO-004 | Generated bindings and bindings-derived clients are the sole production frontend command transport | ✅ | `bindings.ts`, `command-client.ts`, `thinclaw.ts`, `production_frontend_has_one_command_calling_convention` |
 | TDO-005 | Generated `UiEvent` union + one native event-bus listener with typed React fan-out | ✅ | `ui_types.rs`, `use-thinclaw-stream.ts`, `event-bus-migration.test.ts` |
 | TDO-006 | Retired root `tauri_commands.rs`; service helpers live in `desktop_api` behind a deprecated compatibility alias | ✅ | `src/desktop_api.rs`, `src/lib.rs`, typed desktop command modules |
+| TDO-010 | Typed `SharedServices` Tauri state + injectable React services context | ✅ | `backend/src/shared_services.rs`, `frontend/src/components/services-context.tsx`, `App.tsx` |
+| TDO-011 | One keychain-backed `SecretStore` + live shared grants + functional custom-secret updates | ✅ | `secret_store.rs`, `secrets_adapter.rs`, `keys.rs`, `SecretsTab.tsx` |
+| TDO-012 | One shared model/provider registry, discovery cache, local inventory, and key-readiness path | ✅ | `inference/model_discovery/mod.rs`, `inference/router.rs`, `model_manager.rs` |
+| TDO-013 | Shared conversation store, surface isolation, and deterministic one-time legacy merge | ✅ | `history.rs`, `runtime_builder.rs`, `V30__conversation_surfaces.sql` |
+| TDO-014 | One versioned canonical settings schema with typed Workbench and Agent views | ✅ | `config.rs`, `rpc_config.rs`, `ThinClawSystemControl.tsx` |
+| TDO-015 | One versioned theme preference record and semantic token contract for both product surfaces | ✅ | `theme-provider.tsx`, `index.css`, `ThinClawView.tsx` |
 | TDO-100 | Real per-thread compaction (`thinclaw_compact_session`) | ✅ | `rpc_extensions.rs` (drives core `ContextCompactor`) |
 | TDO-102 | Self-repair lifecycle events → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `agent_loop`, `ThinClawEventInspector.tsx` |
 | TDO-103 | Checkpoints/rollback: `list`/`diff`/`restore` commands + Rollback panel | ✅ | `rpc_checkpoints.rs`:40/52/65 |
@@ -88,15 +94,28 @@ a bare error string for a gated state.
 
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
-| TDO-010 | `SharedServices` Rust seam + React `services` context (adapter, no behavior change) | L | ∞ | TDO-001 | new module, `App.tsx` |
-| TDO-011 | Unify secrets: one keychain-backed service feeding Workbench + Cockpit; single `SecretsTab` | L | ∞ | TDO-010 | `secret_store.rs`, `KeychainSecretsAdapter`, `SecretsTab.tsx` |
-| TDO-012 | Unify models/providers: one registry + provider-key vault; `sync_local_llm` canonical bridge | L | ∞ | TDO-010 | `model_manager.rs`, `inference/router.rs`, provider catalog |
-| TDO-013 | Unify history: shared conversation store with `surface` discriminator (+ SQLite merge migration) | L | ∞ | TDO-010 | `history.rs`, ThinClaw session store |
-| TDO-014 | Unify settings: one schema, two views (Workbench `config.rs` + `thinclaw_config_*`) | M | ∞ | TDO-010 | `config.rs`, `rpc_config.rs` |
-| TDO-015 | Unify theming tokens (feeds design system) | M | P3 | TDO-010 | `theme-provider.tsx` |
+| TDO-010 ✅ | `SharedServices` Rust seam + React `services` context (adapter, no behavior change) | L | ∞ | TDO-001 | `backend/src/shared_services.rs`, `components/services-context.tsx`, `App.tsx` |
+| TDO-011 ✅ | Unify secrets: one keychain-backed service feeding Workbench + Cockpit; single `SecretsTab` | L | ∞ | TDO-010 | `secret_store.rs`, `secrets_adapter.rs`, `SecretsTab.tsx` |
+| TDO-012 ✅ | Unify models/providers: one registry + provider-key vault; `sync_local_llm` canonical bridge | L | ∞ | TDO-010 | `model_manager.rs`, `inference/router.rs`, provider catalog |
+| TDO-013 ✅ | Unify history: shared conversation store with `surface` discriminator (+ SQLite merge migration) | L | ∞ | TDO-010 | `history.rs`, ThinClaw session store |
+| TDO-014 ✅ | Unify settings: one schema, two views (Workbench `config.rs` + `thinclaw_config_*`) | M | ∞ | TDO-010 | `config.rs`, `rpc_config.rs` |
+| TDO-015 ✅ | Unify theming tokens (feeds design system) | M | P3 | TDO-010 | `theme-provider.tsx` |
 
 **TDO-011 acceptance:** one code path stores/reads secrets; grant-denial contract test
 still green; legacy aliases migrated; duplicate store deleted.
+
+**TDO-013 acceptance:** Direct and embedded-agent conversations share one local
+database handle; every Direct operation is surface-scoped; the legacy SQLite merge is
+deterministic, idempotent, and preserves Direct metadata and attachments.
+
+**TDO-014 acceptance:** `ConfigManager` is the sole local settings service; the
+database-backed Workbench config wins after a one-time JSON merge; Agent settings share
+the same table without exposing reserved Desktop rows; both UI views save a typed envelope.
+
+**TDO-015 acceptance:** one validated, versioned preference record replaces four legacy
+localStorage keys; one token application path serves both product surfaces and windows;
+semantic surface/content tokens plus compatibility aliases make Cockpit panels honor every
+app palette without changing status-color meaning.
 
 ---
 

@@ -39,6 +39,16 @@
   --color-chart-4: hsl(var(--chart-4));
   --color-chart-5: hsl(var(--chart-5));
 
+  /* Shared Direct Workbench / Agent Cockpit surface contract. */
+  --color-surface-canvas: var(--surface-canvas);
+  --color-surface-panel: var(--surface-panel);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-content-primary: var(--content-primary);
+  --color-content-muted: var(--content-muted);
+  --color-surface-outline: var(--surface-outline);
+  --color-surface-focus: var(--surface-focus);
+
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
@@ -135,6 +145,16 @@
     /* Syntax Highlighting Fallbacks */
     --hljs-bg: 0 0% 99%;
     --hljs-color: 240 10% 20%;
+
+    /* ThemeProvider replaces these with the active palette at runtime. */
+    --surface-canvas: hsl(var(--background));
+    --surface-panel: hsl(var(--card));
+    --surface-elevated: hsl(var(--popover));
+    --surface-subtle: hsl(var(--muted));
+    --content-primary: hsl(var(--foreground));
+    --content-muted: hsl(var(--muted-foreground));
+    --surface-outline: hsl(var(--border));
+    --surface-focus: hsl(var(--ring));
   }
 
   .dark {

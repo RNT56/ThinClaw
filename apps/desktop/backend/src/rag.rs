@@ -834,12 +834,11 @@ pub async fn retrieve_context_internal(
     let mut project_id: Option<String> = project_id_arg;
     if project_id.is_none() {
         if let Some(cid) = &chat_id {
-            project_id = sqlx::query_scalar("SELECT project_id FROM conversations WHERE id = ?")
-                .bind(cid)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|e| format!("Failed to fetch project_id: {}", e))?
-                .flatten();
+            if let Some(handle) = &app {
+                use tauri::Manager;
+                let history = handle.state::<crate::history::SharedHistoryStore>();
+                project_id = history.conversation_project_id(cid).await?;
+            }
         }
     }
 

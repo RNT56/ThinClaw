@@ -794,7 +794,7 @@ export function ThinClawAutomations() {
                             initial={{ x: "100%" }}
                             animate={{ x: 0 }}
                             exit={{ x: "100%" }}
-                            className="relative w-full max-w-md bg-[#0D0D0E] border-l border-border/40 shadow-2xl flex flex-col"
+                            className="relative w-full max-w-md bg-surface-elevated border-l border-border/40 shadow-2xl flex flex-col"
                         >
                             <div className="p-6 border-b border-border/40 flex items-center justify-between">
                                 <div className="flex items-center gap-3">

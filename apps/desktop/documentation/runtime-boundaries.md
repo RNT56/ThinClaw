@@ -1,6 +1,6 @@
 # ThinClaw Desktop Runtime Boundaries
 
-Last updated: 2026-06-24
+Last updated: 2026-07-13
 
 ThinClaw Desktop intentionally contains two AI systems. They serve different
 jobs and must not be collapsed into one architecture without an explicit
@@ -31,7 +31,8 @@ Primary backend ownership:
 - `backend/src/rig_lib/*`
 - `backend/src/rag.rs`, `vector_store.rs`, `reranker.rs`, `web_search.rs`
 - `backend/src/imagine.rs`, `image_gen.rs`, `images.rs`
-- `backend/src/history.rs`, `projects.rs`
+- `backend/src/history.rs`, `projects.rs` (the Direct adapter over the shared
+  conversation store)
 - `backend/migrations/*.sql`
 
 Runtime model:
@@ -50,15 +51,29 @@ Runtime model:
 
 Persistence:
 
-- Uses the Desktop SQLite schema in `backend/migrations`.
-- Stores local app conversations in `conversations` and `messages`.
+- Stores Direct conversations in the app-wide `thinclaw-runtime.db`
+  conversation tables with `surface = 'direct_workbench'`.
+- In the default local profile, `SharedHistoryStore` opens that database once,
+  gives Direct commands a SQLx adapter, and injects the exact same
+  `Arc<dyn Database>` into the embedded libSQL agent runtime. In the PostgreSQL
+  profile, Direct Workbench keeps this local store while the embedded agent uses
+  its configured remote database.
+- On first startup after this change, the legacy Desktop SQLite
+  `conversations` and `messages` rows are merged with deterministic UUIDs.
+  Their Direct-only title/project/order/media fields are preserved under the
+  `metadata.direct_workbench` namespace; the old tables remain only as the
+  idempotent migration and rollback source.
+- The Desktop SQLite schema in `backend/migrations` still owns Direct-only
+  projects, documents, chunks, and assets.
 - Stores uploaded/indexed documents in `documents` and `chunks`.
 - Stores uploaded images, generated images, RAG documents, TTS output, and STT
   input in `direct_assets` through `DirectAssetStore`.
-- `messages.assets` is the canonical `AssetRef[]` attachment field. Legacy
-  `messages.images`, `messages.attached_docs`, and `generated_images` stay
-  migration-readable only.
-- This history is Direct AI Workbench history, not ThinClaw agent memory.
+- `conversation_messages.metadata.direct_workbench.assets` is the canonical
+  `AssetRef[]` attachment field. Legacy `messages.images`,
+  `messages.attached_docs`, and `generated_images` stay migration-readable only.
+- The physical conversation store is shared; the `surface` discriminator and
+  command filters keep Direct history separate from ThinClaw agent memory and
+  authority.
 
 Security boundary:
 
@@ -119,15 +134,27 @@ Security boundary:
 
 ## Shared Infrastructure
 
+Desktop exposes the existing host singletons through
+`backend/src/shared_services.rs::SharedServices` and the generated command/event
+transport through `frontend/src/components/services-context.tsx`. These are
+adapter seams, not new stores: they own no duplicate secret cache, database
+pool, provider registry, or agent runtime. Both product modes receive the same
+React provider, while Rust consumers opt into typed accessors one domain at a
+time. Tool authority, persistence ownership, and the non-shared state below do
+not cross this seam.
+
 These pieces may be shared, but only through explicit adapters:
 
 | Shared piece | Allowed use |
 | --- | --- |
 | Tauri shell | Hosts both systems and dispatches commands. |
 | React app shell | Provides navigation, settings, theming, windows, and layout. |
-| Keychain / `SecretStore` | Stores provider credentials. Agent access still requires ThinClaw grants. |
+| Keychain / `SecretStore` | One app-wide service stores provider credentials for both modes. Its shared live policy denies agent reads unless ThinClaw grants them. |
 | Local inference engines | Report readiness through `LocalRuntimeSnapshot`; `exposurePolicy=shared_when_enabled` means Direct may use the endpoint immediately and ThinClaw may use it only when the local inference toggle is enabled. |
 | Cloud provider catalog | May provide model discovery to both systems if the contract is provider/model metadata only. |
+| Conversation store | In the default local profile, `SharedHistoryStore` owns one runtime database. Direct rows use `surface=direct_workbench`; embedded-agent rows use `surface=agent_cockpit`; delete/list/project operations are surface-scoped. In the PostgreSQL profile, Direct retains that local store and the agent uses PostgreSQL. |
+| Settings schema | In the default local profile, `ConfigManager` owns one versioned settings envelope in the shared runtime database. `desktop.workbench` is the typed Direct view; agent key/value rows are the Cockpit view. `user_config.json` is merged once and retained only as a recovery mirror. In the PostgreSQL profile, Workbench settings remain recovery-file-backed and the agent uses its remote settings store. |
+| Theme tokens | `ThemeProvider` owns one versioned preference record and applies one semantic surface/content/accent token set to the document root. Workbench, Cockpit, Spotlight, and legacy Cockpit neutral/accent utilities consume that same selected palette. |
 | Runtime contracts | `crates/thinclaw-runtime-contracts` is the Desktop-first DTO source, with WebUI as the future adopter. The iOS surface does **not** use it — it generates its client from the gateway OpenAPI spec (`clients/openapi/thinclaw-gateway.openapi.json`) via swift-openapi-generator. |
 | Generated bindings | Direct Workbench uses `direct_*` command wrappers. Agent Cockpit uses `thinclaw_*` wrappers and `thinclaw-event`. |
 | OS permissions | Camera, mic, screen, filesystem, and accessibility prompts may be shared at the host level, but authority must be checked per system. |
@@ -169,7 +196,7 @@ These must stay distinct unless a written migration changes them:
 
 | State | Direct AI Workbench | ThinClaw Agent Cockpit |
 | --- | --- | --- |
-| Chat history | Desktop SQLite `conversations` / `messages` | ThinClaw runtime conversations / threads |
+| Chat history | Shared runtime store, `surface=direct_workbench`; Direct UI fields live under `metadata.direct_workbench` | Shared runtime store, `surface=agent_cockpit`; agent thread semantics remain runtime-owned |
 | Long-term memory | Project/RAG documents, chunks, and `direct_assets` | ThinClaw memory/workspace documents |
 | Tool permissions | Direct feature toggles for RAG/search/media | ThinClaw policy, grants, and approvals |
 | Personas | Desktop personas for direct chat | ThinClaw identity/workspace markdown and runtime persona |

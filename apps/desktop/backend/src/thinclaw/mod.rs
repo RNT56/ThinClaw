@@ -14,7 +14,7 @@ pub mod event_mapping; // StatusUpdate → UiEvent conversion
 pub mod fleet;
 pub mod remote_proxy; // HTTP/SSE proxy client for remote ThinClaw gateway
 pub mod runtime_bridge; // ThinClaw lifecycle manager (ThinClawRuntimeState)
-mod runtime_builder; // Engine construction logic (extracted from runtime_bridge)
+pub(crate) mod runtime_builder; // Engine construction logic (extracted from runtime_bridge)
 pub mod sanitizer; // LLM token stripping
 pub mod secrets_adapter; // SecretsStore adapter (Keychain → ThinClaw trait)
 pub mod tauri_channel; // impl Channel for TauriChannel

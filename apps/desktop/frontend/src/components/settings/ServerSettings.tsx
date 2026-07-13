@@ -305,7 +305,7 @@ export function ServerSettings() {
                             if (!config) return;
                             const newConfig = { ...config, enable_memory_reservation: val };
                             setConfig(newConfig);
-                            await commands.updateUserConfig(newConfig);
+                            await commands.updateUserConfig({ enable_memory_reservation: val });
                         }}
                         className="w-[42px] h-[25px] bg-muted rounded-full relative shadow-[inner_0_2px_4px_rgba(0,0,0,0.2)] data-[state=checked]:bg-primary transition-colors cursor-pointer outline-hidden"
                     >
@@ -349,7 +349,7 @@ export function ServerSettings() {
                                             const val = parseInt(e.target.value);
                                             const newConfig = { ...config, memory_reservation_gb: val };
                                             setConfig(newConfig);
-                                            await commands.updateUserConfig(newConfig);
+                                            await commands.updateUserConfig({ memory_reservation_gb: val });
                                         }}
                                         className="w-[200px] h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
                                     />
@@ -375,7 +375,7 @@ export function ServerSettings() {
                                         if (!config) return;
                                         const newConfig = { ...config, mlock: val };
                                         setConfig(newConfig);
-                                        await commands.updateUserConfig(newConfig);
+                                        await commands.updateUserConfig({ mlock: val });
                                         toast.info("Memory locking strategy updated. Restart server to apply.", { icon: <RotateCcw className="w-4 h-4" /> });
                                     }}
                                     className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-emerald-500 transition-colors cursor-pointer outline-hidden"
@@ -403,7 +403,7 @@ export function ServerSettings() {
                                         if (!config) return;
                                         const newConfig = { ...config, quantize_kv: val };
                                         setConfig(newConfig);
-                                        await commands.updateUserConfig(newConfig);
+                                        await commands.updateUserConfig({ quantize_kv: val });
                                         toast.info("Context optimization updated. Restart server to apply.", { icon: <Box className="w-4 h-4" /> });
                                     }}
                                     className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-blue-500 transition-colors cursor-pointer outline-hidden"

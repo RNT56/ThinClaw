@@ -843,7 +843,6 @@ pub async fn direct_media_generate_image(
         );
     }
 
-    config.reload();
     #[allow(unused_variables)]
     let user_config = config.get_config();
     let final_params = params;

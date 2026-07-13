@@ -103,7 +103,7 @@ function TtsVoiceSelector() {
         try {
             const config = await commandClient.getUserConfig();
             const models = { ...(config.inference_models ?? {}), tts_voice: voiceId };
-            await commandClient.updateUserConfig({ ...config, inference_models: models });
+            await commandClient.updateUserConfig({ inference_models: models });
             toast.success(`Voice set: ${voices.find(v => v.id === voiceId)?.name ?? voiceId}`);
         } catch (e) {
             toast.error('Failed to save voice selection');

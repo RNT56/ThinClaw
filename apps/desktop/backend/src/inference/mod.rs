@@ -36,7 +36,7 @@ pub mod tts;
 
 use std::collections::{HashMap, HashSet};
 
-pub use model_discovery::CloudModelRegistry;
+pub use model_discovery::ModelProviderRegistry;
 pub use router::InferenceRouter;
 
 use serde::{Deserialize, Serialize};
@@ -278,7 +278,7 @@ pub async fn direct_inference_update_backend(
         Modality::Stt => config.stt_backend = Some(backend_id.clone()),
         Modality::Diffusion => config.diffusion_backend = Some(backend_id.clone()),
     }
-    config_manager.save_config(&config);
+    config_manager.save_config(&config).await?;
 
     // Reconfigure the entire router from the updated config.
     // This constructs cloud backends immediately (they only need an API key)
@@ -492,7 +492,7 @@ async fn remote_discover_cloud_models(
 #[specta::specta]
 pub async fn direct_inference_discover_cloud_models(
     ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
-    registry: tauri::State<'_, CloudModelRegistry>,
+    registry: tauri::State<'_, ModelProviderRegistry>,
     providers: Vec<String>,
 ) -> Result<model_discovery::types::DiscoveryResult, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -522,7 +522,7 @@ pub async fn direct_inference_discover_cloud_models(
 #[specta::specta]
 pub async fn direct_inference_refresh_cloud_models(
     ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
-    registry: tauri::State<'_, CloudModelRegistry>,
+    registry: tauri::State<'_, ModelProviderRegistry>,
     provider: String,
 ) -> Result<model_discovery::types::ProviderDiscoveryResult, String> {
     if let Some(proxy) = ironclaw.remote_proxy().await {

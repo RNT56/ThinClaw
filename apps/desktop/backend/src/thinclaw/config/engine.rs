@@ -199,7 +199,7 @@ impl ThinClawConfig {
         // NOTE: The hardcoded model catalog was removed (2026-03-06).
         //
         // The frontend's CloudBrainConfigModal now uses dynamic API discovery
-        // (via CloudModelRegistry / useCloudModels hook) to fetch available
+        // (via ModelProviderRegistry / useCloudModels hook) to fetch available
         // models from each provider. This means new models (e.g. GPT-5.3-Codex)
         // appear automatically without code changes.
         //

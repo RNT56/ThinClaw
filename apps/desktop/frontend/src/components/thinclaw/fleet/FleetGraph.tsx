@@ -43,7 +43,7 @@ export function FleetGraph({ nodes: initialNodes, edges: initialEdges, onNodeCli
     }, [initialNodes, initialEdges, setNodes, setEdges]);
 
     return (
-        <div className="w-full h-full bg-[#050505]">
+        <div className="w-full h-full bg-surface-canvas">
             <ReactFlow
                 nodes={nodes}
                 edges={edges}
