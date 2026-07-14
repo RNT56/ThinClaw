@@ -1,6 +1,6 @@
 # ThinClaw Desktop Packaging And Platform Readiness
 
-Last updated: 2026-05-15
+Last updated: 2026-07-14
 
 This checklist is the P3-W3 release-readiness gate for the macOS alpha. It records what is enforced by config or tests and what still requires release operator secrets or host prerequisites.
 
@@ -20,6 +20,9 @@ The gate verifies:
 - Updater artifacts are enabled and updater endpoint/public key metadata exists.
 - macOS entitlements include sandbox, microphone, network client, network server, and user-selected file access.
 - Engine-specific Tauri override generation declares the expected sidecars for cloud, Ollama, llama.cpp, MLX, and vLLM builds.
+- The real Chromium/llama setup scripts pass isolated clean-machine fixtures, including checksum rejection and required-sidecar layout.
+- Declared native runtimes, libraries, Chromium, and their total stay below the committed `sidecar-budgets.json` limits.
+- Static updater metadata and macOS release artifact collection pass deterministic contract fixtures.
 - Focused Keychain, legacy Scrappy fallback, iCloud fallback, and migration path tests pass.
 
 The script preserves any existing `backend/tauri.override.json` after validation.
@@ -57,7 +60,7 @@ New writes must use ThinClaw identifiers and ThinClaw storage roots.
 | `mlx` | `uv` | `whisper`, `whisper-server`, `tts` | macOS Apple Silicon only. |
 | `vllm` | `uv` | `whisper`, `whisper-server`, `tts` | Linux CUDA only. |
 
-Chromium is included automatically when `backend/resources/chromium` exists. Set `INCLUDE_CHROMIUM=1` to require it in a release build, or `INCLUDE_CHROMIUM=0` to omit it deliberately.
+Chromium is included automatically when `backend/resources/chromium` exists. Set `INCLUDE_CHROMIUM=1` to require it in a release build, or `INCLUDE_CHROMIUM=0` to omit it deliberately. The release pipeline requires Chromium and packages only the core llama.cpp runtime installed by `setup:all`; optional voice/image sidecars are not downloaded or declared unless an operator explicitly installs them.
 
 For a macOS llama.cpp release candidate:
 
@@ -73,6 +76,10 @@ npm run tauri:build:cloud:unsigned
 ```
 
 If `backend/bin` is empty, native sidecar builds fail in strict mode. That is intentional: run `npm run setup:ai` or an engine-specific setup script before packaging a native local build.
+
+`npm run setup:all` downloads pinned archives, verifies them before replacing local assets, validates the extracted executables, generates the strict llama.cpp override, and enforces the sidecar budgets. `npm run test:setup:all` executes those same scripts against tiny deterministic archives without mutating the checkout.
+
+Current limits are 512 MiB per native artifact, 1 GiB for native sidecars and libraries, 768 MiB for Chromium, and 1.5 GiB total bundled runtime. A deliberate increase requires changing `sidecar-budgets.json` in review.
 
 ## Local Inference Setup
 
@@ -92,13 +99,20 @@ Configured:
 - Updater public key is present in `tauri.conf.json`
 - macOS entitlements are configured through `backend/Entitlements.plist`
 
+Automated tag-release behavior:
+
+- Apple Silicon runs on GitHub's `macos-15` Arm64 image.
+- The workflow imports an ephemeral Developer ID Application certificate keychain.
+- Tauri signs, notarizes, and staples the app/DMG and signs the updater archive.
+- Post-build checks require `codesign`, Gatekeeper (`spctl`), and `stapler validate` to pass.
+- `latest.json` embeds the `.sig` contents under `darwin-aarch64` and is uploaded with the DMG/updater archive.
+- The cargo-dist host job cannot publish unless the Desktop job succeeds.
+
 Release operator prerequisites:
 
-- Full Xcode installed and selected with `xcode-select`
-- Apple Developer ID Application certificate available in the build keychain
-- Notary credentials available through the release environment
-- Updater signing private key available only in release secrets
-- Final artifacts checked with `spctl` after notarization stapling
+- Provision the exact GitHub Actions secrets listed in `external-release-prerequisites.md`.
+- Trigger a product tag whose version matches the root Cargo package.
+- Perform first-release clean-machine launch acceptance on the uploaded DMG.
 
 Regular `tauri:build:*` scripts keep updater artifacts enabled and require `TAURI_SIGNING_PRIVATE_KEY`. Use only the `:unsigned` smoke script when validating packaging on a workstation without release signing secrets.
 

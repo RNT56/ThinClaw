@@ -9,9 +9,39 @@
       "include-v-in-tag": true,
       "extra-files": [
         {
+          "type": "json",
+          "path": "apps/desktop/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "apps/desktop/package-lock.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "apps/desktop/package-lock.json",
+          "jsonpath": "$['packages'][''].version"
+        },
+        {
+          "type": "toml",
+          "path": "apps/desktop/backend/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "apps/desktop/backend/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"thinclaw-desktop\")].version"
+        },
+        {
           "type": "toml",
           "path": "apps/desktop/backend/Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==\"thinclaw\")].version"
+        },
+        {
+          "type": "json",
+          "path": "apps/desktop/backend/tauri.conf.json",
+          "jsonpath": "$.version"
         }
       ]
     }

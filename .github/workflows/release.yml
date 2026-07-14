@@ -587,6 +587,138 @@ jobs:
           echo "   ${IMAGE_REF}:${TAG}"
           echo "   ${IMAGE_REF}:latest"
 
+  # Build the production Apple Silicon Desktop bundle. This job intentionally
+  # fails closed when release-operator credentials are absent: an unsigned or
+  # unstapled bundle must never be uploaded as a production Desktop release.
+  build-desktop-macos:
+    needs:
+      - plan
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+          ref: ${{ env.RELEASE_REF }}
+      - name: Require production signing and notarization credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID \
+            TAURI_SIGNING_PRIVATE_KEY
+          do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required Desktop release secrets: ${missing[*]}"
+            exit 1
+          fi
+      - name: Resolve and verify release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Desktop releases require a v-prefixed SemVer tag: $RELEASE_TAG"
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          root_version="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          if [[ "$version" != "$root_version" ]]; then
+            echo "::error::Release tag $RELEASE_TAG does not match root package version $root_version"
+            exit 1
+          fi
+          echo "TAURI_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAURI_RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: desktop-release-macos-arm64
+      - name: Install Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install Desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Import Developer ID Application certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          certificate="$RUNNER_TEMP/thinclaw-certificate.p12"
+          keychain="$RUNNER_TEMP/thinclaw-build.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          printf '%s' "$APPLE_CERTIFICATE" | openssl base64 -d -A > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security default-keychain -s "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          cert_info="$(security find-identity -v -p codesigning "$keychain" | grep '"Developer ID Application:' | head -1 || true)"
+          if [[ -z "$cert_info" ]]; then
+            echo "::error::Imported certificate does not contain a Developer ID Application identity"
+            exit 1
+          fi
+          signing_identity="$(printf '%s\n' "$cert_info" | awk -F'"' '{print $2}')"
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          echo "THINCLAW_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          rm -f "$certificate"
+      - name: Install verified Desktop runtime assets
+        working-directory: apps/desktop
+        run: npm run setup:all
+      - name: Validate Desktop packaging contract
+        working-directory: apps/desktop
+        run: npm run validate:packaging
+      - name: Build, sign, notarize, and staple Desktop
+        working-directory: apps/desktop
+        env:
+          INCLUDE_CHROMIUM: "1"
+        run: npm run tauri:build:llamacpp
+      - name: Verify and collect signed Desktop artifacts
+        working-directory: apps/desktop
+        env:
+          VERIFY_APPLE_ARTIFACTS: "1"
+        run: bash scripts/collect_macos_release_artifacts.sh
+      - name: Upload notarized Desktop artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-desktop-macos
+          path: apps/desktop/backend/target/release-artifacts/*
+          if-no-files-found: error
+      - name: Remove ephemeral signing keychain
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [[ -n "${THINCLAW_RELEASE_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$THINCLAW_RELEASE_KEYCHAIN" || true
+          fi
+
   # Determines if we should publish/announce
   host:
     needs:
@@ -596,8 +728,9 @@ jobs:
       - build-global-artifacts
       - build-wasm-extensions
       - publish-container-manifest
+      - build-desktop-macos
     # Only run if we're "publishing", and only if plan, local, global, and wasm didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.publish-container-manifest.result == 'success' }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.publish-container-manifest.result == 'success' && needs.build-desktop-macos.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

@@ -1,6 +1,6 @@
 # ThinClaw Desktop Runtime Parity Checklist
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 This checklist maps ThinClaw root runtime surfaces to Desktop support status. Status values are:
 
@@ -35,7 +35,7 @@ This checklist maps ThinClaw root runtime surfaces to Desktop support status. St
 | Checkpoints / rollback | wired | `list`/`diff`/`restore` commands + Rollback panel (filesystem shadow-git checkpoints). |
 | Trajectory viewer and export | tested | `stats`/`records` commands plus the Trajectory panel. `thinclaw_trajectory_export` reuses the canonical CLI SFT/DPO validation over legacy and durable run-artifact records, bounds IPC to 5,000 examples, and downloads only after an explicit user action. |
 | Profile evolution | tested | Learning Review displays the parsed local profile, confidence/evidence metadata, schedule, run history, and failures. The explicit run command upserts the reserved weekly routine from first-party profile material and starts it through the live routine engine; profile display is capped at 512 KiB and invalid JSON is reported without reflecting raw content. |
-| Agent eval | wired | `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` (AgentLoopEnv, LocalOnly) feed an interactive Benchmarks panel with bounded prompt/episode/step controls and scored summaries. Runtime smoke-test pending a running engine. |
+| Agent eval | tested | `thinclaw_experiments_list_envs` + `thinclaw_experiments_run_eval` (AgentLoopEnv, LocalOnly) feed an interactive Benchmarks panel with bounded prompt/episode/step controls and scored summaries. Deterministic acceptance drives `AgentLoopEnv`/`EnvRunner` through isolated restricted sessions and verifies provider token-capture propagation; live provider quality remains optional external smoke. |
 | Session personality | tested | Agent Chat exposes the canonical `/personality` path through an accessible menu for status, presets, and base-identity restore. Commands remain session-scoped and use the existing persisted overlay/hydration contract. |
 | Channel config | wired | `Channel::config_schema()` + DTOs; read commands + `thinclaw_channel_config_submit` (LocalOnly; WASM live, native restart-required); Signal/Discord impls + Channel Config panel. |
 | Tool policy | gated | `disabled_tools` deny-list enforced in the dispatcher tool-execution preflight. |
@@ -43,7 +43,7 @@ This checklist maps ThinClaw root runtime surfaces to Desktop support status. St
 ## External Release Operator Entries
 
 - Real provider credentials and remote gateway tokens are optional after fixture acceptance.
-- Apple signing identity, notary credentials, updater private key, and clean-machine notarization remain release-operator responsibilities.
+- The tag release workflow consumes Apple signing/notary credentials and the updater private key, then fails closed if they are missing. Provisioning those secrets and performing the first real notarized release remain release-operator responsibilities.
 
 ## Contract Test Targets
 

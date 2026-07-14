@@ -188,6 +188,12 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+      - name: Clean-machine sidecar setup acceptance
+        working-directory: apps/desktop
+        run: npm run test:setup:all
+      - name: Signed updater metadata fixtures
+        working-directory: apps/desktop
+        run: npm run test:release-manifest
       - name: Runtime contracts tests
         run: cargo test --locked -p thinclaw-runtime-contracts
       - name: Provider catalog tests

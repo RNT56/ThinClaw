@@ -196,9 +196,9 @@ Triggered on-touch, but schedule the worst offenders:
   deployment input, host-key, stdin-secret, and gateway-port behavior.
 
 ### WS-6 — Packaging / Update / Platform (macOS-first)
-- CI: notarized DMG, hardened runtime, stapling; Tauri updater signing key in CI secrets (currently release-operator manual).
-- Auto-update channel wired to `UpdateChecker.tsx`.
-- Sidecar bundling (Chromium, Piper, Whisper, sd.cpp/mflux, engines) validated by `npm run setup:all` on a clean machine; size budget + lazy download.
+- ✅ Tag release CI imports the Developer ID certificate, signs/notarizes/staples the Apple Silicon DMG, verifies Gatekeeper and staple state, creates signed updater metadata, and fails closed when any production secret is absent.
+- ✅ Auto-update channel wired to `UpdateChecker.tsx`, with check/download/install/relaunch and failure acceptance.
+- ✅ Core llama.cpp + Chromium downloads are checksum-pinned and verified before replacement; bundle budgets are enforced; absent optional media runtimes stay out of the release; deterministic clean-machine fixtures exercise the real setup scripts.
 - Keep Windows/Linux in the build matrix (compile + core smoke); do not gate releases on them.
 
 ---
@@ -225,7 +225,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 | ~~Event-triggered routines uncreatable~~ **DONE** | Local and remote `routine_create` wire `Trigger::SystemEvent`; the creation modal has an accessible trigger-type selector | `rpc_routines.rs`, `automations/CreateJobModal.tsx` | M |
 | ~~`evaluate_outcomes` failed opaquely in local mode~~ **DONE** | Typed remote-only gate explains that a gateway is required | `rpc_experiments_learning.rs:394` | M |
 | ~~GPU validate/launch failed opaquely in local mode~~ **DONE** | Typed remote-only gates explain the gateway credential boundary | `rpc_experiments_learning.rs:631-675` | M |
-| Eval framework exposed; live acceptance pending | Commands and Benchmarks panel are wired; complete the real-engine runtime smoke-test | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` | L |
+| ~~Eval framework exposed; live acceptance pending~~ **DONE** | Commands and Benchmarks panel are wired; executable acceptance drives the embedded agent environment through isolated restricted sessions and provider token capture | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx`, `crates/thinclaw-agent/src/env.rs` | L |
 | ~~SFT/DPO export CLI-only~~ **DONE** | CLI and Desktop share the canonical validated exporter; Desktop adds a bounded local command and explicit SFT/DPO download controls | `src/cli/trajectory.rs`, `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` | M |
 | ~~Profile-evolution no panel~~ **DONE** | Dedicated Learning Review panel shows bounded parsed profile/routine state and can explicitly upsert + run the reserved routine | `rpc_profile_evolution.rs`, `learning/ProfileEvolutionPanel.tsx` | S |
 

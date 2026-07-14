@@ -98,10 +98,10 @@ This does everything in one go:
 
 | Script | npm command | What it does |
 |--------|------------|-------------|
-| `setup_chromium.sh` | `npm run setup:chromium` | Downloads Chromium for local web scraping |
+| `setup_chromium.sh` | `npm run setup:chromium` | Downloads the pinned Chromium snapshot and replaces the existing copy only after SHA-256 and archive-layout validation |
 | `setup_llama.sh` | `npm run setup:ai` | Downloads the validated llama.cpp sidecar and required shared libraries for the current host, verifies SHA-256 and `--version`, then installs atomically |
 
-All scripts are **idempotent** — they skip binaries that already exist in `backend/bin/`.
+All setup scripts are deterministic and safe to rerun: archives are verified before the existing installation is replaced. `setup:all` finishes by generating the strict llama.cpp bundle override and enforcing committed sidecar-size limits.
 
 > **Tip:** You can also run any sub-script individually, e.g. `npm run setup:ai` to re-download just the AI binaries. For non-macOS-ARM64 local builds, prefer the engine-specific scripts such as `scripts/setup_llama.sh` and `scripts/setup_uv.sh`.
 
@@ -117,14 +117,10 @@ bash scripts/setup_uv.sh
 ```
 
 ### 4. Verify Binary Setup
-After setup, you should see the following in `backend/bin/` (macOS ARM64 example):
+After the default `setup:all`, you should see the following core runtime files (macOS ARM64 example):
 ```
 backend/bin/
 ├── llama-server-aarch64-apple-darwin
-├── whisper-server-aarch64-apple-darwin
-├── whisper-aarch64-apple-darwin
-├── sd-aarch64-apple-darwin
-├── tts-aarch64-apple-darwin
 ├── libllama.dylib
 ├── libggml*.dylib
 └── *.metal
@@ -132,7 +128,7 @@ backend/bin/
 
 On Linux, the suffix would be `x86_64-unknown-linux-gnu`. On Windows, `x86_64-pc-windows-msvc.exe`.
 
-> **Note:** `tts` (Piper) must currently be placed manually — see [Troubleshooting](#-troubleshooting).
+> **Optional media runtimes:** `whisper`, `whisper-server`, `sd`, and `tts` are not part of the core release download or size budget. They are declared only when explicitly installed under the target-suffixed names below; cloud/MLX media routes remain available without bundling those native binaries.
 
 ---
 
@@ -222,20 +218,20 @@ The `scripts/generate_tauri_overrides.sh` script generates `backend/tauri.overri
 
 | Engine | `externalBin` included | `resources` included |
 |--------|----------------------|---------------------|
-| llamacpp | llama-server, whisper, whisper-server, sd, tts | `*.dylib`, `*.metal`, chromium |
-| mlx / vllm | uv, whisper, whisper-server, tts | `libwhisper*.dylib`, chromium |
-| ollama | whisper, whisper-server, tts | `libwhisper*.dylib`, chromium |
+| llamacpp | llama-server; optional installed whisper, whisper-server, sd, tts | `*.dylib`, `*.metal`, chromium |
+| mlx / vllm | uv; optional installed whisper, whisper-server, tts | platform libraries, chromium |
+| ollama | optional installed whisper, whisper-server, tts | platform libraries, chromium |
 | none (cloud) | *(none)* | chromium |
 
 Chromium inclusion is automatic when `backend/resources/chromium` exists. Use `INCLUDE_CHROMIUM=1 npm run tauri:build:llamacpp` for release builds that must fail if Chromium has not been prepared, or `INCLUDE_CHROMIUM=0` for a deliberate no-browser bundle.
 
-Release builds keep updater artifacts enabled and require `TAURI_SIGNING_PRIVATE_KEY`. The unsigned cloud smoke disables updater artifact generation through the generated override only for local validation.
+Release builds keep updater artifacts enabled and require `TAURI_SIGNING_PRIVATE_KEY`. `TAURI_RELEASE_VERSION` may override the committed Desktop version only with a validated SemVer; tag release CI derives it from the product tag and verifies it against root Cargo metadata. The unsigned cloud smoke disables updater artifact generation through the generated override only for local validation.
 
 ### Packaging Readiness Gate
 ```bash
 npm run validate:packaging
 ```
-This validates Tauri metadata, macOS app identity, entitlements, updater metadata, sidecar override generation, Keychain identifier alignment, legacy Scrappy fallback tests, and migration path checks. See [Packaging And Platform Readiness](packaging-platform-readiness.md).
+This validates Tauri metadata, macOS app identity, entitlements, updater metadata, clean setup/checksum behavior, signed release-manifest generation, sidecar override generation and budgets, Keychain identifier alignment, legacy Scrappy fallback tests, and migration path checks. See [Packaging And Platform Readiness](packaging-platform-readiness.md).
 
 ---
 
