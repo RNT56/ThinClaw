@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "description": "Fail-closed size limits for runtime assets bundled into ThinClaw Desktop.",
+  "limitsBytes": {
+    "individualNativeArtifact": 536870912,
+    "nativeSidecarsAndLibraries": 1073741824,
+    "chromium": 805306368,
+    "totalBundledRuntime": 1610612736
+  }
+}

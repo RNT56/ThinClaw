@@ -2,7 +2,7 @@
 
 > **Status:** draft v1 · **Created:** 2026-06-27 · Companion to [`OVERHAUL_PLAN.md`](OVERHAUL_PLAN.md).
 
-## Completion status (verified 2026-07-13)
+## Completion status (verified 2026-07-14)
 
 Every row below is verified in the current implementation branch. ✅ = implemented
 and locally verified; GitHub merge state remains authoritative until each PR lands.
@@ -28,7 +28,8 @@ and locally verified; GitHub merge state remains authoritative until each PR lan
 | TDO-105 | Advisor consultation → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `tool_execution.rs`, `ThinClawEventInspector.tsx` |
 | TDO-106/114 | Trajectory viewer plus bounded SFT/DPO export command and explicit download controls | ✅ | `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` |
 | TDO-111/112 | Outcome evaluation and GPU operations return typed, actionable gateway gates in local mode | ✅ | `rpc_experiments_learning.rs`:394/631/654 |
-| TDO-113 | Agent-eval commands + interactive Benchmarks panel; real-engine runtime smoke remains manual | ◐ | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` |
+| TDO-113 | Agent-eval commands + interactive Benchmarks panel + executable embedded-agent runtime smoke | ✅ | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx`, `crates/thinclaw-agent/src/env.rs` |
+| TDO-050/051/052 | Fail-closed notarized Desktop release job, signed updater channel, verified/budgeted sidecar setup, and clean-machine fixtures | ✅ | `.github/workflows/release.yml`, `UpdateChecker.tsx`, `scripts/`, `sidecar-budgets.json` |
 | TDO-120 | Channel-config framework: native/WASM schemas, encrypted credential routing, validated local/remote submit commands, and Channel Config panel | ✅ | `rpc_channel_config.rs`, `handlers/channels.rs`, `wasm/wrapper/mod.rs` |
 | TDO-121 | Signal, Discord, iMessage, and Nostr schemas preserve current non-secret values and resolve persisted settings on restart | ✅ | first-party channel adapters, `channel_config.rs` |
 | TDO-122 | Long-tail schemas cover manifest-backed WASM channels, Apple Mail, BlueBubbles, and honest host-managed lifecycle adapters | ✅ | WASM loader/wrapper, native channel adapters |
@@ -37,8 +38,10 @@ and locally verified; GitHub merge state remains authoritative until each PR lan
 | TDO-143 | Local/remote session subscription activates live event routing | ✅ | `commands/sessions.rs`:675, `runtime_bridge.rs`:648 |
 | Supplemental | Session search command + Session Search panel | ✅ | `rpc_session_search.rs`, `ThinClawSessionSearch.tsx` |
 
-**Deferred / cross-lane (still open):** live-reload for startup-only native channel fields
-remains future work; the eval runtime smoke-test needs a running engine. See
+**Deferred / cross-lane (non-blocking):** live-reload for startup-only native channel fields
+remains future work. Real Apple notarization and provider smoke require the external
+credentials listed in `external-release-prerequisites.md`; committed fixture acceptance
+fails closed without substituting unsigned artifacts. See
 [`DEFERRED_FOLLOWUPS_PLAN.md`](DEFERRED_FOLLOWUPS_PLAN.md).
 
 ---
@@ -165,9 +168,9 @@ characterization test added before the split; no behavior change.
 
 | ID | Title | Size | Phase | Depends | Files |
 |---|---|---|---|---|---|
-| TDO-050 | CI notarized DMG (hardened runtime + staple); updater signing key in CI | L | P2 | — | CI, `tauri.conf.json` |
-| TDO-051 | Auto-update channel wired to `UpdateChecker.tsx` | M | P2 | TDO-050 | `UpdateChecker.tsx` |
-| TDO-052 | Sidecar bundling + size budget + lazy download; clean-machine `setup:all` validation | L | P2 | — | `scripts/`, `desktop-sidecars/` |
+| TDO-050 ✅ | Tag release CI imports a Developer ID certificate, signs/notarizes/staples the DMG, verifies Gatekeeper/staples, and refuses to publish without updater/Apple secrets | L | P2 | — | `.github/workflows/release.yml`, `tauri.conf.json`, `collect_macos_release_artifacts.sh` |
+| TDO-051 ✅ | Signed static update manifest + `UpdateChecker` check/download/install/relaunch acceptance | M | P2 | TDO-050 | `UpdateChecker.tsx`, `create_tauri_update_manifest.mjs` |
+| TDO-052 ✅ | SHA-256-pinned core sidecars, explicit bundle size budgets, optional media excluded when absent, and deterministic clean-machine `setup:all` validation | L | P2 | — | `scripts/`, `sidecar-budgets.json` |
 | TDO-053 ✅ | Keep Win/Linux in CI build matrix (compile + core smoke) | M | ∞ | — | `.github/workflows/ci.yml` |
 
 ---
@@ -191,7 +194,7 @@ characterization test added before the split; no behavior change.
 | TDO-110 ✅ | Event-triggered routine creation (`Trigger::SystemEvent`) + UI | M | TDO-024 | `rpc_routines.rs`, `automations/CreateJobModal.tsx` |
 | TDO-111 ✅ | `evaluate_outcomes`: typed remote-only gate with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:394` |
 | TDO-112 ✅ | GPU validate/launch: typed remote-only gates with gateway remediation | M | TDO-001 | `rpc_experiments_learning.rs:631-675` |
-| TDO-113 | Eval framework commands and Benchmarks panel are wired; real-engine runtime smoke-test remains | L | TDO-001 | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx` |
+| TDO-113 ✅ | Eval framework commands, Benchmarks panel, and embedded-agent `AgentLoopEnv`/`EnvRunner` runtime smoke | L | TDO-001 | `rpc_experiments_learning.rs`, `experiments/BenchmarkPanel.tsx`, `crates/thinclaw-agent/src/env.rs` |
 | TDO-114 ✅ | `thinclaw_trajectory_export(format)` (SFT/DPO) + export button | M | TDO-106 | `src/cli/trajectory.rs`, `rpc_trajectory.rs`, `ThinClawTrajectory.tsx` |
 | TDO-115 ✅ | Profile-evolution viewer + force-run | S | TDO-001 | `rpc_profile_evolution.rs`, `learning/ProfileEvolutionPanel.tsx` |
 

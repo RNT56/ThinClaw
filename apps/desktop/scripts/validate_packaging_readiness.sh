@@ -44,6 +44,14 @@ if (!config.plugins?.updater?.pubkey) fail('Updater public key is missing.');
 if (!Array.isArray(config.plugins?.updater?.endpoints) || config.plugins.updater.endpoints.length === 0) {
   fail('Updater endpoint list is missing.');
 }
+if (
+  JSON.stringify(config.plugins.updater.endpoints) !==
+  JSON.stringify(['https://github.com/RNT56/ThinClaw/releases/latest/download/latest.json'])
+) {
+  fail(`Unexpected updater channel: ${JSON.stringify(config.plugins.updater.endpoints)}`);
+}
+const updaterKey = Buffer.from(config.plugins.updater.pubkey, 'base64').toString('utf8');
+if (!updaterKey.includes('minisign public key')) fail('Updater public key payload is malformed.');
 
 const entitlements = fs.readFileSync('backend/Entitlements.plist', 'utf8');
 for (const key of [
@@ -62,6 +70,25 @@ if (!info.includes('NSMicrophoneUsageDescription')) fail('Info.plist is missing 
 const cargo = fs.readFileSync('backend/Cargo.toml', 'utf8');
 if (!cargo.includes('name = "thinclaw-desktop"')) fail('Cargo package name changed unexpectedly.');
 if (!cargo.includes('security-framework = "3"')) fail('macOS Keychain dependency is missing.');
+
+const rootCargo = fs.readFileSync('../../Cargo.toml', 'utf8');
+const rootPackage = rootCargo.split('[package]', 2)[1]?.split('\n[', 1)[0] ?? '';
+const rootVersion = rootPackage.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const desktopCargoVersion = cargo.split('[package]', 2)[1]?.split('\n[', 1)[0]
+  ?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const desktopPackage = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+const desktopLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+const versions = {
+  root: rootVersion,
+  tauri: config.version,
+  cargo: desktopCargoVersion,
+  npm: desktopPackage.version,
+  npmLock: desktopLock.version,
+  npmLockRoot: desktopLock.packages?.['']?.version,
+};
+if (!rootVersion || Object.values(versions).some((version) => version !== rootVersion)) {
+  fail(`Desktop/product version drift: ${JSON.stringify(versions)}`);
+}
 
 const keychain = fs.readFileSync('backend/src/thinclaw/config/keychain.rs', 'utf8');
 if (!keychain.includes('const SERVICE: &str = "com.thinclaw.desktop";')) {

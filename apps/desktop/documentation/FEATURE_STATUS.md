@@ -1,6 +1,6 @@
 # ThinClaw Desktop — Feature Status & Verified Gaps
 
-> **Snapshot:** re-verified 2026-07-12 (originally 2026-06-28) · point-in-time,
+> **Snapshot:** re-verified 2026-07-14 (originally 2026-06-28) · point-in-time,
 > code-grounded. This is intentionally *thinly scoped* (per the repo doc rules): it does
 > not re-inventory every feature. For the roadmap and parity ledger use the canonical docs
 > below; this file only records **verified open gaps** that are easy to lose track of.
@@ -35,9 +35,9 @@ before changing either system.
 
 ## Verified open gaps
 
-No correctness gap remains open in this narrow point-in-time list. Product breadth,
-packaging, shared-service unification, and native release qualification remain tracked
-in the canonical roadmap rather than being duplicated here.
+No correctness gap remains open in this narrow point-in-time list. Broader post-alpha
+product work and the first credentialed native-release qualification remain tracked in
+the canonical roadmap rather than being duplicated here.
 
 ## Recently closed
 
@@ -58,6 +58,8 @@ in the canonical roadmap rather than being duplicated here.
 | Prompt authority | PromptStack and Prompt System V2 now compile through one typed, budgeted authority graph per real provider request; untyped system text is demoted to untrusted evidence. | `src/llm/reasoning.rs`, `crates/thinclaw-llm-core/src/prompt_stack.rs`, `docs/PROMPT_SYSTEM.md` |
 | Routine isolation | Desktop-autonomy state is retained by `AppComponents` and explicitly injected into the desktop agent and routine engine, so independent app builds cannot alter routine emergency-stop behavior through process-global state. | `src/app.rs`, `src/agent/routine_engine.rs`, `backend/src/thinclaw/runtime_builder.rs` |
 | Build hygiene | Bundled WASM extension builds now use the parent Cargo `OUT_DIR`; all-feature builds no longer create nested `target/` trees inside channel or tool sources. | `build.rs`, `tests/repo_hygiene.rs` |
+| Desktop distribution | Product/Desktop versions are aligned; tag CI fails closed on absent production credentials, builds a signed/notarized/stapled Apple Silicon DMG, verifies Gatekeeper, and publishes a signed static update manifest only after sidecar checksum/budget gates pass. | `.github/workflows/release.yml`, `packaging-platform-readiness.md`, `scripts/` |
+| Agent evaluation | The interactive Benchmarks path is backed by deterministic `AgentLoopEnv`/`EnvRunner` acceptance covering isolated restricted sessions and provider token captures. | `rpc_experiments_learning.rs`, `BenchmarkPanel.tsx`, `crates/thinclaw-agent/src/env.rs` |
 
 ## Notes
 

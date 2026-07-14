@@ -19,6 +19,12 @@ STRICT_SIDECARS="${STRICT_SIDECARS:-1}"
 INCLUDE_CHROMIUM="${INCLUDE_CHROMIUM:-auto}"
 DISABLE_UPDATER_ARTIFACTS="${DISABLE_UPDATER_ARTIFACTS:-0}"
 TARGET_TRIPLE="${TAURI_TARGET_TRIPLE:-${TARGET:-}}"
+RELEASE_VERSION="${TAURI_RELEASE_VERSION:-}"
+
+if [[ -n "$RELEASE_VERSION" ]] && ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+  echo "TAURI_RELEASE_VERSION must be a SemVer without a leading v: $RELEASE_VERSION" >&2
+  exit 1
+fi
 
 detect_target_triple() {
   local os arch
@@ -116,7 +122,11 @@ add_platform_resources() {
 
 write_override() {
   {
-    printf '{\n  "bundle": {\n    "externalBin": ['
+    printf '{\n'
+    if [[ -n "$RELEASE_VERSION" ]]; then
+      printf '  "version": "%s",\n' "$RELEASE_VERSION"
+    fi
+    printf '  "bundle": {\n    "externalBin": ['
     for i in "${!EXTERNAL_BINS[@]}"; do
       [[ "$i" != "0" ]] && printf ','
       printf '\n      "%s"' "${EXTERNAL_BINS[$i]}"
