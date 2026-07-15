@@ -41,7 +41,7 @@ tracing = { workspace = true }
 urlencoding = "2"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
-wasmtime = { version = "36.0.12", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
+wasmtime = { version = "44.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
 wasmtime-wasi = { version = "36.0.12", optional = true }
 dirs = "6"
 lru = "0.18.0"
