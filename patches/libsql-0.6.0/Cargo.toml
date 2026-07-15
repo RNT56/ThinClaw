@@ -189,7 +189,7 @@ features = [
 optional = true
 
 [dependencies.tonic]
-version = "0.11"
+version = "0.14"
 optional = true
 
 [dependencies.tonic-web]
