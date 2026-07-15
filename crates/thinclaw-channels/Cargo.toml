@@ -15,7 +15,7 @@ base64 = "0.22"
 chrono = { workspace = true }
 ed25519-dalek = { version = "2", features = ["std"] }
 futures = { workspace = true }
-fs4 = "0.6"
+fs4 = "1.1"
 hmac = "0.13"
 hex = "0.4"
 jsonwebtoken = "9"
