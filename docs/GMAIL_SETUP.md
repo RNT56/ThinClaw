@@ -4,7 +4,7 @@ ThinClaw treats Gmail as two related surfaces:
 
 | Mode | Purpose | What it does | GCP Project required? |
 |------|---------|--------------|----------------------|
-| **Gmail Tool** | Send & read email | The agent can compose, reply, and search emails via the Gmail API | No |
+| **Gmail Tool** | Send & read email | The agent can compose, reply, and search emails via the Gmail API | Yes (OAuth client) |
 | **Gmail Channel** | Receive email in real-time | Incoming emails are pushed to the agent via Google Pub/Sub | Yes |
 
 You can use either or both. Most users want the **tool** for send/read and
@@ -16,8 +16,9 @@ optionally the **channel** for real-time inbound.
 
 - A Google account for the agent (or your own account)
 - ThinClaw installed with the `thinclaw` CLI available
-- A Google Cloud OAuth 2.0 **Desktop app** client ID and client secret
-- For the **channel**: a Google Cloud Platform project (free tier is sufficient)
+- A Google Cloud project with an OAuth consent screen and an OAuth 2.0
+  **Desktop app** client ID and client secret
+- For the **channel**: Gmail API and Cloud Pub/Sub enabled in that project
 
 ---
 
