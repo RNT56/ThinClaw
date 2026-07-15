@@ -211,7 +211,7 @@ base64 = "0.22.1"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.18.0"
-libloading = "0.8"
+libloading = "0.9"
 
 sysinfo = "0.38.2"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
