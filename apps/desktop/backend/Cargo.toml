@@ -65,7 +65,7 @@ specta-typescript = "0.0.7"
 usearch = "2.23.0"
 pdf-extract = "0.12"
 ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
-tokenizers = "0.22.2"
+tokenizers = "0.23.1"
 image = { version = "0.25.9", features = ["jpeg", "png", "webp"] }
 base64 = "0.22.1"
 uuid = { version = "1.19.0", features = ["v4", "v5", "fast-rng", "macro-diagnostics"] }
