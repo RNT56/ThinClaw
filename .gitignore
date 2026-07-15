@@ -71,6 +71,9 @@ target-codex-check/
 
 # Vendored libraries are resolved through the active root/backend lockfiles.
 patches/libsql-0.6.0/Cargo.lock
+patches/glib-0.18.6/Cargo.lock
+patches/libsql-sqlite3-parser-0.13.1/Cargo.lock
+apps/desktop/backend/scrappy-mcp-tools/Cargo.lock
 
 # Desktop app local build/download artifacts
 apps/desktop/frontend/node_modules/

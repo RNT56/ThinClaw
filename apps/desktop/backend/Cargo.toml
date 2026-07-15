@@ -137,8 +137,9 @@ codegen-units = 1
 # Strip debug symbols from the final binary
 strip = "symbols"
 
-# Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
-# sqlx-sqlite calls sqlite3_config() first; the stock libsql asserts on the
-# duplicate call. Our patch checks sqlite3_threadsafe() instead of panicking.
+# Keep local, provenance-documented security/compatibility backports in the
+# dependency graph until upstream crates publish equivalent releases.
 [patch.crates-io]
 libsql = { path = "../../../patches/libsql-0.6.0" }
+libsql-sqlite3-parser = { path = "../../../patches/libsql-sqlite3-parser-0.13.1" }
+glib = { path = "../../../patches/glib-0.18.6" }
