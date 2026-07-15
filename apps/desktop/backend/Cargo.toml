@@ -75,7 +75,7 @@ scraper = "0.25.0"
 chrono = "0.4.43"
 cron = "0.17"
 rig-core = "0.7.0"
-html2text = "0.13.5"
+html2text = "0.17.1"
 urlencoding = "2"
 eventsource-stream = "0.2.3"
 chromiumoxide = { version = "0.9.1" }
