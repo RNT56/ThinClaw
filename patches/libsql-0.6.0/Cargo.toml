@@ -146,7 +146,7 @@ version = "0.8"
 optional = true
 
 [dependencies.libsql_replication]
-version = "0.6"
+version = "0.9"
 optional = true
 
 [dependencies.parking_lot]
