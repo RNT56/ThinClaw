@@ -118,7 +118,7 @@ version = "0.3.28"
 optional = true
 
 [dependencies.http]
-version = "0.2"
+version = "1.4"
 optional = true
 
 [dependencies.hyper]
