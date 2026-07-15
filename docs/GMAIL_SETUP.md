@@ -16,6 +16,7 @@ optionally the **channel** for real-time inbound.
 
 - A Google account for the agent (or your own account)
 - ThinClaw installed with the `thinclaw` CLI available
+- A Google Cloud OAuth 2.0 **Desktop app** client ID and client secret
 - For the **channel**: a Google Cloud Platform project (free tier is sufficient)
 
 ---
@@ -31,6 +32,10 @@ The Gmail tool is a WASM extension that gives the agent the ability to:
 ### Setup
 
 ```bash
+# Keep these values in your shell's secret environment or password manager.
+export GOOGLE_OAUTH_CLIENT_ID="your-desktop-client-id"
+export GOOGLE_OAUTH_CLIENT_SECRET="your-desktop-client-secret"
+
 # Install the Gmail tool extension
 thinclaw tool install gmail
 
@@ -76,12 +81,16 @@ thinclaw tool auth gmail
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GOOGLE_OAUTH_CLIENT_ID` | Built-in | Override the OAuth client ID |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | Built-in | Override the OAuth client secret |
+| `GOOGLE_OAUTH_CLIENT_ID` | Required | Google Desktop app OAuth client ID |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Required | Google Desktop app OAuth client secret |
 | `THINCLAW_OAUTH_CALLBACK_URL` | `http://127.0.0.1:9876` | Custom callback URL for remote setups |
 | `OAUTH_CALLBACK_HOST` | `127.0.0.1` | Listen address for the callback server |
 
-ThinClaw ships with built-in Google "Desktop App" OAuth credentials (similar to `gcloud`, `rclone`). You do **not** need to register your own Google Cloud OAuth app unless you want to.
+ThinClaw does not commit or ship a shared Google OAuth client. Create a Desktop
+app client in Google Cloud, keep it outside the repository, and provide it via
+the environment variables above. Distributors may instead inject a dedicated
+client at compile time with `THINCLAW_GOOGLE_CLIENT_ID` and
+`THINCLAW_GOOGLE_CLIENT_SECRET`.
 
 ---
 

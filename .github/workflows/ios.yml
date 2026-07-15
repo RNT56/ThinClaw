@@ -17,6 +17,9 @@ on:
       - "clients/openapi/**"
       - ".github/workflows/ios.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ios-${{ github.ref }}
   cancel-in-progress: true

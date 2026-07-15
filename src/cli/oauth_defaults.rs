@@ -1,4 +1,4 @@
-//! Shared OAuth infrastructure: built-in credentials, callback server, landing pages.
+//! Shared OAuth infrastructure: optional provider credentials, callback server, landing pages.
 //!
 //! Every OAuth flow in the codebase (WASM tool auth, MCP server auth, NEAR AI login)
 //! uses the same callback port, landing page, and listener logic from this module.
@@ -10,19 +10,15 @@
 //! - **Notion** (Integration): Notion workspace access.
 //! - **Gmail** (Desktop App): Gmail-specific variant with pub/sub scopes.
 //!
-//! # Built-in Credentials
+//! # OAuth Credentials
 //!
-//! Many CLI tools (gcloud, rclone, gdrive) ship with default OAuth credentials
-//! so users don't need to register their own OAuth app. Google explicitly
-//! documents that client_secret for "Desktop App" / "Installed App" types
-//! is NOT actually secret.
-//!
-//! Default credentials are hardcoded below. They can be overridden at:
+//! Provider client credentials are never committed to the repository. They can
+//! be supplied at:
 //!
 //! - **Compile time**: Set THINCLAW_GOOGLE_CLIENT_ID / THINCLAW_GOOGLE_CLIENT_SECRET
-//!   env vars before building to replace the hardcoded defaults.
+//!   before building to inject a distributor-owned OAuth client.
 //! - **Runtime**: Users can set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET
-//!   env vars, which take priority over built-in defaults.
+//!   env vars, which take priority over optional compile-time values.
 
 use std::time::Duration;
 
@@ -31,22 +27,23 @@ use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
-// ── Built-in credentials ────────────────────────────────────────────────
+// ── Optional compile-time credentials ──────────────────────────────────
 
 pub struct OAuthCredentials {
     pub client_id: &'static str,
     pub client_secret: &'static str,
 }
 
-/// Google OAuth "Desktop App" credentials, shared across all Google tools.
-/// Compile-time env vars override the hardcoded defaults below.
+/// Optional Google OAuth "Desktop App" credentials shared by Google tools.
+/// Runtime credentials from a tool capability take precedence over these
+/// compile-time values.
 const GOOGLE_CLIENT_ID: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_ID") {
     Some(v) => v,
-    None => "564604149681-efo25d43rs85v0tibdepsmdv5dsrhhr0.apps.googleusercontent.com",
+    None => "",
 };
 const GOOGLE_CLIENT_SECRET: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_SECRET") {
     Some(v) => v,
-    None => "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",
+    None => "",
 };
 
 /// GitHub OAuth App credentials.
@@ -84,16 +81,20 @@ const NOTION_CLIENT_SECRET: &str = match option_env!("THINCLAW_NOTION_CLIENT_SEC
     None => "",
 };
 
-/// Returns built-in OAuth credentials for a provider, keyed by secret_name.
+/// Returns compile-time OAuth credentials for a provider, keyed by secret_name.
 ///
 /// The secret_name comes from the tool's capabilities.json `auth.secret_name` field.
-/// Returns `None` if no built-in credentials are configured for that provider.
+/// Returns `None` if no complete credential pair is configured for that provider.
 pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
     match secret_name {
-        "google_oauth_token" | "gmail_oauth_token" => Some(OAuthCredentials {
-            client_id: GOOGLE_CLIENT_ID,
-            client_secret: GOOGLE_CLIENT_SECRET,
-        }),
+        "google_oauth_token" | "gmail_oauth_token"
+            if !GOOGLE_CLIENT_ID.is_empty() && !GOOGLE_CLIENT_SECRET.is_empty() =>
+        {
+            Some(OAuthCredentials {
+                client_id: GOOGLE_CLIENT_ID,
+                client_secret: GOOGLE_CLIENT_SECRET,
+            })
+        }
         "github_oauth_token"
             if !GITHUB_CLIENT_ID.is_empty() && !GITHUB_CLIENT_SECRET.is_empty() =>
         {
@@ -141,16 +142,17 @@ impl GmailOAuthConfig {
     }
 
     /// Build the full authorization URL with PKCE.
-    pub fn auth_url(state: &str, code_challenge: &str) -> String {
-        format!(
+    pub fn auth_url(state: &str, code_challenge: &str) -> Option<String> {
+        let credentials = builtin_credentials("gmail_oauth_token")?;
+        Some(format!(
             "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
             Self::AUTH_URL,
-            GOOGLE_CLIENT_ID,
+            credentials.client_id,
             urlencoding::encode(&Self::redirect_uri()),
             urlencoding::encode(&Self::SCOPES.join(" ")),
             urlencoding::encode(state),
             code_challenge,
-        )
+        ))
     }
 }
 
@@ -681,10 +683,13 @@ mod tests {
     #[test]
     fn test_google_returns_based_on_compile_env() {
         let creds = builtin_credentials("google_oauth_token");
-        assert!(creds.is_some());
-        let creds = creds.unwrap();
-        assert!(!creds.client_id.is_empty());
-        assert!(!creds.client_secret.is_empty());
+        if super::GOOGLE_CLIENT_ID.is_empty() || super::GOOGLE_CLIENT_SECRET.is_empty() {
+            assert!(creds.is_none());
+        } else {
+            let creds = creds.unwrap();
+            assert!(!creds.client_id.is_empty());
+            assert!(!creds.client_secret.is_empty());
+        }
     }
 
     #[test]
@@ -743,18 +748,22 @@ mod tests {
     #[test]
     fn test_gmail_returns_credentials() {
         let creds = builtin_credentials("gmail_oauth_token");
-        // Like Google, may be placeholder in dev mode
-        assert!(creds.is_some());
-        let creds = creds.unwrap();
-        assert!(!creds.client_id.is_empty());
+        if super::GOOGLE_CLIENT_ID.is_empty() || super::GOOGLE_CLIENT_SECRET.is_empty() {
+            assert!(creds.is_none());
+        } else {
+            assert!(creds.is_some());
+        }
     }
 
     #[test]
     fn test_gmail_shares_google_credentials() {
-        let google = builtin_credentials("google_oauth_token").unwrap();
-        let gmail = builtin_credentials("gmail_oauth_token").unwrap();
-        assert_eq!(google.client_id, gmail.client_id);
-        assert_eq!(google.client_secret, gmail.client_secret);
+        let google = builtin_credentials("google_oauth_token");
+        let gmail = builtin_credentials("gmail_oauth_token");
+        assert_eq!(google.is_some(), gmail.is_some());
+        if let (Some(google), Some(gmail)) = (google, gmail) {
+            assert_eq!(google.client_id, gmail.client_id);
+            assert_eq!(google.client_secret, gmail.client_secret);
+        }
     }
 
     #[test]
@@ -878,7 +887,10 @@ mod tests {
 
     #[test]
     fn test_gmail_auth_url_contains_required_params() {
-        let url = GmailOAuthConfig::auth_url("test-state", "test-challenge");
+        let Some(url) = GmailOAuthConfig::auth_url("test-state", "test-challenge") else {
+            assert!(builtin_credentials("gmail_oauth_token").is_none());
+            return;
+        };
         assert!(url.contains("accounts.google.com"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("code_challenge=test-challenge"));
