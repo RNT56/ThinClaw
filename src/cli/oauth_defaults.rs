@@ -34,6 +34,19 @@ pub struct OAuthCredentials {
     pub client_secret: &'static str,
 }
 
+fn complete_credentials(
+    client_id: &'static str,
+    client_secret: &'static str,
+) -> Option<OAuthCredentials> {
+    if client_id.is_empty() || client_secret.is_empty() {
+        return None;
+    }
+    Some(OAuthCredentials {
+        client_id,
+        client_secret,
+    })
+}
+
 /// Optional Google OAuth "Desktop App" credentials shared by Google tools.
 /// Runtime credentials from a tool capability take precedence over these
 /// compile-time values.
@@ -87,13 +100,8 @@ const NOTION_CLIENT_SECRET: &str = match option_env!("THINCLAW_NOTION_CLIENT_SEC
 /// Returns `None` if no complete credential pair is configured for that provider.
 pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
     match secret_name {
-        "google_oauth_token" | "gmail_oauth_token"
-            if !GOOGLE_CLIENT_ID.is_empty() && !GOOGLE_CLIENT_SECRET.is_empty() =>
-        {
-            Some(OAuthCredentials {
-                client_id: GOOGLE_CLIENT_ID,
-                client_secret: GOOGLE_CLIENT_SECRET,
-            })
+        "google_oauth_token" | "gmail_oauth_token" => {
+            complete_credentials(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
         }
         "github_oauth_token"
             if !GITHUB_CLIENT_ID.is_empty() && !GITHUB_CLIENT_SECRET.is_empty() =>
@@ -570,6 +578,16 @@ mod tests {
         landing_html,
     };
     use crate::config::helpers::lock_env;
+
+    #[test]
+    fn complete_credentials_requires_both_values() {
+        assert!(super::complete_credentials("", "secret").is_none());
+        assert!(super::complete_credentials("client", "").is_none());
+
+        let credentials = super::complete_credentials("client", "secret").unwrap();
+        assert_eq!(credentials.client_id, "client");
+        assert_eq!(credentials.client_secret, "secret");
+    }
 
     #[test]
     fn test_is_loopback_host() {

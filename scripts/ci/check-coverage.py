@@ -120,6 +120,10 @@ def main() -> int:
             f"({patch_covered}/{patch_total}, minimum {args.patch_min:.2f}%)"
         )
         if patch_total and patch_pct < args.patch_min:
+            uncovered = sorted(line for line in coverable_changed if coverage[line] == 0)
+            print("Uncovered changed lines:", file=sys.stderr)
+            for source, line_number in uncovered:
+                print(f"  {source}:{line_number}", file=sys.stderr)
             failures.append(
                 f"patch coverage {patch_pct:.2f}% is below {args.patch_min:.2f}%"
             )
