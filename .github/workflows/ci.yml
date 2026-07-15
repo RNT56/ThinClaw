@@ -180,7 +180,7 @@ jobs:
           # not fail an otherwise green job while saving the post-job cache.
           save-if: false
       - name: Install Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
