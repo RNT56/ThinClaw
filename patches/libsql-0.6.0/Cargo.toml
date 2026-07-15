@@ -193,7 +193,7 @@ version = "0.11"
 optional = true
 
 [dependencies.tonic-web]
-version = "0.11"
+version = "0.14"
 optional = true
 
 [dependencies.tower]
