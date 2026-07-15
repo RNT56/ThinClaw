@@ -15,6 +15,13 @@ function pathInside(root, candidate, label) {
   if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
     fail(`${label} escapes ${resolvedRoot}: ${candidate}`);
   }
+  if (fs.existsSync(resolved)) {
+    const realRoot = fs.realpathSync(resolvedRoot);
+    const real = fs.realpathSync(resolved);
+    if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) {
+      fail(`${label} resolves outside ${realRoot}: ${candidate}`);
+    }
+  }
   return resolved;
 }
 
@@ -85,19 +92,20 @@ for (const key of [
 
 const triple = targetTriple();
 const bundle = config.bundle ?? {};
+const backendRoot = path.join(desktopRoot, 'backend');
 const nativeFiles = new Set();
 for (const externalBin of bundle.externalBin ?? []) {
   if (typeof externalBin !== 'string' || !/^bin\/[A-Za-z0-9_.-]+$/.test(externalBin)) {
     fail(`invalid external binary declaration: ${externalBin}`);
   }
-  const base = path.join(desktopRoot, 'backend', 'bin', path.basename(externalBin));
+  const base = path.join(backendRoot, 'bin', path.basename(externalBin));
   const candidates = [`${base}-${triple}`, `${base}-${triple}.exe`];
   const selected = candidates.find((candidate) => fs.existsSync(candidate));
   if (!selected) fail(`declared sidecar is missing for ${triple}: ${externalBin}`);
-  nativeFiles.add(selected);
+  nativeFiles.add(pathInside(backendRoot, selected, 'external binary'));
 }
 
-const binDir = path.join(desktopRoot, 'backend', 'bin');
+const binDir = path.join(backendRoot, 'bin');
 if (fs.existsSync(binDir)) {
   for (const file of fs.readdirSync(binDir)) {
     const nativeLibrary = triple.includes('apple-darwin')
@@ -113,7 +121,7 @@ const chromiumDeclared = (bundle.resources ?? []).some((resource) =>
   resource === 'resources/chromium' || resource.startsWith('resources/chromium/'),
 );
 const chromiumFiles = chromiumDeclared
-  ? filesUnder(path.join(desktopRoot, 'backend', 'resources', 'chromium'))
+  ? filesUnder(path.join(backendRoot, 'resources', 'chromium'))
   : [];
 if (chromiumDeclared && chromiumFiles.length === 0) {
   fail('Chromium is declared but backend/resources/chromium is empty or missing');

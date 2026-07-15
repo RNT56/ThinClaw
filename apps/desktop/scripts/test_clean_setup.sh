@@ -81,6 +81,14 @@ if TAURI_TARGET_TRIPLE="$TEST_TARGET" \
   exit 1
 fi
 
+cp backend/tauri.override.json "$TMP_ROOT/outside-config.json"
+ln -s "$TMP_ROOT/outside-config.json" backend/tauri.symlink.json
+if TAURI_TARGET_TRIPLE="$TEST_TARGET" \
+  node scripts/check_sidecar_budgets.mjs --config backend/tauri.symlink.json >/dev/null 2>&1; then
+  echo "Sidecar budget check accepted a config symlink outside the desktop root." >&2
+  exit 1
+fi
+
 if TAURI_TARGET_TRIPLE='../escape' \
   node scripts/check_sidecar_budgets.mjs --config backend/tauri.override.json >/dev/null 2>&1; then
   echo "Sidecar budget check accepted an unsafe target triple." >&2
