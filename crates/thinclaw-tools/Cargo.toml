@@ -57,7 +57,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 wasmtime = { version = "46.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
 wasmtime-wasi = { version = "46.0.1", optional = true }
 wasmparser = { version = "0.244", optional = true }
-html-to-markdown-rs = { version = "2.3", optional = true }
+html-to-markdown-rs = { version = "3.8", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
