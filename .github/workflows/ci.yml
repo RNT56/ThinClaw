@@ -112,8 +112,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Free disk space for heavy profile test compile
-        if: matrix.name == 'edge' || matrix.name == 'full' || matrix.name == 'all-features' || matrix.name == 'desktop'
+      # Every profile links Wasmtime-backed test binaries; the stock image can
+      # exhaust its writable disk and crash rust-lld even for the default profile.
+      - name: Free disk space for profile test compile
         run: |
           df -h
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
