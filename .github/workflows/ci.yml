@@ -116,12 +116,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -d /mnt && -w /mnt ]]; then
+          if mountpoint -q /mnt; then
             cargo_target_dir=/mnt/thinclaw-cargo-target
+            sudo install -d -o "$(id -u)" -g "$(id -g)" "$cargo_target_dir"
           else
             cargo_target_dir="$RUNNER_TEMP/thinclaw-cargo-target"
+            mkdir -p "$cargo_target_dir"
           fi
-          mkdir -p "$cargo_target_dir"
           echo "CARGO_TARGET_DIR=$cargo_target_dir" >> "$GITHUB_ENV"
           df -h "$cargo_target_dir"
       # Every profile links Wasmtime-backed test binaries; the stock image can
