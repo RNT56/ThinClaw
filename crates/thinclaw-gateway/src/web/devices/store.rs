@@ -153,7 +153,7 @@ impl DeviceStore {
             .create(true)
             .truncate(false)
             .open(&path)?;
-        file.lock_exclusive()?;
+        FileExt::lock(&file)?;
         let mut content = String::new();
         use std::io::Read as _;
         file.read_to_string(&mut content)?;

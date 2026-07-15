@@ -138,12 +138,12 @@ clap = { version = "4", features = ["derive", "env"] }
 # Terminal
 crossterm = "0.29"
 rustyline = { version = "18", features = ["custom-bindings", "derive", "with-file-history"] }
-termimad = "0.34"
+termimad = "0.35"
 
 # Channel integrations
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "set-header"] }
 
 # Cron scheduling for routines
 cron = "0.17"
@@ -160,7 +160,7 @@ serde_yaml_ng = "0.10"
 
 # Filesystem paths
 dirs = "6"
-fs4 = "0.6"
+fs4 = "1.1"
 
 # Secrecy for sensitive values
 secrecy = { version = "0.10", features = ["serde"] }
@@ -177,9 +177,9 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "36.0.12", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
-wasmtime-wasi = { version = "36.0.12", optional = true }  # WASI support for component model
-wasmparser = { version = "0.220", optional = true }  # WASM binary parsing for validation
+wasmtime = { version = "44.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
+wasmtime-wasi = { version = "44.0.3", optional = true }  # WASI support for component model
+wasmparser = { version = "0.244", optional = true }  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes-gcm = "0.11"
@@ -211,7 +211,7 @@ base64 = "0.22.1"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.18.0"
-libloading = "0.8"
+libloading = "0.9"
 
 sysinfo = "0.38.2"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
@@ -274,7 +274,7 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1"
-criterion = "0.5"
+criterion = "0.8"
 insta = { version = "1", features = ["json", "yaml"] }
 
 [build-dependencies]

@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ACTION_SHA = "5c625bfb5d1ff62eadeeb3772007f7f66fdcf071"
+ACTION_SHA = "45996ed1f6d02564a971a2fa1b5860e934307cf7"
 
 
 def cargo_version() -> str:

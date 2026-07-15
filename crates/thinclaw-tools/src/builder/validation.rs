@@ -54,7 +54,7 @@ pub struct ValidationResult {
 }
 
 /// Information about an exported function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportInfo {
     pub name: String,
     pub kind: ExportKind,
@@ -70,7 +70,7 @@ pub enum ExportKind {
 }
 
 /// Information about an imported function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportInfo {
     pub module: String,
     pub name: String,
@@ -181,7 +181,10 @@ impl WasmValidator {
                             match export {
                                 Ok(exp) => {
                                     let kind = match exp.kind {
-                                        wasmparser::ExternalKind::Func => ExportKind::Function,
+                                        wasmparser::ExternalKind::Func
+                                        | wasmparser::ExternalKind::FuncExact => {
+                                            ExportKind::Function
+                                        }
                                         wasmparser::ExternalKind::Memory => ExportKind::Memory,
                                         wasmparser::ExternalKind::Table => ExportKind::Table,
                                         wasmparser::ExternalKind::Global => ExportKind::Global,
@@ -202,11 +205,12 @@ impl WasmValidator {
                         }
                     }
                     Ok(wasmparser::Payload::ImportSection(reader)) => {
-                        for import in reader {
+                        for import in reader.into_imports() {
                             match import {
                                 Ok(imp) => {
                                     let kind = match imp.ty {
-                                        wasmparser::TypeRef::Func(_) => ImportKind::Function,
+                                        wasmparser::TypeRef::Func(_)
+                                        | wasmparser::TypeRef::FuncExact(_) => ImportKind::Function,
                                         wasmparser::TypeRef::Memory(_) => ImportKind::Memory,
                                         wasmparser::TypeRef::Table(_) => ImportKind::Table,
                                         wasmparser::TypeRef::Global(_) => ImportKind::Global,
@@ -333,5 +337,41 @@ mod tests {
         );
     }
 
-    // Note: Full WASM parsing tests would require actual WASM binaries
+    #[cfg(feature = "wasm-runtime")]
+    #[test]
+    fn test_validate_minimal_module_with_import() {
+        // (module
+        //   (import "env" "host" (func))
+        //   (func (export "run")))
+        let wasm = [
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section
+            0x02, 0x0c, 0x01, 0x03, b'e', b'n', b'v', 0x04, b'h', b'o', b's', b't', 0x00,
+            0x00, // import section
+            0x03, 0x02, 0x01, 0x00, // function section
+            0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01, // export section
+            0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b, // code section
+        ];
+
+        let result = WasmValidator::new()
+            .with_allowed_import("env")
+            .validate_bytes(&wasm)
+            .expect("minimal module should parse");
+
+        assert!(result.is_valid, "unexpected errors: {:?}", result.errors);
+        assert_eq!(
+            result.imports,
+            vec![ImportInfo {
+                module: "env".to_string(),
+                name: "host".to_string(),
+                kind: ImportKind::Function,
+            }]
+        );
+        assert!(
+            result
+                .exports
+                .iter()
+                .any(|export| export.name == "run" && export.kind == ExportKind::Function)
+        );
+    }
 }

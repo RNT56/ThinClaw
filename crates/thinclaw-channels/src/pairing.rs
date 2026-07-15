@@ -9,7 +9,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs4::FileExt;
 use rand::RngExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -259,7 +258,7 @@ impl PairingStore {
             .truncate(false)
             .open(&path)?;
 
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
 
         let content = fs::read_to_string(&path)?;
         let mut store: PairingStoreFile = parse_json_or_default(
@@ -357,7 +356,7 @@ impl PairingStore {
             .create(true)
             .truncate(false)
             .open(&path)?;
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
 
         let existing = match fs::read_to_string(&path) {
             Ok(content) => content,
@@ -406,7 +405,7 @@ impl PairingStore {
                 }
             })?;
 
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
 
         let content = fs::read_to_string(&path)?;
         let mut store: PairingStoreFile = parse_json_or_default(
@@ -475,7 +474,7 @@ impl PairingStore {
             .truncate(false)
             .open(&path)?;
 
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
 
         let content = fs::read_to_string(&path)?;
         let mut store: PairingStoreFile = parse_json_or_default(
@@ -593,7 +592,7 @@ impl PairingStore {
             .create(true)
             .truncate(false)
             .open(&path)?;
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
 
         let mut content = String::new();
         let mut reader = file.try_clone()?;
@@ -639,7 +638,7 @@ impl PairingStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
         let mut content = String::new();
         let mut reader = file.try_clone()?;
         reader.read_to_string(&mut content)?;
@@ -712,7 +711,7 @@ impl PairingStore {
             .truncate(false)
             .open(&path)?;
 
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
 
         let mut content = String::new();
         let mut reader = file.try_clone()?;
@@ -757,7 +756,7 @@ impl PairingStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
         let mut content = String::new();
         let mut reader = file.try_clone()?;
         reader.read_to_string(&mut content)?;
@@ -798,7 +797,7 @@ impl PairingStore {
             .create(true)
             .truncate(true)
             .open(&path)?;
-        file.lock_exclusive()?;
+        fs4::FileExt::lock(&file)?;
         self.write_pairing_file_locked(&mut file, channel, requests)?;
         fs4::FileExt::unlock(&file)?;
         Ok(())
