@@ -14,13 +14,22 @@ on `main`. Review all of these before merging it:
 2. Root Cargo, both Desktop Cargo files and lockfiles, Desktop package files,
    and `tauri.conf.json` all carry the same version.
 3. The PR-associated CI run is green.
-4. Every required release secret below is present.
+4. The required `Release Credentials` status is green.
+5. Every required release secret below is present.
 
 Release Please authenticates with `GITHUB_TOKEN`. GitHub creates the normal
 `pull_request` CI run for that automated PR in an `action_required` state. A
 maintainer must inspect and approve that pending run in GitHub Actions. A
 manually dispatched CI run can test the same commit, but GitHub does not attach
 it to the pull request and it cannot satisfy branch protection.
+
+After that CI run completes, `Release Credential Gate` executes its workflow
+definition from the default branch without checking out pull-request code. It
+publishes the required `Release Credentials` commit status. A normal PR passes
+that status without receiving release secrets; the Release Please branch fails
+closed when a required secret is absent or its static certificate/key format is
+invalid. The tag artifact workflow remains authoritative for live Apple
+authentication, notarization, signing-key matching, and artifact verification.
 
 Use these commands for a quick read-only check:
 
@@ -30,6 +39,16 @@ gh pr view <release-pr> --repo RNT56/ThinClaw \
 gh run list --repo RNT56/ThinClaw \
   --branch release-please--branches--main--components--thinclaw
 gh secret list --repo RNT56/ThinClaw
+```
+
+After provisioning or correcting secrets, refresh only the credential status
+on the unchanged, already-green release head:
+
+```bash
+head_sha="$(gh pr view <release-pr> --repo RNT56/ThinClaw \
+  --json headRefOid --jq .headRefOid)"
+gh workflow run release-credential-gate.yml --repo RNT56/ThinClaw --ref main \
+  -f head_sha="$head_sha"
 ```
 
 Do not print, copy into logs, or paste secret values into a pull request or chat.
