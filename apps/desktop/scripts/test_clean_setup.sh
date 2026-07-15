@@ -75,4 +75,16 @@ if CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/rejected" \
   exit 1
 fi
 
+if TAURI_TARGET_TRIPLE="$TEST_TARGET" \
+  node scripts/check_sidecar_budgets.mjs --config ../outside.json >/dev/null 2>&1; then
+  echo "Sidecar budget check accepted a config path outside the desktop root." >&2
+  exit 1
+fi
+
+if TAURI_TARGET_TRIPLE='../escape' \
+  node scripts/check_sidecar_budgets.mjs --config backend/tauri.override.json >/dev/null 2>&1; then
+  echo "Sidecar budget check accepted an unsafe target triple." >&2
+  exit 1
+fi
+
 echo "Clean-machine setup fixture passed with verified downloads, required sidecars, and size budgets."

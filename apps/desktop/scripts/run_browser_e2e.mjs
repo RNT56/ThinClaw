@@ -2,13 +2,25 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { constants } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const wdioCli = join(desktopRoot, "node_modules", "@wdio", "cli", "bin", "wdio.js");
+const chromeForTestingOrigin = "https://storage.googleapis.com";
+const maxChromeDriverArchiveBytes = 32 * 1024 * 1024;
 
 async function isExecutable(path) {
   try {
@@ -57,18 +69,46 @@ async function prepareMacChromedriver() {
   try {
     const archive = join(scratch, "chromedriver.zip");
     const url = `https://storage.googleapis.com/chrome-for-testing-public/${version}/${platform}/chromedriver-${platform}.zip`;
-    const response = await fetch(url, { redirect: "follow" });
+    const response = await fetch(url, { redirect: "error" });
     if (!response.ok) {
       throw new Error(`ChromeDriver download failed (${response.status} ${response.statusText})`);
     }
-    await writeFile(archive, Buffer.from(await response.arrayBuffer()));
-    const unzip = spawnSync("unzip", ["-q", "-o", archive, "-d", installRoot], {
+    const responseUrl = new URL(response.url);
+    if (responseUrl.origin !== chromeForTestingOrigin || responseUrl.href !== url) {
+      throw new Error(`ChromeDriver download returned an unexpected URL: ${responseUrl.href}`);
+    }
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > maxChromeDriverArchiveBytes) {
+      throw new Error(`ChromeDriver archive is unexpectedly large (${declaredLength} bytes)`);
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length === 0 || bytes.length > maxChromeDriverArchiveBytes) {
+      throw new Error(`ChromeDriver archive has an invalid size (${bytes.length} bytes)`);
+    }
+    if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+      throw new Error("ChromeDriver download is not a ZIP archive");
+    }
+    await writeFile(archive, bytes, { mode: 0o600 });
+
+    const expectedEntry = `chromedriver-${platform}/chromedriver`;
+    const extractedRoot = join(scratch, "extracted");
+    await mkdir(extractedRoot);
+    const unzip = spawnSync("unzip", ["-q", archive, expectedEntry, "-d", extractedRoot], {
       stdio: "inherit",
     });
     if (unzip.status !== 0) {
       throw new Error(`unzip failed with exit code ${unzip.status ?? "unknown"}`);
     }
-    await chmod(driver, 0o755);
+    const extractedDriver = join(extractedRoot, expectedEntry);
+    const extractedStat = await lstat(extractedDriver);
+    if (!extractedStat.isFile() || extractedStat.isSymbolicLink()) {
+      throw new Error("ChromeDriver archive did not contain the expected regular file");
+    }
+    await mkdir(dirname(driver), { recursive: true });
+    const stagedDriver = `${driver}.tmp-${process.pid}`;
+    await copyFile(extractedDriver, stagedDriver);
+    await chmod(stagedDriver, 0o755);
+    await rename(stagedDriver, driver);
     if (!(await isExecutable(driver))) {
       throw new Error(`ChromeDriver was not installed at ${driver}`);
     }
