@@ -8508,7 +8508,7 @@ dependencies = [
 name = "thinclaw-portability"
 version = "0.1.0"
 dependencies = [
- "aead 0.5.2",
+ "aead 0.6.1",
  "chacha20poly1305",
  "flate2",
  "rand 0.10.2",
