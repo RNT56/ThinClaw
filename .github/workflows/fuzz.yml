@@ -4,6 +4,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
@@ -18,10 +21,10 @@ jobs:
           - fuzz_credential_detect
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Install system dependencies

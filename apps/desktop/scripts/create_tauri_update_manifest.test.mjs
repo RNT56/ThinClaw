@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createUpdateManifest } from './create_tauri_update_manifest.mjs';
+import { createUpdateManifest, parseArguments } from './create_tauri_update_manifest.mjs';
 
 test('creates the exact static Tauri updater contract for Apple Silicon', () => {
   const manifest = createUpdateManifest({
@@ -41,4 +41,14 @@ test('rejects drift between the tag, version, artifact, and signature', () => {
   assert.throws(() => createUpdateManifest({ ...valid, tag: 'v0.16.1' }), /must equal/);
   assert.throws(() => createUpdateManifest({ ...valid, updaterArtifact: 'ThinClaw.dmg' }), /unexpected/);
   assert.throws(() => createUpdateManifest({ ...valid, signature: ' ' }), /empty/);
+});
+
+test('accepts only unique known CLI arguments', () => {
+  assert.deepEqual(
+    { ...parseArguments(['--version', '0.16.0', '--arch', 'aarch64']) },
+    { version: '0.16.0', arch: 'aarch64' },
+  );
+  assert.throws(() => parseArguments(['--__proto__', 'polluted']), /unknown argument/);
+  assert.throws(() => parseArguments(['--version', '1', '--version', '2']), /duplicate argument/);
+  assert.throws(() => parseArguments(['--version']), /invalid argument/);
 });

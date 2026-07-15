@@ -275,6 +275,19 @@ function LegacyPanel({ content, onClose }: {
     // Iframe message handler
     useEffect(() => {
         const handleMessage = (event: MessageEvent) => {
+            const frameWindow = iframeRef.current?.contentWindow;
+            if (!frameWindow || event.source !== frameWindow) return;
+
+            let expectedOrigin = 'null';
+            if (content.url) {
+                try {
+                    expectedOrigin = new URL(content.url, window.location.href).origin;
+                } catch {
+                    return;
+                }
+            }
+            if (event.origin !== expectedOrigin) return;
+
             if (event.data?.source === 'thinclaw-canvas') {
                 const { eventType, payload } = event.data;
                 if (content.sessionKey) {
