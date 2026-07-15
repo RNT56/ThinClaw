@@ -142,7 +142,7 @@ version = "0.2"
 optional = true
 
 [dependencies.libsql-sys]
-version = "0.8"
+version = "0.9"
 optional = true
 
 [dependencies.libsql_replication]
