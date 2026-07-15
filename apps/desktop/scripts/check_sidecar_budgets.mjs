@@ -6,20 +6,13 @@ import { fileURLToPath } from 'node:url';
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-function pathInside(root, candidate, label) {
-  if (typeof candidate !== 'string' || candidate.length === 0 || candidate.includes('\0')) {
-    fail(`invalid ${label} path`);
-  }
-  const resolvedRoot = path.resolve(root);
-  const resolved = path.resolve(resolvedRoot, candidate);
-  if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
-    fail(`${label} escapes ${resolvedRoot}: ${candidate}`);
-  }
+function fixedPath(...segments) {
+  const resolved = path.join(desktopRoot, ...segments);
   if (fs.existsSync(resolved)) {
-    const realRoot = fs.realpathSync(resolvedRoot);
+    const realRoot = fs.realpathSync(desktopRoot);
     const real = fs.realpathSync(resolved);
     if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) {
-      fail(`${label} resolves outside ${realRoot}: ${candidate}`);
+      fail(`fixed input resolves outside ${realRoot}: ${resolved}`);
     }
   }
   return resolved;
@@ -36,17 +29,36 @@ function argument(name, fallback) {
 }
 
 function targetTriple() {
-  let triple;
-  if (process.env.TAURI_TARGET_TRIPLE || process.env.TARGET) {
-    triple = process.env.TAURI_TARGET_TRIPLE || process.env.TARGET;
-  } else {
+  let requested = process.env.TAURI_TARGET_TRIPLE || process.env.TARGET;
+  if (!requested) {
     const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
-    if (process.platform === 'darwin') triple = `${arch}-apple-darwin`;
-    else if (process.platform === 'win32') triple = `${arch}-pc-windows-msvc`;
-    else triple = `${arch}-unknown-linux-gnu`;
+    if (process.platform === 'darwin') requested = `${arch}-apple-darwin`;
+    else if (process.platform === 'win32') requested = `${arch}-pc-windows-msvc`;
+    else requested = `${arch}-unknown-linux-gnu`;
   }
-  if (!/^[A-Za-z0-9_.-]+$/.test(triple)) fail(`invalid target triple: ${triple}`);
-  return triple;
+  switch (requested) {
+    case 'aarch64-apple-darwin': return 'aarch64-apple-darwin';
+    case 'x86_64-apple-darwin': return 'x86_64-apple-darwin';
+    case 'aarch64-unknown-linux-gnu': return 'aarch64-unknown-linux-gnu';
+    case 'x86_64-unknown-linux-gnu': return 'x86_64-unknown-linux-gnu';
+    case 'aarch64-unknown-linux-musl': return 'aarch64-unknown-linux-musl';
+    case 'x86_64-unknown-linux-musl': return 'x86_64-unknown-linux-musl';
+    case 'aarch64-pc-windows-msvc': return 'aarch64-pc-windows-msvc';
+    case 'x86_64-pc-windows-msvc': return 'x86_64-pc-windows-msvc';
+    default: fail(`unsupported target triple: ${requested}`);
+  }
+}
+
+function externalBinaryBasename(declaration) {
+  switch (declaration) {
+    case 'bin/llama-server': return 'llama-server';
+    case 'bin/whisper': return 'whisper';
+    case 'bin/whisper-server': return 'whisper-server';
+    case 'bin/sd': return 'sd';
+    case 'bin/tts': return 'tts';
+    case 'bin/uv': return 'uv';
+    default: fail(`unsupported external binary declaration: ${declaration}`);
+  }
 }
 
 function filesUnder(entry) {
@@ -63,16 +75,12 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
-const configPath = pathInside(
-  desktopRoot,
-  argument('--config', 'backend/tauri.override.json'),
-  'config',
-);
-const budgetPath = pathInside(
-  desktopRoot,
-  argument('--budgets', 'sidecar-budgets.json'),
-  'budgets',
-);
+const configArgument = argument('--config', 'backend/tauri.override.json');
+const budgetArgument = argument('--budgets', 'sidecar-budgets.json');
+if (configArgument !== 'backend/tauri.override.json') fail(`unsupported config path: ${configArgument}`);
+if (budgetArgument !== 'sidecar-budgets.json') fail(`unsupported budgets path: ${budgetArgument}`);
+const configPath = fixedPath('backend', 'tauri.override.json');
+const budgetPath = fixedPath('sidecar-budgets.json');
 if (!configPath || !budgetPath || !fs.existsSync(configPath) || !fs.existsSync(budgetPath)) {
   fail(`missing config (${configPath}) or budgets (${budgetPath})`);
 }
@@ -92,17 +100,14 @@ for (const key of [
 
 const triple = targetTriple();
 const bundle = config.bundle ?? {};
-const backendRoot = path.join(desktopRoot, 'backend');
+const backendRoot = fixedPath('backend');
 const nativeFiles = new Set();
 for (const externalBin of bundle.externalBin ?? []) {
-  if (typeof externalBin !== 'string' || !/^bin\/[A-Za-z0-9_.-]+$/.test(externalBin)) {
-    fail(`invalid external binary declaration: ${externalBin}`);
-  }
-  const base = path.join(backendRoot, 'bin', path.basename(externalBin));
+  const base = path.join(backendRoot, 'bin', externalBinaryBasename(externalBin));
   const candidates = [`${base}-${triple}`, `${base}-${triple}.exe`];
   const selected = candidates.find((candidate) => fs.existsSync(candidate));
   if (!selected) fail(`declared sidecar is missing for ${triple}: ${externalBin}`);
-  nativeFiles.add(pathInside(backendRoot, selected, 'external binary'));
+  nativeFiles.add(selected);
 }
 
 const binDir = path.join(backendRoot, 'bin');

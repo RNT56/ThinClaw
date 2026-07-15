@@ -9,17 +9,18 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   rename,
   rm,
-  writeFile,
+  stat,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Browser, BrowserPlatform, install } from "@puppeteer/browsers";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const wdioCli = join(desktopRoot, "node_modules", "@wdio", "cli", "bin", "wdio.js");
-const chromeForTestingOrigin = "https://storage.googleapis.com";
 const maxChromeDriverArchiveBytes = 32 * 1024 * 1024;
 
 async function isExecutable(path) {
@@ -53,7 +54,9 @@ async function prepareMacChromedriver() {
   if (process.env.CHROMEDRIVER_PATH) return process.env.CHROMEDRIVER_PATH;
 
   const version = installedChromeVersion();
-  const platform = process.arch === "arm64" ? "mac-arm64" : "mac-x64";
+  const arm64 = process.arch === "arm64";
+  const platform = arm64 ? BrowserPlatform.MAC_ARM : BrowserPlatform.MAC;
+  const platformLabel = arm64 ? "mac-arm64" : "mac-x64";
   const installRoot = join(
     homedir(),
     ".cache",
@@ -61,45 +64,41 @@ async function prepareMacChromedriver() {
     "manual",
     version,
   );
-  const driver = join(installRoot, `chromedriver-${platform}`, "chromedriver");
+  const driver = join(installRoot, `chromedriver-${platformLabel}`, "chromedriver");
   if (await isExecutable(driver)) return driver;
 
-  await mkdir(installRoot, { recursive: true });
+  const archive = await install({
+    browser: Browser.CHROMEDRIVER,
+    buildId: version,
+    cacheDir: join(homedir(), ".cache", "thinclaw-webdriver", "downloads"),
+    platform,
+    unpack: false,
+  });
+  const archiveStat = await stat(archive);
+  if (!archiveStat.isFile() || archiveStat.size === 0 || archiveStat.size > maxChromeDriverArchiveBytes) {
+    throw new Error(`ChromeDriver archive has an invalid size (${archiveStat.size} bytes)`);
+  }
+  const signature = Buffer.alloc(2);
+  const archiveFile = await open(archive, "r");
+  try {
+    await archiveFile.read(signature, 0, signature.length, 0);
+  } finally {
+    await archiveFile.close();
+  }
+  if (signature[0] !== 0x50 || signature[1] !== 0x4b) {
+    throw new Error("ChromeDriver download is not a ZIP archive");
+  }
+
   const scratch = await mkdtemp(join(tmpdir(), "thinclaw-chromedriver-"));
   try {
-    const archive = join(scratch, "chromedriver.zip");
-    const url = `https://storage.googleapis.com/chrome-for-testing-public/${version}/${platform}/chromedriver-${platform}.zip`;
-    const response = await fetch(url, { redirect: "error" });
-    if (!response.ok) {
-      throw new Error(`ChromeDriver download failed (${response.status} ${response.statusText})`);
-    }
-    const responseUrl = new URL(response.url);
-    if (responseUrl.origin !== chromeForTestingOrigin || responseUrl.href !== url) {
-      throw new Error(`ChromeDriver download returned an unexpected URL: ${responseUrl.href}`);
-    }
-    const declaredLength = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > maxChromeDriverArchiveBytes) {
-      throw new Error(`ChromeDriver archive is unexpectedly large (${declaredLength} bytes)`);
-    }
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length === 0 || bytes.length > maxChromeDriverArchiveBytes) {
-      throw new Error(`ChromeDriver archive has an invalid size (${bytes.length} bytes)`);
-    }
-    if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
-      throw new Error("ChromeDriver download is not a ZIP archive");
-    }
-    await writeFile(archive, bytes, { mode: 0o600 });
-
-    const expectedEntry = `chromedriver-${platform}/chromedriver`;
-    const extractedRoot = join(scratch, "extracted");
-    await mkdir(extractedRoot);
-    const unzip = spawnSync("unzip", ["-q", archive, expectedEntry, "-d", extractedRoot], {
+    const expectedEntry = `chromedriver-${platformLabel}/chromedriver`;
+    const unzip = spawnSync("unzip", ["-q", archive, expectedEntry, "-d", scratch], {
       stdio: "inherit",
     });
     if (unzip.status !== 0) {
       throw new Error(`unzip failed with exit code ${unzip.status ?? "unknown"}`);
     }
-    const extractedDriver = join(extractedRoot, expectedEntry);
+    const extractedDriver = join(scratch, expectedEntry);
     const extractedStat = await lstat(extractedDriver);
     if (!extractedStat.isFile() || extractedStat.isSymbolicLink()) {
       throw new Error("ChromeDriver archive did not contain the expected regular file");
@@ -109,13 +108,13 @@ async function prepareMacChromedriver() {
     await copyFile(extractedDriver, stagedDriver);
     await chmod(stagedDriver, 0o755);
     await rename(stagedDriver, driver);
-    if (!(await isExecutable(driver))) {
-      throw new Error(`ChromeDriver was not installed at ${driver}`);
-    }
-    return driver;
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
+  if (!(await isExecutable(driver))) {
+    throw new Error(`ChromeDriver was not installed at ${driver}`);
+  }
+  return driver;
 }
 
 const env = { ...process.env };

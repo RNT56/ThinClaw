@@ -81,13 +81,29 @@ if TAURI_TARGET_TRIPLE="$TEST_TARGET" \
   exit 1
 fi
 
-cp backend/tauri.override.json "$TMP_ROOT/outside-config.json"
-ln -s "$TMP_ROOT/outside-config.json" backend/tauri.symlink.json
+mv backend/tauri.override.json "$TMP_ROOT/outside-config.json"
+ln -s "$TMP_ROOT/outside-config.json" backend/tauri.override.json
 if TAURI_TARGET_TRIPLE="$TEST_TARGET" \
-  node scripts/check_sidecar_budgets.mjs --config backend/tauri.symlink.json >/dev/null 2>&1; then
+  node scripts/check_sidecar_budgets.mjs --config backend/tauri.override.json >/dev/null 2>&1; then
   echo "Sidecar budget check accepted a config symlink outside the desktop root." >&2
   exit 1
 fi
+rm backend/tauri.override.json
+cp "$TMP_ROOT/outside-config.json" backend/tauri.override.json
+
+node <<'NODE'
+const fs = require('node:fs');
+const path = 'backend/tauri.override.json';
+const config = JSON.parse(fs.readFileSync(path, 'utf8'));
+config.bundle.externalBin = ['bin/../../escape'];
+fs.writeFileSync(path, JSON.stringify(config));
+NODE
+if TAURI_TARGET_TRIPLE="$TEST_TARGET" \
+  node scripts/check_sidecar_budgets.mjs --config backend/tauri.override.json >/dev/null 2>&1; then
+  echo "Sidecar budget check accepted an undeclared external binary." >&2
+  exit 1
+fi
+cp "$TMP_ROOT/outside-config.json" backend/tauri.override.json
 
 if TAURI_TARGET_TRIPLE='../escape' \
   node scripts/check_sidecar_budgets.mjs --config backend/tauri.override.json >/dev/null 2>&1; then
