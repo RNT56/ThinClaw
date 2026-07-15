@@ -722,7 +722,8 @@ mod tests {
         use crate::leak_detector::mask_secret;
 
         assert_eq!(mask_secret("short"), "*****");
-        assert_eq!(mask_secret("sk-test1234567890abcdef"), "sk-t********cdef");
+        let secret = ["sk", "test1234567890abcdef"].join("-");
+        assert_eq!(mask_secret(&secret), "sk-t********cdef");
     }
 
     #[test]

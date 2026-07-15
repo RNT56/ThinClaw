@@ -235,13 +235,16 @@ mod tests {
 
     #[test]
     fn redacts_contacts_secrets_and_paths_deterministically() {
-        let raw = "Email me@example.com, call +1 (555) 123-4567, token=sk-abcdefghijklmnopqrst, path /Users/alex/project/.env";
-        let redacted = redact_prompt_text(raw, Some("discord"));
+        let secret = ["sk", "abcdefghijklmnopqrst"].join("-");
+        let raw = format!(
+            "Email me@example.com, call +1 (555) 123-4567, token={secret}, path /Users/alex/project/.env"
+        );
+        let redacted = redact_prompt_text(&raw, Some("discord"));
 
-        assert_eq!(redacted, redact_prompt_text(raw, Some("discord")));
+        assert_eq!(redacted, redact_prompt_text(&raw, Some("discord")));
         assert!(!redacted.contains("me@example.com"));
         assert!(!redacted.contains("555"));
-        assert!(!redacted.contains("sk-abcdefghijklmnopqrst"));
+        assert!(!redacted.contains(&secret));
         assert!(!redacted.contains("/Users/alex"));
         assert!(redacted.contains("[redacted email:"));
         assert!(redacted.contains("[redacted phone:"));

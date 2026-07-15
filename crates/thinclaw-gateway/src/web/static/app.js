@@ -1958,23 +1958,31 @@ function renderMarkdown(text) {
 // Strip dangerous HTML elements and attributes from rendered markdown.
 // This prevents XSS from tool output or prompt injection in LLM responses.
 function sanitizeRenderedHtml(html) {
-  html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-  html = html.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  html = html.replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '');
-  html = html.replace(/<embed\b[^>]*\/?>/gi, '');
-  html = html.replace(/<form\b[^>]*>[\s\S]*?<\/form>/gi, '');
-  html = html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
-  html = html.replace(/<link\b[^>]*\/?>/gi, '');
-  html = html.replace(/<base\b[^>]*\/?>/gi, '');
-  html = html.replace(/<meta\b[^>]*\/?>/gi, '');
-  // Remove event handler attributes (onclick, onerror, onload, etc.)
-  html = html.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
-  html = html.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
-  html = html.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
-  // Remove javascript: and data: URLs in href/src attributes
-  html = html.replace(/(href|src|action)\s*=\s*["']?\s*javascript\s*:/gi, '$1="');
-  html = html.replace(/(href|src|action)\s*=\s*["']?\s*data\s*:/gi, '$1="');
-  return html;
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  template.content
+    .querySelectorAll('script, iframe, object, embed, form, style, link, base, meta, svg, math, template')
+    .forEach((node) => node.remove());
+
+  const urlAttributes = new Set(['href', 'src', 'action', 'formaction', 'xlink:href']);
+  template.content.querySelectorAll('*').forEach((element) => {
+    [...element.attributes].forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith('on') || name === 'style' || name === 'srcdoc') {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+      if (urlAttributes.has(name)) {
+        const normalized = attribute.value
+          .replace(/[\u0000-\u0020\u007f-\u009f]/g, '')
+          .toLowerCase();
+        if (/^(?:javascript|data|vbscript):/.test(normalized)) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+    });
+  });
+  return template.innerHTML;
 }
 
 function copyCodeBlock(btn) {

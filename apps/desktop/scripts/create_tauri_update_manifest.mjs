@@ -30,26 +30,34 @@ export function createUpdateManifest({
 
   const asset = path.basename(updaterArtifact);
   const url = `https://github.com/${repository}/releases/download/${tag}/${encodeURIComponent(asset)}`;
+  const target = {
+    signature: signature.trim(),
+    url,
+  };
+  const platforms = arch === 'aarch64'
+    ? { 'darwin-aarch64': target }
+    : { 'darwin-x86_64': target };
   return {
     version,
     notes,
     pub_date: new Date(publishedAt).toISOString(),
-    platforms: {
-      [`darwin-${arch}`]: {
-        signature: signature.trim(),
-        url,
-      },
-    },
+    platforms,
   };
 }
 
-function parseArguments(argv) {
-  const values = {};
+export function parseArguments(argv) {
+  const allowed = new Set([
+    'version', 'tag', 'repository', 'arch', 'artifact', 'signature', 'notes', 'output',
+  ]);
+  const values = Object.create(null);
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
     const value = argv[index + 1];
     if (!key?.startsWith('--') || value === undefined) throw new Error(`invalid argument near ${key ?? '<end>'}`);
-    values[key.slice(2)] = value;
+    const name = key.slice(2);
+    if (!allowed.has(name)) throw new Error(`unknown argument --${name}`);
+    if (Object.hasOwn(values, name)) throw new Error(`duplicate argument --${name}`);
+    values[name] = value;
   }
   return values;
 }
