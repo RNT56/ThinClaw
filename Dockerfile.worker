@@ -48,7 +48,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     CODEX_HOME=/home/sandbox/.codex \
     PATH=/usr/local/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.94.0 \
     && chmod -R a+r /usr/local/rustup /usr/local/cargo
 
 # Install container coding CLIs (for claude-bridge and codex-bridge modes)
