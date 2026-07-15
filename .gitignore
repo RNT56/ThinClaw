@@ -69,6 +69,9 @@ cobertura.xml
 target-codex-analyze/
 target-codex-check/
 
+# Vendored libraries are resolved through the active root/backend lockfiles.
+patches/libsql-0.6.0/Cargo.lock
+
 # Desktop app local build/download artifacts
 apps/desktop/frontend/node_modules/
 apps/desktop/node_modules/
