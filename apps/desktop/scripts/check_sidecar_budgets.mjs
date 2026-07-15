@@ -2,6 +2,21 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function fixedPath(...segments) {
+  const resolved = path.join(desktopRoot, ...segments);
+  if (fs.existsSync(resolved)) {
+    const realRoot = fs.realpathSync(desktopRoot);
+    const real = fs.realpathSync(resolved);
+    if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) {
+      fail(`fixed input resolves outside ${realRoot}: ${resolved}`);
+    }
+  }
+  return resolved;
+}
 
 function fail(message) {
   console.error(`Sidecar budget check failed: ${message}`);
@@ -14,13 +29,36 @@ function argument(name, fallback) {
 }
 
 function targetTriple() {
-  if (process.env.TAURI_TARGET_TRIPLE || process.env.TARGET) {
-    return process.env.TAURI_TARGET_TRIPLE || process.env.TARGET;
+  let requested = process.env.TAURI_TARGET_TRIPLE || process.env.TARGET;
+  if (!requested) {
+    const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+    if (process.platform === 'darwin') requested = `${arch}-apple-darwin`;
+    else if (process.platform === 'win32') requested = `${arch}-pc-windows-msvc`;
+    else requested = `${arch}-unknown-linux-gnu`;
   }
-  const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
-  if (process.platform === 'darwin') return `${arch}-apple-darwin`;
-  if (process.platform === 'win32') return `${arch}-pc-windows-msvc`;
-  return `${arch}-unknown-linux-gnu`;
+  switch (requested) {
+    case 'aarch64-apple-darwin': return 'aarch64-apple-darwin';
+    case 'x86_64-apple-darwin': return 'x86_64-apple-darwin';
+    case 'aarch64-unknown-linux-gnu': return 'aarch64-unknown-linux-gnu';
+    case 'x86_64-unknown-linux-gnu': return 'x86_64-unknown-linux-gnu';
+    case 'aarch64-unknown-linux-musl': return 'aarch64-unknown-linux-musl';
+    case 'x86_64-unknown-linux-musl': return 'x86_64-unknown-linux-musl';
+    case 'aarch64-pc-windows-msvc': return 'aarch64-pc-windows-msvc';
+    case 'x86_64-pc-windows-msvc': return 'x86_64-pc-windows-msvc';
+    default: fail(`unsupported target triple: ${requested}`);
+  }
+}
+
+function externalBinaryBasename(declaration) {
+  switch (declaration) {
+    case 'bin/llama-server': return 'llama-server';
+    case 'bin/whisper': return 'whisper';
+    case 'bin/whisper-server': return 'whisper-server';
+    case 'bin/sd': return 'sd';
+    case 'bin/tts': return 'tts';
+    case 'bin/uv': return 'uv';
+    default: fail(`unsupported external binary declaration: ${declaration}`);
+  }
 }
 
 function filesUnder(entry) {
@@ -37,8 +75,12 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
-const configPath = argument('--config', 'backend/tauri.override.json');
-const budgetPath = argument('--budgets', 'sidecar-budgets.json');
+const configArgument = argument('--config', 'backend/tauri.override.json');
+const budgetArgument = argument('--budgets', 'sidecar-budgets.json');
+if (configArgument !== 'backend/tauri.override.json') fail(`unsupported config path: ${configArgument}`);
+if (budgetArgument !== 'sidecar-budgets.json') fail(`unsupported budgets path: ${budgetArgument}`);
+const configPath = fixedPath('backend', 'tauri.override.json');
+const budgetPath = fixedPath('sidecar-budgets.json');
 if (!configPath || !budgetPath || !fs.existsSync(configPath) || !fs.existsSync(budgetPath)) {
   fail(`missing config (${configPath}) or budgets (${budgetPath})`);
 }
@@ -58,16 +100,17 @@ for (const key of [
 
 const triple = targetTriple();
 const bundle = config.bundle ?? {};
+const backendRoot = fixedPath('backend');
 const nativeFiles = new Set();
 for (const externalBin of bundle.externalBin ?? []) {
-  const base = path.join('backend', externalBin);
+  const base = path.join(backendRoot, 'bin', externalBinaryBasename(externalBin));
   const candidates = [`${base}-${triple}`, `${base}-${triple}.exe`];
   const selected = candidates.find((candidate) => fs.existsSync(candidate));
   if (!selected) fail(`declared sidecar is missing for ${triple}: ${externalBin}`);
   nativeFiles.add(selected);
 }
 
-const binDir = path.join('backend', 'bin');
+const binDir = path.join(backendRoot, 'bin');
 if (fs.existsSync(binDir)) {
   for (const file of fs.readdirSync(binDir)) {
     const nativeLibrary = triple.includes('apple-darwin')
@@ -83,7 +126,7 @@ const chromiumDeclared = (bundle.resources ?? []).some((resource) =>
   resource === 'resources/chromium' || resource.startsWith('resources/chromium/'),
 );
 const chromiumFiles = chromiumDeclared
-  ? filesUnder(path.join('backend', 'resources', 'chromium'))
+  ? filesUnder(path.join(backendRoot, 'resources', 'chromium'))
   : [];
 if (chromiumDeclared && chromiumFiles.length === 0) {
   fail('Chromium is declared but backend/resources/chromium is empty or missing');

@@ -29,6 +29,7 @@ describe("ThinClaw Desktop onboarding", () => {
   });
 
   it("intercepts Tauri IPC and returns deterministic command data", async () => {
+    const requestId = "browser-e2e-direct-permission-check";
     const permissionStatus = await browser.tauri.mock("get_permission_status");
     await permissionStatus.mockResolvedValue({
       accessibility: true,
@@ -37,11 +38,18 @@ describe("ThinClaw Desktop onboarding", () => {
     await permissionStatus.mockClear();
 
     const result = await browser.execute(async () =>
-      (window as any).__TAURI_INTERNALS__.invoke("get_permission_status"),
+      (window as any).__TAURI_INTERNALS__.invoke("get_permission_status", {
+        requestId: "browser-e2e-direct-permission-check",
+      }),
     );
     await permissionStatus.update();
 
     expect(result).toEqual({ accessibility: true, screen_recording: true });
-    expect(permissionStatus.mock.calls).toHaveSize(1);
+    expect(
+      permissionStatus.mock.calls.filter(
+        (call) =>
+          (call[0] as { requestId?: string } | null)?.requestId === requestId,
+      ),
+    ).toHaveSize(1);
   });
 });
