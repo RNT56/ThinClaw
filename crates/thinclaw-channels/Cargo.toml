@@ -18,7 +18,7 @@ futures = { workspace = true }
 fs4 = "1.1"
 hmac = "0.13"
 hex = "0.4"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream", "http2"] }
 regex = "1"

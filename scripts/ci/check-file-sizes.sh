@@ -9,11 +9,14 @@ set -euo pipefail
 
 MAX_LINES="${MAX_LINES:-2000}"
 
-# Committed .rs files only — `git ls-files` skips every (nested) target/ build
-# dir and the generated WIT bindings under OUT_DIR (never committed).
+# First-party committed .rs files only — `git ls-files` skips every (nested)
+# target/ build dir and the generated WIT bindings under OUT_DIR (never
+# committed). Vendored security/compatibility backports under patches/ retain
+# their upstream layout and are not subject to ThinClaw's module-size policy.
 violations=0
 while IFS= read -r f; do
   [ -f "$f" ] || continue
+  [[ "$f" == patches/* ]] && continue
   n=$(wc -l < "$f")
   if [ "$n" -gt "$MAX_LINES" ]; then
     printf '  %6d  %s\n' "$n" "$f"

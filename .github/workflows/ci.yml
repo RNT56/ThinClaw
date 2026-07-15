@@ -112,6 +112,19 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Select Cargo build storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          if mountpoint -q /mnt; then
+            cargo_target_dir=/mnt/thinclaw-cargo-target
+            sudo install -d -o "$(id -u)" -g "$(id -g)" "$cargo_target_dir"
+          else
+            cargo_target_dir="$RUNNER_TEMP/thinclaw-cargo-target"
+            mkdir -p "$cargo_target_dir"
+          fi
+          echo "CARGO_TARGET_DIR=$cargo_target_dir" >> "$GITHUB_ENV"
+          df -h "$cargo_target_dir"
       # Every profile links Wasmtime-backed test binaries; the stock image can
       # exhaust its writable disk and crash rust-lld even for the default profile.
       - name: Free disk space for profile test compile
@@ -143,7 +156,10 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
-        run: cargo test --locked --workspace --no-run ${{ matrix.cargo-args }}
+        shell: bash
+        run: |
+          trap 'df -h "$CARGO_TARGET_DIR"' EXIT
+          cargo test --locked --workspace --no-run ${{ matrix.cargo-args }}
 
   desktop-companion:
     name: Desktop Companion

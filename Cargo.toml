@@ -153,7 +153,7 @@ regex = "1"
 aho-corasick = "1"
 unicode-normalization = "0.1"
 jsonschema = { version = "0.47", default-features = false }
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 
 # YAML parsing for SKILL.md frontmatter
 serde_yaml_ng = "0.10"
@@ -237,7 +237,7 @@ qrcode = "0.14"
 
 # AWS Bedrock (native InvokeModel API for embeddings, opt-in via --features bedrock)
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
-aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-types = { version = "1", optional = true }
 
 # Audio capture for voice wake word detection (headless mode only)
@@ -505,8 +505,8 @@ doc_lazy_continuation      = "allow"
 # CI will still catch them via `-D warnings`.
 unused_imports = "warn"
 
-# Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
-# sqlx-sqlite (used by ThinClaw Desktop) calls sqlite3_config() first; the stock libsql
-# asserts on the duplicate call. Our patch checks sqlite3_threadsafe() instead.
+# Keep local, provenance-documented security/compatibility backports in the
+# dependency graph until upstream crates publish equivalent releases.
 [patch.crates-io]
 libsql = { path = "patches/libsql-0.6.0" }
+libsql-sqlite3-parser = { path = "patches/libsql-sqlite3-parser-0.13.1" }

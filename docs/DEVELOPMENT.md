@@ -12,7 +12,9 @@ For normal installation and first-run usage, start with [../README.md](../README
 The setup script checks the Rust toolchain and common build prerequisites. If
 you install dependencies manually, use the repository `rust-toolchain.toml` and
 keep `cargo-component` available when working on packaged WASM tools or
-channels.
+channels. Windows builds use AWS-LC's upstream prebuilt NASM objects when NASM
+is not installed; installing NASM on `PATH` rebuilds those objects from source
+instead.
 
 ## Source Builds
 
