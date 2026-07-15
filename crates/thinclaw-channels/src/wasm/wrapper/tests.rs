@@ -1264,11 +1264,9 @@ fn test_clone_wit_status_update_all_variants() {
 fn test_redact_credentials_replaces_values() {
     use super::store::ChannelStoreData;
 
+    let telegram_token = format!("{}:{}", "8".repeat(10), "A".repeat(35));
     let mut creds = std::collections::HashMap::new();
-    creds.insert(
-        "TELEGRAM_BOT_TOKEN".to_string(),
-        "8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis".to_string(),
-    );
+    creds.insert("TELEGRAM_BOT_TOKEN".to_string(), telegram_token.clone());
     creds.insert("OTHER_SECRET".to_string(), "s3cret".to_string());
 
     let store = ChannelStoreData::new(
@@ -1280,13 +1278,15 @@ fn test_redact_credentials_replaces_values() {
         Arc::new(ChannelWorkspaceStore::new()),
     );
 
-    let error = "HTTP request failed: error sending request for url \
-        (https://api.telegram.org/bot8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis/getUpdates)";
+    let error = format!(
+        "HTTP request failed: error sending request for url \
+         (https://api.telegram.org/bot{telegram_token}/getUpdates)"
+    );
 
-    let redacted = store.redact_credentials(error);
+    let redacted = store.redact_credentials(&error);
 
     assert!(
-        !redacted.contains("8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis"),
+        !redacted.contains(&telegram_token),
         "credential value should be redacted"
     );
     assert!(
