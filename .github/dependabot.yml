@@ -36,7 +36,9 @@ updates:
     # libSQL 0.6 patch. Root dependencies are updated by the entry above; the
     # patch internals must move only with an intentional libSQL migration.
     ignore:
+      - dependency-name: bincode
       - dependency-name: fs4
+      - dependency-name: http
       - dependency-name: libloading
       - dependency-name: libsql-sys
       - dependency-name: libsql_replication
