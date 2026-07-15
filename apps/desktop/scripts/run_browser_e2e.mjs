@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, createWriteStream } from "node:fs";
 import {
   access,
   chmod,
@@ -12,10 +12,10 @@ import {
   open,
   rename,
   rm,
-  stat,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { Browser, BrowserPlatform, install } from "@puppeteer/browsers";
 
@@ -74,25 +74,29 @@ async function prepareMacChromedriver() {
     platform,
     unpack: false,
   });
-  const archiveStat = await stat(archive);
-  if (!archiveStat.isFile() || archiveStat.size === 0 || archiveStat.size > maxChromeDriverArchiveBytes) {
-    throw new Error(`ChromeDriver archive has an invalid size (${archiveStat.size} bytes)`);
-  }
-  const signature = Buffer.alloc(2);
-  const archiveFile = await open(archive, "r");
-  try {
-    await archiveFile.read(signature, 0, signature.length, 0);
-  } finally {
-    await archiveFile.close();
-  }
-  if (signature[0] !== 0x50 || signature[1] !== 0x4b) {
-    throw new Error("ChromeDriver download is not a ZIP archive");
-  }
-
   const scratch = await mkdtemp(join(tmpdir(), "thinclaw-chromedriver-"));
+  let archiveFile;
   try {
+    archiveFile = await open(archive, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const archiveStat = await archiveFile.stat();
+    if (!archiveStat.isFile() || archiveStat.size === 0 || archiveStat.size > maxChromeDriverArchiveBytes) {
+      throw new Error(`ChromeDriver archive has an invalid size (${archiveStat.size} bytes)`);
+    }
+    const signature = Buffer.alloc(2);
+    await archiveFile.read(signature, 0, signature.length, 0);
+    if (signature[0] !== 0x50 || signature[1] !== 0x4b) {
+      throw new Error("ChromeDriver download is not a ZIP archive");
+    }
+    const validatedArchive = join(scratch, "chromedriver.zip");
+    await pipeline(
+      archiveFile.createReadStream({ autoClose: false, start: 0 }),
+      createWriteStream(validatedArchive, { flags: "wx", mode: 0o600 }),
+    );
+    await archiveFile.close();
+    archiveFile = undefined;
+
     const expectedEntry = `chromedriver-${platformLabel}/chromedriver`;
-    const unzip = spawnSync("unzip", ["-q", archive, expectedEntry, "-d", scratch], {
+    const unzip = spawnSync("unzip", ["-q", validatedArchive, expectedEntry, "-d", scratch], {
       stdio: "inherit",
     });
     if (unzip.status !== 0) {
@@ -109,6 +113,7 @@ async function prepareMacChromedriver() {
     await chmod(stagedDriver, 0o755);
     await rename(stagedDriver, driver);
   } finally {
+    await archiveFile?.close();
     await rm(scratch, { recursive: true, force: true });
   }
   if (!(await isExecutable(driver))) {
