@@ -493,8 +493,9 @@ async fn event_routine_filters_by_channel_and_supports_wildcard() {
         .await;
     assert_eq!(fired_telegram, 1);
 
+    let seen_wildcard_runs = HashSet::from([wildcard_first_run.id]);
     let wildcard_second_run =
-        wait_for_new_terminal_run(&ctx.db, wildcard_id, Some(wildcard_first_run.id)).await;
+        wait_for_unseen_terminal_run(&ctx.db, wildcard_id, &seen_wildcard_runs).await;
     assert_ne!(wildcard_first_run.id, wildcard_second_run.id);
 }
 
@@ -562,7 +563,7 @@ async fn event_routine_matching_covers_multiple_channel_names() {
     .await;
     let wildcard_id = parse_uuid(&wildcard, "id");
 
-    let mut wildcard_last = None;
+    let mut seen_wildcard_runs = HashSet::new();
     for (index, (channel, routine_id)) in channel_routines.iter().enumerate() {
         let fired = engine
             .check_event_triggers(&owned_event_message(
@@ -584,17 +585,14 @@ async fn event_routine_matching_covers_multiple_channel_names() {
             Some("matrix check is active")
         );
 
-        let next_wildcard_run = if let Some(previous_id) = wildcard_last {
-            wait_for_new_terminal_run(&ctx.db, wildcard_id, Some(previous_id)).await
-        } else {
-            wait_for_terminal_run(&ctx.db, wildcard_id).await
-        };
+        let next_wildcard_run =
+            wait_for_unseen_terminal_run(&ctx.db, wildcard_id, &seen_wildcard_runs).await;
         assert_eq!(next_wildcard_run.status, RunStatus::Attention);
         assert_eq!(
             next_wildcard_run.trigger_detail.as_deref(),
             Some("matrix check is active")
         );
-        wildcard_last = Some(next_wildcard_run.id);
+        seen_wildcard_runs.insert(next_wildcard_run.id);
     }
 
     let unrelated_fired = engine
@@ -607,11 +605,8 @@ async fn event_routine_matching_covers_multiple_channel_names() {
         .await;
     assert_eq!(unrelated_fired, 1);
 
-    let wildcard_run_after_unrelated = if let Some(previous_id) = wildcard_last {
-        wait_for_new_terminal_run(&ctx.db, wildcard_id, Some(previous_id)).await
-    } else {
-        wait_for_terminal_run(&ctx.db, wildcard_id).await
-    };
+    let wildcard_run_after_unrelated =
+        wait_for_unseen_terminal_run(&ctx.db, wildcard_id, &seen_wildcard_runs).await;
     assert_eq!(wildcard_run_after_unrelated.status, RunStatus::Attention);
     assert_eq!(
         wildcard_run_after_unrelated.trigger_detail.as_deref(),
