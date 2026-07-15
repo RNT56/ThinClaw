@@ -213,7 +213,7 @@ clap_complete = "4.5.0"
 lru = "0.18.0"
 libloading = "0.9"
 
-sysinfo = "0.38.2"
+sysinfo = "0.39.6"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
 chromiumoxide = { version = "0.9.1", optional = true }
 ratatui = "0.30.0"
