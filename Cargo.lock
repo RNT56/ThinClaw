@@ -8114,7 +8114,7 @@ dependencies = [
  "tokio-postgres-rustls",
  "tokio-stream",
  "tokio-test",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite 0.30.0",
  "toml 1.1.3+spec-1.1.0",
  "tower 0.5.3",
  "tower-http 0.7.0",
@@ -8241,7 +8241,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite 0.30.0",
  "tower 0.5.3",
  "tracing",
  "url",
@@ -8485,7 +8485,7 @@ dependencies = [
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "url",
  "uuid",
@@ -9056,12 +9056,24 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "tokio",
+ "tungstenite 0.29.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
  "rustls 0.23.42",
  "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.4",
- "tungstenite 0.29.0",
+ "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -9482,9 +9494,25 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "sha1 0.10.7",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http 1.4.2",
+ "httparse",
+ "log",
+ "rand 0.10.2",
  "rustls 0.23.42",
  "rustls-pki-types",
- "sha1 0.10.7",
+ "sha1 0.11.0",
  "thiserror 2.0.18",
 ]
 
