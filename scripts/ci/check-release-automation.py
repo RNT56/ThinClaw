@@ -91,6 +91,9 @@ def main() -> int:
     workflow = (ROOT / ".github/workflows/release-please.yml").read_text(
         encoding="utf-8"
     )
+    credential_workflow = (
+        ROOT / ".github/workflows/release-credential-gate.yml"
+    ).read_text(encoding="utf-8")
     artifact_workflow = (ROOT / ".github/workflows/release.yml").read_text(
         encoding="utf-8"
     )
@@ -233,6 +236,43 @@ def main() -> int:
             + ", ".join(forbidden)
         )
 
+    credential_workflow_fragments = [
+        "name: Release Credential Gate",
+        "workflow_run:",
+        "workflows: [CI]",
+        "workflow_dispatch:",
+        "pull-requests: read",
+        "statuses: write",
+        "release-please--branches--main--components--thinclaw",
+        "HEAD_REPOSITORY",
+        "commits/$HEAD_SHA/pulls",
+        "APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}",
+        "APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}",
+        "APPLE_ID: ${{ secrets.APPLE_ID }}",
+        "APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}",
+        "APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}",
+        "TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
+        "openssl pkcs12",
+        "rsign encrypted secret key",
+        "minisign encrypted secret key",
+        "statuses/$HEAD_SHA",
+        "context='Release Credentials'",
+    ]
+    missing_credentials = [
+        item
+        for item in credential_workflow_fragments
+        if item not in credential_workflow
+    ]
+    if missing_credentials:
+        raise SystemExit(
+            "release credential gate is missing: "
+            + ", ".join(missing_credentials)
+        )
+    if "actions/checkout" in credential_workflow:
+        raise SystemExit(
+            "release credential gate must not execute pull-request-controlled code"
+        )
+
     desktop_release_fragments = [
         "build-desktop-macos:",
         "runs-on: macos-15",
@@ -259,8 +299,8 @@ def main() -> int:
 
     print(
         f"Release automation: root thinclaw v{version}, immutable action, "
-        f"PR-associated protected CI approval, synchronized Desktop versioning, "
-        f"and artifact dispatch, "
+        f"PR-associated protected CI approval, pre-tag credential status, "
+        f"synchronized Desktop versioning, and artifact dispatch, "
         f"binaries {', '.join(release_binaries)}"
     )
     return 0
