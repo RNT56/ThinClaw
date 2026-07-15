@@ -211,13 +211,27 @@ def main() -> int:
         "manifest-file: .release-please-manifest.json",
         "if: steps.release.outputs.prs_created == 'true'",
         "RELEASE_PR: ${{ steps.release.outputs.pr }}",
-        'gh workflow run ci.yml --repo "$GITHUB_REPOSITORY"',
+        "Record release PR approval gate",
+        "A maintainer must review and approve that pending run",
+        "Do not substitute a manually dispatched CI run",
         'gh workflow run release.yml --repo "$GITHUB_REPOSITORY"',
         "RELEASE_TAG: ${{ steps.release.outputs.tag_name }}",
     ]
     missing = [item for item in required_workflow_fragments if item not in workflow]
     if missing:
         raise SystemExit("release workflow is missing: " + ", ".join(missing))
+
+    forbidden_workflow_fragments = [
+        'gh workflow run ci.yml --repo "$GITHUB_REPOSITORY"',
+    ]
+    forbidden = [
+        item for item in forbidden_workflow_fragments if item in workflow
+    ]
+    if forbidden:
+        raise SystemExit(
+            "release workflow dispatches CI that cannot satisfy the PR gate: "
+            + ", ".join(forbidden)
+        )
 
     desktop_release_fragments = [
         "build-desktop-macos:",
@@ -245,7 +259,8 @@ def main() -> int:
 
     print(
         f"Release automation: root thinclaw v{version}, immutable action, "
-        f"protected CI, synchronized Desktop versioning, and artifact dispatch, "
+        f"PR-associated protected CI approval, synchronized Desktop versioning, "
+        f"and artifact dispatch, "
         f"binaries {', '.join(release_binaries)}"
     )
     return 0

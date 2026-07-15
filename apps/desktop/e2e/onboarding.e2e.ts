@@ -34,6 +34,7 @@ describe("ThinClaw Desktop onboarding", () => {
       accessibility: true,
       screen_recording: true,
     });
+    await permissionStatus.mockClear();
 
     const result = await browser.execute(async () =>
       (window as any).__TAURI_INTERNALS__.invoke("get_permission_status"),
