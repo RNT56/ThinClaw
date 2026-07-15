@@ -247,12 +247,24 @@ async fn upload_worker(
 
 /// Apply a single upload job, honoring the network sync strategy for `Put`s.
 async fn apply_upload_job(provider: &dyn CloudProvider, master_key: &MasterKey, job: UploadJob) {
+    let quality = network::detect_quality(None).await;
+    let strategy = network::recommend_strategy(&quality);
+    apply_upload_job_with_strategy(provider, master_key, job, &strategy).await;
+}
+
+/// Apply an upload job using a strategy selected by the caller.
+///
+/// Keeping strategy selection outside the upload mechanics makes the latter
+/// deterministic to test without changing production's live network policy.
+async fn apply_upload_job_with_strategy(
+    provider: &dyn CloudProvider,
+    master_key: &MasterKey,
+    job: UploadJob,
+    strategy: &network::SyncStrategy,
+) {
     let key = cloud_key(&job.rel_path);
     match job.op {
         UploadOp::Put => {
-            // Consult the network strategy; defer files the strategy declines.
-            let quality = network::detect_quality(None).await;
-            let strategy = network::recommend_strategy(&quality);
             if !strategy.should_sync(job.data.len() as u64) {
                 warn!(
                     "[cloud/live_sync] Deferring upload of '{}' ({} bytes) under strategy {}; \
@@ -363,10 +375,19 @@ async fn sync_changes(
     master_key: &MasterKey,
     changes: Vec<ChangedFile>,
 ) -> Result<(), CloudError> {
-    let _guard = AppNapGuard::begin("cloud sync");
-
     let quality = network::detect_quality(None).await;
     let strategy = network::recommend_strategy(&quality);
+    sync_changes_with_strategy(provider, master_key, changes, &strategy).await
+}
+
+/// Push a batch using a strategy selected by the caller.
+async fn sync_changes_with_strategy(
+    provider: &dyn CloudProvider,
+    master_key: &MasterKey,
+    changes: Vec<ChangedFile>,
+    strategy: &network::SyncStrategy,
+) -> Result<(), CloudError> {
+    let _guard = AppNapGuard::begin("cloud sync");
 
     for change in changes {
         let key = cloud_key(&change.rel_path);
@@ -482,7 +503,7 @@ mod tests {
         let rel = "documents/note.txt";
         let payload = b"hello cloud".to_vec();
 
-        apply_upload_job(
+        apply_upload_job_with_strategy(
             provider.as_ref(),
             &master_key,
             UploadJob {
@@ -490,6 +511,7 @@ mod tests {
                 data: payload.clone(),
                 op: UploadOp::Put,
             },
+            &network::SyncStrategy::FullSync,
         )
         .await;
 
@@ -596,9 +618,14 @@ mod tests {
             },
         ];
 
-        sync_changes(provider.as_ref(), &master_key, changes)
-            .await
-            .unwrap();
+        sync_changes_with_strategy(
+            provider.as_ref(),
+            &master_key,
+            changes,
+            &network::SyncStrategy::FullSync,
+        )
+        .await
+        .unwrap();
 
         // Added object is present + decrypts.
         let stored = provider.get("documents/added.txt.enc").await.unwrap();

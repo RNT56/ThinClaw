@@ -32,7 +32,7 @@
 # What this script does:
 #   1. Checks macOS version compatibility
 #   2. Installs Xcode CLI tools (if missing)
-#   3. Installs Rust 1.92+ toolchain via rustup (if missing)
+#   3. Installs Rust 1.94+ toolchain via rustup (if missing)
 #   4. Adds wasm32-wasip2 target (required for WASM extension compilation)
 #   5. Installs wasm-tools and cargo-component
 #   6. Clones ThinClaw repository (or uses existing checkout)
@@ -290,13 +290,13 @@ if command -v rustup &>/dev/null; then
     RUST_VERSION=$(rustc --version 2>/dev/null | awk '{print $2}' || echo "unknown")
     success "Rust $RUST_VERSION already installed"
 
-    # Ensure we're on a recent enough version (1.92+)
+    # Ensure we're on a recent enough version (1.94+)
     MIN_MAJOR=1
-    MIN_MINOR=92
+    MIN_MINOR=94
     MAJOR=$(echo "$RUST_VERSION" | cut -d. -f1)
     MINOR=$(echo "$RUST_VERSION" | cut -d. -f2)
     if [[ "$MAJOR" -lt "$MIN_MAJOR" ]] || [[ "$MAJOR" -eq "$MIN_MAJOR" && "$MINOR" -lt "$MIN_MINOR" ]]; then
-        warn "Rust $RUST_VERSION is below minimum 1.92. Updating..."
+        warn "Rust $RUST_VERSION is below minimum 1.94. Updating..."
         rustup update stable
     fi
 else

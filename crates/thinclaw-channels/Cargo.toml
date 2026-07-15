@@ -15,7 +15,7 @@ base64 = "0.22"
 chrono = { workspace = true }
 ed25519-dalek = { version = "2", features = ["std"] }
 futures = { workspace = true }
-fs4 = "0.6"
+fs4 = "1.1"
 hmac = "0.13"
 hex = "0.4"
 jsonwebtoken = "9"
@@ -41,8 +41,8 @@ tracing = { workspace = true }
 urlencoding = "2"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
-wasmtime = { version = "36.0.12", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
-wasmtime-wasi = { version = "36.0.12", optional = true }
+wasmtime = { version = "46.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
+wasmtime-wasi = { version = "46.0.1", optional = true }
 dirs = "6"
 lru = "0.18.0"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }

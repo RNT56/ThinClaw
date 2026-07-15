@@ -12,7 +12,7 @@
 > **Inputs:** `AUDIT-FINDINGS.md` (findings) + `WS-01..WS-13` (per-workstream plans).
 > **This doc:** the *order of operations* — how the 13 workstreams were driven to merged, green code with maximum safe parallelism and minimum rebase churn.
 >
-> Repo root: `/Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop`. Default/main branch: `main`. Toolchain pinned to Rust 1.92.0.
+> Repo root: `/Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop`. Default/main branch: `main`. Toolchain pinned to Rust 1.94.0.
 
 ---
 

@@ -142,9 +142,9 @@ Lower-priority: `execute_code` runs on the bare host by default with weaker safe
 
 ## 9. Build / Test / CI Health
 
-Builds clean (`cargo check --no-default-features --features edge` green, zero warnings). Toolchain pinned to Rust 1.92.0. CI matrix broad (7 profiles, 3 OSes, Postgres + libSQL `db_contract`, ACP/host-runtime/deploy smokes, desktop-companion).
+Builds clean (`cargo check --no-default-features --features edge` green, zero warnings). Toolchain pinned to Rust 1.94.0. CI matrix broad (7 profiles, 3 OSes, Postgres + libSQL `db_contract`, ACP/host-runtime/deploy smokes, desktop-companion).
 
-Two real problems, **both now RESOLVED:** `cargo deny check` FAILED on main (RUSTSEC-2026-0182), now fixed (wasmtime-wasi now `36.0.12`, `deny.toml [advisories] ignore = []`, gate green); CI clippy omitted `--all-targets`, now fixed: `ci.yml:66` now runs `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` (the feature-matrix leg at `ci.yml:135` also uses `--all-targets`), and the `await_holding_lock` in `crates/thinclaw-config/src/secrets.rs` is now an explicit `#[allow]` with a justifying comment.
+Two real problems, **both now RESOLVED:** `cargo deny check` first caught RUSTSEC-2026-0182 and later rejected the affected Wasmtime 44 line under RUSTSEC-2026-0188; the synchronized Rust 1.94 / Wasmtime-WASI 46.0.1 stack is advisory-clean with `deny.toml [advisories] ignore = []`. CI Clippy had also omitted `--all-targets`; `ci.yml` now runs `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` (the feature-matrix legs also use `--all-targets`), and the `await_holding_lock` in `crates/thinclaw-config/src/secrets.rs` is an explicit `#[allow]` with a justifying comment.
 
 15 `#[ignore]` tests (Docker E2Es, live smokes), incl. a quarantined known-flaky `autonomous_campaign_..._end_to_end` (`src/api/experiments.rs:5060`, commit `64b9572f`) masking an unfixed worktree/Docker race. None run in CI.
 

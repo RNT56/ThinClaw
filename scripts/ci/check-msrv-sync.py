@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when package MSRV and the pinned developer/CI toolchain drift."""
+"""Fail when package MSRV and pinned developer, CI, or container toolchains drift."""
 
 from pathlib import Path
 import json
@@ -38,4 +38,45 @@ if normalized_channel != rust_version:
         f"is {rust_version}, rust-toolchain.toml channel is {channel}"
     )
 
-print(f"MSRV/toolchain synchronized at Rust {rust_version}")
+
+def normalized_version(version: str) -> str:
+    """Normalize exact patch-zero pins to Cargo's major.minor MSRV form."""
+
+    return version.removesuffix(".0")
+
+
+drifted_pins: list[str] = []
+
+workflow_pin_pattern = re.compile(
+    r"^\s*toolchain:\s*([0-9]+\.[0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$",
+    re.MULTILINE,
+)
+for workflow in sorted((root / ".github" / "workflows").glob("*.y*ml")):
+    for workflow_match in workflow_pin_pattern.finditer(
+        workflow.read_text(encoding="utf-8")
+    ):
+        pin = workflow_match.group(1)
+        if normalized_version(pin) != rust_version:
+            line = workflow_match.string.count("\n", 0, workflow_match.start()) + 1
+            drifted_pins.append(f"{workflow.relative_to(root)}:{line} pins Rust {pin}")
+
+container_pin_pattern = re.compile(
+    r"^FROM\s+rust:([0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-@\s]|$)", re.MULTILINE
+)
+for dockerfile in (root / "Dockerfile.worker", root / "docker" / "sandbox.Dockerfile"):
+    dockerfile_text = dockerfile.read_text(encoding="utf-8")
+    container_match = container_pin_pattern.search(dockerfile_text)
+    if container_match is None:
+        drifted_pins.append(
+            f"{dockerfile.relative_to(root)} is missing a numeric rust:<version> base image"
+        )
+        continue
+    pin = container_match.group(1)
+    if normalized_version(pin) != rust_version:
+        drifted_pins.append(f"{dockerfile.relative_to(root)} pins Rust {pin}")
+
+if drifted_pins:
+    details = "\n".join(f"- {pin}" for pin in drifted_pins)
+    raise SystemExit(f"MSRV drift outside Cargo.toml/rust-toolchain.toml:\n{details}")
+
+print(f"MSRV, CI, and container toolchains synchronized at Rust {rust_version}")

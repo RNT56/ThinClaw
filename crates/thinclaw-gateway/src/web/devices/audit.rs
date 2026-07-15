@@ -132,7 +132,7 @@ impl DeviceAuditLog {
             .create(true)
             .append(true)
             .open(&path)?;
-        file.lock_exclusive()?;
+        FileExt::lock(&file)?;
 
         let line = AuditLine {
             at: now_iso(),

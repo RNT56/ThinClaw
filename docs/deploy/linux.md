@@ -29,7 +29,7 @@ Required for source builds:
 - C/C++ build tools
 - `pkg-config`
 - `curl`, Git, and CA certificates
-- Rust 1.92+ through `rustup`
+- Rust 1.94+ through `rustup`
 - `wasm32-wasip2` if you are building WASM extensions or bundled channel/tool artifacts
 
 Debian/Ubuntu baseline:

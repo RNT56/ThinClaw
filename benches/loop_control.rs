@@ -1,5 +1,6 @@
 use chrono::Utc;
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use thinclaw_agent::loop_control::{LoopBudget, LoopKind, LoopRunContext};
 use thinclaw_agent::routine::{RoutineEvent, RoutineEventStatus};
 use thinclaw_agent::routine_engine::fair_interleave_routine_events;

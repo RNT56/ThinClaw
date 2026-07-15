@@ -28,7 +28,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install Linux ALSA packages
@@ -112,8 +112,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Free disk space for heavy profile test compile
-        if: matrix.name == 'full' || matrix.name == 'all-features' || matrix.name == 'desktop'
+      # Every profile links Wasmtime-backed test binaries; the stock image can
+      # exhaust its writable disk and crash rust-lld even for the default profile.
+      - name: Free disk space for profile test compile
         run: |
           df -h
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
@@ -122,7 +123,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -174,7 +175,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: desktop-companion
@@ -182,7 +183,7 @@ jobs:
           # not fail an otherwise green job while saving the post-job cache.
           save-if: false
       - name: Install Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -258,7 +259,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - name: Verify edge avoids heavy dependency families
         shell: bash
         run: |
@@ -278,7 +279,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: linux-host-smoke
@@ -294,7 +295,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: acp-acceptance
@@ -314,7 +315,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: linux-arm64-host-smoke
@@ -468,7 +469,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: macos-host-regression
@@ -489,7 +490,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: linux-deploy-smoke
@@ -598,7 +599,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: linux-docker-multiarch
@@ -633,7 +634,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-${{ matrix.name }}
@@ -651,7 +652,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-smoke
@@ -697,7 +698,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run libSQL contract tests
         env:
@@ -730,7 +731,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -764,7 +765,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -822,7 +823,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -871,7 +872,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: tool-crate-${{ matrix.name }}
@@ -894,7 +895,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.94.0
           components: llvm-tools-preview
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

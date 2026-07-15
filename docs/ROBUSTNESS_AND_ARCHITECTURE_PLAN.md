@@ -49,7 +49,7 @@ finite, addressable set of real risks. Two audit findings were **over-flagged an
 | Error model | Comprehensive `thiserror` hierarchy (14 typed enums in `thinclaw-types/src/error.rs`); `anyhow` correctly scoped to CLI/tunnel only; dispatcher & gateway hot paths free of production `unwrap`. |
 | Async | `BackgroundTasksHandle` tracks + aborts long-lived tasks; `spawn_blocking` used for git/fs; cooperative cancellation via `TurnCancellationRegistry`; lock discipline mostly correct. |
 | Security | 5-stage shell pipeline; AES-GCM secrets with AAD binding + OS keychain; constant-time bearer auth; WASM caps default-off + HTTPS allowlist; SSRF post-DNS pinning on the HTTP tool; leak-detector scrubs SSE logs; Ed25519 plugin/scanner signing. |
-| Testing/CI | 3,747 `#[test]` + 813 `#[tokio::test]` fns in `src/`+`crates/`; 7-profile feature matrix; `cargo-deny` with **zero advisory ignores**; 4 fuzz targets; multi-OS smoke; Postgres+libSQL contract tests; MSRV pinned 1.92. |
+| Testing/CI | 3,747 `#[test]` + 813 `#[tokio::test]` fns in `src/`+`crates/`; 7-profile feature matrix; `cargo-deny` with **zero advisory ignores**; 4 fuzz targets; multi-OS smoke; Postgres+libSQL contract tests; MSRV pinned 1.94. |
 | Dep hygiene | `cargo-deny` bans git/unknown registries, yanked, wildcards; documented in-tree libsql patch; edge-dependency footprint guard. |
 
 These are genuine differentiators. The plan **adds guardrails to keep them true**, not to rebuild them.
@@ -237,7 +237,7 @@ sit in the 1,500–1,999 band and could be split further if desired.
 - Frontend test coverage for the chat hook + Tauri bridge (53 Vitest cases cover only utilities today).
 
 Landed guardrail: `check-msrv-sync.py` now runs in CI and enforces that package MSRV and the pinned
-developer/CI toolchain remain Rust 1.92.
+developer/CI toolchain remain Rust 1.94.
 
 ---
 

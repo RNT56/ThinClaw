@@ -279,7 +279,7 @@ The desktop formerly failed the root `deny.toml`'s bans/licenses. **Landed:** a 
 | T5 | Miri CI job for `thinclaw-secrets` (crypto) + `thinclaw-safety` (sanitizer/leak) | P2 | — |
 | T6 | Contract test for `SafetyLayer`/`SecretsStore` injection in `AppBuilder` | P2 | — |
 | T7 | Frontend tests for the chat hook (`use-chat.ts`) + Tauri bridge | P3 | — |
-| T8 | **[DONE]** Enforce package MSRV == pinned developer/CI toolchain (`check-msrv-sync.py`; Rust 1.92) | P3 | — |
+| T8 | **[DONE]** Enforce package MSRV == pinned developer/CI toolchain (`check-msrv-sync.py`; Rust 1.94) | P3 | — |
 | T9 | Extend `--locked` to the remaining CI jobs (host-smoke/acp/release/db-contract) | P1 | — |
 | T10 | **[DONE]** God-file size-guard CI (`scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000`, `ci.yml:64`) | P2 | A5–A8 |
 | T11 | `wit-bindgen` single-version check + bundle-reference resolution test — **[OPEN]**, still 2 versions (0.51.0, 0.57.1) | P1 | — |

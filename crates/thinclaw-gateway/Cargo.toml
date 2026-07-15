@@ -11,7 +11,7 @@ async-trait = { workspace = true }
 base64 = "0.22"
 blake3 = "1"
 chrono = { workspace = true }
-fs4 = "0.6"
+fs4 = "1.1"
 futures = { workspace = true }
 hex = "0.4"
 ipnet = "2"
