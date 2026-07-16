@@ -727,6 +727,14 @@ impl Channel for ReplChannel {
                     eprintln!("  {muted}{display}{reset}");
                 }
             }
+            StatusUpdate::ContextPressure {
+                level,
+                usage_percent,
+            } => {
+                if debug || level != "none" {
+                    eprintln!("  {warn}context {usage_percent:.1}% ({level}){reset}");
+                }
+            }
             StatusUpdate::Plan { entries } => {
                 if debug {
                     let display = serde_json::to_string(&entries)

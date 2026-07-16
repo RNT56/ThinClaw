@@ -44,6 +44,14 @@ if (!config.plugins?.updater?.pubkey) fail('Updater public key is missing.');
 if (!Array.isArray(config.plugins?.updater?.endpoints) || config.plugins.updater.endpoints.length === 0) {
   fail('Updater endpoint list is missing.');
 }
+if (
+  JSON.stringify(config.plugins.updater.endpoints) !==
+  JSON.stringify(['https://github.com/RNT56/ThinClaw/releases/latest/download/latest.json'])
+) {
+  fail(`Unexpected updater channel: ${JSON.stringify(config.plugins.updater.endpoints)}`);
+}
+const updaterKey = Buffer.from(config.plugins.updater.pubkey, 'base64').toString('utf8');
+if (!updaterKey.includes('minisign public key')) fail('Updater public key payload is malformed.');
 
 const entitlements = fs.readFileSync('backend/Entitlements.plist', 'utf8');
 for (const key of [
@@ -63,12 +71,84 @@ const cargo = fs.readFileSync('backend/Cargo.toml', 'utf8');
 if (!cargo.includes('name = "thinclaw-desktop"')) fail('Cargo package name changed unexpectedly.');
 if (!cargo.includes('security-framework = "3"')) fail('macOS Keychain dependency is missing.');
 
+const rootCargo = fs.readFileSync('../../Cargo.toml', 'utf8');
+const rootPackage = rootCargo.split('[package]', 2)[1]?.split('\n[', 1)[0] ?? '';
+const rootVersion = rootPackage.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const desktopCargoVersion = cargo.split('[package]', 2)[1]?.split('\n[', 1)[0]
+  ?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const desktopPackage = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+const desktopLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+const versions = {
+  root: rootVersion,
+  tauri: config.version,
+  cargo: desktopCargoVersion,
+  npm: desktopPackage.version,
+  npmLock: desktopLock.version,
+  npmLockRoot: desktopLock.packages?.['']?.version,
+};
+if (!rootVersion || Object.values(versions).some((version) => version !== rootVersion)) {
+  fail(`Desktop/product version drift: ${JSON.stringify(versions)}`);
+}
+
 const keychain = fs.readFileSync('backend/src/thinclaw/config/keychain.rs', 'utf8');
 if (!keychain.includes('const SERVICE: &str = "com.thinclaw.desktop";')) {
   fail('Keychain service must match the bundle identifier.');
 }
 
-console.log('Bundle identity, updater metadata, entitlements, Info.plist, and keychain service are consistent.');
+const mainCapability = JSON.parse(
+  fs.readFileSync('backend/capabilities/default.json', 'utf8'),
+);
+const spotlightCapability = JSON.parse(
+  fs.readFileSync('backend/capabilities/spotlight.json', 'utf8'),
+);
+const permissionId = (permission) =>
+  typeof permission === 'string' ? permission : permission.identifier;
+const mainPermissionIds = mainCapability.permissions.map(permissionId);
+const mainSerialized = JSON.stringify(mainCapability);
+
+if (JSON.stringify(mainCapability.windows) !== JSON.stringify(['main'])) {
+  fail('The default capability must apply only to the main window.');
+}
+for (const forbidden of [
+  'shell:allow-execute',
+  'opener:allow-open-path',
+  'fs:scope',
+  '$HOME/**',
+  '/Users/',
+]) {
+  if (mainSerialized.includes(forbidden)) fail(`Forbidden capability scope: ${forbidden}`);
+}
+for (const required of [
+  'opener:allow-default-urls',
+  'core:event:default',
+  'core:window:default',
+  'fs:default',
+  'fs:allow-write-file',
+  'fs:allow-exists',
+  'updater:default',
+  'process:default',
+]) {
+  if (!mainPermissionIds.includes(required)) fail(`Missing main-window permission: ${required}`);
+}
+for (const required of ['fs:allow-write-file', 'fs:allow-exists']) {
+  const permission = mainCapability.permissions.find((entry) => permissionId(entry) === required);
+  const paths = permission?.allow?.map((entry) => entry.path) ?? [];
+  if (JSON.stringify(paths) !== JSON.stringify(['$DOWNLOAD/*'])) {
+    fail(`${required} must be restricted to direct children of Downloads.`);
+  }
+}
+if (JSON.stringify(spotlightCapability.windows) !== JSON.stringify(['spotlight'])) {
+  fail('The Spotlight capability must apply only to the spotlight window.');
+}
+const spotlightPermissionIds = spotlightCapability.permissions.map(permissionId).sort();
+if (
+  JSON.stringify(spotlightPermissionIds) !==
+  JSON.stringify(['core:event:default', 'core:window:default'])
+) {
+  fail(`Unexpected Spotlight permissions: ${spotlightPermissionIds.join(', ')}`);
+}
+
+console.log('Bundle identity, updater metadata, entitlements, keychain service, and window capabilities are consistent.');
 NODE
 
 echo "== Engine override matrix =="
@@ -98,7 +178,7 @@ NODE
 done
 
 echo "== Focused platform tests =="
-cargo test --manifest-path backend/Cargo.toml --locked thinclaw::ironclaw_secrets::tests:: -- --test-threads=1
+cargo test --manifest-path backend/Cargo.toml --locked thinclaw::secrets_adapter::tests:: -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked personas::tests::legacy_scrappy_persona_aliases_to_thinclaw -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked cloud::providers::icloud::tests:: -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked cloud::migration::tests::test_validated_manifest_relative_path_rejects_traversal -- --test-threads=1

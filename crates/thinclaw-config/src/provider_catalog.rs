@@ -188,12 +188,11 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_has_suggested_cheap_model() {
+    fn anthropic_uses_current_source_verified_defaults() {
         let ep = endpoint_for("anthropic").unwrap();
-        assert_eq!(
-            ep.suggested_cheap_model.as_deref(),
-            Some("claude-sonnet-4-6")
-        );
+        assert_eq!(ep.default_model, "claude-opus-4-8");
+        assert_eq!(ep.default_context_size, 1_000_000);
+        assert_eq!(ep.suggested_cheap_model.as_deref(), Some("claude-sonnet-5"));
     }
 
     #[test]

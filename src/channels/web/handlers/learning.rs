@@ -34,7 +34,7 @@ fn learning_orchestrator(
         state.workspace.clone(),
         state.skill_registry.clone(),
     )
-    .with_routine_engine(state.routine_engine.clone()))
+    .with_routine_engine(state.routine_engine()))
 }
 
 pub(crate) async fn learning_status_handler(
@@ -408,7 +408,7 @@ pub(crate) async fn learning_outcomes_evaluate_now_handler(
         .with_learning_context(
             state.workspace.clone(),
             state.skill_registry.clone(),
-            state.routine_engine.clone(),
+            state.routine_engine(),
         );
     let processed = service
         .run_once_for_user(&request_identity.principal_id)
@@ -509,7 +509,7 @@ mod tests {
             cost_tracker: None,
             metrics_registry: None,
             response_cache: None,
-            routine_engine: None,
+            routine_engine: Arc::new(std::sync::RwLock::new(None)),
             repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),

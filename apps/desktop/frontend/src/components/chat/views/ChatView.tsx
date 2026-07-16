@@ -9,6 +9,7 @@ import { cn } from '../../../lib/utils';
 import { useChatLayout } from '../ChatProvider';
 import { findStyle } from '../../../lib/style-library';
 import { useModelContext } from '../../model-context';
+import { AsyncState, Progress } from '../../ui';
 
 export function ChatView() {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -130,14 +131,11 @@ export function ChatView() {
                                 const totalTokens = tokenUsage.total_tokens ?? tokenUsage.totalTokens;
                                 return (
                                 <div className="flex items-center gap-2 bg-background/60 backdrop-blur-xl px-2 py-1.5 rounded-full border border-input/50 shadow-xs animate-in fade-in transition-all">
-                                    <div className="w-16 h-1.5 bg-muted rounded-full overflow-hidden">
-                                        <div
-                                            className={cn("h-full transition-all duration-500 rounded-full",
-                                                (totalTokens / maxContext) > 0.8 ? "bg-red-500" : "bg-primary"
-                                            )}
-                                            style={{ width: `${Math.min(100, (totalTokens / maxContext) * 100)}%` }}
-                                        />
-                                    </div>
+                                    <Progress
+                                        value={(totalTokens / maxContext) * 100}
+                                        label="Context window usage"
+                                        className="w-16"
+                                    />
                                     <span className={cn(
                                         "text-[10px] font-bold tabular-nums min-w-[24px] text-right",
                                         (totalTokens / maxContext) > 0.8 ? "text-red-500" : "text-muted-foreground"
@@ -152,18 +150,21 @@ export function ChatView() {
                 {/* Message List */}
                 <div className="absolute inset-0 mask-fade-top flex flex-col">
                     {loadingHistory ? (
-                        <div className="flex-1 flex items-center justify-center">
-                            <Loader2 className="w-8 h-8 animate-spin text-primary/20" />
-                        </div>
+                        <AsyncState kind="loading" title="Loading conversation" className="flex-1" />
                     ) : messages.length === 0 ? (
-                        <div className="flex-1 flex items-center justify-center text-muted-foreground flex-col gap-4 min-h-[50vh]">
-                            <Bot className="w-12 h-12 opacity-20" />
-                            <p>Ready to chat.</p>
-                            <div className="flex gap-4 text-xs opacity-50">
-                                {canSee && <span className="flex items-center gap-1"><ImageIcon className="w-3 h-3" /> Images</span>}
-                                {isRagCapable && <span className="flex items-center gap-1"><Paperclip className="w-3 h-3" /> Documents</span>}
-                            </div>
-                        </div>
+                        <AsyncState
+                            kind="empty"
+                            title="Ready to chat"
+                            description={canSee && isRagCapable
+                                ? "Ask anything, attach an image, or add a document for grounded context."
+                                : canSee
+                                    ? "Ask anything or attach an image to begin."
+                                    : isRagCapable
+                                        ? "Ask anything or attach a document for grounded context."
+                                        : "Choose a model and send a message to begin."}
+                            icon={<Bot className="size-5" aria-hidden="true" />}
+                            className="flex-1 min-h-[50vh]"
+                        />
                     ) : (
                         <Virtuoso
                             ref={virtuosoRef}
@@ -216,6 +217,7 @@ export function ChatView() {
                                     virtuosoRef.current?.scrollToIndex({ index: messages.length - 1, align: 'end', behavior: 'smooth' });
                                 }}
                                 className="absolute -top-12 right-4 p-2 bg-primary text-primary-foreground rounded-full shadow-lg hover:bg-primary/90 transition-all z-20"
+                                aria-label="Scroll to latest message"
                             >
                                 <ArrowDown className="w-5 h-5" />
                             </button>
@@ -235,7 +237,7 @@ export function ChatView() {
                                                 <span className="text-xs font-semibold text-foreground/90 truncate max-w-[120px]">Image {i + 1}</span>
                                                 <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Attached</span>
                                             </div>
-                                            <button onClick={() => removeImage(img.id)} className="ml-2 p-1 hover:bg-destructive/10 text-muted-foreground hover:text-destructive rounded-full transition-colors opacity-0 group-hover:opacity-100">
+                                            <button aria-label={`Remove image ${i + 1}`} onClick={() => removeImage(img.id)} className="ml-2 p-1 hover:bg-destructive/10 text-muted-foreground hover:text-destructive rounded-full transition-colors opacity-0 group-hover:opacity-100 focus-visible:opacity-100">
                                                 <X className="w-3.5 h-3.5" />
                                             </button>
                                         </div>
@@ -249,7 +251,7 @@ export function ChatView() {
                                                 <span className="text-xs font-semibold text-foreground/90 truncate max-w-[140px]" title={file.name}>{file.name}</span>
                                                 <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Context</span>
                                             </div>
-                                            <button onClick={() => removeIngestedFile(file.id)} className="ml-2 p-1 hover:bg-destructive/10 text-muted-foreground hover:text-destructive rounded-full transition-colors opacity-0 group-hover:opacity-100">
+                                            <button aria-label={`Remove ${file.name}`} onClick={() => removeIngestedFile(file.id)} className="ml-2 p-1 hover:bg-destructive/10 text-muted-foreground hover:text-destructive rounded-full transition-colors opacity-0 group-hover:opacity-100 focus-visible:opacity-100">
                                                 <X className="w-3.5 h-3.5" />
                                             </button>
                                         </div>

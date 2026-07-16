@@ -20,7 +20,8 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use thinclaw_channels_core::{
-    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    Channel, ConfigField, ConfigSchema, IncomingMessage, MessageStream, OutgoingResponse,
+    StatusUpdate,
 };
 use thinclaw_types::error::ChannelError;
 
@@ -515,6 +516,55 @@ impl Channel for AppleMailChannel {
         Some("Email supports rich formatting. Use HTML-compatible structure with headings. Keep emails scannable.".to_string())
     }
 
+    fn config_schema(&self) -> Option<ConfigSchema> {
+        Some(ConfigSchema {
+            channel_id: NAME.to_string(),
+            channel_name: "Apple Mail".to_string(),
+            fields: vec![
+                ConfigField {
+                    id: "allow_from".to_string(),
+                    label: "Allowed senders".to_string(),
+                    field_type: "textarea".to_string(),
+                    required: false,
+                    help_text: Some("Email addresses, one per line or comma-separated; empty allows all senders.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.allow_from.join("\n"))),
+                    options: None,
+                },
+                ConfigField {
+                    id: "poll_interval".to_string(),
+                    label: "Polling interval (seconds)".to_string(),
+                    field_type: "number".to_string(),
+                    required: true,
+                    help_text: Some("Seconds between Envelope Index checks.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.poll_interval_secs)),
+                    options: None,
+                },
+                ConfigField {
+                    id: "unread_only".to_string(),
+                    label: "Unread only".to_string(),
+                    field_type: "checkbox".to_string(),
+                    required: false,
+                    help_text: Some("Only process unread messages.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.unread_only)),
+                    options: None,
+                },
+                ConfigField {
+                    id: "mark_as_read".to_string(),
+                    label: "Mark as read".to_string(),
+                    field_type: "checkbox".to_string(),
+                    required: false,
+                    help_text: Some("Mark a message as read after accepting it.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.mark_as_read)),
+                    options: None,
+                },
+            ],
+            help: Some(
+                "Apple Mail reads the local Envelope Index. Database location and macOS permissions remain host-managed."
+                    .to_string(),
+            ),
+        })
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
         if let Some(handle) = self.poll_task.lock().await.take() {
@@ -847,6 +897,35 @@ mod tests {
     use tempfile::tempdir;
 
     static APPLE_MAIL_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn config_schema_exposes_current_nonsecret_values() {
+        let home = tempdir().unwrap();
+        let db_path = home.path().join("Envelope Index");
+        fs::write(&db_path, b"").unwrap();
+        let channel = AppleMailChannel::new(AppleMailConfig {
+            db_path: Some(db_path),
+            allow_from: vec!["alice@example.com".to_string()],
+            poll_interval_secs: 17,
+            unread_only: false,
+            mark_as_read: false,
+            ..AppleMailConfig::default()
+        })
+        .unwrap();
+
+        let schema = channel.config_schema().unwrap();
+        assert_eq!(schema.channel_id, "apple_mail");
+        assert_eq!(schema.fields.len(), 4);
+        assert_eq!(
+            schema.fields[0].default_value,
+            Some(serde_json::json!("alice@example.com"))
+        );
+        assert_eq!(schema.fields[1].default_value, Some(serde_json::json!(17)));
+        assert_eq!(
+            schema.fields[2].default_value,
+            Some(serde_json::json!(false))
+        );
+    }
 
     #[test]
     fn test_extract_email_angle_brackets() {

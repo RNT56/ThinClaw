@@ -239,7 +239,7 @@ impl DevicePairingStore {
             .create(true)
             .truncate(false)
             .open(path)?;
-        file.lock_exclusive()?;
+        FileExt::lock(&file)?;
         Ok(file)
     }
 

@@ -23,12 +23,12 @@ pub async fn direct_assets_upload_image(
     file_store: State<'_, FileStore>,
     pool: State<'_, SqlitePool>,
     image_bytes: Vec<u8>,
-) -> Result<ImageResponse, String> {
+) -> Result<ImageResponse, crate::thinclaw::bridge::BridgeError> {
     // Ensure images directory exists
     file_store
         .create_dir_all("images")
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // Decode image (supports PNG, JPEG, WebP, GIF, BMP, etc.)
     let img = image::load_from_memory(&image_bytes)
@@ -109,7 +109,7 @@ pub async fn direct_assets_get_image_path(
     file_store: State<'_, FileStore>,
     pool: State<'_, SqlitePool>,
     id: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let reference = DirectAssetStore::direct_ref(&id);
     if let Ok(path) = DirectAssetStore::path_for(pool.inner(), &reference).await {
         return Ok(path);
@@ -128,13 +128,16 @@ pub async fn direct_assets_get_image_path(
         return Ok(full.to_string_lossy().to_string());
     }
 
-    Err(format!("Image not found: {}", id))
+    Err((format!("Image not found: {}", id)).into())
 }
 
 // Helper to load and base64 encode an image by ID (Available as command)
 #[tauri::command]
 #[specta::specta]
-pub async fn direct_assets_load_image(app: AppHandle, id: String) -> Result<String, String> {
+pub async fn direct_assets_load_image(
+    app: AppHandle,
+    id: String,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     load_image_as_base64(&app, &id).await
 }
 
@@ -153,8 +156,11 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
 pub async fn load_image_as_base64_with_mime(
     app: &AppHandle,
     image_id: &str,
-) -> Result<(String, &'static str), String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+) -> Result<(String, &'static str), crate::thinclaw::bridge::BridgeError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let images_dir = app_data_dir.join("images");
 
     let pool = app.state::<SqlitePool>();
@@ -172,7 +178,7 @@ pub async fn load_image_as_base64_with_mime(
     }
 
     if !path.exists() {
-        return Err(format!("Image not found: {}", image_id));
+        return Err((format!("Image not found: {}", image_id)).into());
     }
 
     let mime = mime_for_path(&path);
@@ -181,44 +187,49 @@ pub async fn load_image_as_base64_with_mime(
     let bytes = file_store
         .read_absolute(&path)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     use base64::prelude::*;
     Ok((BASE64_STANDARD.encode(bytes), mime))
 }
 
 // Helper to load and base64 encode an image by ID
-pub async fn load_image_as_base64(app: &AppHandle, image_id: &str) -> Result<String, String> {
+pub async fn load_image_as_base64(
+    app: &AppHandle,
+    image_id: &str,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let (b64, _mime) = load_image_as_base64_with_mime(app, image_id).await?;
     Ok(b64)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn direct_assets_open_images_folder(app: AppHandle) -> Result<(), String> {
+pub async fn direct_assets_open_images_folder(
+    app: AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let file_store = app.state::<FileStore>();
     file_store
         .create_dir_all("images")
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let images_dir = file_store.resolve_path("images").await;
 
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .arg(&images_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open")
         .arg(&images_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "windows")]
     std::process::Command::new("explorer")
         .arg(&images_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(())
 }

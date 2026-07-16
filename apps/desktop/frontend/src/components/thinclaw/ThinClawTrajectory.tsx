@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Activity, RefreshCw, FileText, Layers, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { Activity, RefreshCw, FileText, Layers, CheckCircle2, XCircle, Clock, Download } from 'lucide-react';
+import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 
@@ -34,6 +35,7 @@ export function ThinClawTrajectory() {
     const [stats, setStats] = useState<thinclaw.TrajectoryStats | null>(null);
     const [records, setRecords] = useState<thinclaw.ThinClawJson[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [exporting, setExporting] = useState<thinclaw.TrajectoryExportFormat | null>(null);
 
     const fetchData = useCallback(async () => {
         try {
@@ -53,6 +55,31 @@ export function ThinClawTrajectory() {
     useEffect(() => {
         fetchData();
     }, [fetchData]);
+
+    const handleExport = async (format: thinclaw.TrajectoryExportFormat) => {
+        setExporting(format);
+        try {
+            const result = await thinclaw.exportTrajectory(format);
+            if (result.exported_record_count === 0) {
+                toast.error(`No eligible ${format.toUpperCase()} examples were found`);
+                return;
+            }
+
+            const blob = new Blob([result.payload], { type: 'application/x-ndjson;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            link.href = url;
+            link.download = `thinclaw-trajectory-${format}-${stamp}.jsonl`;
+            link.click();
+            URL.revokeObjectURL(url);
+            toast.success(`Exported ${result.exported_record_count.toLocaleString()} ${format.toUpperCase()} examples`);
+        } catch (error) {
+            toast.error(`Trajectory export failed: ${String(error)}`);
+        } finally {
+            setExporting(null);
+        }
+    };
 
     if (isLoading) {
         return (
@@ -90,12 +117,28 @@ export function ThinClawTrajectory() {
                         </p>
                     </div>
                 </div>
-                <button
-                    onClick={fetchData}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
-                >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex items-center gap-2">
+                    {(['sft', 'dpo'] as const).map(format => (
+                        <button
+                            key={format}
+                            onClick={() => handleExport(format)}
+                            disabled={exporting !== null || (stats?.record_count ?? 0) === 0}
+                            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-wide text-primary bg-primary/10 hover:bg-primary/15 border border-primary/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            {exporting === format
+                                ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                : <Download className="w-3.5 h-3.5" />}
+                            Export {format.toUpperCase()}
+                        </button>
+                    ))}
+                    <button
+                        aria-label="Refresh trajectory archive"
+                        onClick={fetchData}
+                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
+                    >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                    </button>
+                </div>
             </div>
 
             {/* Stat cards */}

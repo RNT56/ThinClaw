@@ -126,6 +126,10 @@ impl WasmChannelLoader {
             .await?;
 
         // Create the channel
+        let setup_schema = cap_file
+            .as_ref()
+            .map(|capabilities| capabilities.setup.clone())
+            .unwrap_or_default();
         let channel = WasmChannel::new(
             self.runtime.clone(),
             prepared,
@@ -133,7 +137,8 @@ impl WasmChannelLoader {
             config_json,
             formatting_hints,
             self.pairing_store.clone(),
-        );
+        )
+        .with_setup_schema(setup_schema);
 
         tracing::info!(
             name = name,

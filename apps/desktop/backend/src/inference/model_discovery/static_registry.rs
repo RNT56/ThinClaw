@@ -64,8 +64,8 @@ fn deepgram_models() -> Vec<CloudModelEntry> {
 fn voyage_models() -> Vec<CloudModelEntry> {
     vec![
         CloudModelEntry {
-            id: "voyage-3".to_string(),
-            display_name: "Voyage 3".to_string(),
+            id: "voyage-4".to_string(),
+            display_name: "Voyage 4".to_string(),
             provider: "voyage".to_string(),
             provider_name: "Voyage AI".to_string(),
             category: ModelCategory::Embedding,
@@ -84,8 +84,8 @@ fn voyage_models() -> Vec<CloudModelEntry> {
             metadata: HashMap::new(),
         },
         CloudModelEntry {
-            id: "voyage-3-large".to_string(),
-            display_name: "Voyage 3 Large".to_string(),
+            id: "voyage-4-large".to_string(),
+            display_name: "Voyage 4 Large".to_string(),
             provider: "voyage".to_string(),
             provider_name: "Voyage AI".to_string(),
             category: ModelCategory::Embedding,
@@ -97,15 +97,15 @@ fn voyage_models() -> Vec<CloudModelEntry> {
             capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
-                input_per_million: Some(0.18),
+                input_per_million: Some(0.12),
                 ..Default::default()
             }),
             embedding_dimensions: Some(1024),
             metadata: HashMap::new(),
         },
         CloudModelEntry {
-            id: "voyage-code-3".to_string(),
-            display_name: "Voyage Code 3".to_string(),
+            id: "voyage-4-lite".to_string(),
+            display_name: "Voyage 4 Lite".to_string(),
             provider: "voyage".to_string(),
             provider_name: "Voyage AI".to_string(),
             category: ModelCategory::Embedding,
@@ -117,7 +117,7 @@ fn voyage_models() -> Vec<CloudModelEntry> {
             capabilities: Default::default(),
             deprecated: false,
             pricing: Some(ModelPricing {
-                input_per_million: Some(0.18),
+                input_per_million: Some(0.02),
                 ..Default::default()
             }),
             embedding_dimensions: Some(1024),

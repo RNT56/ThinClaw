@@ -299,6 +299,8 @@ interface channel {
         approval-needed,
         /// Generic status text that should be shown to the user.
         status,
+        /// Structured context-window capacity transition.
+        context-pressure,
         /// A background/sandbox job was started.
         job-started,
         /// An extension/tool requires user authentication.

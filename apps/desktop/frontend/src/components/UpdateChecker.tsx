@@ -93,14 +93,18 @@ export function UpdateChecker() {
                     width: 340,
                 }}
             >
-                <div style={{
-                    background: 'linear-gradient(135deg, rgba(13,17,23,0.95), rgba(22,27,34,0.95))',
-                    backdropFilter: 'blur(20px)',
-                    borderRadius: 14,
-                    border: '1px solid rgba(255,255,255,0.08)',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.05)',
-                    overflow: 'hidden',
-                }}>
+                <div
+                    role={status === 'error' ? 'alert' : 'status'}
+                    aria-live={status === 'error' ? 'assertive' : 'polite'}
+                    style={{
+                        background: 'linear-gradient(135deg, rgba(13,17,23,0.95), rgba(22,27,34,0.95))',
+                        backdropFilter: 'blur(20px)',
+                        borderRadius: 14,
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        boxShadow: '0 8px 32px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.05)',
+                        overflow: 'hidden',
+                    }}
+                >
                     {/* Header */}
                     <div style={{
                         padding: '14px 16px 10px',
@@ -166,6 +170,7 @@ export function UpdateChecker() {
 
                         {(status === 'available' || status === 'error' || status === 'upToDate') && (
                             <button
+                                aria-label={status === 'available' ? 'Dismiss update' : 'Close update status'}
                                 onClick={() => {
                                     if (status === 'available') setDismissed(true);
                                     else setStatus('idle');

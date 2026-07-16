@@ -185,7 +185,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                         ...(config?.inference_models ?? {}),
                         chat: modelId,
                     },
-                    selected_model_context_size: contextSize ?? undefined,
+                    selected_model_context_size: contextSize,
                 };
 
                 await updateConfig(newConfig);

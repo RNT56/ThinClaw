@@ -139,7 +139,7 @@ fn kdf_params_within_limits(log_n: u8, r: u32, p: u32) -> bool {
 }
 
 fn derive_key(passphrase: &str, salt: &[u8], log_n: u8, r: u32, p: u32) -> Result<[u8; KEY_LEN]> {
-    let params = scrypt::Params::new(log_n, r, p, KEY_LEN)
+    let params = scrypt::Params::new(log_n, r, p)
         .map_err(|e| PortabilityError::KeyDerivation(format!("invalid scrypt params: {e}")))?;
     let mut key = [0u8; KEY_LEN];
     scrypt::scrypt(passphrase.as_bytes(), salt, &params, &mut key)

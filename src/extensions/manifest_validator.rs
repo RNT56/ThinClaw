@@ -153,7 +153,7 @@ impl ValidationResult {
         !self.warnings.is_empty()
     }
 
-    /// Convert to a serializable response for the `openclaw_manifest_validate` Tauri command.
+    /// Convert to a serializable response for the `thinclaw_manifest_validate` Desktop command.
     ///
     /// Returns `{ errors: Vec<String>, warnings: Vec<String> }` matching §17.4.
     pub fn to_response(&self) -> ValidationResponse {
@@ -165,7 +165,7 @@ impl ValidationResult {
     }
 }
 
-/// Serializable validation response for `openclaw_manifest_validate`.
+/// Serializable validation response for `thinclaw_manifest_validate`.
 ///
 /// Matches §17.4 integration contract: `{ errors: Vec<String>, warnings: Vec<String> }`
 #[derive(Debug, Clone, Serialize, Deserialize)]

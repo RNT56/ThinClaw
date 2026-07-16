@@ -9,7 +9,7 @@ import {
     Box
 } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
-import { commands, GGUFMetadata, Result } from '../../lib/bindings';
+import { commands, GGUFMetadata } from '../../lib/bindings';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -17,6 +17,7 @@ import { useModelContext } from '../model-context';
 import * as Switch from '@radix-ui/react-switch';
 import { CustomSelect } from './CustomSelect';
 import { analyzeMemoryConstraints, GB } from './memory-analysis';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 export function ServerSettings() {
     const {
@@ -44,7 +45,7 @@ export function ServerSettings() {
 
     useEffect(() => {
         if (modelPath && modelPath !== "auto") {
-            commands.getModelMetadata(modelPath).then((res: Result<GGUFMetadata, string>) => {
+            commands.getModelMetadata(modelPath).then((res) => {
                 if (res.status === "ok") setMetadata(res.data);
                 else setMetadata(undefined);
             }).catch(() => setMetadata(undefined));
@@ -84,7 +85,7 @@ export function ServerSettings() {
                 try { await directCommands.directRuntimeStopEngine(); } catch { /* may already be stopped */ }
                 await new Promise(r => setTimeout(r, 500));
                 const startRes = await directCommands.directRuntimeStartEngine(modelPath, maxContext);
-                if (startRes.status === 'error') throw new Error(startRes.error);
+                if (startRes.status === 'error') throw new Error(bridgeErrorMessage(startRes.error));
             }
             const snapshot = await refreshRuntimeSnapshot();
 
@@ -305,7 +306,7 @@ export function ServerSettings() {
                             if (!config) return;
                             const newConfig = { ...config, enable_memory_reservation: val };
                             setConfig(newConfig);
-                            await commands.updateUserConfig(newConfig);
+                            await commands.updateUserConfig({ enable_memory_reservation: val });
                         }}
                         className="w-[42px] h-[25px] bg-muted rounded-full relative shadow-[inner_0_2px_4px_rgba(0,0,0,0.2)] data-[state=checked]:bg-primary transition-colors cursor-pointer outline-hidden"
                     >
@@ -349,7 +350,7 @@ export function ServerSettings() {
                                             const val = parseInt(e.target.value);
                                             const newConfig = { ...config, memory_reservation_gb: val };
                                             setConfig(newConfig);
-                                            await commands.updateUserConfig(newConfig);
+                                            await commands.updateUserConfig({ memory_reservation_gb: val });
                                         }}
                                         className="w-[200px] h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
                                     />
@@ -375,7 +376,7 @@ export function ServerSettings() {
                                         if (!config) return;
                                         const newConfig = { ...config, mlock: val };
                                         setConfig(newConfig);
-                                        await commands.updateUserConfig(newConfig);
+                                        await commands.updateUserConfig({ mlock: val });
                                         toast.info("Memory locking strategy updated. Restart server to apply.", { icon: <RotateCcw className="w-4 h-4" /> });
                                     }}
                                     className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-emerald-500 transition-colors cursor-pointer outline-hidden"
@@ -403,7 +404,7 @@ export function ServerSettings() {
                                         if (!config) return;
                                         const newConfig = { ...config, quantize_kv: val };
                                         setConfig(newConfig);
-                                        await commands.updateUserConfig(newConfig);
+                                        await commands.updateUserConfig({ quantize_kv: val });
                                         toast.info("Context optimization updated. Restart server to apply.", { icon: <Box className="w-4 h-4" /> });
                                     }}
                                     className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-blue-500 transition-colors cursor-pointer outline-hidden"
@@ -496,10 +497,14 @@ export function ServerSettings() {
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-3 gap-2 text-[10px] text-muted-foreground/80">
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px] text-muted-foreground/80">
                                 <div className="flex items-center gap-1.5">
                                     <div className="w-1.5 h-1.5 rounded-full bg-primary" />
-                                    <span>AI Active: {(systemSpecs.app_memory / GB).toFixed(1)}GB</span>
+                                    <span>Desktop: {(systemSpecs.desktop_memory / GB).toFixed(1)}GB</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                                    <span>Sidecars: {(systemSpecs.sidecar_memory / GB).toFixed(1)}GB</span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                     <div className="w-1.5 h-1.5 rounded-full bg-primary/20 border border-primary/30" />
@@ -510,6 +515,23 @@ export function ServerSettings() {
                                     <span>System: {((systemSpecs.used_memory - systemSpecs.app_memory) / GB).toFixed(1)}GB</span>
                                 </div>
                             </div>
+                            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2 text-[10px] text-muted-foreground">
+                                <span>
+                                    Backend ready: <b className={systemSpecs.startup_budget_exceeded ? 'text-amber-500' : 'text-emerald-500'}>
+                                        {systemSpecs.startup_ready_ms.toLocaleString()}ms
+                                    </b> / {systemSpecs.startup_budget_ms.toLocaleString()}ms budget
+                                </span>
+                                <span>
+                                    App + sidecars: {(systemSpecs.app_memory / GB).toFixed(1)}GB
+                                    {systemSpecs.memory_ceiling > 0 ? ` / ${(systemSpecs.memory_ceiling / GB).toFixed(0)}GB ceiling` : ' / no configured ceiling'}
+                                </span>
+                            </div>
+                            {systemSpecs.memory_budget_exceeded && (
+                                <div className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-500">
+                                    <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                                    <span>Desktop and inference sidecars exceed the configured memory ceiling. Stop the local runtime or raise the quota before starting another model.</span>
+                                </div>
+                            )}
                         </div>
                     );
                 })()}

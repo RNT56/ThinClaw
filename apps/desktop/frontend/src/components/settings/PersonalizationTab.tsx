@@ -7,6 +7,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import { v4 as uuidv4 } from 'uuid';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 export function PersonalizationTab() {
     const { config, updateConfig } = useConfig();
@@ -246,7 +247,7 @@ export function PersonalizationTab() {
                                     try {
                                         const res = await directCommands.directHistoryDeleteAllHistory();
                                         if (res.status === "error") {
-                                            toast.error("Wipe failed", { id: tId, description: res.error });
+                                            toast.error("Wipe failed", { id: tId, description: bridgeErrorMessage(res.error) });
                                             return;
                                         }
                                         toast.success("All data erased", { id: tId });

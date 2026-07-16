@@ -1,5 +1,5 @@
 import { Toaster } from "sonner";
-import { lazy, Suspense, useState, useEffect } from "react";
+import { lazy, Suspense, useState, useEffect, type ReactNode } from "react";
 import * as thinclaw from "./lib/thinclaw";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { ExperimentalBadge } from "./components/ExperimentalBadge";
@@ -10,6 +10,10 @@ import { ThemeProvider } from "./components/theme-provider";
 import { ModelProvider } from "./components/model-context";
 import { ChatProvider } from "./components/chat/chat-context";
 import { ConfigProvider } from "./components/config-context";
+import { ServicesProvider } from "./components/services-context";
+import { recordRendererReady } from "./lib/performance-budgets";
+import { I18nProvider, useI18n } from "./components/i18n-provider";
+import { AsyncState } from "./components/ui";
 
 const ChatLayout = lazy(() =>
   import("./components/chat/ChatLayout").then((module) => ({ default: module.ChatLayout })),
@@ -24,10 +28,27 @@ const SpotlightBar = lazy(() =>
 );
 
 function AppLoadingScreen() {
+  const { t } = useI18n();
   return (
-    <div className="flex h-screen items-center justify-center bg-background text-sm text-muted-foreground">
-      Loading ThinClaw…
+    <div className="flex h-screen items-center justify-center bg-background">
+      <AsyncState kind="loading" title={t("common.loading")} compact />
     </div>
+  );
+}
+
+function AppProviders({ children }: { children: ReactNode }) {
+  return (
+    <ServicesProvider>
+      <ThemeProvider defaultTheme="system">
+        <I18nProvider>
+          <ConfigProvider>
+            <ModelProvider>
+              <ChatProvider>{children}</ChatProvider>
+            </ModelProvider>
+          </ConfigProvider>
+        </I18nProvider>
+      </ThemeProvider>
+    </ServicesProvider>
   );
 }
 
@@ -46,6 +67,10 @@ function App() {
       setWindowLabel("");
     }
   }, []);
+
+  useEffect(() => {
+    if (checked) recordRendererReady();
+  }, [checked]);
 
   const checkSetup = async () => {
     try {
@@ -104,40 +129,28 @@ function App() {
     // The ThemeProvider reads from localStorage which is shared across windows
 
     return (
-      <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">
-        <ConfigProvider>
-          <ModelProvider>
-            <ChatProvider>
-              <Suspense fallback={null}>
-                <SpotlightBar />
-              </Suspense>
-              <Toaster closeButton position="top-right" />
-            </ChatProvider>
-          </ModelProvider>
-        </ConfigProvider>
-      </ThemeProvider>
+      <AppProviders>
+        <Suspense fallback={null}>
+          <SpotlightBar />
+        </Suspense>
+        <Toaster closeButton position="top-right" />
+      </AppProviders>
     );
   }
 
   return (
-    <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">
-      <ConfigProvider>
-        <ModelProvider>
-          <ChatProvider>
-            <Suspense fallback={<AppLoadingScreen />}>
-              {showOnboarding ? (
-                <OnboardingWizard onComplete={() => setShowOnboarding(false)} />
-              ) : (
-                <ChatLayout />
-              )}
-            </Suspense>
-            <Toaster closeButton position="top-right" richColors expand={true} />
-            <UpdateChecker />
-            <ExperimentalBadge />
-          </ChatProvider>
-        </ModelProvider>
-      </ConfigProvider>
-    </ThemeProvider>
+    <AppProviders>
+      <Suspense fallback={<AppLoadingScreen />}>
+        {showOnboarding ? (
+          <OnboardingWizard onComplete={() => setShowOnboarding(false)} />
+        ) : (
+          <ChatLayout />
+        )}
+      </Suspense>
+      <Toaster closeButton position="top-right" richColors expand={true} />
+      <UpdateChecker />
+      <ExperimentalBadge />
+    </AppProviders>
   );
 }
 

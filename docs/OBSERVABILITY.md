@@ -16,6 +16,19 @@ Set the backend via the onboarding wizard (Observability step) or the
 
 Unknown values fall back to `noop`.
 
+## Desktop observer and crash reports
+
+ThinClaw Desktop decorates the selected core backend with an always-on local
+adapter. It forwards metadata-only observer records to the existing typed
+`thinclaw-event` bus, so the Event Inspector can display lifecycle and loop
+telemetry even when the core backend is `noop` or Prometheus. Prompt and message
+bodies are not included; diagnostic strings are redacted and bounded.
+
+Desktop also records observer errors and process panics under the app data
+directory's `crash-reports/` folder. Reports are local-only, written with `0600`
+permissions on Unix, and capped at the newest 20 files. There is no automatic
+upload or third-party crash service.
+
 ## The `/metrics` endpoint
 
 When `OBSERVABILITY_BACKEND=prometheus`, the gateway serves Prometheus

@@ -9,7 +9,7 @@ publish = false
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
-aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-types = { version = "1", optional = true }
 chrono = { workspace = true }
 chrono-tz = "0.10"

@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Tool-execution status carried by [`UiEvent::ToolUpdate`].
 ///
@@ -74,6 +75,27 @@ impl RunStatus {
             "interrupted" => Self::Known(RunStatusKnown::Interrupted),
             "rejected" => Self::Known(RunStatusKnown::Rejected),
             _ => Self::Other(value),
+        }
+    }
+}
+
+/// Context-window pressure level carried by [`UiEvent::ContextPressure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPressureLevel {
+    None,
+    Warning,
+    Critical,
+}
+
+impl ContextPressureLevel {
+    /// Parse the gateway/channel wire value, failing closed to the healthy
+    /// state for unknown future labels.
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "warning" => Self::Warning,
+            "critical" => Self::Critical,
+            _ => Self::None,
         }
     }
 }
@@ -234,6 +256,13 @@ pub enum UiEvent {
         error: Option<String>,
     },
 
+    /// Structured context-window capacity transition for the active session.
+    ContextPressure {
+        session_key: String,
+        level: ContextPressureLevel,
+        usage_percent: f64,
+    },
+
     /// Explicit run lifecycle transition.
     LifecycleUpdate {
         session_key: String,
@@ -256,6 +285,9 @@ pub enum UiEvent {
         /// Optional extra detail (token counts, trigger reason, …).
         detail: Option<String>,
     },
+
+    /// Metadata-only core observer event/metric forwarded by Desktop.
+    ObserverRecord { record: UiObserverRecord },
 
     /// Structured plan/progress update from the ThinClaw agent loop.
     PlanUpdate {
@@ -379,6 +411,13 @@ pub enum UiEvent {
         result_summary: Option<String>,
     },
 
+    /// Channel connectivity changed in either the local runtime or remote gateway.
+    ChannelStatus {
+        channel_id: String,
+        state: String,
+        error: Option<String>,
+    },
+
     /// Cost/budget event from the gateway/runtime.
     CostAlert {
         alert_type: String,
@@ -421,6 +460,19 @@ pub enum UiEvent {
         #[specta(type = f64)]
         bytes: u64,
     },
+}
+
+/// Privacy-safe observer metadata surfaced to the Desktop Event Inspector.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct UiObserverRecord {
+    /// `event` or `metric`.
+    pub record_type: String,
+    /// Stable machine name such as `llm_response` or `loop_run`.
+    pub name: String,
+    pub success: Option<bool>,
+    pub duration_ms: Option<u64>,
+    /// Redacted, bounded metadata. Prompt/message bodies are never included.
+    pub attributes: BTreeMap<String, String>,
 }
 
 /// Session metadata for session list
@@ -499,6 +551,23 @@ mod tests {
     }
 
     #[test]
+    fn context_pressure_level_has_stable_wire_values() {
+        assert_eq!(
+            ContextPressureLevel::from_wire("warning"),
+            ContextPressureLevel::Warning
+        );
+        assert_eq!(
+            ContextPressureLevel::from_wire("critical"),
+            ContextPressureLevel::Critical
+        );
+        assert_eq!(
+            ContextPressureLevel::from_wire("future"),
+            ContextPressureLevel::None
+        );
+        assert_eq!(json(&ContextPressureLevel::Critical), "\"critical\"");
+    }
+
+    #[test]
     fn sub_agent_status_preserves_running_category_form() {
         assert_eq!(
             SubAgentStatus::from_wire("completed"),
@@ -522,6 +591,24 @@ mod tests {
         assert_eq!(
             MessageType::from_wire("custom"),
             MessageType::Other("custom".to_string())
+        );
+    }
+
+    #[test]
+    fn channel_status_uses_the_generated_discriminated_shape() {
+        let event = UiEvent::ChannelStatus {
+            channel_id: "telegram".into(),
+            state: "degraded".into(),
+            error: Some("webhook timeout".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "ChannelStatus",
+                "channel_id": "telegram",
+                "state": "degraded",
+                "error": "webhook timeout"
+            })
         );
     }
 }

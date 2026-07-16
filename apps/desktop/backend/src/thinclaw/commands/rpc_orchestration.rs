@@ -177,12 +177,69 @@ mod sub_agent_registry_tests {
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_spawn_session(
+    state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     agent_id: String,
     task: String,
     parent_session: Option<String>,
-) -> Result<SpawnSessionResponse, String> {
+) -> Result<SpawnSessionResponse, crate::thinclaw::bridge::BridgeError> {
+    let agent_id = agent_id.trim();
+    let task = task.trim();
+    if agent_id.is_empty() {
+        return Err(("Agent ID must not be empty".to_string()).into());
+    }
+    if task.is_empty() {
+        return Err(("Task must not be empty".to_string()).into());
+    }
+    if task.chars().count() > 8_000 {
+        return Err(("Task must not exceed 8,000 characters".to_string()).into());
+    }
     let child_key = format!("agent:{}:task-{}", agent_id, uuid::Uuid::new_v4());
+
+    // A saved remote fleet node owns its own session. Route the task through
+    // that profile's authenticated gateway rather than creating a misleading
+    // local session whose key merely contains the remote agent ID.
+    if !matches!(agent_id, "main" | "local-core") {
+        let cfg = if let Some(config) = state.get_config().await {
+            config
+        } else {
+            state.init_config().await?
+        };
+        if let Some(profile) = cfg
+            .profiles
+            .iter()
+            .find(|profile| profile.id == agent_id)
+            .cloned()
+        {
+            let token = profile
+                .token
+                .as_deref()
+                .filter(|token| !token.trim().is_empty())
+                .ok_or_else(|| {
+                    format!("Agent '{}' has no stored gateway credential", profile.name)
+                })?;
+            let proxy =
+                crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&profile.url, token)?;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                proxy.send_message(&child_key, task),
+            )
+            .await
+            .map_err(|_| {
+                format!(
+                    "Task delivery to '{}' timed out after 10 seconds",
+                    profile.name
+                )
+            })??;
+            return Ok(SpawnSessionResponse {
+                session_key: child_key,
+                parent_session,
+                task: task.to_string(),
+            });
+        }
+        return Err((format!("Fleet agent '{agent_id}' is not configured")).into());
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -195,7 +252,7 @@ pub async fn thinclaw_spawn_session(
     if let Some(ref parent) = parent_session {
         let child_info = ChildSessionInfo {
             session_key: child_key.clone(),
-            task: task.clone(),
+            task: task.to_string(),
             status: "running".to_string(),
             spawned_at: now,
             result_summary: None,
@@ -205,7 +262,7 @@ pub async fn thinclaw_spawn_session(
         let event = crate::thinclaw::ui_types::UiEvent::SubAgentUpdate {
             parent_session: parent.clone(),
             child_session: child_key.clone(),
-            task: task.clone(),
+            task: task.to_string(),
             status: crate::thinclaw::ui_types::SubAgentStatus::from_wire("running"),
             progress: Some(0.0),
             result_preview: None,
@@ -218,7 +275,7 @@ pub async fn thinclaw_spawn_session(
     let app_handle = ironclaw.app_handle().clone();
     let parent_bg = parent_session.clone();
     let child_bg = child_key.clone();
-    let task_bg = task.clone();
+    let task_bg = task.to_string();
 
     // ── Non-blocking: full agent turn runs in a background task ──────────
     tokio::spawn(async move {
@@ -318,7 +375,7 @@ pub async fn thinclaw_spawn_session(
     Ok(SpawnSessionResponse {
         session_key: child_key,
         parent_session,
-        task,
+        task: task.to_string(),
     })
 }
 
@@ -331,7 +388,7 @@ pub async fn thinclaw_spawn_session(
 pub async fn thinclaw_list_child_sessions(
     ironclaw: State<'_, ThinClawRuntimeState>,
     parent_session: String,
-) -> Result<Vec<ChildSessionInfo>, String> {
+) -> Result<Vec<ChildSessionInfo>, crate::thinclaw::bridge::BridgeError> {
     let mut children = sub_agent_registry::list_children(&parent_session).await;
 
     // ── Post-restart recovery: scan live sessions if registry is empty ──
@@ -381,7 +438,7 @@ pub async fn thinclaw_update_sub_agent_status(
     child_session: String,
     status: String,
     result_summary: Option<String>,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // Find the parent before updating
     let parent = sub_agent_registry::find_parent(&child_session).await;
 
@@ -425,9 +482,9 @@ pub async fn thinclaw_update_sub_agent_status(
 pub async fn thinclaw_agents_list(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Vec<AgentProfile>, String> {
+) -> Result<Vec<AgentProfile>, crate::thinclaw::bridge::BridgeError> {
     let cfg = state.get_config().await.ok_or("Config not loaded")?;
-    let mut profiles = cfg.profiles.clone();
+    let mut profiles: Vec<_> = cfg.profiles.iter().map(AgentProfile::redacted).collect();
 
     if ironclaw.is_initialized() && !profiles.iter().any(|p| p.id == "local-core") {
         profiles.insert(
@@ -452,11 +509,11 @@ pub async fn thinclaw_agents_list(
 pub async fn thinclaw_canvas_push(
     state: State<'_, ThinClawManager>,
     content: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .app
         .emit("thinclaw-canvas-push", content)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(())
 }
 
@@ -466,11 +523,11 @@ pub async fn thinclaw_canvas_push(
 pub async fn thinclaw_canvas_navigate(
     state: State<'_, ThinClawManager>,
     url: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .app
         .emit("thinclaw-canvas-navigate", url)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(())
 }
 
@@ -483,7 +540,7 @@ pub async fn thinclaw_canvas_dispatch_event(
     _run_id: Option<String>,
     event_type: String,
     payload: serde_json::Value,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     // Inject the canvas event as a message to the agent
     let content = serde_json::json!({
         "type": "canvas_event",
@@ -500,7 +557,7 @@ pub async fn thinclaw_canvas_dispatch_event(
         false, // Context injection, don't trigger turn
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(ThinClawRpcResponse {
         ok: true,

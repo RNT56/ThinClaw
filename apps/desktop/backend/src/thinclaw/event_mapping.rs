@@ -8,7 +8,8 @@ use thinclaw_core::channels::StatusUpdate;
 
 use super::sanitizer::strip_llm_tokens;
 use super::ui_types::{
-    MessageType, RunStatus, SubAgentStatus, SubAgentStatusKnown, ToolStatus, UiEvent, UiUsage,
+    ContextPressureLevel, MessageType, RunStatus, SubAgentStatus, SubAgentStatusKnown, ToolStatus,
+    UiEvent, UiUsage,
 };
 
 fn session_key_from_metadata(metadata: &Value) -> Option<&str> {
@@ -128,6 +129,15 @@ pub fn status_to_ui_event(
             run_id,
             status: RunStatus::from_wire(text),
             error: None,
+        }),
+
+        StatusUpdate::ContextPressure {
+            level,
+            usage_percent,
+        } => Some(UiEvent::ContextPressure {
+            session_key,
+            level: ContextPressureLevel::from_wire(&level),
+            usage_percent,
         }),
 
         StatusUpdate::ApprovalNeeded {
@@ -587,6 +597,20 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
                 error: None,
             }]
         }
+        "agent_lifecycle" => vec![UiEvent::AgentLifecycleEvent {
+            session_key: session_key.unwrap_or_else(|| "agent:main".to_string()),
+            run_id,
+            phase: value_string(&value, "phase").unwrap_or_else(|| "unknown".to_string()),
+            label: value_string(&value, "label").unwrap_or_default(),
+            detail: value_string(&value, "detail"),
+        }],
+        "context_pressure" => vec![UiEvent::ContextPressure {
+            session_key: session_key.unwrap_or_else(|| "agent:main".to_string()),
+            level: ContextPressureLevel::from_wire(
+                value_string(&value, "level").as_deref().unwrap_or("none"),
+            ),
+            usage_percent: value_f64(&value, "usage_percent").unwrap_or_default(),
+        }],
         "plan_update" => {
             let session_key = session_key.unwrap_or_else(|| "agent:main".to_string());
             vec![UiEvent::PlanUpdate {
@@ -766,6 +790,11 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
             run_id,
             result_summary: value_string(&value, "result_summary"),
         }],
+        "channel_status_change" => vec![UiEvent::ChannelStatus {
+            channel_id: value_string(&value, "channel").unwrap_or_default(),
+            state: value_string(&value, "status").unwrap_or_default(),
+            error: value_string(&value, "message"),
+        }],
         "cost_alert" => vec![UiEvent::CostAlert {
             alert_type: value_string(&value, "alert_type").unwrap_or_default(),
             current_cost_usd: value_f64(&value, "current_cost_usd").unwrap_or_default(),
@@ -823,6 +852,24 @@ mod tests {
             },
             StatusUpdate::StreamChunk("chunk".into()),
             StatusUpdate::Status("running".into()),
+            StatusUpdate::ContextCompactionStarted {
+                used: 9_500,
+                limit: 10_000,
+            },
+            StatusUpdate::AdvisorConsultationStarted {
+                reason: "confidence below threshold".into(),
+            },
+            StatusUpdate::SelfRepairStarted {
+                repair_type: "tool".into(),
+                target_id: "weather".into(),
+                reason: "runtime failure".into(),
+            },
+            StatusUpdate::SelfRepairCompleted {
+                repair_type: "tool".into(),
+                target_id: "weather".into(),
+                success: true,
+                summary: "rebuilt and reloaded".into(),
+            },
             StatusUpdate::Plan {
                 entries: vec![serde_json::json!({"step": "one"})],
             },
@@ -1014,6 +1061,33 @@ mod tests {
     }
 
     #[test]
+    fn maps_structured_gateway_agent_lifecycle_event() {
+        let events = gateway_sse_to_ui_events(serde_json::json!({
+            "type": "agent_lifecycle",
+            "thread_id": "thread-a",
+            "run_id": "run-a",
+            "phase": "self_repair_completed",
+            "label": "Self-repair succeeded: tool weather",
+            "detail": "rebuilt and reloaded"
+        }));
+
+        assert!(matches!(
+            events.as_slice(),
+            [UiEvent::AgentLifecycleEvent {
+                session_key,
+                run_id,
+                phase,
+                label,
+                detail,
+            }] if session_key == "thread-a"
+                && run_id.as_deref() == Some("run-a")
+                && phase == "self_repair_completed"
+                && label == "Self-repair succeeded: tool weather"
+                && detail.as_deref() == Some("rebuilt and reloaded")
+        ));
+    }
+
+    #[test]
     fn maps_gateway_plan_usage_and_lifecycle_events() {
         let plan = gateway_sse_to_ui_events(serde_json::json!({
             "type": "plan_update",
@@ -1164,6 +1238,20 @@ mod tests {
                     && result_summary.as_deref() == Some("ok")
         ));
 
+        let channel = gateway_sse_to_ui_events(serde_json::json!({
+            "type": "channel_status_change",
+            "channel": "telegram",
+            "status": "degraded",
+            "message": "webhook timeout"
+        }));
+        assert!(matches!(
+            channel.as_slice(),
+            [UiEvent::ChannelStatus { channel_id, state, error }]
+                if channel_id == "telegram"
+                    && state == "degraded"
+                    && error.as_deref() == Some("webhook timeout")
+        ));
+
         let cost = gateway_sse_to_ui_events(serde_json::json!({
             "type": "cost_alert",
             "alert_type": "threshold",
@@ -1235,6 +1323,37 @@ mod tests {
                 if event_type == "future_event"
                     && session_key.as_deref() == Some("thread-x")
                     && run_id.as_deref() == Some("run-x")
+        ));
+    }
+
+    #[test]
+    fn maps_local_and_remote_context_pressure_without_text_parsing() {
+        let local = status_to_ui_event(
+            StatusUpdate::ContextPressure {
+                level: "critical".to_string(),
+                usage_percent: 97.5,
+            },
+            "thread-local",
+            None,
+            "message-1",
+        )
+        .expect("map local pressure");
+        assert!(matches!(
+            local,
+            UiEvent::ContextPressure { session_key, level: ContextPressureLevel::Critical, usage_percent }
+                if session_key == "thread-local" && (usage_percent - 97.5).abs() < f64::EPSILON
+        ));
+
+        let remote = gateway_sse_to_ui_events(serde_json::json!({
+            "type": "context_pressure",
+            "level": "warning",
+            "usage_percent": 88.25,
+            "thread_id": "thread-remote"
+        }));
+        assert!(matches!(
+            remote.as_slice(),
+            [UiEvent::ContextPressure { session_key, level: ContextPressureLevel::Warning, usage_percent }]
+                if session_key == "thread-remote" && (*usage_percent - 88.25).abs() < f64::EPSILON
         ));
     }
 }

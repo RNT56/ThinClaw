@@ -317,7 +317,7 @@ archive success.
 
 The gateway's OpenAPI snapshot is generated **from Rust** and committed at
 `clients/openapi/thinclaw-gateway.openapi.json` (repo root; regenerate with
-`cargo run --bin export-openapi -- generate`). Then:
+`cargo run --example export-openapi -- generate`). Then:
 
 ```bash
 scripts/generate-api.sh   # vendors the spec, runs swift-openapi-generator

@@ -23,6 +23,7 @@ pub struct ModelPricing {
     pub output_per_million: Option<f64>,
     pub per_image: Option<f64>,
     pub per_minute: Option<f64>,
+    #[serde(rename = "per1kChars")]
     pub per_1k_chars: Option<f64>,
 }
 

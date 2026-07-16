@@ -219,12 +219,10 @@ the coverage test itself.
 **Landed:** `ROUTE_TABLE` (`apps/desktop/backend/src/thinclaw/bridge.rs:116`) classifies all 346
 commands (100%), enforced by `all_registered_commands_are_classified` (`bridge.rs:764`).
 
-### B5 · `Result<T,String>` → `Result<T,BridgeError>` migration · P2 · L · **[OPEN]** · Blocked-by: —
-**Why:** 313 of 342 commands still return untyped string errors; the frontend can't render
-gated-capability CTAs. (The original ~149 figure undercounted the surface.)
-**Steps:** file-by-file, change the return type (the `From<String>` impl makes existing
-`.map_err(|e| e.to_string())` compile as-is); retire `local_unavailable()` (`rpc_jobs_autonomy.rs`).
-Regenerate bindings each file. **Verify:** `export_bindings` + `tsc`; bridge tests.
+### B5 · `Result<T,String>` → `Result<T,BridgeError>` migration · P2 · L · **[DONE]**
+All 347 registered commands use the tagged `BridgeError` contract, the frontend renders errors
+through one normalizer, and a generated-binding test rejects raw string error channels.
+**Verify:** `export_bindings` + `tsc`; `registered_commands_never_expose_raw_string_errors`.
 
 ### B6 · Stringly-typed `UiEvent` status fields → specta enums · P2 · M · **[OPEN]** · Blocked-by: —
 Replace free-form `status`/`phase`/`message_type` strings (`ui_types.rs`) with serde-tagged,
@@ -281,7 +279,7 @@ The desktop formerly failed the root `deny.toml`'s bans/licenses. **Landed:** a 
 | T5 | Miri CI job for `thinclaw-secrets` (crypto) + `thinclaw-safety` (sanitizer/leak) | P2 | — |
 | T6 | Contract test for `SafetyLayer`/`SecretsStore` injection in `AppBuilder` | P2 | — |
 | T7 | Frontend tests for the chat hook (`use-chat.ts`) + Tauri bridge | P3 | — |
-| T8 | **[DONE]** Enforce package MSRV == pinned developer/CI toolchain (`check-msrv-sync.py`; Rust 1.92) | P3 | — |
+| T8 | **[DONE]** Enforce package MSRV == pinned developer/CI toolchain (`check-msrv-sync.py`; Rust 1.94) | P3 | — |
 | T9 | Extend `--locked` to the remaining CI jobs (host-smoke/acp/release/db-contract) | P1 | — |
 | T10 | **[DONE]** God-file size-guard CI (`scripts/ci/check-file-sizes.sh`, `MAX_LINES=2000`, `ci.yml:64`) | P2 | A5–A8 |
 | T11 | `wit-bindgen` single-version check + bundle-reference resolution test — **[OPEN]**, still 2 versions (0.51.0, 0.57.1) | P1 | — |

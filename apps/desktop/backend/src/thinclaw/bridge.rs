@@ -10,9 +10,8 @@
 //! instead of an error toast.
 //!
 //! This module is the foundation the rest of WS-1 (route-table registry, bridge
-//! linter, generated route matrix) builds on. It is intentionally additive: it
-//! does not yet replace existing `Result<_, String>` signatures — commands are
-//! migrated incrementally.
+//! linter, generated route matrix) builds on. Every desktop command uses this
+//! envelope, which keeps error handling machine-readable all the way to the UI.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,9 +43,34 @@ pub enum BridgeError {
         /// Which runtime mode *would* satisfy it.
         satisfied_by: RouteMode,
     },
-    /// A genuine error (kept distinct from the gated state above).
-    /// Struct variant (not a tuple) so the internally-tagged (`tag = "kind"`)
-    /// representation stays valid for serde/specta export.
+    /// User-provided data failed validation.
+    InvalidInput {
+        message: String,
+        field: Option<String>,
+    },
+    /// Credentials are absent, expired, or rejected by the target service.
+    Unauthorized {
+        message: String,
+        remediation: Option<String>,
+    },
+    /// A requested local or remote resource does not exist.
+    NotFound { resource: String, message: String },
+    /// The request conflicts with current state and may be retried after it changes.
+    Conflict {
+        message: String,
+        remediation: Option<String>,
+    },
+    /// The operation exceeded a bounded deadline.
+    Timeout {
+        operation: String,
+        message: String,
+        retryable: bool,
+    },
+    /// The transport failed before a valid response was received.
+    Network { message: String, retryable: bool },
+    /// A genuine unclassified runtime error (kept distinct from gated and
+    /// actionable outcomes). Struct variants keep the internally-tagged
+    /// (`tag = "kind"`) representation valid for serde/specta export.
     Runtime { message: String },
 }
 
@@ -56,7 +80,13 @@ impl std::fmt::Display for BridgeError {
             BridgeError::Unavailable {
                 capability, reason, ..
             } => write!(f, "unavailable: {capability}: {reason}"),
-            BridgeError::Runtime { message } => write!(f, "{message}"),
+            BridgeError::InvalidInput { message, .. }
+            | BridgeError::Unauthorized { message, .. }
+            | BridgeError::NotFound { message, .. }
+            | BridgeError::Conflict { message, .. }
+            | BridgeError::Timeout { message, .. }
+            | BridgeError::Network { message, .. }
+            | BridgeError::Runtime { message } => write!(f, "{message}"),
         }
     }
 }
@@ -76,6 +106,15 @@ impl From<&str> for BridgeError {
         BridgeError::Runtime {
             message: value.to_string(),
         }
+    }
+}
+
+/// Compatibility for internal subsystems that have not adopted the desktop
+/// command envelope. The downgrade happens only behind the bridge boundary;
+/// registered commands still serialize [`BridgeError`] to the frontend.
+impl From<BridgeError> for String {
+    fn from(value: BridgeError) -> Self {
+        value.to_string()
     }
 }
 
@@ -191,6 +230,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("direct_imagine_toggle_favorite", RouteMode::LocalOnly),
     ("direct_inference_get_backends", RouteMode::LocalOnly),
     ("direct_inference_update_backend", RouteMode::LocalOnly),
+    ("direct_i18n_get_catalog", RouteMode::LocalOnly),
     ("direct_media_generate_image", RouteMode::LocalOnly),
     ("direct_media_transcribe_audio", RouteMode::LocalOnly),
     ("direct_media_tts_list_voices", RouteMode::LocalOnly),
@@ -266,15 +306,12 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_add_agent_profile", RouteMode::LocalOnly),
     ("thinclaw_add_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_agents_list", RouteMode::LocalOnly),
-    ("thinclaw_broadcast_command", RouteMode::LocalOnly),
+    ("thinclaw_canvas_dispatch_event", RouteMode::LocalOnly),
     ("thinclaw_canvas_navigate", RouteMode::LocalOnly),
     ("thinclaw_canvas_panel_dismiss", RouteMode::LocalOnly),
     ("thinclaw_canvas_panel_get", RouteMode::LocalOnly),
     ("thinclaw_canvas_panels_list", RouteMode::LocalOnly),
     ("thinclaw_canvas_push", RouteMode::LocalOnly),
-    ("thinclaw_channel_config_schema", RouteMode::LocalAndRemote),
-    ("thinclaw_channel_config_schemas", RouteMode::LocalAndRemote),
-    ("thinclaw_channel_config_submit", RouteMode::LocalAndRemote),
     ("thinclaw_check_bootstrap_needed", RouteMode::LocalOnly),
     ("thinclaw_checkpoint_diff", RouteMode::LocalOnly),
     ("thinclaw_checkpoint_restore", RouteMode::LocalOnly),
@@ -283,10 +320,11 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_cron_lint", RouteMode::LocalOnly),
     ("thinclaw_experiments_list_envs", RouteMode::LocalOnly),
     ("thinclaw_experiments_run_eval", RouteMode::LocalOnly),
+    ("thinclaw_external_memory_configure", RouteMode::LocalOnly),
+    ("thinclaw_external_memory_disable", RouteMode::LocalOnly),
     ("thinclaw_get_anthropic_key", RouteMode::LocalOnly),
     ("thinclaw_get_bedrock_credentials", RouteMode::LocalOnly),
     ("thinclaw_get_brave_key", RouteMode::LocalOnly),
-    ("thinclaw_get_fleet_status", RouteMode::LocalOnly),
     ("thinclaw_get_gemini_key", RouteMode::LocalOnly),
     ("thinclaw_get_groq_key", RouteMode::LocalOnly),
     ("thinclaw_get_implicit_provider_key", RouteMode::LocalOnly),
@@ -300,7 +338,13 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_list_child_sessions", RouteMode::LocalOnly),
     ("thinclaw_manifest_validate", RouteMode::LocalOnly),
     ("thinclaw_plugin_lifecycle_list", RouteMode::LocalOnly),
+    ("thinclaw_profile_evolution_run", RouteMode::LocalOnly),
+    ("thinclaw_profile_evolution_status", RouteMode::LocalOnly),
     ("thinclaw_reload_secrets", RouteMode::LocalOnly),
+    ("thinclaw_reveal_gateway_token", RouteMode::LocalOnly),
+    ("thinclaw_remote_access_start", RouteMode::LocalOnly),
+    ("thinclaw_remote_access_status", RouteMode::LocalOnly),
+    ("thinclaw_remote_access_stop", RouteMode::LocalOnly),
     ("thinclaw_remove_agent_profile", RouteMode::LocalOnly),
     ("thinclaw_remove_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_repo_project_approve", RouteMode::LocalOnly),
@@ -334,6 +378,11 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_save_gateway_settings", RouteMode::LocalOnly),
     ("thinclaw_save_slack_config", RouteMode::LocalOnly),
     ("thinclaw_save_telegram_config", RouteMode::LocalOnly),
+    ("thinclaw_secret_master_key_rotate", RouteMode::LocalOnly),
+    ("thinclaw_secret_recovery_export", RouteMode::LocalOnly),
+    ("thinclaw_secret_recovery_import", RouteMode::LocalOnly),
+    ("thinclaw_secret_recovery_status", RouteMode::LocalOnly),
+    ("thinclaw_security_posture", RouteMode::LocalOnly),
     ("thinclaw_session_search", RouteMode::LocalOnly),
     ("thinclaw_set_autonomy_mode", RouteMode::LocalOnly),
     ("thinclaw_set_bootstrap_completed", RouteMode::LocalOnly),
@@ -342,7 +391,6 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_set_setup_completed", RouteMode::LocalOnly),
     ("thinclaw_set_workspace_mode", RouteMode::LocalOnly),
     ("thinclaw_skills_toggle", RouteMode::LocalOnly),
-    ("thinclaw_spawn_session", RouteMode::LocalOnly),
     ("thinclaw_sync_local_llm", RouteMode::LocalOnly),
     ("thinclaw_toggle_auto_start", RouteMode::LocalOnly),
     ("thinclaw_toggle_custom_secret", RouteMode::LocalOnly),
@@ -350,13 +398,13 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_toggle_local_inference", RouteMode::LocalOnly),
     ("thinclaw_toggle_local_tools", RouteMode::LocalOnly),
     ("thinclaw_toggle_secret_access", RouteMode::LocalOnly),
+    ("thinclaw_trajectory_export", RouteMode::LocalOnly),
     ("thinclaw_trajectory_records", RouteMode::LocalOnly),
     ("thinclaw_trajectory_stats", RouteMode::LocalOnly),
     ("thinclaw_trigger_bootstrap", RouteMode::LocalOnly),
+    ("thinclaw_update_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_update_run", RouteMode::LocalOnly),
     ("thinclaw_update_sub_agent_status", RouteMode::LocalOnly),
-    ("thinclaw_web_login_telegram", RouteMode::LocalOnly),
-    ("thinclaw_web_login_whatsapp", RouteMode::LocalOnly),
     ("thinclaw_write_agent_workspace_file", RouteMode::LocalOnly),
     ("toggle_spotlight", RouteMode::LocalOnly),
     ("update_project", RouteMode::LocalOnly),
@@ -387,7 +435,11 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_autonomy_rollback", RouteMode::LocalAndRemote),
     ("thinclaw_autonomy_rollouts", RouteMode::LocalAndRemote),
     ("thinclaw_autonomy_status", RouteMode::LocalAndRemote),
+    ("thinclaw_broadcast_command", RouteMode::LocalAndRemote),
     ("thinclaw_cache_stats", RouteMode::LocalAndRemote),
+    ("thinclaw_channel_config_schema", RouteMode::LocalAndRemote),
+    ("thinclaw_channel_config_schemas", RouteMode::LocalAndRemote),
+    ("thinclaw_channel_config_submit", RouteMode::LocalAndRemote),
     ("thinclaw_channel_status_list", RouteMode::LocalAndRemote),
     ("thinclaw_channels_list", RouteMode::LocalAndRemote),
     ("thinclaw_clawhub_install", RouteMode::LocalAndRemote),
@@ -455,6 +507,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_get_autonomy_mode", RouteMode::LocalAndRemote),
     ("thinclaw_get_diagnostics", RouteMode::LocalAndRemote),
     ("thinclaw_get_file", RouteMode::LocalAndRemote),
+    ("thinclaw_get_fleet_status", RouteMode::LocalAndRemote),
     ("thinclaw_get_history", RouteMode::LocalAndRemote),
     ("thinclaw_get_memory", RouteMode::LocalAndRemote),
     ("thinclaw_get_sessions", RouteMode::LocalAndRemote),
@@ -562,6 +615,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_skills_reload_all", RouteMode::LocalAndRemote),
     ("thinclaw_skills_search", RouteMode::LocalAndRemote),
     ("thinclaw_skills_status", RouteMode::LocalAndRemote),
+    ("thinclaw_spawn_session", RouteMode::LocalAndRemote),
     ("thinclaw_start_gateway", RouteMode::LocalAndRemote),
     ("thinclaw_stop_gateway", RouteMode::LocalAndRemote),
     ("thinclaw_subscribe_session", RouteMode::LocalAndRemote),
@@ -584,6 +638,101 @@ pub fn route_mode(command: &str) -> Option<RouteMode> {
         .iter()
         .find(|(name, _)| *name == command)
         .map(|(_, mode)| *mode)
+}
+
+// ---------------------------------------------------------------------------
+// Generated route matrix (TDO-003)
+// ---------------------------------------------------------------------------
+
+pub const ROUTE_MATRIX_BEGIN_MARKER: &str = "<!-- BEGIN GENERATED ROUTE TABLE -->";
+pub const ROUTE_MATRIX_END_MARKER: &str = "<!-- END GENERATED ROUTE TABLE -->";
+
+/// Render the exhaustive, code-authoritative portion of the remote gateway
+/// route matrix. The prose and endpoint-family notes around this block remain
+/// human-authored; every per-command classification comes directly from
+/// [`ROUTE_TABLE`].
+pub fn render_route_matrix_section() -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    writeln!(output, "{ROUTE_MATRIX_BEGIN_MARKER}").expect("write to String");
+    writeln!(output, "## Generated Per-Command Classification\n").expect("write to String");
+    writeln!(
+        output,
+        "> Generated from `apps/desktop/backend/src/thinclaw/bridge.rs`. Do not edit this block by hand. Regenerate it with `cargo run --locked --example export_bindings`.\n"
+    )
+    .expect("write to String");
+
+    let groups = [
+        (
+            RouteMode::RemoteOnly,
+            "Remote only",
+            "Embedded mode returns a typed unavailable reason; connect a remote gateway.",
+        ),
+        (
+            RouteMode::LocalOnly,
+            "Local only",
+            "Remote mode returns a typed unavailable reason; use the embedded runtime.",
+        ),
+        (
+            RouteMode::LocalAndRemote,
+            "Local and remote",
+            "Supported in both embedded and remote-gateway modes.",
+        ),
+    ];
+
+    for (mode, heading, behavior) in groups {
+        let mut commands = ROUTE_TABLE
+            .iter()
+            .filter_map(|(command, entry_mode)| (*entry_mode == mode).then_some(*command))
+            .collect::<Vec<_>>();
+        commands.sort_unstable();
+
+        writeln!(output, "### {heading} ({})\n", commands.len()).expect("write to String");
+        writeln!(
+            output,
+            "| Command | Route mode | Unsupported-mode behavior |"
+        )
+        .expect("write to String");
+        writeln!(output, "| --- | --- | --- |").expect("write to String");
+        for command in commands {
+            writeln!(output, "| `{command}` | `{mode:?}` | {behavior} |").expect("write to String");
+        }
+        output.push('\n');
+    }
+
+    writeln!(output, "{ROUTE_MATRIX_END_MARKER}").expect("write to String");
+    output
+}
+
+/// Replace only the generated block in the route-matrix document.
+pub fn update_route_matrix_document(document: &str) -> Result<String, String> {
+    let begin = document
+        .find(ROUTE_MATRIX_BEGIN_MARKER)
+        .ok_or_else(|| format!("missing route matrix marker: {ROUTE_MATRIX_BEGIN_MARKER}"))?;
+    let end_start = document[begin..]
+        .find(ROUTE_MATRIX_END_MARKER)
+        .map(|offset| begin + offset)
+        .ok_or_else(|| format!("missing route matrix marker: {ROUTE_MATRIX_END_MARKER}"))?;
+    let end = end_start + ROUTE_MATRIX_END_MARKER.len();
+
+    Ok(format!(
+        "{}{}{}",
+        &document[..begin],
+        render_route_matrix_section().trim_end(),
+        &document[end..]
+    ))
+}
+
+/// Regenerate the committed route-matrix block in place.
+pub fn write_route_matrix_document(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let document = std::fs::read_to_string(path)?;
+    let updated = update_route_matrix_document(&document).map_err(std::io::Error::other)?;
+    if updated != document {
+        std::fs::write(path, updated)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -709,6 +858,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn generated_pricing_field_matches_wire_contract() {
+        let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
+        assert!(
+            bindings.contains("per1kChars"),
+            "generated pricing bindings must preserve the serialized per1kChars field"
+        );
+        assert!(
+            !bindings.contains("per1KChars"),
+            "generated pricing bindings must not invent a differently-cased field"
+        );
+    }
+
     /// TDO-002 linter: every gated command (its generated binding returns
     /// `BridgeError`) must be classified in ROUTE_TABLE, so the route-matrix can
     /// never silently omit a gated capability.
@@ -752,8 +914,85 @@ mod tests {
     }
 
     #[test]
+    fn fixture_acceptance_local_route_contract() {
+        let representative_routes = [
+            ("thinclaw_send_message", RouteMode::LocalAndRemote),
+            ("thinclaw_jobs_list", RouteMode::LocalAndRemote),
+            ("thinclaw_job_detail", RouteMode::LocalAndRemote),
+            ("thinclaw_job_cancel", RouteMode::LocalAndRemote),
+            ("thinclaw_cost_summary", RouteMode::LocalAndRemote),
+            ("thinclaw_routing_status", RouteMode::LocalAndRemote),
+            ("thinclaw_experiments_projects", RouteMode::LocalAndRemote),
+            ("thinclaw_learning_status", RouteMode::LocalAndRemote),
+            ("thinclaw_autonomy_status", RouteMode::LocalAndRemote),
+            ("thinclaw_job_restart", RouteMode::RemoteOnly),
+            ("thinclaw_session_search", RouteMode::LocalOnly),
+        ];
+
+        for (command, expected_mode) in representative_routes {
+            let actual = route_mode(command);
+            assert_eq!(
+                actual,
+                Some(expected_mode),
+                "unexpected fixture route for {command}"
+            );
+            assert_eq!(
+                expected_mode != RouteMode::RemoteOnly,
+                matches!(
+                    actual,
+                    Some(RouteMode::LocalOnly | RouteMode::LocalAndRemote)
+                ),
+                "local availability mismatch for {command}"
+            );
+        }
+
+        let remote_gate = gated(
+            "job restart",
+            "the embedded runtime cannot restart remote sandbox jobs",
+            "connect a remote gateway",
+            RouteMode::RemoteOnly,
+        );
+        assert!(matches!(
+            remote_gate,
+            BridgeError::Unavailable {
+                satisfied_by: RouteMode::RemoteOnly,
+                remediation: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn route_mode_unknown_command_returns_none() {
         assert_eq!(route_mode("nope"), None);
+    }
+
+    #[test]
+    fn generated_route_matrix_covers_every_classified_command() {
+        let generated = render_route_matrix_section();
+        let generated_rows = generated
+            .lines()
+            .filter(|line| line.starts_with("| `"))
+            .count();
+
+        assert_eq!(generated_rows, ROUTE_TABLE.len());
+        for (command, mode) in ROUTE_TABLE {
+            assert!(
+                generated.contains(&format!("| `{command}` | `{mode:?}` |")),
+                "generated route matrix is missing {command} ({mode:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_route_matrix_matches_the_registry() {
+        let document = include_str!("../../../documentation/remote-gateway-route-matrix.md");
+        let regenerated = update_route_matrix_document(document)
+            .expect("route matrix document should contain generation markers");
+        assert_eq!(
+            document, regenerated,
+            "remote-gateway-route-matrix.md is stale; run `cargo run --locked --example export_bindings` from apps/desktop/backend"
+        );
     }
 
     /// TOTAL-coverage linter (B4): EVERY registered command (each `async NAME(` in

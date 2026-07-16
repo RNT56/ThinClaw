@@ -36,11 +36,87 @@ pub mod tts;
 
 use std::collections::{HashMap, HashSet};
 
-pub use model_discovery::CloudModelRegistry;
+pub use model_discovery::ModelProviderRegistry;
 pub use router::InferenceRouter;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
+
+/// Persist and apply an embedding dimension change before any new vector
+/// store is opened. Existing full-text data remains available; only
+/// incompatible vector index files are discarded.
+pub(crate) async fn reconcile_embedding_dimensions(
+    app: &tauri::AppHandle,
+    vector_manager: &crate::vector_store::VectorStoreManager,
+    new_dimensions: usize,
+    source: &str,
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
+    if !(1..=embedding::MAX_EMBEDDING_DIMENSIONS).contains(&new_dimensions) {
+        return Err(format!(
+            "Embedding backend '{source}' reported invalid dimension {new_dimensions}"
+        )
+        .into());
+    }
+
+    use tauri::{Emitter, Manager};
+    let old_dimensions = vector_manager.dimensions();
+    let config_manager = app.state::<crate::config::ConfigManager>();
+    let mut config = config_manager.get_config();
+    let config_was_current = config.vector_dimensions as usize == new_dimensions;
+    if old_dimensions == new_dimensions && config_was_current {
+        return Ok(false);
+    }
+    config.vector_dimensions = u32::try_from(new_dimensions)
+        .map_err(|_| format!("Embedding dimension {new_dimensions} does not fit in config"))?;
+    // Persist first: after a crash/restart the manager selects a new-dimension
+    // filename and cannot accidentally reopen an incompatible index.
+    config_manager.save_config(&config).await?;
+
+    if old_dimensions == new_dimensions {
+        return Ok(false);
+    }
+
+    vector_manager
+        .reinit(new_dimensions)
+        .map_err(|error| format!("Failed to reinitialize vector store: {error}"))?;
+    vector_manager.purge_by_dimension(old_dimensions);
+
+    tracing::warn!(
+        old_dimensions,
+        new_dimensions,
+        source,
+        "embedding dimensions changed; incompatible vector indices were reset"
+    );
+    let _ = app.emit(
+        "embedding_dims_changed",
+        serde_json::json!({
+            "old_dims": old_dimensions,
+            "new_dims": new_dimensions,
+            "source": source,
+            "message": format!(
+                "Embedding dimensions changed from {old_dimensions} to {new_dimensions}. Re-import documents to rebuild semantic search; full-text search remains available."
+            ),
+        }),
+    );
+    Ok(true)
+}
+
+pub(crate) fn migrate_retired_embedding_selection(config: &mut crate::config::UserConfig) -> bool {
+    if config.embedding_backend.as_deref() != Some("gemini") {
+        return false;
+    }
+    let Some(models) = config.inference_models.as_mut() else {
+        return false;
+    };
+    let Some(model) = models.get("embedding") else {
+        return false;
+    };
+    if !embedding::cloud_gemini::is_retired_embedding_model(model) {
+        return false;
+    }
+    models.insert("embedding".to_string(), "gemini-embedding-2".to_string());
+    true
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types
@@ -233,7 +309,7 @@ pub struct ModalityBackends {
 pub async fn direct_inference_get_backends(
     router: tauri::State<'_, InferenceRouter>,
     config_manager: tauri::State<'_, crate::config::ConfigManager>,
-) -> Result<Vec<ModalityBackends>, String> {
+) -> Result<Vec<ModalityBackends>, crate::thinclaw::bridge::BridgeError> {
     let config = config_manager.get_config();
     let active_list = router.active_backends(&config).await;
     let mut result = Vec::with_capacity(5);
@@ -260,9 +336,10 @@ pub async fn direct_inference_update_backend(
     app: tauri::AppHandle,
     router: tauri::State<'_, InferenceRouter>,
     config_manager: tauri::State<'_, crate::config::ConfigManager>,
+    vector_manager: tauri::State<'_, crate::vector_store::VectorStoreManager>,
     modality: Modality,
     backend_id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     tracing::info!(
         "[inference] Updating {} backend to '{}'",
         modality,
@@ -278,7 +355,8 @@ pub async fn direct_inference_update_backend(
         Modality::Stt => config.stt_backend = Some(backend_id.clone()),
         Modality::Diffusion => config.diffusion_backend = Some(backend_id.clone()),
     }
-    config_manager.save_config(&config);
+    migrate_retired_embedding_selection(&mut config);
+    config_manager.save_config(&config).await?;
 
     // Reconfigure the entire router from the updated config.
     // This constructs cloud backends immediately (they only need an API key)
@@ -298,23 +376,14 @@ pub async fn direct_inference_update_backend(
         );
     }
 
-    // Check if embedding dimensions changed (callers may need to rebuild vector indices)
-    if result.embedding_dims_changed() {
-        tracing::warn!(
-            "[inference] ⚠️ Embedding dimensions changed: {} → {}. Vector indices may need rebuilding!",
-            result.old_embedding_dims,
-            result.new_embedding_dims
-        );
-        // Notify frontend so the user can re-ingest documents
-        use tauri::Emitter;
-        let _ = app.emit("embedding_dims_changed", serde_json::json!({
-            "old_dims": result.old_embedding_dims,
-            "new_dims": result.new_embedding_dims,
-            "message": format!(
-                "Embedding dimensions changed from {} to {}. Previously ingested documents should be re-imported for best results.",
-                result.old_embedding_dims, result.new_embedding_dims
-            ),
-        }));
+    if matches!(modality, Modality::Embedding) && result.new_embedding_dims > 0 {
+        reconcile_embedding_dimensions(
+            &app,
+            &vector_manager,
+            result.new_embedding_dims,
+            &backend_id,
+        )
+        .await?;
     }
 
     Ok(())
@@ -453,7 +522,7 @@ fn remote_model_option_to_entry(
 async fn remote_discover_cloud_models(
     proxy: crate::thinclaw::remote_proxy::RemoteGatewayProxy,
     providers: Vec<String>,
-) -> Result<model_discovery::types::DiscoveryResult, String> {
+) -> Result<model_discovery::types::DiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     let config = proxy.get_providers_config().await?;
     let slugs = remote_provider_slugs(&config, &providers);
     let mut provider_results = Vec::new();
@@ -492,9 +561,9 @@ async fn remote_discover_cloud_models(
 #[specta::specta]
 pub async fn direct_inference_discover_cloud_models(
     ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
-    registry: tauri::State<'_, CloudModelRegistry>,
+    registry: tauri::State<'_, ModelProviderRegistry>,
     providers: Vec<String>,
-) -> Result<model_discovery::types::DiscoveryResult, String> {
+) -> Result<model_discovery::types::DiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return remote_discover_cloud_models(proxy, providers).await;
     }
@@ -522,9 +591,9 @@ pub async fn direct_inference_discover_cloud_models(
 #[specta::specta]
 pub async fn direct_inference_refresh_cloud_models(
     ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
-    registry: tauri::State<'_, CloudModelRegistry>,
+    registry: tauri::State<'_, ModelProviderRegistry>,
     provider: String,
-) -> Result<model_discovery::types::ProviderDiscoveryResult, String> {
+) -> Result<model_discovery::types::ProviderDiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_provider_models(&provider)
@@ -539,6 +608,28 @@ pub async fn direct_inference_refresh_cloud_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_gemini_embedding_selection_is_migrated_in_config() {
+        let mut config = crate::config::UserConfig {
+            embedding_backend: Some("gemini".to_string()),
+            inference_models: Some(std::collections::HashMap::from([(
+                "embedding".to_string(),
+                "gemini-embedding-001".to_string(),
+            )])),
+            ..Default::default()
+        };
+        assert!(migrate_retired_embedding_selection(&mut config));
+        assert_eq!(
+            config
+                .inference_models
+                .as_ref()
+                .and_then(|models| models.get("embedding"))
+                .map(String::as_str),
+            Some("gemini-embedding-2")
+        );
+        assert!(!migrate_retired_embedding_selection(&mut config));
+    }
 
     #[test]
     fn remote_provider_slugs_prefers_requested_list() {

@@ -9,6 +9,8 @@ use serde::Serialize;
 use specta::Type;
 use tauri::{AppHandle, Manager};
 
+const GGUF_QUANT_PATTERN: &str = r"(?i)[-_]((?:UD-)?(?:q[0-9]_[a-z0-9_]+|iq[0-9]_[a-z0-9_]+|tq[12]_0|mxfp4(?:_moe)?|nvfp4|f16|f32|bf16))\.gguf$";
+
 // ---------------------------------------------------------------------------
 // Types exposed to frontend via specta
 // ---------------------------------------------------------------------------
@@ -54,7 +56,9 @@ pub struct ModelDownloadInfo {
 /// Build an HTTP client with optional HF token injection.
 /// Reads the token from the app-wide SecretStore (populated once at startup
 /// from the macOS Keychain).
-async fn build_hf_client(app: &AppHandle) -> Result<reqwest::Client, String> {
+async fn build_hf_client(
+    app: &AppHandle,
+) -> Result<reqwest::Client, crate::thinclaw::bridge::BridgeError> {
     let mut headers = reqwest::header::HeaderMap::new();
 
     // Read HF token from the app-wide SecretStore (NOT ThinClawConfig)
@@ -68,12 +72,12 @@ async fn build_hf_client(app: &AppHandle) -> Result<reqwest::Client, String> {
         }
     }
 
-    reqwest::Client::builder()
+    Ok(reqwest::Client::builder()
         .default_headers(headers)
         .user_agent("ThinClawDesktop/0.14")
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?)
 }
 
 /// Format bytes as human-readable string.
@@ -144,7 +148,7 @@ async fn fetch_hf_models(
     client: &reqwest::Client,
     url: &str,
     engine_tag: &str,
-) -> Result<Vec<HfModelCard>, String> {
+) -> Result<Vec<HfModelCard>, crate::thinclaw::bridge::BridgeError> {
     let response = client.get(url).send().await.map_err(|e| {
         if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
             "HuggingFace rate limit reached. Add an HF token in settings to increase limits."
@@ -156,19 +160,21 @@ async fn fetch_hf_models(
 
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         return Err(
-            "HuggingFace rate limit reached. Add an HF token in settings to increase limits."
-                .to_string(),
+            ("HuggingFace rate limit reached. Add an HF token in settings to increase limits."
+                .to_string())
+            .into(),
         );
     }
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!(
+        return Err((format!(
             "HuggingFace model search failed with HTTP {}: {}",
             status,
             body.chars().take(240).collect::<String>()
-        ));
+        ))
+        .into());
     }
 
     let body: Vec<serde_json::Value> = response
@@ -207,7 +213,7 @@ pub async fn direct_runtime_discover_hf_models(
     // Optional list of HF pipeline tags to filter by task type.
     // When provided, one request per tag is made and results are merged.
     pipeline_tags: Option<Vec<String>>,
-) -> Result<Vec<HfModelCard>, String> {
+) -> Result<Vec<HfModelCard>, crate::thinclaw::bridge::BridgeError> {
     let tag = engine_to_hf_tag(&engine)
         .ok_or_else(|| format!("Unknown engine '{}' — cannot map to HF tag", engine))?;
 
@@ -253,10 +259,11 @@ pub async fn direct_runtime_discover_hf_models(
         }
 
         if all_cards.is_empty() && !failures.is_empty() {
-            return Err(format!(
+            return Err((format!(
                 "HuggingFace search failed for all requested filters: {}",
                 failures.join("; ")
-            ));
+            ))
+            .into());
         }
 
         // Deduplicate by model ID
@@ -290,7 +297,7 @@ pub async fn direct_runtime_get_model_files(
     app: AppHandle,
     repo_id: String,
     engine: String,
-) -> Result<ModelDownloadInfo, String> {
+) -> Result<ModelDownloadInfo, crate::thinclaw::bridge::BridgeError> {
     let client = build_hf_client(&app).await?;
     let url = format!("https://huggingface.co/api/models/{}/tree/main", repo_id);
 
@@ -301,11 +308,12 @@ pub async fn direct_runtime_get_model_files(
         .map_err(|e| format!("HF Tree API failed: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!(
+        return Err((format!(
             "HF Tree API returned {} for repo '{}'",
             response.status(),
             repo_id
-        ));
+        ))
+        .into());
     }
 
     let tree: Vec<serde_json::Value> = response
@@ -326,11 +334,9 @@ pub async fn direct_runtime_get_model_files(
 
     if is_single_file {
         // GGUF mode: extract quantization types from filenames
-        // Matches: Q4_K_M, IQ3_XXS, F16, Q8_0, UD-Q5_K_XL, etc.
-        let re = regex::Regex::new(
-            r"(?i)[-_]((?:UD-)?(?:q[0-9]_[a-z0-9_]+|iq[0-9]_[a-z0-9_]+|f16|f32|bf16))\.gguf$",
-        )
-        .unwrap();
+        // Matches the llama.cpp b9988 matrix plus mixed-tensor UD variants:
+        // Q4_K_M, IQ3_XXS, TQ1_0, MXFP4_MOE, NVFP4, UD-Q5_K_XL, etc.
+        let re = regex::Regex::new(GGUF_QUANT_PATTERN).unwrap();
 
         for file in &tree {
             if let Some(path) = file["path"].as_str() {
@@ -427,8 +433,11 @@ pub async fn direct_runtime_download_hf_model_files(
     files_to_download: Vec<String>,
     dest_subdir: Option<String>,
     category: Option<String>,
-) -> Result<String, String> {
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let sanitized = repo_id.replace('/', "_");
     let model_category = category.unwrap_or_else(|| "LLM".to_string());
     let dest_dir = app_data
@@ -517,11 +526,12 @@ pub async fn direct_runtime_download_hf_model_files(
             .map_err(|e| format!("Download request failed: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(format!(
+            return Err((format!(
                 "Download failed for '{}': HTTP {}",
                 filename,
                 response.status()
-            ));
+            ))
+            .into());
         }
 
         let file_total = response.content_length().unwrap_or(file_sizes[file_idx]);
@@ -628,9 +638,40 @@ pub async fn direct_runtime_download_hf_model_files(
     Ok(dest_dir.to_string_lossy().to_string())
 }
 
+const MAX_EMBEDDING_DIMENSION: u64 = 65_536;
+
+/// Extract a bounded sentence-embedding dimension from common Hugging Face
+/// configuration shapes. Sentence/projection-specific fields take precedence
+/// over a transformer's hidden size, and nested text configs are supported.
+pub(crate) fn embedding_dimension_from_config(config: &serde_json::Value) -> Option<usize> {
+    const KEYS: &[&str] = &[
+        "sentence_embedding_dimension",
+        "word_embedding_dimension",
+        "embedding_dimension",
+        "embedding_dim",
+        "projection_dim",
+        "hidden_size",
+        "d_model",
+        "word_embed_proj_dim",
+    ];
+
+    let candidates = std::iter::once(config)
+        .chain(config.get("text_config"))
+        .chain(config.get("sentence_bert_config"));
+    for candidate in candidates {
+        for key in KEYS {
+            if let Some(value) = candidate.get(key).and_then(|value| value.as_u64()) {
+                if (1..=MAX_EMBEDDING_DIMENSION).contains(&value) {
+                    return usize::try_from(value).ok();
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Discover the embedding dimension of a HuggingFace model by fetching its
-/// `config.json` from the API and extracting `hidden_size`, `d_model`, or
-/// `embedding_dim`.
+/// `config.json` and inspecting common sentence-transformer and model fields.
 ///
 /// Returns `None` for GGUF single-file models or repos without a `config.json`.
 /// This is used by the onboarding wizard to pre-configure the vector store
@@ -641,7 +682,7 @@ pub async fn direct_runtime_download_hf_model_files(
 pub async fn direct_runtime_discover_embedding_dimension(
     app: AppHandle,
     repo_id: String,
-) -> Result<Option<u32>, String> {
+) -> Result<Option<u32>, crate::thinclaw::bridge::BridgeError> {
     let client = build_hf_client(&app).await?;
 
     // Fetch config.json from the HF Hub raw file API
@@ -673,16 +714,7 @@ pub async fn direct_runtime_discover_embedding_dimension(
         .await
         .map_err(|e| format!("Failed to parse config.json for {}: {}", repo_id, e))?;
 
-    // Try the common keys in priority order:
-    //   hidden_size — most common (BERT, Nomic, BGE, GTE, etc.)
-    //   d_model     — used by some sentence-transformers
-    //   embedding_dim — occasionally used
-    let dim = config
-        .get("hidden_size")
-        .or_else(|| config.get("d_model"))
-        .or_else(|| config.get("embedding_dim"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
+    let dim = embedding_dimension_from_config(&config).and_then(|value| u32::try_from(value).ok());
 
     if let Some(d) = dim {
         println!(
@@ -727,6 +759,35 @@ mod tests {
     }
 
     #[test]
+    fn embedding_dimension_prefers_projection_and_supports_nested_configs() {
+        assert_eq!(
+            embedding_dimension_from_config(&serde_json::json!({
+                "hidden_size": 1024,
+                "sentence_embedding_dimension": 768
+            })),
+            Some(768)
+        );
+        assert_eq!(
+            embedding_dimension_from_config(&serde_json::json!({
+                "text_config": { "projection_dim": 1152, "hidden_size": 2048 }
+            })),
+            Some(1152)
+        );
+    }
+
+    #[test]
+    fn embedding_dimension_rejects_zero_and_unbounded_values() {
+        assert_eq!(
+            embedding_dimension_from_config(&serde_json::json!({ "hidden_size": 0 })),
+            None
+        );
+        assert_eq!(
+            embedding_dimension_from_config(&serde_json::json!({ "embedding_dimension": 65_537 })),
+            None
+        );
+    }
+
+    #[test]
     fn parse_model_card_basic() {
         let json = serde_json::json!({
             "id": "unsloth/Llama-3-8B-GGUF",
@@ -758,5 +819,26 @@ mod tests {
         });
         let card = parse_model_card(&json).expect("should parse");
         assert!(card.gated, "gated: 'auto' should be treated as gated=true");
+    }
+
+    #[test]
+    fn gguf_discovery_regex_covers_pinned_quantization_families() {
+        let re = regex::Regex::new(GGUF_QUANT_PATTERN).unwrap();
+        for (filename, expected) in [
+            ("model-Q4_K_M.gguf", "Q4_K_M"),
+            ("model-IQ2_XXS.gguf", "IQ2_XXS"),
+            ("model-TQ1_0.gguf", "TQ1_0"),
+            ("model-MXFP4_MOE.gguf", "MXFP4_MOE"),
+            ("model-NVFP4.gguf", "NVFP4"),
+            ("model-UD-Q8_K_XL.gguf", "UD-Q8_K_XL"),
+            ("model-BF16.gguf", "BF16"),
+        ] {
+            let quant = re
+                .captures(filename)
+                .and_then(|captures| captures.get(1))
+                .map(|value| value.as_str().to_uppercase());
+            assert_eq!(quant.as_deref(), Some(expected));
+        }
+        assert!(!re.is_match("model-unknown.gguf"));
     }
 }

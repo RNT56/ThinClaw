@@ -4,7 +4,8 @@ import {
     Activity, Trash2, Pause, Play, Filter, Search,
     Zap, MessageSquare, Wrench, AlertTriangle, Eye
 } from 'lucide-react';
-import { listen } from '@tauri-apps/api/event';
+import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
+import type { UiEvent } from '../../lib/bindings';
 
 interface EventEntry {
     id: string;
@@ -12,7 +13,7 @@ interface EventEntry {
     kind: string;
     session_key?: string;
     run_id?: string;
-    raw: any;
+    raw: UiEvent;
 }
 
 const KIND_CONFIG: Record<string, { icon: typeof Activity; color: string }> = {
@@ -21,6 +22,7 @@ const KIND_CONFIG: Record<string, { icon: typeof Activity; color: string }> = {
     'ToolCall': { icon: Wrench, color: 'text-muted-foreground' },
     'ToolResult': { icon: Wrench, color: 'text-primary' },
     'StatusUpdate': { icon: Activity, color: 'text-primary' },
+    'ObserverRecord': { icon: Activity, color: 'text-cyan-400' },
     'Error': { icon: AlertTriangle, color: 'text-red-400' },
     'CanvasUpdate': { icon: Zap, color: 'text-primary' },
 };
@@ -40,28 +42,24 @@ export function ThinClawEventInspector() {
     // Keep ref in sync
     useEffect(() => { pausedRef.current = paused; }, [paused]);
 
-    // Listen for events
-    useEffect(() => {
-        const unlistenPromise = listen<any>('thinclaw-event', (event) => {
-            if (pausedRef.current) return;
-            const payload = event.payload;
-            const entry: EventEntry = {
-                id: `evt-${nextId++}`,
-                timestamp: new Date(),
-                kind: payload?.kind || 'Unknown',
-                session_key: payload?.session_key,
-                run_id: payload?.run_id,
-                raw: payload,
-            };
-            setEvents(prev => {
-                const next = [...prev, entry];
-                if (next.length > 500) return next.slice(-500);
-                return next;
-            });
+    useThinClawEvents((payload) => {
+        if (pausedRef.current) return;
+        const sessionKey = 'session_key' in payload ? payload.session_key : undefined;
+        const runId = 'run_id' in payload ? payload.run_id ?? undefined : undefined;
+        const entry: EventEntry = {
+            id: `evt-${nextId++}`,
+            timestamp: new Date(),
+            kind: payload.kind,
+            session_key: sessionKey ?? undefined,
+            run_id: runId,
+            raw: payload,
+        };
+        setEvents(prev => {
+            const next = [...prev, entry];
+            if (next.length > 500) return next.slice(-500);
+            return next;
         });
-
-        return () => { unlistenPromise.then(u => u()); };
-    }, []);
+    });
 
     // Auto-scroll
     useEffect(() => {

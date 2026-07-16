@@ -55,6 +55,7 @@ npm run tauri:dev:llamacpp
 - **[Remote Gateway Route Matrix](documentation/remote-gateway-route-matrix.md)**: local/remote command behavior and unavailable-response rules.
 - **[Environment Requirements](documentation/env-requirements.md)**: required toolchains, env vars, and final gate commands.
 - **[Secrets Policy](documentation/secrets-policy.md)**: ThinClaw key naming, grants, legacy fallback, and remote secrecy rules.
+- **[RAG And Embedding Compatibility](documentation/rag-inference-compatibility.md)**: provider defaults, live dimension migration, retrieval failure modes, and verified reranker artifacts.
 - **[Manual Smoke Checklist](documentation/manual-smoke-checklist.md)**: repeatable local and remote release smoke.
 - **[External Release Prerequisites](documentation/external-release-prerequisites.md)**: release-operator inputs that must stay gated or documented.
 

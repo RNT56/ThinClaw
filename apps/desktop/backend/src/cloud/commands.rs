@@ -100,7 +100,7 @@ pub struct OAuthStartResult {
 #[specta::specta]
 pub async fn cloud_get_status(
     cloud: State<'_, CloudManager>,
-) -> Result<CloudStatusResponse, String> {
+) -> Result<CloudStatusResponse, crate::thinclaw::bridge::BridgeError> {
     Ok(cloud.get_status().await.into())
 }
 
@@ -111,7 +111,7 @@ pub async fn cloud_test_connection(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
     config: S3ConfigInput,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     let provider_config = CloudProviderConfig {
         provider_type: "s3".to_string(),
         endpoint: config.endpoint,
@@ -133,7 +133,7 @@ pub async fn cloud_test_connection(
 pub async fn cloud_test_icloud(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     let provider_config = CloudProviderConfig {
         provider_type: "icloud".to_string(),
         endpoint: None,
@@ -154,7 +154,7 @@ pub async fn cloud_test_webdav(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
     config: WebDavConfigInput,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     let provider_config = CloudProviderConfig {
         provider_type: "webdav".to_string(),
         endpoint: Some(config.endpoint),
@@ -175,7 +175,7 @@ pub async fn cloud_test_sftp(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
     config: SftpConfigInput,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     let provider_config = CloudProviderConfig {
         provider_type: "sftp".to_string(),
         endpoint: Some(config.endpoint),
@@ -198,7 +198,9 @@ pub async fn cloud_test_sftp(
 /// 3. Pass the received `code` + `code_verifier` to `cloud_oauth_complete()`
 #[tauri::command]
 #[specta::specta]
-pub async fn cloud_oauth_start(provider: String) -> Result<OAuthStartResult, String> {
+pub async fn cloud_oauth_start(
+    provider: String,
+) -> Result<OAuthStartResult, crate::thinclaw::bridge::BridgeError> {
     use super::oauth::{OAuthConfig, OAuthManager};
 
     let client_id = match provider.as_str() {
@@ -208,7 +210,7 @@ pub async fn cloud_oauth_start(provider: String) -> Result<OAuthStartResult, Str
             .unwrap_or_else(|_| "thinclaw_desktop_app".to_string()),
         "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
             .unwrap_or_else(|_| "thinclaw-desktop-app".to_string()),
-        other => return Err(format!("OAuth not supported for provider: {}", other)),
+        other => return Err((format!("OAuth not supported for provider: {}", other)).into()),
     };
 
     let config = match provider.as_str() {
@@ -240,7 +242,7 @@ pub async fn cloud_oauth_complete(
     provider: String,
     code: String,
     code_verifier: String,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     use super::oauth::{OAuthConfig, OAuthManager};
     use super::provider::CloudProvider;
 
@@ -251,7 +253,7 @@ pub async fn cloud_oauth_complete(
             .unwrap_or_else(|_| "thinclaw_desktop_app".to_string()),
         "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
             .unwrap_or_else(|_| "thinclaw-desktop-app".to_string()),
-        other => return Err(format!("OAuth not supported for provider: {}", other)),
+        other => return Err((format!("OAuth not supported for provider: {}", other)).into()),
     };
 
     let config = match provider.as_str() {
@@ -330,7 +332,7 @@ pub async fn cloud_migrate_to_cloud(
     cloud: State<'_, CloudManager>,
     app: tauri::AppHandle,
     db: State<'_, sqlx::SqlitePool>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     use tauri::Manager;
 
     info!("[cloud] Frontend requested: migrate to cloud");
@@ -349,10 +351,11 @@ pub async fn cloud_migrate_to_cloud(
                 "[cloud] Migration succeeded but live sync failed to start: {}",
                 e
             );
-            return Err(format!(
+            return Err((format!(
                 "Migrated to cloud, but live sync failed to start: {}. Restart the app to retry.",
                 e
-            ));
+            ))
+            .into());
         }
     }
 
@@ -366,7 +369,7 @@ pub async fn cloud_migrate_to_local(
     cloud: State<'_, CloudManager>,
     app: tauri::AppHandle,
     db: State<'_, sqlx::SqlitePool>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     use tauri::Manager;
 
     info!("[cloud] Frontend requested: migrate to local");
@@ -385,15 +388,19 @@ pub async fn cloud_migrate_to_local(
 /// Cancel an in-progress migration.
 #[tauri::command]
 #[specta::specta]
-pub async fn cloud_cancel_migration(cloud: State<'_, CloudManager>) -> Result<(), String> {
-    cloud.cancel_migration().await
+pub async fn cloud_cancel_migration(
+    cloud: State<'_, CloudManager>,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    Ok(cloud.cancel_migration().await?)
 }
 
 /// Get the recovery key (base64-encoded master encryption key).
 #[tauri::command]
 #[specta::specta]
-pub async fn cloud_get_recovery_key(cloud: State<'_, CloudManager>) -> Result<String, String> {
-    cloud.get_recovery_key().await
+pub async fn cloud_get_recovery_key(
+    cloud: State<'_, CloudManager>,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    Ok(cloud.get_recovery_key().await?)
 }
 
 /// Import a recovery key (for restoring on a new device).
@@ -402,8 +409,8 @@ pub async fn cloud_get_recovery_key(cloud: State<'_, CloudManager>) -> Result<St
 pub async fn cloud_import_recovery_key(
     cloud: State<'_, CloudManager>,
     recovery_key: String,
-) -> Result<(), String> {
-    cloud.import_recovery_key(&recovery_key).await
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    Ok(cloud.import_recovery_key(&recovery_key).await?)
 }
 
 /// Get storage breakdown by category (for the progress bar UI).
@@ -411,9 +418,12 @@ pub async fn cloud_import_recovery_key(
 #[specta::specta]
 pub async fn cloud_get_storage_breakdown(
     app: tauri::AppHandle,
-) -> Result<Vec<StorageCategory>, String> {
+) -> Result<Vec<StorageCategory>, crate::thinclaw::bridge::BridgeError> {
     use tauri::Manager;
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let categories = vec![
         ("generated", "Generated Images", "generated/"),
@@ -477,7 +487,7 @@ async fn test_provider(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
     config: CloudProviderConfig,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     match cloud.configure_provider(config).await {
         Ok(status) => {
             if let Some(config) = cloud.provider_config().await {
@@ -504,7 +514,7 @@ async fn test_provider(
 async fn persist_provider_config(
     db: &sqlx::SqlitePool,
     config: &CloudProviderConfig,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     super::save_provider_credentials(config)?;
     let config_json = provider_config_json_for_persistence(config)?;
     sqlx::query("INSERT OR REPLACE INTO cloud_config (key, value) VALUES ('provider_config', ?)")
@@ -515,9 +525,11 @@ async fn persist_provider_config(
     Ok(())
 }
 
-fn provider_config_json_for_persistence(config: &CloudProviderConfig) -> Result<String, String> {
-    serde_json::to_string(&config.sanitized_for_persistence())
-        .map_err(|e| format!("Failed to serialize provider config: {}", e))
+fn provider_config_json_for_persistence(
+    config: &CloudProviderConfig,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    Ok(serde_json::to_string(&config.sanitized_for_persistence())
+        .map_err(|e| format!("Failed to serialize provider config: {}", e))?)
 }
 
 /// Recursively calculate directory size.

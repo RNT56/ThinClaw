@@ -767,12 +767,13 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_oauth_refresh_config_builtin_google() {
+    fn test_resolve_oauth_refresh_config_requires_google_credentials() {
         use crate::wasm::capabilities_schema::{
             AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema,
         };
 
-        // google_oauth_token should fall back to built-in credentials
+        // Google OAuth has no committed fallback credentials. A distributor
+        // may still inject a dedicated client at compile time.
         let caps = CapabilitiesFile {
             auth: Some(AuthCapabilitySchema {
                 secret_name: "google_oauth_token".to_string(),
@@ -780,7 +781,7 @@ mod tests {
                 oauth: Some(OAuthConfigSchema {
                     authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                     token_url: "https://oauth2.googleapis.com/token".to_string(),
-                    // No inline client_id, should fall back to builtin
+                    // No inline client_id; only a compile-time value can resolve it.
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -789,9 +790,9 @@ mod tests {
         };
 
         let config = crate::wasm::resolve_oauth_refresh_config(&caps);
-        assert!(config.is_some());
-        let config = config.unwrap();
-        assert!(!config.client_id.is_empty());
-        assert!(config.client_secret.is_some());
+        let compile_credentials_present = option_env!("THINCLAW_GOOGLE_CLIENT_ID")
+            .is_some_and(|value| !value.is_empty())
+            && option_env!("THINCLAW_GOOGLE_CLIENT_SECRET").is_some_and(|value| !value.is_empty());
+        assert_eq!(config.is_some(), compile_credentials_present);
     }
 }

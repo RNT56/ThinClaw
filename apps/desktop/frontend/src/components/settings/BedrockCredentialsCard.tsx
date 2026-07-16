@@ -3,6 +3,7 @@ import { commands, type ThinClawStatus } from '../../lib/bindings';
 import { Eye, EyeOff, Save, Bot, Loader2, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
+import { reloadSecrets } from '../../lib/thinclaw';
 
 export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
     status: ThinClawStatus | null;
@@ -44,6 +45,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
             const res = await commands.thinclawSaveBedrockCredentials(accessKeyId, secretAccessKey, region);
             if (res.status === 'ok') {
                 await loadStatus();
+                await reloadSecrets().catch(() => { /* engine may be stopped */ });
                 toast.success('Bedrock credentials saved');
             } else {
                 toast.error('Failed to save Bedrock credentials');
@@ -63,6 +65,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
                 setRegion('us-east-1');
                 setShowConfirm(false);
                 await loadStatus();
+                await reloadSecrets().catch(() => { /* engine may be stopped */ });
                 toast.success('Bedrock credentials deleted');
             } else {
                 toast.error('Failed to delete Bedrock credentials');

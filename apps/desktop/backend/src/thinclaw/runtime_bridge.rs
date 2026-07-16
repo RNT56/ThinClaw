@@ -22,6 +22,32 @@ use thinclaw_core::llm::LlmRuntimeManager;
 use super::tool_bridge::TauriToolBridge;
 use super::ui_types::UiEvent;
 
+#[derive(Debug, Clone)]
+pub(crate) struct LocalToolSecurityEvidence {
+    pub name: String,
+    pub side_effect: String,
+    pub approval_class: String,
+    pub empty_params_requirement: String,
+    pub sanitizes_output: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalSandboxSecurityEvidence {
+    pub enabled: bool,
+    pub policy: String,
+    pub network_allowlist: Vec<String>,
+    pub timeout_secs: u64,
+    pub memory_limit_mb: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalSecurityRuntimeEvidence {
+    pub telemetry: thinclaw_core::safety::SafetyTelemetrySnapshot,
+    pub sandbox: LocalSandboxSecurityEvidence,
+    pub tools: Vec<LocalToolSecurityEvidence>,
+}
+
 /// Inner state: only present when the engine is running.
 pub(crate) struct ThinClawRuntimeInner {
     /// The running agent instance.
@@ -41,7 +67,7 @@ pub(crate) struct ThinClawRuntimeInner {
     /// Used to fire event-triggered routines on each message (parity with run() loop).
     pub routine_engine: Option<Arc<thinclaw_core::agent::routine_engine::RoutineEngine>>,
 
-    // ── Sprint 13: Backend service objects for tauri_commands facade ────
+    // ── Sprint 13: Backend service objects for the Desktop service API ──
     /// LLM cost tracker — **same Arc** that `AgentDeps.cost_tracker` uses,
     /// so every LLM call in the dispatcher records costs here.
     pub cost_tracker: Arc<TokioMutex<CostTracker>>,
@@ -59,6 +85,8 @@ pub(crate) struct ThinClawRuntimeInner {
     pub oauth_credential_sync: Option<thinclaw_core::llm::OAuthCredentialSyncHandle>,
     /// LLM runtime manager used for provider routing, advisor state, and route simulation.
     pub llm_runtime: Arc<LlmRuntimeManager>,
+    /// Effective sandbox configuration captured at runtime assembly.
+    pub sandbox_config: thinclaw_core::config::SandboxModeConfig,
     /// Desktop-local auxiliary tasks tied to the embedded engine lifecycle.
     pub auxiliary_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -161,6 +189,78 @@ impl ThinClawRuntimeState {
         }
     }
 
+    /// Read the active local runtime's safety evidence without exposing raw
+    /// prompts, tool parameters, outputs, or secrets.
+    pub(crate) async fn local_security_evidence(&self) -> Option<LocalSecurityRuntimeEvidence> {
+        use thinclaw_core::tools::{ApprovalRequirement, ToolApprovalClass, ToolSideEffectLevel};
+
+        let (agent, sandbox_config) = {
+            let guard = self.inner.read().await;
+            let inner = guard.as_ref()?;
+            (Arc::clone(&inner.agent), inner.sandbox_config.clone())
+        };
+        let sandbox = sandbox_config.to_sandbox_config();
+        let mut tools = Vec::new();
+        for tool in agent.tools().all().await {
+            let descriptor = tool.descriptor();
+            let approval_class = match descriptor.metadata.approval_class {
+                ToolApprovalClass::Never => "never",
+                ToolApprovalClass::Conditional => "conditional",
+                ToolApprovalClass::Always => "always",
+            };
+            let side_effect = match descriptor.metadata.side_effect_level {
+                ToolSideEffectLevel::Read => "read",
+                ToolSideEffectLevel::Write => "write",
+            };
+            let empty_params_requirement = match tool.requires_approval(&serde_json::json!({})) {
+                ApprovalRequirement::Never => "never",
+                ApprovalRequirement::UnlessAutoApproved => "unless_auto_approved",
+                ApprovalRequirement::Always => "always",
+            };
+            let reason = match (descriptor.metadata.side_effect_level, descriptor.metadata.approval_class) {
+                (_, ToolApprovalClass::Always) => {
+                    "Every invocation requires explicit human approval.".to_string()
+                }
+                (ToolSideEffectLevel::Write, ToolApprovalClass::Conditional) => {
+                    "Write-capable tool; approval is decided from the concrete operation and parameters."
+                        .to_string()
+                }
+                (ToolSideEffectLevel::Write, ToolApprovalClass::Never) => {
+                    "Write-capable tool with no coarse approval requirement; sandbox and runtime validators remain authoritative."
+                        .to_string()
+                }
+                (ToolSideEffectLevel::Read, ToolApprovalClass::Conditional) => {
+                    "Read-oriented tool that may require approval for sensitive targets or credentials."
+                        .to_string()
+                }
+                (ToolSideEffectLevel::Read, ToolApprovalClass::Never) => {
+                    "Read-only metadata class with no approval requirement.".to_string()
+                }
+            };
+            tools.push(LocalToolSecurityEvidence {
+                name: descriptor.name,
+                side_effect: side_effect.to_string(),
+                approval_class: approval_class.to_string(),
+                empty_params_requirement: empty_params_requirement.to_string(),
+                sanitizes_output: tool.requires_sanitization(),
+                reason,
+            });
+        }
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+
+        Some(LocalSecurityRuntimeEvidence {
+            telemetry: agent.safety_telemetry_snapshot(),
+            sandbox: LocalSandboxSecurityEvidence {
+                enabled: sandbox.enabled,
+                policy: sandbox_config.policy,
+                network_allowlist: sandbox.network_allowlist,
+                timeout_secs: sandbox_config.timeout_secs,
+                memory_limit_mb: sandbox_config.memory_limit_mb,
+            },
+            tools,
+        })
+    }
+
     /// Get a reference to the Tauri AppHandle.
     pub fn app_handle(&self) -> &tauri::AppHandle<tauri::Wry> {
         &self.app_handle
@@ -201,8 +301,8 @@ impl ThinClawRuntimeState {
         //     to run BOOT.md tasks or greet the user proactively
         //
         // Uses `handle_message_external()` — the same path as send_message —
-        // because `agent.run()` is never called in Tauri mode (there's no
-        // channel message loop). The inject_tx stream is not consumed.
+        // because boot injection needs its result immediately. The embedded
+        // channel loop separately consumes Tauri/gateway/injected messages.
         {
             let (agent_opt, boot_md_content) = {
                 let guard = self.inner.read().await;
@@ -438,6 +538,15 @@ impl ThinClawRuntimeState {
     /// If already stopped, this is a no-op.
     /// Returns `true` if the engine was stopped, `false` if already stopped.
     pub async fn stop(&self) -> bool {
+        // Remove any Tailscale exposure before tearing down the authenticated
+        // loopback gateway. This also covers local→remote profile switches.
+        use tauri::Manager as _;
+        if let Some(remote_access) =
+            self.app_handle
+                .try_state::<crate::thinclaw::remote_access::RemoteAccessState>()
+        {
+            remote_access.shutdown().await;
+        }
         let inner = self.inner.write().await.take();
         if let Some(inner) = inner {
             // Shutdown background tasks
@@ -568,7 +677,7 @@ impl ThinClawRuntimeState {
             .ok_or_else(|| "ThinClaw runtime is not running".to_string())
     }
 
-    // ── Sprint 13: Backend service accessors for tauri_commands ─────────
+    // ── Sprint 13: Backend service accessors for desktop_api ────────────
 
     /// Get the cost tracker, or error if engine is stopped.
     pub async fn cost_tracker(&self) -> Result<Arc<TokioMutex<CostTracker>>, String> {

@@ -1,12 +1,13 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { ModelFile, SystemSpecs, commands, StandardAsset, EngineInfo, LocalRuntimeSnapshot } from "../lib/bindings";
 import { directCommands } from "../lib/generated/direct-commands";
+import { commandClient } from "../lib/command-client";
 import { unwrapResult } from "../lib/guards";
 import { getMigratedLocalStorageItem, isOnboardingInProgress, setMigratedLocalStorageItem } from "../lib/local-storage-migration";
+import { bridgeErrorMessage } from "../lib/command-errors";
 
 import { MODEL_LIBRARY, ExtendedModelDefinition as ModelDefinition, ModelVariant } from "../lib/model-library";
 
@@ -199,7 +200,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const checkStandardAssets = useCallback(async () => {
         try {
             const result = await commands.checkMissingStandardAssets();
-            if (result.status === "error") throw new Error(result.error);
+            if (result.status === "error") throw new Error(bridgeErrorMessage(result.error));
             setStandardAssets(result.data);
         } catch (e) {
             console.error(e);
@@ -208,11 +209,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
     useEffect(() => {
         appDataDir().then(dir => {
-            invoke("get_models_dir").then((_d: any) => {
-                setModelsDir(`${dir}/models`);
-            }).catch(() => {
-                setModelsDir(`${dir}/models`);
-            });
+            setModelsDir(`${dir}/models`);
         });
     }, []);
 
@@ -312,7 +309,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const refreshModels = useCallback(async () => {
         setIsRefreshing(true);
         try {
-            const models = await invoke<ModelFile[]>("list_models");
+            const models = await commandClient.listModels();
             setLocalModels(models);
             return models;
         } catch (e) {
@@ -376,7 +373,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                     if (downloadPctBufferRef.current[compFullPath] === undefined) {
                         console.log(`Starting component download: ${comp.filename} -> ${compFullPath}`);
                         setDownloading(prev => ({ ...prev, [compFullPath]: 0 }));
-                        invoke("download_model", { url: comp.url, filename: compFullPath }).catch(e => {
+                        commandClient.downloadModel(comp.url, compFullPath).catch(e => {
                             console.error(`Component download failed: ${comp.filename}`, e);
                             setDownloading(prev => {
                                 const c = { ...prev };
@@ -393,7 +390,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                 const projFullPath = getTargetPath(model.mmproj.filename);
                 if (downloadPctBufferRef.current[projFullPath] === undefined) {
                     setDownloading(prev => ({ ...prev, [projFullPath]: 0 }));
-                    invoke("download_model", { url: model.mmproj.url, filename: projFullPath }).catch(e => {
+                    commandClient.downloadModel(model.mmproj.url, projFullPath).catch(e => {
                         console.error("Projector download failed", e);
                         setDownloading(prev => {
                             const c = { ...prev };
@@ -404,7 +401,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                 }
             }
 
-            await invoke("download_model", { url: v.url, filename: mainFullPath });
+            await commandClient.downloadModel(v.url, mainFullPath);
         } catch (e) {
             console.error("Download failed to start:", e);
             toast.error(`Failed to start download: ${e}`);
@@ -605,9 +602,9 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
     const cancelDownload = useCallback(async (filename: string) => {
         try {
-            await invoke("cancel_download", { filename });
+            await commandClient.cancelDownload(filename);
             // Also try cancelling potential mmproj
-            await invoke("cancel_download", { filename: `${filename}.mmproj` });
+            await commandClient.cancelDownload(`${filename}.mmproj`);
             toast.info("Download cancelled");
         } catch (e) {
             console.warn("Backend cancel failed (task might be finished):", e);
@@ -623,7 +620,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
     const deleteModel = useCallback(async (filename: string) => {
         try {
-            await invoke("delete_local_model", { filename });
+            await commandClient.deleteLocalModel(filename);
             toast.success("Model deleted");
             await refreshModels();
         } catch (e) {

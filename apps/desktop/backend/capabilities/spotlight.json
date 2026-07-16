@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "spotlight",
+  "description": "Minimal window/event capability for Spotlight Chat",
+  "windows": [
+    "spotlight"
+  ],
+  "permissions": [
+    "core:event:default",
+    "core:window:default"
+  ]
+}

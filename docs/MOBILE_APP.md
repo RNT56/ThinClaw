@@ -52,8 +52,8 @@ document generated **from the Rust source** (utoipa annotations behind the
 `thinclaw-gateway` crate's `openapi` feature):
 
 - Committed snapshot: `clients/openapi/thinclaw-gateway.openapi.json`
-- Regenerate: `cargo run --bin export-openapi -- generate`
-- CI drift gate: `cargo run --bin export-openapi -- check`
+- Regenerate: `cargo run --example export-openapi -- generate`
+- CI drift gate: `cargo run --example export-openapi -- check`
 - Served live at `GET /api/openapi.json` (authenticated)
 - Swift client: generated with Apple's `swift-openapi-generator` by
   `apps/ios/scripts/generate-api.sh`; generated code is **committed** (iOS CI

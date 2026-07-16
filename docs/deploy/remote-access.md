@@ -14,6 +14,21 @@ service/headless runtime, generates `GATEWAY_AUTH_TOKEN` when missing, and
 prints access instructions. It ships inside the normal `thinclaw` binary from
 GitHub Releases; there is no separate remote binary.
 
+### ThinClaw Desktop host
+
+When Local Core is running, ThinClaw Desktop mounts the same authenticated root
+gateway on a loopback-only free port. Open **Agent Cockpit → System → Remote
+Access** to inspect gateway/Tailscale readiness and start either:
+
+- **Tailnet only** — Tailscale Serve; the default and recommended mode.
+- **Public Funnel** — an internet-reachable HTTPS endpoint for callbacks; the
+  panel requires an explicit confirmation on every start.
+
+Desktop does not accept or store a Tailscale auth key. Install Tailscale and sign
+in through Tailscale itself. Gateway bearer authentication remains mandatory,
+and the credential stays in Desktop's Gateway settings. When Desktop is connected
+to a remote ThinClaw profile, exposure must be configured on that remote host.
+
 ## Prerequisites By Access Pattern
 
 | Access Pattern | Required | Not Required |

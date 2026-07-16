@@ -30,6 +30,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { SettingsPage } from '../settings/SettingsSidebar';
 import { findStyle, STYLE_LIBRARY } from '../../lib/style-library';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -125,6 +126,9 @@ export interface ChatLayoutState {
     activeTab: ActiveTab;
     setActiveTab: (v: ActiveTab) => void;
     appMode: AppMode;
+    commandPaletteOpen: boolean;
+    setCommandPaletteOpen: (open: boolean) => void;
+    openCommandPalette: () => void;
     isSettingsMode: boolean;
     isThinClawMode: boolean;
     isImagineMode: boolean;
@@ -280,10 +284,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const [showImageSettings, setShowImageSettings] = useState(false);
 
     const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
+    const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
     const isSettingsMode = activeTab !== 'chat' && activeTab !== 'thinclaw' && activeTab !== 'imagine';
     const isThinClawMode = activeTab === 'thinclaw';
     const isImagineMode = activeTab === 'imagine';
     const appMode: AppMode = isSettingsMode ? 'settings' : (activeTab as AppMode);
+    const openCommandPalette = useCallback(() => setCommandPaletteOpen(true), []);
 
     // Imagine
     const [activeImagineTab, setActiveImagineTab] = useState<ImagineTab>('generate');
@@ -421,14 +427,26 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         };
     }, []);
 
-    // Escape key exits settings
+    // Global shell shortcuts: command palette and direct product-mode switching.
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape' && isSettingsMode) setActiveTab('chat');
+            const modifier = e.metaKey || e.ctrlKey;
+            if (modifier && e.key.toLowerCase() === 'k') {
+                e.preventDefault();
+                setCommandPaletteOpen((open) => !open);
+                return;
+            }
+            if (modifier && ['1', '2', '3'].includes(e.key)) {
+                e.preventDefault();
+                setCommandPaletteOpen(false);
+                setActiveTab(e.key === '1' ? 'chat' : e.key === '2' ? 'thinclaw' : 'imagine');
+                return;
+            }
+            if (e.key === 'Escape' && isSettingsMode && !commandPaletteOpen) setActiveTab('chat');
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isSettingsMode]);
+    }, [commandPaletteOpen, isSettingsMode]);
 
     // Update selected project when conversation changes
     useEffect(() => {
@@ -544,7 +562,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             const tId = toast.loading('Starting Image Engine...');
             try {
                 const res = await directCommands.directRuntimeStartImageServer(modelPathToUse);
-                if (res.status !== 'ok') throw new Error(res.error);
+                if (res.status !== 'ok') throw new Error(bridgeErrorMessage(res.error));
                 await new Promise(r => setTimeout(r, 4000));
                 toast.success('Image Engine Ready', { id: tId });
             } catch (e) {
@@ -684,7 +702,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                         setAttachedImages(prev => [...prev, res.data]);
                         toast.success('Image attached', { id: toastId });
                     } else {
-                        throw new Error(res.error);
+                        throw new Error(bridgeErrorMessage(res.error));
                     }
                 } catch (e) {
                     console.error('Failed to upload image:', e);
@@ -706,7 +724,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                         toast.success('added to knowledge base', { id: toastId, description: file.name });
                         setIngestedFiles(prev => [...prev, { id: docId, name: file.name, assetRef: { namespace: 'direct_workbench', id: docId } }]);
                     } else {
-                        throw new Error(res.error);
+                        throw new Error(bridgeErrorMessage(res.error));
                     }
                 } catch (e) {
                     console.error('Failed to upload/ingest document:', e);
@@ -761,7 +779,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     const tId = toast.loading('Starting STT Engine...');
                     try {
                         const res = await directCommands.directRuntimeStartSttServer(currentSttModelPath);
-                        if (res.status !== 'ok') throw new Error(res.error);
+                        if (res.status !== 'ok') throw new Error(bridgeErrorMessage(res.error));
                         await new Promise(r => setTimeout(r, 2000));
                         toast.success('STT Engine Ready', { id: tId });
                     } catch (e) {
@@ -788,7 +806,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     setInput(prev => (prev ? prev + ' ' + res.data.text : res.data.text));
                     toast.success('Transcribed', { id: toastId });
                 } else {
-                    throw new Error(res.error);
+                    throw new Error(bridgeErrorMessage(res.error));
                 }
             } catch (e) {
                 console.error(e);
@@ -917,7 +935,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         isWebSearchEnabled, setIsWebSearchEnabled, imageSteps, setImageSteps,
         showImageSettings, setShowImageSettings,
         // mode
-        activeTab, setActiveTab, appMode, isSettingsMode, isThinClawMode, isImagineMode,
+        activeTab, setActiveTab, appMode, commandPaletteOpen, setCommandPaletteOpen,
+        openCommandPalette, isSettingsMode, isThinClawMode, isImagineMode,
         // imagine
         activeImagineTab, setActiveImagineTab, imagineGenerating, generationProgress,
         lastGeneratedImage, setLastGeneratedImage,

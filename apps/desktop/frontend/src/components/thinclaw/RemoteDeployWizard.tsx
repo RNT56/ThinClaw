@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
+import { commandClient } from '../../lib/command-client';
 import { listen } from '@tauri-apps/api/event';
 import { Server, CheckCircle, AlertCircle, Loader2, Zap, Copy } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
@@ -12,10 +12,10 @@ interface RemoteDeployWizardProps {
 }
 
 interface DeployResult {
-    status: 'success' | 'timeout' | 'failed';
+    status: string;
     url: string;
     token: string;
-    message?: string;
+    message?: string | null;
 }
 
 /** Normalise a user-typed URL/IP into a clean http://host:port URL */
@@ -30,11 +30,11 @@ function normaliseHttpUrl(raw: string): string {
         url = `http://${url}`;
     }
 
-    // If no port, add default 18789
+    // ThinClaw's HTTP gateway defaults to port 3000.
     const withoutProto = url.replace(/^https?:\/\//, '');
     const hostPart = withoutProto.split('/')[0];
     if (!hostPart.includes(':')) {
-        url = url.replace(hostPart, `${hostPart}:18789`);
+        url = url.replace(hostPart, `${hostPart}:3000`);
     }
 
     return url;
@@ -74,36 +74,23 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             const unlistenLog = await listen<string>('deploy-log', (event) => {
                 setLogs((prev) => [...prev, event.payload]);
             });
-
-            const unlistenStatus = await listen<string>('deploy-status', (event) => {
-                unlistenLog();
-                unlistenStatus();
-
-                // New structured payload
-                try {
-                    const result: DeployResult = JSON.parse(event.payload);
-                    setDeployResult(result);
-                    if (result.status === 'success') {
-                        setStep('success');
-                    } else if (result.status === 'timeout') {
-                        setStep('timeout');
-                    } else {
-                        setErrorMsg(result.message || 'Deployment failed');
-                        setStep('error');
-                    }
-                } catch {
-                    // Legacy plain-text fallback
-                    if (event.payload === 'success') {
-                        setStep('success');
-                    } else {
-                        setErrorMsg(event.payload);
-                        setStep('error');
-                    }
+            try {
+                const result = await commandClient.thinclawDeployRemote(
+                    ip,
+                    user,
+                    tailscaleKey || null,
+                    enableSystemd,
+                );
+                setDeployResult(result);
+                if (result.status === 'success') {
+                    setStep('success');
+                } else {
+                    setErrorMsg(result.message || 'Deployment health check timed out');
+                    setStep('timeout');
                 }
-            });
-
-            await thinclawCommands.thinclawDeployRemote(ip, user, tailscaleKey || null, enableSystemd);
-
+            } finally {
+                unlistenLog();
+            }
         } catch (e: any) {
             setErrorMsg(typeof e === 'string' ? e : e.message);
             setStep('error');
@@ -126,7 +113,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await thinclawCommands.thinclawSaveGatewaySettings('remote', deployResult.url, deployResult.token || '');
+            await commandClient.thinclawSaveGatewaySettings('remote', deployResult.url, deployResult.token || '');
 
             toast.success('Remote agent saved! Connecting...');
             onCheckStatus?.();
@@ -148,7 +135,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
         // Test connection first
         setTestLoading(true);
         try {
-            const ok = await thinclawCommands.thinclawTestConnection(url, existingToken || null);
+            const ok = await commandClient.thinclawTestConnection(url, existingToken || null);
             if (!ok) {
                 toast.error('Cannot connect — server unreachable or auth failed');
                 setTestLoading(false);
@@ -174,7 +161,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await thinclawCommands.thinclawSaveGatewaySettings('remote', url, existingToken || '');
+            await commandClient.thinclawSaveGatewaySettings('remote', url, existingToken || '');
 
             toast.success('Connected to remote agent');
             onCheckStatus?.();
@@ -271,8 +258,9 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                         <div className="space-y-2">
                                             <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-muted-foreground/60">(optional)</span></label>
                                             <input
-                                                type="text"
+                                                type="password"
                                                 id="deploy-tailscale"
+                                                autoComplete="off"
                                                 className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                 placeholder="tskey-auth-..."
                                                 value={tailscaleKey}
@@ -281,7 +269,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                             <p className="text-[10px] text-muted-foreground font-medium">
                                                 If provided, Tailscale VPN will be installed for encrypted private access. Get a key from
                                                 <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener" className="text-primary ml-1 hover:underline">Tailscale Admin</a>.
-                                                Port 18789 will be restricted to Tailscale only.
+                                                Port 3000 will be restricted to Tailscale only.
                                             </p>
                                         </div>
 
@@ -312,13 +300,13 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                                 type="text"
                                                 id="connect-url"
                                                 className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-hidden transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
-                                                placeholder="192.168.1.50 or http://your-server.com:18789"
+                                                placeholder="192.168.1.50 or https://your-server.com:3000"
                                                 value={existingUrl}
                                                 onChange={(e) => setExistingUrl(e.target.value)}
                                             />
                                             <Server className="absolute left-3 top-3.5 w-4 h-4 text-muted-foreground" />
                                         </div>
-                                        <p className="text-[10px] text-muted-foreground font-medium">Port <code>18789</code> is added automatically if omitted.</p>
+                                        <p className="text-[10px] text-muted-foreground font-medium">Port <code>3000</code> is added automatically if omitted.</p>
                                     </div>
 
                                     <div className="space-y-2">

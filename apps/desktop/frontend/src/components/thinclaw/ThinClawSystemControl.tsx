@@ -16,10 +16,10 @@ import {
     Search,
     X
 } from 'lucide-react';
-import { listen } from '@tauri-apps/api/event';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
+import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
 
 interface LogLine {
     timestamp: string;
@@ -65,8 +65,8 @@ function LogRow({ entry, idx }: { entry: LogLine; idx: number }) {
 
 export function ThinClawSystemControl() {
     const [activeTab, setActiveTab] = useState<'config' | 'logs' | 'system'>('config');
+    const [settingsView, setSettingsView] = useState<'workbench' | 'agent'>('workbench');
     const [config, setConfig] = useState<any>(null);
-    const [snapshotHash, setSnapshotHash] = useState<string | null>(null);
     const [schema, setSchema] = useState<any>(null);
     const [logs, setLogs] = useState<LogLine[]>([]);
     const [filter, setFilter] = useState('');
@@ -96,13 +96,10 @@ export function ThinClawSystemControl() {
             ]);
             setStatus(s);
             if (c) {
-                if (c.config && typeof c.config === 'object') {
-                    setConfig(c.config);
-                    setSnapshotHash(c.hash || null);
-                } else {
-                    setConfig(c);
-                    setSnapshotHash(null);
-                }
+                setConfig({
+                    workbench: c.workbench && typeof c.workbench === 'object' ? c.workbench : {},
+                    agent: c.agent && typeof c.agent === 'object' ? c.agent : {},
+                });
             } else {
                 setConfig(null);
             }
@@ -131,30 +128,26 @@ export function ThinClawSystemControl() {
         fetchData();
     }, []);
 
-    // Live log streaming via Tauri events
+    // Load history while the live log subscription is active.
     useEffect(() => {
         if (activeTab !== 'logs') return;
-
         fetchLogHistory();
-
-        const unlistenPromise = listen<any>('thinclaw-event', (event) => {
-            const payload = event.payload;
-            if (payload?.kind === 'LogEntry') {
-                setIsLive(true);
-                appendLog({
-                    timestamp: payload.timestamp,
-                    level: payload.level,
-                    target: payload.target,
-                    message: payload.message,
-                });
-            }
-        });
-
         return () => {
-            unlistenPromise.then(fn => fn());
             setIsLive(false);
         };
-    }, [activeTab, appendLog, fetchLogHistory]);
+    }, [activeTab, fetchLogHistory]);
+
+    useThinClawEvents((payload) => {
+        if (payload.kind === 'LogEntry') {
+            setIsLive(true);
+            appendLog({
+                timestamp: payload.timestamp,
+                level: payload.level,
+                target: payload.target,
+                message: payload.message,
+            });
+        }
+    }, activeTab === 'logs');
 
     // Auto-scroll
     useEffect(() => {
@@ -174,19 +167,30 @@ export function ThinClawSystemControl() {
     const handleSaveConfig = async () => {
         setIsSaving(true);
         try {
-            await thinclaw.patchThinClawConfig({
-                raw: JSON.stringify(config),
-                baseHash: snapshotHash
-            });
+            await thinclaw.patchThinClawConfig(config);
             toast.success('Configuration saved and hot-reloaded');
             const c = await thinclaw.getThinClawConfig();
-            if (c && c.hash) setSnapshotHash(c.hash);
+            setConfig({ workbench: c.workbench ?? {}, agent: c.agent ?? {} });
         } catch (e) {
             toast.error(`Failed to save configuration: ${e}`);
         } finally {
             setIsSaving(false);
         }
     };
+
+    const activeSettings = config?.[settingsView] ?? {};
+    const updateSetting = (key: string, value: unknown) => {
+        setConfig((current: any) => ({
+            ...current,
+            [settingsView]: {
+                ...(current?.[settingsView] ?? {}),
+                [key]: value,
+            },
+        }));
+    };
+
+    const settingSchema = (key: string) =>
+        schema?.views?.[settingsView]?.schema?.properties?.[key];
 
     const handleUpdate = async () => {
         toast.promise(thinclaw.runThinClawUpdate(), {
@@ -273,9 +277,30 @@ export function ThinClawSystemControl() {
                             exit={{ opacity: 0, x: 20 }}
                             className="flex-1 flex flex-col overflow-hidden"
                         >
+                            <div className="mb-4 flex items-center justify-between gap-4 rounded-xl border border-border/40 bg-muted/10 p-2">
+                                <div className="flex items-center gap-1">
+                                    {(['workbench', 'agent'] as const).map((view) => (
+                                        <button
+                                            key={view}
+                                            onClick={() => setSettingsView(view)}
+                                            className={cn(
+                                                "rounded-lg px-3 py-2 text-[10px] font-bold uppercase tracking-widest transition-colors",
+                                                settingsView === view
+                                                    ? "bg-primary text-primary-foreground"
+                                                    : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                                            )}
+                                        >
+                                            {view === 'workbench' ? 'Direct Workbench' : 'Agent Cockpit'}
+                                        </button>
+                                    ))}
+                                </div>
+                                <p className="max-w-xl text-right text-[10px] text-muted-foreground">
+                                    {schema?.views?.[settingsView]?.description}
+                                </p>
+                            </div>
                             <div className="flex-1 overflow-y-auto pr-4 space-y-6 scrollbar-thin">
-                                {config && Object.keys(config).length > 0 ? (
-                                    Object.entries(config).map(([key, value]: [string, any]) => (
+                                {Object.keys(activeSettings).length > 0 ? (
+                                    Object.entries(activeSettings).map(([key, value]: [string, any]) => (
                                         <div key={key} className="space-y-2 p-4 rounded-xl bg-muted/10 border border-border/30">
                                             <div className="flex items-center justify-between">
                                                 <label className="text-xs font-bold uppercase tracking-wider text-primary/80">{key}</label>
@@ -287,7 +312,7 @@ export function ThinClawSystemControl() {
                                                     onChange={(e) => {
                                                         try {
                                                             const newVal = JSON.parse(e.target.value);
-                                                            setConfig({ ...config, [key]: newVal });
+                                                            updateSetting(key, newVal);
                                                         } catch { }
                                                     }}
                                                     className="w-full bg-muted/30 border border-border/40 rounded-lg p-3 text-xs font-mono text-foreground min-h-[100px] focus:border-primary/50 outline-hidden transition-colors"
@@ -295,7 +320,7 @@ export function ThinClawSystemControl() {
                                             ) : typeof value === 'boolean' ? (
                                                 <div className="flex items-center gap-2">
                                                     <button
-                                                        onClick={() => setConfig({ ...config, [key]: !value })}
+                                                        onClick={() => updateSetting(key, !value)}
                                                         className={cn(
                                                             "px-3 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
                                                             value ? "bg-green-500/20 text-green-500 border border-green-500/20" : "bg-red-500/20 text-red-500 border border-red-500/20"
@@ -308,20 +333,25 @@ export function ThinClawSystemControl() {
                                                 <input
                                                     type="text"
                                                     value={value}
-                                                    onChange={(e) => setConfig({ ...config, [key]: e.target.value })}
+                                                    onChange={(e) => updateSetting(
+                                                        key,
+                                                        typeof value === 'number'
+                                                            ? Number(e.target.value)
+                                                            : e.target.value
+                                                    )}
                                                     className="w-full bg-muted/30 border border-border/40 rounded-lg px-3 py-2 text-xs font-mono text-foreground focus:border-primary/50 outline-hidden transition-colors"
                                                 />
                                             )}
-                                            {schema?.[key]?.description && (
-                                                <p className="text-[10px] text-muted-foreground italic">{schema[key].description}</p>
+                                            {settingSchema(key)?.description && (
+                                                <p className="text-[10px] text-muted-foreground italic">{settingSchema(key).description}</p>
                                             )}
                                         </div>
                                     ))
                                 ) : (
                                     <div className="h-full flex flex-col items-center justify-center p-12 text-center opacity-40">
                                         <AlertTriangle className="w-8 h-8 mb-4" />
-                                        <p className="text-sm font-semibold uppercase tracking-widest">No Node Configuration</p>
-                                        <p className="text-xs mt-2 text-muted-foreground">The registry returned an empty configuration set.</p>
+                                        <p className="text-sm font-semibold uppercase tracking-widest">No {settingsView} settings</p>
+                                        <p className="text-xs mt-2 text-muted-foreground">This view has no persisted overrides yet.</p>
                                         <button
                                             onClick={() => { setIsLoading(true); fetchData(); }}
                                             className="mt-6 flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-primary hover:underline"
@@ -351,7 +381,7 @@ export function ThinClawSystemControl() {
                             initial={{ opacity: 0, scale: 0.98 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.98 }}
-                            className="flex-1 bg-zinc-950 dark:bg-[#040404] rounded-2xl border border-border/40 shadow-2xl flex flex-col overflow-hidden"
+                            className="flex-1 bg-surface-elevated rounded-2xl border border-border/40 shadow-2xl flex flex-col overflow-hidden"
                         >
                             {/* Toolbar */}
                             <div className="p-3 border-b border-border/30 bg-muted/10 flex items-center gap-3 flex-wrap">

@@ -38,7 +38,8 @@ utoipa = { version = "5", features = ["uuid"] }
 name = "thinclaw"
 version = "0.15.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.94"
+autobins = false
 description = "Secure personal agent that protects your data and expands its capabilities on the fly"
 authors = ["RNT56 (ThinClaw)"]
 license = "MIT OR Apache-2.0"
@@ -137,12 +138,12 @@ clap = { version = "4", features = ["derive", "env"] }
 # Terminal
 crossterm = "0.29"
 rustyline = { version = "18", features = ["custom-bindings", "derive", "with-file-history"] }
-termimad = "0.34"
+termimad = "0.35"
 
 # Channel integrations
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "set-header"] }
 
 # Cron scheduling for routines
 cron = "0.17"
@@ -152,14 +153,14 @@ regex = "1"
 aho-corasick = "1"
 unicode-normalization = "0.1"
 jsonschema = { version = "0.47", default-features = false }
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 
 # YAML parsing for SKILL.md frontmatter
 serde_yaml_ng = "0.10"
 
 # Filesystem paths
 dirs = "6"
-fs4 = "0.6"
+fs4 = "1.1"
 
 # Secrecy for sensitive values
 secrecy = { version = "0.10", features = ["serde"] }
@@ -176,9 +177,9 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "36.0.12", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
-wasmtime-wasi = { version = "36.0.12", optional = true }  # WASI support for component model
-wasmparser = { version = "0.220", optional = true }  # WASM binary parsing for validation
+wasmtime = { version = "46.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
+wasmtime-wasi = { version = "46.0.1", optional = true }  # WASI support for component model
+wasmparser = { version = "0.244", optional = true }  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes-gcm = "0.11"
@@ -210,7 +211,7 @@ base64 = "0.22.1"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.18.0"
-libloading = "0.8"
+libloading = "0.9"
 
 sysinfo = "0.38.2"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
@@ -236,7 +237,7 @@ qrcode = "0.14"
 
 # AWS Bedrock (native InvokeModel API for embeddings, opt-in via --features bedrock)
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
-aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-types = { version = "1", optional = true }
 
 # Audio capture for voice wake word detection (headless mode only)
@@ -273,7 +274,7 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1"
-criterion = "0.5"
+criterion = "0.8"
 insta = { version = "1", features = ["json", "yaml"] }
 
 [build-dependencies]
@@ -393,9 +394,21 @@ name = "html_to_markdown"
 required-features = ["html-to-markdown"]
 
 [[bin]]
+name = "thinclaw"
+path = "src/main.rs"
+
+[[bin]]
 name = "thinclaw-acp"
 path = "src/bin/thinclaw-acp.rs"
 required-features = ["acp"]
+
+[[bin]]
+name = "thinclaw-shell-scan"
+path = "src/bin/thinclaw-shell-scan.rs"
+
+[[example]]
+name = "export-openapi"
+path = "src/bin/export-openapi.rs"
 
 [[bench]]
 name = "safety_sanitize"
@@ -492,8 +505,8 @@ doc_lazy_continuation      = "allow"
 # CI will still catch them via `-D warnings`.
 unused_imports = "warn"
 
-# Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
-# sqlx-sqlite (used by ThinClaw Desktop) calls sqlite3_config() first; the stock libsql
-# asserts on the duplicate call. Our patch checks sqlite3_threadsafe() instead.
+# Keep local, provenance-documented security/compatibility backports in the
+# dependency graph until upstream crates publish equivalent releases.
 [patch.crates-io]
 libsql = { path = "patches/libsql-0.6.0" }
+libsql-sqlite3-parser = { path = "patches/libsql-sqlite3-parser-0.13.1" }

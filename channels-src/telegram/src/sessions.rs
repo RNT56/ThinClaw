@@ -162,6 +162,7 @@ pub(crate) fn classify_status_update(update: &StatusUpdate) -> Option<TelegramSt
             }
         }
         StatusType::ApprovalNeeded
+        | StatusType::ContextPressure
         | StatusType::JobStarted
         | StatusType::AuthRequired
         | StatusType::AuthCompleted

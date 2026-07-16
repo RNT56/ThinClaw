@@ -10,7 +10,8 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { commandClient } from "../lib/command-client";
+import type { ModelDescriptor, ProviderDiscoveryResult as GeneratedProviderResult } from "../lib/bindings";
 
 // ─── Types matching the Rust Specta-derived types ──────────────────────────
 
@@ -54,6 +55,40 @@ export interface DiscoveryResult {
     errors: string[];
 }
 
+function normalizeModel(model: ModelDescriptor): CloudModelEntry {
+    return {
+        id: model.id,
+        displayName: model.displayName,
+        provider: model.provider,
+        providerName: model.providerName,
+        category: model.category,
+        contextWindow: model.contextWindow ?? null,
+        maxOutputTokens: model.maxOutputTokens ?? null,
+        supportsVision: model.supportsVision ?? false,
+        supportsTools: model.supportsTools ?? false,
+        supportsStreaming: model.supportsStreaming ?? false,
+        deprecated: model.deprecated ?? false,
+        pricing: model.pricing ? {
+            inputPerMillion: model.pricing.inputPerMillion,
+            outputPerMillion: model.pricing.outputPerMillion,
+            perImage: model.pricing.perImage,
+            perMinute: model.pricing.perMinute,
+            per1kChars: model.pricing.per1kChars,
+        } : null,
+        embeddingDimensions: model.embeddingDimensions ?? null,
+        metadata: model.metadata ?? {},
+    };
+}
+
+function normalizeProvider(provider: GeneratedProviderResult): ProviderDiscoveryResult {
+    return {
+        provider: provider.provider,
+        models: provider.models.map(normalizeModel),
+        fromCache: provider.fromCache,
+        error: provider.error ?? null,
+    };
+}
+
 // ─── Hook ──────────────────────────────────────────────────────────────────
 
 export function useCloudModels() {
@@ -65,7 +100,12 @@ export function useCloudModels() {
         setLoading(true);
         setError(null);
         try {
-            const data = await invoke<DiscoveryResult>("direct_inference_discover_cloud_models", { providers });
+            const discovered = await commandClient.directInferenceDiscoverCloudModels(providers);
+            const data: DiscoveryResult = {
+                providers: discovered.providers.map(normalizeProvider),
+                totalModels: discovered.totalModels,
+                errors: discovered.errors ?? [],
+            };
             setResult(data);
             if (data.errors.length > 0) {
                 console.warn("[useCloudModels] Discovery errors:", data.errors);
@@ -80,7 +120,9 @@ export function useCloudModels() {
 
     const refreshProvider = useCallback(async (provider: string) => {
         try {
-            const providerResult = await invoke<ProviderDiscoveryResult>("direct_inference_refresh_cloud_models", { provider });
+            const providerResult = normalizeProvider(
+                await commandClient.directInferenceRefreshCloudModels(provider),
+            );
             setResult(prev => {
                 if (!prev) return prev;
                 const updated = prev.providers.map(p =>

@@ -278,9 +278,12 @@ fn static_model_cost(id: &str) -> Option<(Decimal, Decimal)> {
         "o1-mini" | "o1-mini-2024-09-12" => Some((dec!(0.0000011), dec!(0.0000044))),
 
         // Anthropic
-        "claude-opus-4-7" | "claude-opus-4-6" | "claude-opus-4-5" | "claude-opus-4-5-20251101" => {
-            Some((dec!(0.000005), dec!(0.000025)))
-        }
+        "claude-fable-5" => Some((dec!(0.00001), dec!(0.00005))),
+        "claude-opus-4-8"
+        | "claude-opus-4-7"
+        | "claude-opus-4-6"
+        | "claude-opus-4-5"
+        | "claude-opus-4-5-20251101" => Some((dec!(0.000005), dec!(0.000025))),
         "claude-opus-4"
         | "claude-opus-4-1"
         | "claude-opus-4-1-20250805"
@@ -289,7 +292,8 @@ fn static_model_cost(id: &str) -> Option<(Decimal, Decimal)> {
         "claude-3-opus" | "claude-3-opus-20240229" | "claude-3-opus-latest" => {
             Some((dec!(0.000015), dec!(0.000075)))
         }
-        "claude-sonnet-4"
+        "claude-sonnet-5"
+        | "claude-sonnet-4"
         | "claude-sonnet-4-6"
         | "claude-sonnet-4-5"
         | "claude-sonnet-4-5-20250929"
@@ -435,6 +439,22 @@ mod tests {
     }
 
     #[test]
+    fn test_current_claude_family_costs() {
+        assert_eq!(
+            model_cost("claude-fable-5"),
+            Some((dec!(0.00001), dec!(0.00005)))
+        );
+        assert_eq!(
+            model_cost("claude-opus-4-8"),
+            Some((dec!(0.000005), dec!(0.000025)))
+        );
+        assert_eq!(
+            model_cost("claude-sonnet-5"),
+            Some((dec!(0.000003), dec!(0.000015)))
+        );
+    }
+
+    #[test]
     fn test_claude_haiku_4_5_costs() {
         let (input, output) = model_cost("claude-haiku-4-5").unwrap();
         assert_eq!(input, dec!(0.000001));
@@ -490,8 +510,8 @@ mod tests {
     #[test]
     fn test_bedrock_claude_model_normalized() {
         assert_eq!(
-            model_cost("anthropic.claude-3-sonnet-20240229-v1:0"),
-            model_cost("claude-3-sonnet-20240229")
+            model_cost("anthropic.claude-opus-4-8"),
+            model_cost("claude-opus-4-8")
         );
     }
 

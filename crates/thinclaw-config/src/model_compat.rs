@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_routing_quality_score_orders_known_models() {
-        let opus = find_model("claude-opus-4-7")
+        let opus = find_model("claude-opus-4-8")
             .unwrap()
             .routing_quality_score();
         let gpt_54 = find_model("gpt-5.4").unwrap().routing_quality_score();
@@ -518,7 +518,7 @@ mod tests {
                 "models": [
                     {
                         "provider": "anthropic",
-                        "model_id": "claude-sonnet-4-6",
+                        "model_id": "claude-sonnet-5",
                         "alias_of": "claude-sonnet-4-20250514",
                         "display_name": "Claude Sonnet 4.6",
                         "context_window": 200000,

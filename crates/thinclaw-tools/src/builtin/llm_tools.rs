@@ -471,7 +471,7 @@ impl Tool for LlmListModelsTool {
             (
                 "bedrock".to_string(),
                 "AWS Bedrock".to_string(),
-                "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+                "anthropic.claude-opus-4-8".to_string(),
                 200_000,
                 true,
                 thinclaw_config::helpers::optional_env("BEDROCK_API_KEY")

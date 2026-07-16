@@ -367,7 +367,7 @@ export function McpTab() {
         try {
             const next = { ...config, ...patch };
             setConfig(next);
-            await commands.updateUserConfig(next);
+            await commands.updateUserConfig(patch);
         } catch (e) {
             toast.error('Failed to save MCP settings', { description: String(e) });
         } finally {

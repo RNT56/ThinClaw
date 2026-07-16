@@ -19,26 +19,34 @@ jobs:
     steps:
       - name: Prepare release PR or publish merged release
         id: release
-        # v4.4.1, pinned to its immutable commit.
-        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
+        # v5.0.0, pinned to its immutable commit.
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # Events created by GITHUB_TOKEN do not recursively start other
-      # workflows. Dispatch protected CI explicitly so the generated release
-      # PR remains mergeable without requiring a separate PAT.
-      - name: Trigger protected CI for the release PR
+      # GitHub starts pull_request workflows for PRs created with GITHUB_TOKEN,
+      # but holds them for maintainer approval. Keep that real PR-associated CI
+      # as the merge gate: a workflow_dispatch run is not attached to the PR
+      # and therefore cannot satisfy required branch-protection checks.
+      - name: Record release PR approval gate
         if: steps.release.outputs.prs_created == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_PR: ${{ steps.release.outputs.pr }}
         run: |
           set -euo pipefail
+          number="$(jq -r '.number // empty' <<<"$RELEASE_PR")"
           branch="$(jq -r '.headBranchName // empty' <<<"$RELEASE_PR")"
+          test -n "$number"
           test -n "$branch"
-          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
+          {
+            echo "### Release PR #$number"
+            echo
+            echo "GitHub has created protected CI for \`$branch\` in an approval-required state."
+            echo "A maintainer must review and approve that pending run before the release PR can merge."
+            echo "Do not substitute a manually dispatched CI run; GitHub will not associate it with the PR gate."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # A newly-created release event is suppressed for the same reason, so
       # dispatch the existing artifact pipeline explicitly.

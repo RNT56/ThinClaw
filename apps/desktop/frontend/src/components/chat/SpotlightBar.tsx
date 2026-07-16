@@ -680,11 +680,10 @@ export function SpotlightBar() {
                 )}
             </motion.div>
 
-            <style dangerouslySetInnerHTML={{
-                __html: `
+            <style>{`
                 .spotlight-scroll::-webkit-scrollbar { width: 0px; }
                 .spotlight-scroll { mask-image: linear-gradient(to bottom, transparent, black 20px); -webkit-mask-image: linear-gradient(to bottom, transparent, black 20px); }
-            `}} />
+            `}</style>
         </div>
     );
 }

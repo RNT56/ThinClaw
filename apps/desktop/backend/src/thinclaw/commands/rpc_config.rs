@@ -17,57 +17,77 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_config_schema(
-    _ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
-    // Config schema is static — return a minimal schema for the UI
-    Ok(serde_json::json!({
-        "type": "object",
-        "properties": {
-            "setupCompleted": { "type": "boolean" },
-            "autoStartGateway": { "type": "boolean" },
-            "devModeWizard": { "type": "boolean" },
+    _settings: State<'_, crate::config::ConfigManager>,
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
+    Ok(crate::config::unified_settings_schema())
+}
+
+fn agent_settings_map(response: &serde_json::Value) -> serde_json::Value {
+    let mut settings = serde_json::Map::new();
+    if let Some(rows) = response
+        .get("settings")
+        .and_then(serde_json::Value::as_array)
+    {
+        for row in rows {
+            if let (Some(key), Some(value)) = (
+                row.get("key").and_then(serde_json::Value::as_str),
+                row.get("value"),
+            ) {
+                settings.insert(key.to_string(), value.clone());
+            }
         }
-    }))
+    } else if let Some(config) = response
+        .get("config")
+        .and_then(serde_json::Value::as_object)
+    {
+        settings.extend(config.clone());
+    }
+    serde_json::Value::Object(settings)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_config_get(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
-    if let Some(proxy) = ironclaw.remote_proxy().await {
-        return proxy.list_settings().await;
-    }
-
-    let agent = ironclaw.agent().await?;
-    if let Some(store) = agent.store() {
-        let resp = thinclaw_core::api::config::list_settings(store, "local_user")
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_value(resp).map_err(|e| e.to_string())
+    settings: State<'_, crate::config::ConfigManager>,
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
+    let agent_response = if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.list_settings().await?
     } else {
-        Ok(serde_json::json!({ "settings": [] }))
+        settings.agent_settings().await?
+    };
+    let settings_rows = agent_response
+        .get("settings")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let mut workbench = serde_json::to_value(settings.get_config())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    if let Some(workbench) = workbench.as_object_mut() {
+        workbench.remove("mcp_auth_token");
     }
+    Ok(serde_json::json!({
+        "version": crate::config::SETTINGS_SCHEMA_VERSION,
+        "workbench": workbench,
+        "agent": agent_settings_map(&agent_response),
+        // Compatibility view for ThinClawConfig and channel panels.
+        "settings": settings_rows,
+    }))
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_config_set(
     ironclaw: State<'_, ThinClawRuntimeState>,
+    settings: State<'_, crate::config::ConfigManager>,
     key: String,
     value: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.set_setting(&key, &value).await?;
         return Ok(serde_json::json!({ "ok": true }));
     }
 
-    let agent = ironclaw.agent().await?;
-    let store = agent.store().ok_or("Database not available")?;
-
-    thinclaw_core::api::config::set_setting(store, "local_user", &key, &value)
-        .await
-        .map_err(|e| e.to_string())?;
+    settings.set_agent_setting(&key, &value).await?;
 
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -76,25 +96,35 @@ pub async fn thinclaw_config_set(
 #[specta::specta]
 pub async fn thinclaw_config_patch(
     ironclaw: State<'_, ThinClawRuntimeState>,
+    settings: State<'_, crate::config::ConfigManager>,
     patch: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    if let Some(proxy) = ironclaw.remote_proxy().await {
-        if let Some(obj) = patch.as_object() {
-            for (key, value) in obj {
-                proxy.set_setting(key, value).await?;
-            }
-        }
-        return Ok(serde_json::json!({ "ok": true }));
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
+    let patch = patch
+        .as_object()
+        .ok_or_else(|| "Settings patch must be an object".to_string())?;
+
+    if let Some(workbench) = patch.get("workbench") {
+        settings.patch_workbench(workbench).await?;
     }
 
-    let agent = ironclaw.agent().await?;
-    let store = agent.store().ok_or("Database not available")?;
+    let agent_patch = if let Some(agent) = patch.get("agent") {
+        agent
+            .as_object()
+            .ok_or_else(|| "Agent settings patch must be an object".to_string())?
+    } else if patch.contains_key("workbench") {
+        return Ok(serde_json::json!({ "ok": true }));
+    } else {
+        // Compatibility for callers that already send a flat agent patch.
+        patch
+    };
 
-    if let Some(obj) = patch.as_object() {
-        for (key, value) in obj {
-            thinclaw_core::api::config::set_setting(store, "local_user", key, value)
-                .await
-                .map_err(|e| e.to_string())?;
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        for (key, value) in agent_patch {
+            proxy.set_setting(key, value).await?;
+        }
+    } else {
+        for (key, value) in agent_patch {
+            settings.set_agent_setting(key, value).await?;
         }
     }
 
@@ -110,7 +140,7 @@ pub async fn thinclaw_config_patch(
 pub async fn thinclaw_toggle_expose_inference(
     state: State<'_, ThinClawManager>,
     enabled: bool,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -118,7 +148,7 @@ pub async fn thinclaw_toggle_expose_inference(
     };
 
     cfg.toggle_expose_inference(enabled)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     *state.config.write().await = Some(cfg);
 
     Ok(serde_json::json!({ "enabled": enabled }))
@@ -129,7 +159,7 @@ pub async fn thinclaw_toggle_expose_inference(
 pub async fn thinclaw_set_setup_completed(
     state: State<'_, ThinClawManager>,
     completed: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -137,7 +167,7 @@ pub async fn thinclaw_set_setup_completed(
     };
 
     cfg.set_setup_completed(completed)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     *state.config.write().await = Some(cfg);
     Ok(())
 }
@@ -147,7 +177,7 @@ pub async fn thinclaw_set_setup_completed(
 pub async fn thinclaw_toggle_auto_start(
     state: State<'_, ThinClawManager>,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -155,7 +185,8 @@ pub async fn thinclaw_toggle_auto_start(
     };
 
     cfg.auto_start_gateway = enabled;
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    cfg.save_identity()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     *state.config.write().await = Some(cfg);
     Ok(())
 }
@@ -165,7 +196,7 @@ pub async fn thinclaw_toggle_auto_start(
 pub async fn thinclaw_set_dev_mode_wizard(
     state: State<'_, ThinClawManager>,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -173,7 +204,7 @@ pub async fn thinclaw_set_dev_mode_wizard(
     };
 
     cfg.set_dev_mode_wizard(enabled)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     *state.config.write().await = Some(cfg);
     Ok(())
 }
@@ -212,7 +243,7 @@ pub async fn thinclaw_set_autonomy_mode(
     };
 
     cfg.set_auto_approve_tools(enabled)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     *state.config.write().await = Some(cfg);
 
     // Also propagate to the running process env so the next engine init picks it up
@@ -239,7 +270,7 @@ pub async fn thinclaw_set_autonomy_mode(
 pub async fn thinclaw_get_autonomy_mode(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<bool, String> {
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_autonomy_status().await?;
         return Ok(status
@@ -263,7 +294,7 @@ pub async fn thinclaw_get_autonomy_mode(
 pub async fn thinclaw_set_bootstrap_completed(
     state: State<'_, ThinClawManager>,
     completed: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -271,7 +302,7 @@ pub async fn thinclaw_set_bootstrap_completed(
     };
 
     cfg.set_bootstrap_completed(completed)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     *state.config.write().await = Some(cfg);
 
     info!(
@@ -295,7 +326,7 @@ pub async fn thinclaw_set_bootstrap_completed(
 pub async fn thinclaw_check_bootstrap_needed(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<bool, String> {
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     let cfg = state.get_config().await;
     let already_done = cfg.as_ref().map(|c| c.bootstrap_completed).unwrap_or(false);
 
@@ -357,7 +388,9 @@ pub async fn thinclaw_check_bootstrap_needed(
 /// on next startup. The agent will re-run its identity awakening.
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_trigger_bootstrap(state: State<'_, ThinClawManager>) -> Result<(), String> {
+pub async fn thinclaw_trigger_bootstrap(
+    state: State<'_, ThinClawManager>,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -365,7 +398,7 @@ pub async fn thinclaw_trigger_bootstrap(state: State<'_, ThinClawManager>) -> Re
     };
 
     cfg.set_bootstrap_completed(false)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     *state.config.write().await = Some(cfg);
 
     info!("[thinclaw-runtime] Bootstrap ritual re-triggered");
@@ -380,7 +413,7 @@ pub async fn thinclaw_trigger_bootstrap(state: State<'_, ThinClawManager>) -> Re
 #[specta::specta]
 pub async fn thinclaw_system_presence(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
         return Ok(serde_json::json!({
@@ -489,7 +522,7 @@ pub async fn thinclaw_system_presence(
 pub async fn thinclaw_logs_tail(
     ironclaw: State<'_, ThinClawRuntimeState>,
     limit: u32,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.logs_recent().await?;
         let cap = (limit as usize).clamp(1, 2000);
@@ -558,7 +591,7 @@ pub async fn thinclaw_logs_tail(
 #[specta::specta]
 pub async fn thinclaw_update_run(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
         return Ok(serde_json::json!({
             "status": "remote",
@@ -572,24 +605,6 @@ pub async fn thinclaw_update_run(
     Ok(serde_json::json!({ "status": "embedded", "update_available": false }))
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn thinclaw_web_login_whatsapp(
-    _state: State<'_, ThinClawManager>,
-) -> Result<serde_json::Value, String> {
-    // WhatsApp web login not supported in ThinClaw desktop mode
-    Err("WhatsApp web login is not available in desktop mode".into())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn thinclaw_web_login_telegram(
-    _state: State<'_, ThinClawManager>,
-) -> Result<serde_json::Value, String> {
-    // Telegram web login not supported in ThinClaw desktop mode
-    Err("Telegram web login is not available in desktop mode".into())
-}
-
 // ============================================================================
 // Cloud model / cloud config — write to ThinClaw Desktop identity.json
 // ============================================================================
@@ -601,7 +616,7 @@ pub async fn thinclaw_save_selected_cloud_model(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     model: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let remote_mode = ironclaw.remote_proxy().await;
     if let Some(proxy) = remote_mode.as_ref() {
         let mut remote_config = proxy
@@ -622,7 +637,7 @@ pub async fn thinclaw_save_selected_cloud_model(
     };
 
     cfg.update_selected_cloud_model(model)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // Regenerate engine config so ThinClaw picks up the new model selection
     let existing_thinclaw_engine = cfg.load_config().ok();
@@ -640,7 +655,7 @@ pub async fn thinclaw_save_selected_cloud_model(
         local_llm.clone(),
     );
     cfg.write_config(&thinclaw_engine, local_llm)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     *state.config.write().await = Some(cfg);
     Ok(())
@@ -660,10 +675,11 @@ pub struct CustomLlmConfigInput {
 pub async fn thinclaw_save_cloud_config(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     enabled_providers: Vec<String>,
     enabled_models: std::collections::HashMap<String, Vec<String>>,
     custom_llm: Option<CustomLlmConfigInput>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let remote_mode = ironclaw.remote_proxy().await;
     if let Some(proxy) = remote_mode.as_ref() {
         let mut remote_config = proxy
@@ -711,21 +727,22 @@ pub async fn thinclaw_save_cloud_config(
     if let Some(c) = &custom_llm {
         cfg.custom_llm_enabled = c.enabled;
         cfg.custom_llm_url = c.url.clone();
-        // Store custom LLM key in Keychain, not identity.json
+        // Store custom LLM key in Keychain, not identity.json. A missing key is
+        // an omitted patch because status responses intentionally redact it;
+        // an explicit empty string clears it.
         if remote_mode.is_none() {
-            if let Some(ref key) = c.key {
-                let _ = crate::thinclaw::config::keychain::set_key("custom_llm_key", Some(key));
+            if let Some(key) = c.key.as_deref() {
+                let key = key.trim();
+                let value = (!key.is_empty()).then_some(key);
+                secret_store.set("custom_llm_key", value)?;
+                cfg.custom_llm_key = value.map(str::to_string);
             }
         }
-        cfg.custom_llm_key = if remote_mode.is_none() {
-            c.key.clone()
-        } else {
-            None
-        };
         cfg.custom_llm_model = c.model.clone();
     }
 
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    cfg.save_identity()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // Regenerate engine config so ThinClaw picks up the new model allowlist
     // and provider selections. Without this, changes were lost on engine restart.
@@ -744,8 +761,44 @@ pub async fn thinclaw_save_cloud_config(
         local_llm.clone(),
     );
     cfg.write_config(&thinclaw_engine, local_llm)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
+    secret_store.apply_thinclaw_config(&cfg);
     *state.config.write().await = Some(cfg);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_settings_map;
+
+    #[test]
+    fn agent_settings_map_normalizes_row_responses() {
+        let response = serde_json::json!({
+            "settings": [
+                { "key": "llm.backend", "value": "anthropic" },
+                { "key": "limits.max_steps", "value": 12 }
+            ]
+        });
+
+        assert_eq!(
+            agent_settings_map(&response),
+            serde_json::json!({
+                "llm.backend": "anthropic",
+                "limits.max_steps": 12
+            })
+        );
+    }
+
+    #[test]
+    fn agent_settings_map_accepts_remote_config_objects() {
+        let response = serde_json::json!({
+            "config": {
+                "llm.backend": "openai",
+                "features.experimental": true
+            }
+        });
+
+        assert_eq!(agent_settings_map(&response), response["config"].clone());
+    }
 }

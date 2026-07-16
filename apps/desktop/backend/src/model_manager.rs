@@ -163,13 +163,26 @@ fn display_size(path: &std::path::Path) -> u64 {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn list_models(app: AppHandle) -> Result<Vec<ModelFile>, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+pub async fn list_models(
+    app: AppHandle,
+    registry: State<'_, crate::inference::ModelProviderRegistry>,
+) -> Result<Vec<ModelFile>, crate::thinclaw::bridge::BridgeError> {
+    Ok(registry.list_local_models(&app)?)
+}
+
+pub(crate) fn list_local_models(
+    app: &AppHandle,
+) -> Result<Vec<ModelFile>, crate::thinclaw::bridge::BridgeError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let models_dir = app_data_dir.join("models");
 
     if !models_dir.exists() {
-        fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&models_dir)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     // Ensure category folders exist
@@ -263,22 +276,26 @@ pub async fn download_model(
     state: State<'_, DownloadManager>,
     url: String,
     filename: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     println!(
         "[download_model] Called with url: {}, filename: {}",
         url, filename
     );
 
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let models_dir = app_data_dir.join("models");
 
     if !models_dir.exists() {
-        fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&models_dir)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     // Check for directory traversal attempts in the filename
     if filename.contains("..") {
-        return Err("Invalid filename: traversal detected".to_string());
+        return Err(("Invalid filename: traversal detected".to_string()).into());
     }
 
     let dest_path = models_dir.join(&filename);
@@ -286,7 +303,8 @@ pub async fn download_model(
     // Ensure parent directory exists (for nested categories like LLM/ModelName/)
     if let Some(parent) = dest_path.parent() {
         if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            fs::create_dir_all(parent)
+                .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
         }
     }
 
@@ -295,7 +313,7 @@ pub async fn download_model(
     {
         let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         if downloads.contains_key(&filename) {
-            return Err("Download already in progress".to_string());
+            return Err(("Download already in progress".to_string()).into());
         }
         downloads.insert(filename.clone(), notify.clone());
     }
@@ -303,7 +321,7 @@ pub async fn download_model(
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     println!("[download_model] Sending request to {}", url);
 
@@ -337,7 +355,7 @@ pub async fn download_model(
                 let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                 downloads.remove(&filename);
             }
-            return Err(err_msg);
+            return Err((err_msg).into());
         }
     };
 
@@ -351,7 +369,7 @@ pub async fn download_model(
                 let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                 downloads.remove(&filename);
             }
-            return Err(err_msg);
+            return Err((err_msg).into());
         }
     };
 
@@ -359,12 +377,13 @@ pub async fn download_model(
 
     // Safety check: LLM models are usually large. Small files might be error pages, but config files are ~1KB.
     if total_size > 0 && total_size < 1024 {
-        return Err(format!("File too small ({} bytes). Check URL.", total_size));
+        return Err((format!("File too small ({} bytes). Check URL.", total_size)).into());
     }
 
     println!("Starting download for {}. Size: {}", filename, total_size);
 
-    let mut file = fs::File::create(&dest_path).map_err(|e| e.to_string())?;
+    let mut file = fs::File::create(&dest_path)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let mut downloaded: u64 = 0;
     let mut stream = res.bytes_stream();
     let mut last_emit_time = std::time::Instant::now();
@@ -383,13 +402,13 @@ pub async fn download_model(
                 let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                 downloads.remove(&filename);
 
-                return Err("Download cancelled".to_string());
+                return Err(("Download cancelled".to_string()).into());
             }
             chunk_option = stream.next() => {
                 match chunk_option {
                     Some(chunk_res) => {
-                        let chunk = chunk_res.map_err(|e| e.to_string())?;
-                        file.write_all(&chunk).map_err(|e| e.to_string())?;
+                        let chunk = chunk_res.map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+                        file.write_all(&chunk).map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
                         downloaded += chunk.len() as u64;
 
                         // Emit progress logic
@@ -460,13 +479,13 @@ pub async fn download_model(
 pub async fn cancel_download(
     state: State<'_, DownloadManager>,
     filename: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(notify) = downloads.get(&filename) {
         notify.notify_one();
         Ok(())
     } else {
-        Err("Download not found".to_string())
+        Err(("Download not found".to_string()).into())
     }
 }
 
@@ -480,12 +499,18 @@ pub async fn check_model_path(path: String) -> bool {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn open_models_folder(app: AppHandle) -> Result<(), String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+pub async fn open_models_folder(
+    app: AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let models_dir = app_data_dir.join("models");
 
     if !models_dir.exists() {
-        fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&models_dir)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     // Also ensure category folders exist
@@ -509,32 +534,38 @@ pub async fn open_models_folder(app: AppHandle) -> Result<(), String> {
     std::process::Command::new("open")
         .arg(&models_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open")
         .arg(&models_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "windows")]
     std::process::Command::new("explorer")
         .arg(&models_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn open_standard_models_folder(app: AppHandle) -> Result<(), String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+pub async fn open_standard_models_folder(
+    app: AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let models_dir = app_data_dir.join("models");
     let standard_dir = models_dir.join("Diffusion").join("standard"); // Updated path
 
     if !standard_dir.exists() {
-        fs::create_dir_all(&standard_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&standard_dir)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     // Ensure subfolders exist
@@ -547,48 +578,58 @@ pub async fn open_standard_models_folder(app: AppHandle) -> Result<(), String> {
     std::process::Command::new("open")
         .arg(&standard_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open")
         .arg(&standard_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "windows")]
     std::process::Command::new("explorer")
         .arg(&standard_dir)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_local_model(app: AppHandle, filename: String) -> Result<(), String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+pub async fn delete_local_model(
+    app: AppHandle,
+    filename: String,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let models_dir = app_data_dir.join("models");
 
     // Check for directory traversal attempts
     if filename.contains("..") {
-        return Err("Invalid filename: traversal detected".to_string());
+        return Err(("Invalid filename: traversal detected".to_string()).into());
     }
 
     let file_path = models_dir.join(&filename);
 
     // Verify it is still inside models_dir
-    let canonical_models = models_dir.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_models = models_dir
+        .canonicalize()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     // Check if the file/folder exists before canonicalizing
     if !file_path.exists() {
-        return Err(format!("File not found: {}", filename));
+        return Err((format!("File not found: {}", filename)).into());
     }
 
-    let canonical_target = file_path.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_target = file_path
+        .canonicalize()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     if !canonical_target.starts_with(&canonical_models) {
-        return Err("Invalid file path: outside models directory".to_string());
+        return Err(("Invalid file path: outside models directory".to_string()).into());
     }
 
     // Determine if we should delete the whole folder
@@ -620,18 +661,18 @@ pub async fn delete_local_model(app: AppHandle, filename: String) -> Result<(), 
 
 #[tauri::command]
 #[specta::specta]
-pub async fn open_url(url: String) -> Result<(), String> {
+pub async fn open_url(url: String) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .arg(&url)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open")
         .arg(&url)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "windows")]
     std::process::Command::new("cmd")
@@ -640,7 +681,7 @@ pub async fn open_url(url: String) -> Result<(), String> {
         .arg("")
         .arg(&url)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(())
 }
@@ -699,8 +740,13 @@ pub fn get_standard_assets() -> Vec<StandardAsset> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn check_missing_standard_assets(app: AppHandle) -> Result<Vec<StandardAsset>, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+pub async fn check_missing_standard_assets(
+    app: AppHandle,
+) -> Result<Vec<StandardAsset>, crate::thinclaw::bridge::BridgeError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let standard_dir = app_data_dir
         .join("models")
         .join("Diffusion")
@@ -726,7 +772,7 @@ pub async fn download_standard_asset(
     app: AppHandle,
     state: State<'_, DownloadManager>,
     filename: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     // Find asset
     let assets = get_standard_assets();
     let asset = assets
@@ -734,7 +780,10 @@ pub async fn download_standard_asset(
         .find(|a| a.filename == filename)
         .ok_or("Asset not found in standard list")?;
 
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let target_dir = app_data_dir
         .join("models")
         .join("Diffusion")
@@ -742,7 +791,8 @@ pub async fn download_standard_asset(
         .join(&asset.category);
 
     if !target_dir.exists() {
-        fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&target_dir)
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
 
     // Check if exists
@@ -766,7 +816,7 @@ pub async fn download_standard_asset(
     {
         let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         if downloads.contains_key(&filename) {
-            return Err("Download already in progress".to_string());
+            return Err(("Download already in progress".to_string()).into());
         }
         downloads.insert(filename.clone(), notify.clone());
     }
@@ -774,7 +824,7 @@ pub async fn download_standard_asset(
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     println!("[download_standard] Sending request to {}", url);
 
@@ -793,16 +843,19 @@ pub async fn download_standard_asset(
     }
 
     let res = match request_builder.send().await {
-        Ok(r) => r.error_for_status().map_err(|e| e.to_string())?,
+        Ok(r) => r
+            .error_for_status()
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?,
         Err(e) => {
             let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
             downloads.remove(&filename);
-            return Err(e.to_string());
+            return Err((e.to_string()).into());
         }
     };
 
     let total_size = res.content_length().unwrap_or(asset.size);
-    let mut file = fs::File::create(&dest_path).map_err(|e| e.to_string())?;
+    let mut file = fs::File::create(&dest_path)
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     let mut downloaded: u64 = 0;
     let mut stream = res.bytes_stream();
     let mut last_emit_time = std::time::Instant::now();
@@ -815,13 +868,13 @@ pub async fn download_standard_asset(
                 let _ = fs::remove_file(&dest_path);
                 let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                 downloads.remove(&filename);
-                return Err("Download cancelled".to_string());
+                return Err(("Download cancelled".to_string()).into());
            }
            chunk_option = stream.next() => {
                match chunk_option {
                    Some(chunk_res) => {
-                        let chunk = chunk_res.map_err(|e| e.to_string())?;
-                        file.write_all(&chunk).map_err(|e| e.to_string())?;
+                        let chunk = chunk_res.map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+                        file.write_all(&chunk).map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
                         downloaded += chunk.len() as u64;
 
                         let now = std::time::Instant::now();
@@ -865,8 +918,10 @@ pub async fn download_standard_asset(
 }
 #[tauri::command]
 #[specta::specta]
-pub async fn get_model_metadata(path: String) -> Result<crate::gguf::GGUFMetadata, String> {
-    crate::gguf::read_gguf_metadata(&path)
+pub async fn get_model_metadata(
+    path: String,
+) -> Result<crate::gguf::GGUFMetadata, crate::thinclaw::bridge::BridgeError> {
+    Ok(crate::gguf::read_gguf_metadata(&path)?)
 }
 
 #[derive(Serialize, Deserialize, Clone, Type)]
@@ -886,7 +941,7 @@ pub struct RemoteModelEntry {
 pub async fn update_remote_model_catalog(
     pool: State<'_, sqlx::SqlitePool>,
     entries: Vec<RemoteModelEntry>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     for entry in entries {
         let metadata_json = entry.metadata.to_string();
         sqlx::query(
@@ -908,7 +963,7 @@ pub async fn update_remote_model_catalog(
         .bind(&entry.status)
         .execute(&*pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     }
     Ok(())
 }
@@ -917,11 +972,11 @@ pub async fn update_remote_model_catalog(
 #[specta::specta]
 pub async fn get_remote_model_catalog(
     pool: State<'_, sqlx::SqlitePool>,
-) -> Result<Vec<RemoteModelEntry>, String> {
+) -> Result<Vec<RemoteModelEntry>, crate::thinclaw::bridge::BridgeError> {
     let rows = sqlx::query("SELECT id, name, metadata, local_version, remote_version, last_checked_at, status FROM models_catalog")
         .fetch_all(&*pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let entries = rows
         .into_iter()

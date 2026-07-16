@@ -45,6 +45,7 @@ impl Tunnel for TailscaleTunnel {
                 tokio::time::Duration::from_secs(10),
                 Command::new(crate::tunnel::resolve_binary("tailscale"))
                     .args(["status", "--json"])
+                    .kill_on_drop(true)
                     .output(),
             )
             .await
@@ -97,24 +98,41 @@ impl Tunnel for TailscaleTunnel {
         // for port 443" if ThinClaw was killed without a clean shutdown.
         let ts_bin = crate::tunnel::resolve_binary("tailscale");
         tracing::debug!("Resetting stale tailscale {subcommand} config before start");
-        let reset_output = Command::new(&ts_bin)
-            .args([subcommand, "reset"])
-            .output()
-            .await;
-        if let Ok(ref out) = reset_output
-            && !out.status.success()
-        {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            // version warnings are harmless — only log real failures
-            let real_errors: Vec<&str> = stderr
-                .lines()
-                .filter(|l| !l.contains("client version") && !l.contains("Warning:"))
-                .collect();
-            if !real_errors.is_empty() {
+        let reset_output = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            Command::new(&ts_bin)
+                .args([subcommand, "reset"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        match reset_output {
+            Ok(Ok(out)) if out.status.success() => {}
+            Ok(Ok(out)) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                // Version warnings are harmless, but a real reset failure means
+                // we cannot safely replace an existing listener on port 443.
+                let real_errors: Vec<&str> = stderr
+                    .lines()
+                    .filter(|line| !line.contains("client version") && !line.contains("Warning:"))
+                    .collect();
+                if !real_errors.is_empty() || stderr.trim().is_empty() {
+                    let detail = if real_errors.is_empty() {
+                        format!("exit status {}", out.status)
+                    } else {
+                        real_errors.join("; ")
+                    };
+                    bail!("tailscale {subcommand} reset failed: {}", detail);
+                }
                 tracing::warn!(
-                    "tailscale {subcommand} reset returned non-zero: {}",
-                    real_errors.join("; ")
+                    "Tailscale client/server version mismatch detected while resetting {subcommand}"
                 );
+            }
+            Ok(Err(error)) => {
+                bail!("could not run tailscale {subcommand} reset: {error}");
+            }
+            Err(_) => {
+                bail!("tailscale {subcommand} reset timed out after 10s");
             }
         }
 
@@ -203,6 +221,23 @@ impl Tunnel for TailscaleTunnel {
                     hostname = %hostname,
                     "Tailscale {subcommand} process started and still running"
                 );
+
+                // Long-running CLI processes must have their output drained;
+                // otherwise a full pipe can deadlock an otherwise healthy
+                // Serve/Funnel listener. Early-exit diagnostics were already
+                // collected above.
+                if let Some(mut stdout) = child.stdout.take() {
+                    tokio::spawn(async move {
+                        let mut sink = tokio::io::sink();
+                        let _ = tokio::io::copy(&mut stdout, &mut sink).await;
+                    });
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    tokio::spawn(async move {
+                        let mut sink = tokio::io::sink();
+                        let _ = tokio::io::copy(&mut stderr, &mut sink).await;
+                    });
+                }
             }
             Err(e) => {
                 tracing::warn!("Could not check tailscale {subcommand} status: {e}");
@@ -222,24 +257,58 @@ impl Tunnel for TailscaleTunnel {
     }
 
     async fn stop(&self) -> Result<()> {
-        let subcommand = if self.funnel { "funnel" } else { "serve" };
-        if let Err(e) = Command::new(crate::tunnel::resolve_binary("tailscale"))
-            .args([subcommand, "reset"])
-            .output()
-            .await
-        {
-            tracing::warn!("tailscale {subcommand} reset failed: {e}");
+        // A newly constructed tunnel has never changed Tailscale state. This
+        // also keeps stop-before-start deterministic when the CLI is absent.
+        if self.proc.lock().await.is_none() {
+            if let Ok(mut guard) = self.url.write() {
+                *guard = None;
+            }
+            return Ok(());
         }
+
+        let subcommand = if self.funnel { "funnel" } else { "serve" };
+        let reset_error = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            Command::new(crate::tunnel::resolve_binary("tailscale"))
+                .args([subcommand, "reset"])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(output)) if !output.status.success() => {
+                let detail = String::from_utf8_lossy(&output.stderr)
+                    .trim()
+                    .chars()
+                    .take(1_000)
+                    .collect::<String>();
+                Some(if detail.is_empty() {
+                    format!("tailscale {subcommand} reset returned {}", output.status)
+                } else {
+                    format!("tailscale {subcommand} reset failed: {detail}")
+                })
+            }
+            Ok(Err(error)) => Some(format!("tailscale {subcommand} reset failed: {error}")),
+            Err(_) => Some(format!("tailscale {subcommand} reset timed out after 10s")),
+            Ok(Ok(_)) => None,
+        };
 
         if let Ok(mut guard) = self.url.write() {
             *guard = None;
         }
-        kill_shared(&self.proc).await
+        kill_shared(&self.proc).await?;
+        if let Some(error) = reset_error {
+            bail!(error);
+        }
+        Ok(())
     }
 
     async fn health_check(&self) -> bool {
-        let guard = self.proc.lock().await;
-        guard.as_ref().is_some_and(|tp| tp.child.id().is_some())
+        let mut guard = self.proc.lock().await;
+        let Some(process) = guard.as_mut() else {
+            return false;
+        };
+        matches!(process.child.try_wait(), Ok(None))
     }
 
     fn public_url(&self) -> Option<String> {

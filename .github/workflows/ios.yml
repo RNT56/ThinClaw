@@ -17,6 +17,9 @@ on:
       - "clients/openapi/**"
       - ".github/workflows/ios.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ios-${{ github.ref }}
   cancel-in-progress: true
@@ -27,7 +30,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       # The packages declare swift-tools-version 6.2, which needs the Swift 6.2
       # toolchain (Xcode 26). The runner's *default* Xcode is older (Swift 6.1),
       # so select the newest installed Xcode before any swift/xcodebuild call.
@@ -61,7 +64,7 @@ jobs:
           - ThinClawLiveActivity
           - ThinClawWatchBridge
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
@@ -76,7 +79,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
@@ -84,7 +87,7 @@ jobs:
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
           swift --version
       # The drift check runs swift-openapi-generator, installed via mise.
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       - name: Check generated client freshness
@@ -104,14 +107,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           echo "Selecting ${latest:-<none found>}"
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
           swift --version
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       - name: Generate workspace (resolves SPM via xcodebuild)
@@ -167,14 +170,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           echo "Selecting ${latest:-<none found>}"
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
           swift --version
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       - name: Generate workspace (resolves SPM via xcodebuild)
@@ -221,7 +224,7 @@ jobs:
     # Missing runtimes fail quickly; the cap only fires on a genuine hang.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
@@ -301,14 +304,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           echo "Selecting ${latest:-<none found>}"
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
           swift --version
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       # Surface whether distribution credentials are configured. Secrets cannot

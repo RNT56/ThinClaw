@@ -7,7 +7,10 @@ impl RemoteGatewayProxy {
     /// Read a workspace file.
     ///
     /// Remote endpoint: GET /api/memory/read?path={path}
-    pub async fn get_file(&self, path: &str) -> Result<String, String> {
+    pub async fn get_file(
+        &self,
+        path: &str,
+    ) -> Result<String, crate::thinclaw::bridge::BridgeError> {
         let resp = self
             .get_json(&format!(
                 "/api/memory/read?path={}",
@@ -26,7 +29,11 @@ impl RemoteGatewayProxy {
     /// Write a workspace file.
     ///
     /// Remote endpoint: POST /api/memory/write
-    pub async fn write_file(&self, path: &str, content: &str) -> Result<(), String> {
+    pub async fn write_file(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             "/api/memory/write",
             &serde_json::json!({
@@ -39,7 +46,10 @@ impl RemoteGatewayProxy {
     }
 
     /// Delete a workspace file.
-    pub async fn delete_file(&self, path: &str) -> Result<(), String> {
+    pub async fn delete_file(
+        &self,
+        path: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         self.post_json("/api/memory/delete", &serde_json::json!({ "path": path }))
             .await
             .map(|_| ())
@@ -48,7 +58,7 @@ impl RemoteGatewayProxy {
     /// List all workspace files.
     ///
     /// Remote endpoint: GET /api/memory/list
-    pub async fn list_files(&self) -> Result<Vec<String>, String> {
+    pub async fn list_files(&self) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
         let resp = self.get_json("/api/memory/tree").await?;
         let paths: Vec<String> = resp
             .get("entries")
@@ -74,7 +84,7 @@ impl RemoteGatewayProxy {
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             "/api/memory/search",
             &serde_json::json!({

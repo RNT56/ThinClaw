@@ -837,7 +837,7 @@ These are only needed if you **compile ThinClaw from source**:
 |-----------|---------|-------|-------|---------------|
 | Xcode CLI Tools | C compiler, linker | `xcode-select --install` | N/A | N/A |
 | C/C++ build tools | Native dependency compilation | Xcode CLI Tools | `sudo apt install build-essential pkg-config` or distro equivalent | Use WSL and Linux packages for the supported Linux-style source path |
-| Rust 1.92+ | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Same | Install inside WSL for Linux-style builds |
+| Rust 1.94+ | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Same | Install inside WSL for Linux-style builds |
 | wasm32-wasip2 target | WASM compilation | `rustup target add wasm32-wasip2` | Same | Same inside WSL |
 | wasm-tools | WASM component model | `cargo install wasm-tools --locked` | Same | Same inside WSL |
 | cargo-component | Build WASM extensions | `cargo install cargo-component --locked` | Same | Same inside WSL |

@@ -1,8 +1,8 @@
 //! Application-level secret storage.
 //!
-//! `SecretStore` is a **top-level Tauri managed state** that holds all API keys
-//! for the application.  It is NOT part of the ThinClaw subsystem — it is an
-//! app-wide concern consumed by:
+//! `SecretStore` is the **single top-level Tauri managed state** for all Desktop
+//! API keys. It is not owned by either product mode — it is an app-wide service
+//! consumed by:
 //!
 //!   - **ThinClaw runtime** — reads keys via `SecretsStore` trait adapter
 //!   - **HF Hub**          — reads the HuggingFace token for API calls
@@ -12,10 +12,11 @@
 //!
 //! ## Storage
 //!
-//! Keys are encrypted at rest in the macOS Keychain as a single JSON blob
-//! (one Keychain item → one unlock prompt on app launch).  At runtime, keys
-//! are cached in `keychain::key_cache()` — a single `Mutex<HashMap>` shared
-//! by both this store and `ThinClawConfig`.
+//! Keys are serialized into one authenticated AES-256-GCM envelope using the
+//! core `SecretsCrypto` implementation. The ciphertext and the random master
+//! key occupy separate macOS Keychain items (one data-blob read at launch).
+//! At runtime, decrypted values are cached only in `keychain::key_cache()` — a
+//! single `Mutex<HashMap>` shared by both this store and `ThinClawConfig`.
 //!
 //! ## Architecture note (2026-02-24)
 //!
@@ -34,37 +35,110 @@
 //! HF Hub, etc.), every new consumer had to reach into `ThinClawConfig` to
 //! get keys — creating confusing coupling.
 //!
-//! Now: `SecretStore` owns the keys.  `ThinClawConfig` reads from it when
-//! generating engine config.  Everyone else reads from it directly.
+//! Now: `SecretStore` owns the keychain access path. Direct Workbench consumers
+//! use its host methods; the ThinClaw runtime uses the `SecretsStore` trait
+//! implementation in `thinclaw/secrets_adapter.rs`, which applies agent grants
+//! before reading the exact same service.
 
 use crate::thinclaw::config::keychain;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use thinclaw_runtime_contracts::SecretDescriptor;
+
+#[derive(Debug, Clone)]
+pub(crate) struct AgentCustomSecretGrant {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Default)]
+struct AgentGrantState {
+    keychain_keys: HashSet<String>,
+    custom_by_alias: HashMap<String, AgentCustomSecretGrant>,
+}
 
 /// Application-wide API key / secret store.
 ///
 /// Managed as `app.manage(SecretStore::new())` — accessible from any Tauri
 /// command via `State<'_, SecretStore>`.
 ///
-/// This is a thin delegation wrapper over `keychain`.  All reads and writes
-/// go through the single `keychain::key_cache()` `Mutex<HashMap>`, ensuring
-/// consistency with `ThinClawConfig` which also uses `keychain` directly.
+/// All reads and writes go through the single `keychain::key_cache()` cache.
+/// Agent grants are a separate shared policy snapshot: cloning this service
+/// shares that snapshot rather than creating another secret store.
+#[derive(Clone)]
 pub struct SecretStore {
-    // No local cache — delegates entirely to keychain::get_key / set_key
-    // which maintain a single Mutex<HashMap> as the in-memory cache.
+    agent_grants: Arc<RwLock<AgentGrantState>>,
 }
 
 impl SecretStore {
     /// Create the store.
     ///
-    /// Call `keychain::load_all()` before constructing this — it populates the
-    /// module-level cache that `get_key` / `set_key` read from.
+    /// Call `keychain::load_all()` before constructing this — it authenticates
+    /// and decrypts the versioned envelope, then populates the module-level
+    /// cache that `get_key` / `set_key` read from.
     pub fn new() -> Self {
-        let count = keychain::PROVIDERS
-            .iter()
-            .filter(|p| keychain::get_key(p).is_some())
-            .count();
-        println!("[secret_store] keychain has {} keys loaded", count);
-        Self {}
+        Self {
+            agent_grants: Arc::new(RwLock::new(AgentGrantState::default())),
+        }
+    }
+
+    pub(crate) fn replace_agent_grants(
+        &self,
+        keychain_keys: HashSet<String>,
+        custom_secrets: Vec<AgentCustomSecretGrant>,
+    ) {
+        let mut custom_by_alias = HashMap::new();
+        for secret in custom_secrets {
+            custom_by_alias.insert(secret.id.clone(), secret.clone());
+            custom_by_alias.insert(secret.name.clone(), secret);
+        }
+        let next = AgentGrantState {
+            keychain_keys,
+            custom_by_alias,
+        };
+        match self.agent_grants.write() {
+            Ok(mut grants) => *grants = next,
+            Err(poisoned) => *poisoned.into_inner() = next,
+        }
+    }
+
+    pub(crate) fn is_agent_key_granted(&self, keychain_key: &str) -> bool {
+        match self.agent_grants.read() {
+            Ok(grants) => grants.keychain_keys.contains(keychain_key),
+            Err(poisoned) => poisoned.into_inner().keychain_keys.contains(keychain_key),
+        }
+    }
+
+    pub(crate) fn resolve_agent_custom_secret(&self, name: &str) -> Option<AgentCustomSecretGrant> {
+        match self.agent_grants.read() {
+            Ok(grants) => grants.custom_by_alias.get(name).cloned(),
+            Err(poisoned) => poisoned.into_inner().custom_by_alias.get(name).cloned(),
+        }
+    }
+
+    pub(crate) fn granted_agent_custom_secrets(&self) -> Vec<AgentCustomSecretGrant> {
+        let grants = match self.agent_grants.read() {
+            Ok(grants) => grants,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut by_id = HashMap::new();
+        for secret in grants.custom_by_alias.values() {
+            by_id
+                .entry(secret.id.clone())
+                .or_insert_with(|| secret.clone());
+        }
+        by_id.into_values().collect()
+    }
+
+    pub(crate) fn revoke_agent_grant(&self, keychain_key: &str) {
+        let mut grants = match self.agent_grants.write() {
+            Ok(grants) => grants,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        grants.keychain_keys.remove(keychain_key);
+        grants
+            .custom_by_alias
+            .retain(|_, secret| secret.id != keychain_key);
     }
 
     // ─────────────────────────────────────────────────────────────────────

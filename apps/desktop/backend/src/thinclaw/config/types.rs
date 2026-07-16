@@ -34,20 +34,64 @@ pub struct CustomSecret {
     pub granted: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, Default)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, Default)]
 pub struct AgentProfile {
     pub id: String,
     pub name: String,
     pub url: String,
+    /// Remote bearer token. Accepted on input, but always redacted from serialized
+    /// profile metadata; the durable value lives in the encrypted Keychain envelope.
+    #[serde(default, serialize_with = "serialize_redacted_profile_token")]
     pub token: Option<String>,
     pub mode: String, // "local" | "remote"
     #[serde(default)]
     pub auto_connect: bool,
 }
 
+fn serialize_redacted_profile_token<S>(
+    _token: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_none()
+}
+
+impl AgentProfile {
+    pub fn redacted(&self) -> Self {
+        let mut profile = self.clone();
+        profile.token = None;
+        profile
+    }
+}
+
+impl std::fmt::Debug for AgentProfile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentProfile")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("mode", &self.mode)
+            .field("auto_connect", &self.auto_connect)
+            .finish()
+    }
+}
+
+impl Drop for AgentProfile {
+    fn drop(&mut self) {
+        if let Some(token) = &mut self.token {
+            token.zeroize();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ThinClawIdentity {
     pub device_id: String,
+    #[serde(default, skip_serializing)]
     pub auth_token: String,
     /// Ed25519 key pair for protocol signing (not an API credential, generated locally)
     #[serde(default)]
@@ -322,6 +366,9 @@ impl Drop for ThinClawConfig {
         z!(self.gemini_api_key);
         z!(self.groq_api_key);
         z!(self.remote_token);
+        for profile in &mut self.profiles {
+            z!(profile.token);
+        }
         z!(self.custom_llm_key);
         z!(self.xai_api_key);
         z!(self.venice_api_key);

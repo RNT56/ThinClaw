@@ -113,6 +113,14 @@ pub(super) fn status_to_wit(
                 metadata_json,
             }
         }
+        StatusUpdate::ContextPressure {
+            level,
+            usage_percent,
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::ContextPressure,
+            message: format!("Context pressure: {level} ({usage_percent:.1}%)"),
+            metadata_json,
+        },
         StatusUpdate::Plan { entries } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Plan,
             message: format!(
@@ -366,6 +374,7 @@ pub(super) fn clone_wit_status_update(
             wit_channel::StatusType::ToolResult => wit_channel::StatusType::ToolResult,
             wit_channel::StatusType::ApprovalNeeded => wit_channel::StatusType::ApprovalNeeded,
             wit_channel::StatusType::Status => wit_channel::StatusType::Status,
+            wit_channel::StatusType::ContextPressure => wit_channel::StatusType::ContextPressure,
             wit_channel::StatusType::JobStarted => wit_channel::StatusType::JobStarted,
             wit_channel::StatusType::AuthRequired => wit_channel::StatusType::AuthRequired,
             wit_channel::StatusType::AuthCompleted => wit_channel::StatusType::AuthCompleted,

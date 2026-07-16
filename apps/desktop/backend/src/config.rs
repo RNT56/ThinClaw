@@ -1,7 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::{AppHandle, Manager};
+
+const SETTINGS_USER_ID: &str = "local_user";
+const WORKBENCH_CONFIG_KEY: &str = "desktop.workbench";
+const SETTINGS_SCHEMA_VERSION_KEY: &str = "desktop.schema_version";
+pub(crate) const SETTINGS_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct KnowledgeBit {
@@ -156,6 +161,208 @@ pub struct UserConfig {
     pub selected_model_context_size: Option<u32>,
 }
 
+/// Presence-aware patch for [`UserConfig`].
+///
+/// `UserConfig` fields use Serde defaults so older recovery snapshots can be
+/// upgraded safely. That same behavior is wrong for a command patch: a field
+/// omitted by the caller would be replaced with its default before the command
+/// could tell that it was absent. `PatchField` preserves that distinction,
+/// including the difference between an omitted nullable field and an explicit
+/// `null` used to clear it.
+#[derive(Debug, Default)]
+enum PatchField<T> {
+    #[default]
+    Missing,
+    Value(T),
+}
+
+impl<'de, T> Deserialize<'de> for PatchField<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(Self::Value)
+    }
+}
+
+#[derive(Debug, Default, Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct UserConfigPatch {
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    search_concurrency_limit: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    scrape_concurrency_limit: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    max_search_results: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    max_scrape_chars: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    scrape_timeout_secs: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    default_context_window: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    summarization_chunk_size: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = f32)]
+    llm_temperature: PatchField<f32>,
+    #[serde(default)]
+    #[specta(optional, type = f32)]
+    llm_top_p: PatchField<f32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    vector_dimensions: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    sd_threads: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = Vec<KnowledgeBit>)]
+    knowledge_bits: PatchField<Vec<KnowledgeBit>>,
+    #[serde(default)]
+    #[specta(optional, type = Vec<CustomPersona>)]
+    custom_personas: PatchField<Vec<CustomPersona>>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    image_prompt_enhance_enabled: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = String)]
+    selected_persona: PatchField<String>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    selected_chat_provider: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    memory_reservation_gb: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    enable_memory_reservation: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    mlock: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    quantize_kv: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = String)]
+    spotlight_shortcut: PatchField<String>,
+    #[serde(default)]
+    #[specta(optional, type = String)]
+    ptt_shortcut: PatchField<String>,
+    #[serde(default)]
+    #[specta(optional, type = Vec<String>)]
+    disabled_providers: PatchField<Vec<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    mcp_base_url: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    mcp_auth_token: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    mcp_sandbox_enabled: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    mcp_cache_ttl_secs: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    mcp_tool_result_max_chars: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    chat_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    embedding_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    tts_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    stt_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    diffusion_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<std::collections::HashMap<String, String>>)]
+    inference_models: PatchField<Option<std::collections::HashMap<String, String>>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<u32>)]
+    selected_model_context_size: PatchField<Option<u32>>,
+}
+
+impl UserConfigPatch {
+    fn into_json(self) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
+        serde_json::to_value(self)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
+    }
+}
+
+impl Serialize for UserConfigPatch {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+
+        let mut map = serializer.serialize_map(None)?;
+        macro_rules! serialize_present {
+            ($($field:ident),+ $(,)?) => {
+                $(
+                    if let PatchField::Value(value) = &self.$field {
+                        map.serialize_entry(stringify!($field), value)?;
+                    }
+                )+
+            };
+        }
+        serialize_present!(
+            search_concurrency_limit,
+            scrape_concurrency_limit,
+            max_search_results,
+            max_scrape_chars,
+            scrape_timeout_secs,
+            default_context_window,
+            summarization_chunk_size,
+            llm_temperature,
+            llm_top_p,
+            vector_dimensions,
+            sd_threads,
+            knowledge_bits,
+            custom_personas,
+            image_prompt_enhance_enabled,
+            selected_persona,
+            selected_chat_provider,
+            memory_reservation_gb,
+            enable_memory_reservation,
+            mlock,
+            quantize_kv,
+            spotlight_shortcut,
+            ptt_shortcut,
+            disabled_providers,
+            mcp_base_url,
+            mcp_auth_token,
+            mcp_sandbox_enabled,
+            mcp_cache_ttl_secs,
+            mcp_tool_result_max_chars,
+            chat_backend,
+            embedding_backend,
+            tts_backend,
+            stt_backend,
+            diffusion_backend,
+            inference_models,
+            selected_model_context_size,
+        );
+        map.end()
+    }
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
@@ -286,6 +493,8 @@ fn normalize_user_config(mut config: UserConfig) -> UserConfig {
 pub struct ConfigManager {
     config: Mutex<UserConfig>,
     config_path: PathBuf,
+    database: RwLock<Option<Arc<dyn thinclaw_core::db::Database>>>,
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl ConfigManager {
@@ -316,6 +525,8 @@ impl ConfigManager {
         Self {
             config: Mutex::new(config),
             config_path,
+            database: RwLock::new(None),
+            write_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -326,55 +537,291 @@ impl ConfigManager {
             .clone()
     }
 
-    pub fn save_config(&self, new_config: &UserConfig) {
-        let normalized = normalize_user_config(new_config.clone());
-        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized.clone();
-        // Spawn an async write so we never block the Tokio thread-pool under
-        // lock contention (the in-memory cache above is already updated).
-        if let Ok(json) = serde_json::to_string_pretty(&normalized) {
-            let path = self.config_path.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = tokio::fs::write(&path, json).await;
-            });
+    /// Attach the canonical app-wide settings database and perform the one-time
+    /// `user_config.json` merge. The database wins once a Workbench value has
+    /// been written; the JSON file remains a recovery mirror for downgrades.
+    pub async fn attach_database(
+        &self,
+        database: Arc<dyn thinclaw_core::db::Database>,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+        let _write = self.write_lock.lock().await;
+        let canonical = database
+            .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
+            .await
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+
+        let config = if let Some(value) = canonical {
+            normalize_user_config(
+                serde_json::from_value(value)
+                    .map_err(|error| format!("invalid canonical Workbench config: {error}"))?,
+            )
+        } else {
+            let config = self.get_config();
+            database
+                .set_setting(
+                    SETTINGS_USER_ID,
+                    WORKBENCH_CONFIG_KEY,
+                    &serde_json::to_value(&config).map_err(|error| {
+                        crate::thinclaw::bridge::BridgeError::from(error.to_string())
+                    })?,
+                )
+                .await
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+            config
+        };
+
+        database
+            .set_setting(
+                SETTINGS_USER_ID,
+                SETTINGS_SCHEMA_VERSION_KEY,
+                &serde_json::json!(SETTINGS_SCHEMA_VERSION),
+            )
+            .await
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        *self
+            .database
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(database);
+        *self
+            .config
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = config.clone();
+        if let Err(error) = self.write_recovery_file(&config).await {
+            tracing::warn!(%error, "Failed to refresh legacy Workbench config recovery file");
         }
+        Ok(())
     }
 
-    pub fn reload(&self) {
-        if let Ok(content) = std::fs::read_to_string(&self.config_path) {
-            if let Ok(new_config) = serde_json::from_str(&content) {
-                *self.config.lock().unwrap_or_else(|e| e.into_inner()) =
-                    normalize_user_config(new_config);
+    pub async fn save_config(
+        &self,
+        new_config: &UserConfig,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+        let _write = self.write_lock.lock().await;
+        let normalized = normalize_user_config(new_config.clone());
+        let database = self
+            .database
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(database) = database {
+            database
+                .set_setting(
+                    SETTINGS_USER_ID,
+                    WORKBENCH_CONFIG_KEY,
+                    &serde_json::to_value(&normalized).map_err(|error| {
+                        crate::thinclaw::bridge::BridgeError::from(error.to_string())
+                    })?,
+                )
+                .await
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        }
+        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized.clone();
+        if let Err(error) = self.write_recovery_file(&normalized).await {
+            tracing::warn!(%error, "Failed to update legacy Workbench config recovery file");
+        }
+        Ok(())
+    }
+
+    async fn write_recovery_file(
+        &self,
+        config: &UserConfig,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+        let json = serde_json::to_string_pretty(config)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        if let Some(parent) = self.config_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        }
+        tokio::fs::write(&self.config_path, json)
+            .await
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
+    }
+
+    pub async fn reload(&self) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+        let _write = self.write_lock.lock().await;
+        let database = self
+            .database
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let config = if let Some(database) = database {
+            database
+                .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
+                .await
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
+        } else {
+            tokio::fs::read_to_string(&self.config_path)
+                .await
+                .ok()
+                .and_then(|content| serde_json::from_str(&content).ok())
+        };
+        if let Some(config) = config {
+            *self
+                .config
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = normalize_user_config(config);
+        }
+        Ok(())
+    }
+
+    fn canonical_database(
+        &self,
+    ) -> Result<Arc<dyn thinclaw_core::db::Database>, crate::thinclaw::bridge::BridgeError> {
+        Ok(self
+            .database
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .ok_or_else(|| "Canonical settings database is not initialized".to_string())?)
+    }
+
+    pub async fn agent_settings(
+        &self,
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
+        let database = self.canonical_database()?;
+        let response = thinclaw_core::api::config::list_settings(&database, SETTINGS_USER_ID)
+            .await
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        let mut value = serde_json::to_value(response)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        if let Some(settings) = value
+            .get_mut("settings")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            settings.retain(|setting| {
+                setting
+                    .get("key")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|key| !key.starts_with("desktop."))
+            });
+        }
+        Ok(value)
+    }
+
+    pub async fn set_agent_setting(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+        if key.starts_with("desktop.") {
+            return Err(
+                ("desktop.* settings are reserved for the Workbench view".to_string()).into(),
+            );
+        }
+        let database = self.canonical_database()?;
+        thinclaw_core::api::config::set_setting(&database, SETTINGS_USER_ID, key, value)
+            .await
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
+    }
+
+    pub async fn patch_workbench(
+        &self,
+        patch: &serde_json::Value,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+        let patch = patch
+            .as_object()
+            .ok_or_else(|| "Workbench settings patch must be an object".to_string())?;
+        let mut merged = serde_json::to_value(self.get_config())
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        let target = merged
+            .as_object_mut()
+            .ok_or_else(|| "Workbench settings must serialize as an object".to_string())?;
+        for (key, value) in patch {
+            if !target.contains_key(key) {
+                return Err((format!("Unknown Workbench setting: {key}")).into());
+            }
+            target.insert(key.clone(), value.clone());
+        }
+        let config: UserConfig = serde_json::from_value(merged)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+        self.save_config(&config).await
+    }
+}
+
+fn schema_for_default(value: &serde_json::Value) -> serde_json::Value {
+    let type_name = match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    };
+    let mut schema = serde_json::json!({ "type": type_name, "default": value });
+    if let Some(object) = value.as_object() {
+        schema["properties"] = serde_json::Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), schema_for_default(value)))
+                .collect(),
+        );
+    }
+    schema
+}
+
+pub fn unified_settings_schema() -> serde_json::Value {
+    let mut workbench =
+        serde_json::to_value(UserConfig::default()).unwrap_or_else(|_| serde_json::json!({}));
+    // Secret values are managed by the dedicated keychain surface and must
+    // never be reflected into a generic settings schema/default payload.
+    if let Some(workbench) = workbench.as_object_mut() {
+        workbench.remove("mcp_auth_token");
+    }
+    serde_json::json!({
+        "version": SETTINGS_SCHEMA_VERSION,
+        "type": "object",
+        "views": {
+            "workbench": {
+                "title": "Direct AI Workbench",
+                "description": "Direct chat, inference, RAG, media, and local engine preferences.",
+                "storageKey": WORKBENCH_CONFIG_KEY,
+                "schema": schema_for_default(&workbench),
+            },
+            "agent": {
+                "title": "ThinClaw Agent Cockpit",
+                "description": "Agent-runtime settings stored in the same canonical settings table.",
+                "schema": { "type": "object", "additionalProperties": true },
             }
         }
-    }
+    })
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn open_config_file(app: AppHandle) -> Result<(), String> {
+pub fn open_config_file(app: AppHandle) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let config_path = app
         .path()
         .app_config_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
         .join("user_config.json");
 
     if !config_path.exists() {
-        return Err("Config file does not exist yet".to_string());
+        return Err(("Config file does not exist yet".to_string()).into());
     }
 
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(&config_path).spawn();
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&config_path)
+            .spawn();
     }
     #[cfg(not(target_os = "macos"))]
-    open::that(&config_path).map_err(|e| e.to_string())?;
+    open::that(config_path.parent().unwrap_or(&config_path))
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn get_hf_token(
+    app: AppHandle,
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if let Some(ironclaw) = app.try_state::<crate::thinclaw::runtime_bridge::ThinClawRuntimeState>()
     {
         if ironclaw.remote_proxy().await.is_some() {
@@ -404,26 +851,11 @@ pub fn get_user_config(state: tauri::State<ConfigManager>) -> UserConfig {
 
 #[tauri::command]
 #[specta::specta]
-pub fn update_user_config(
-    state: tauri::State<ConfigManager>,
-    config: UserConfig,
-) -> Result<(), String> {
-    // JSON-level merge: read current config, overlay incoming fields, save.
-    // This prevents a stale frontend copy from overwriting concurrent backend
-    // changes (e.g. local inference config written by the sidecar manager).
-    let current = state.get_config();
-    let mut base = serde_json::to_value(&current).map_err(|e| e.to_string())?;
-    let incoming = serde_json::to_value(&config).map_err(|e| e.to_string())?;
-
-    if let (Some(base_obj), Some(inc_obj)) = (base.as_object_mut(), incoming.as_object()) {
-        for (key, value) in inc_obj {
-            base_obj.insert(key.clone(), value.clone());
-        }
-    }
-
-    let merged: UserConfig = serde_json::from_value(base).map_err(|e| e.to_string())?;
-    state.save_config(&merged);
-    Ok(())
+pub async fn update_user_config(
+    state: tauri::State<'_, ConfigManager>,
+    config: UserConfigPatch,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    state.patch_workbench(&config.into_json()?).await
 }
 
 // =============================================================================
@@ -594,7 +1026,20 @@ mod tests {
         ConfigManager {
             config: Mutex::new(cfg),
             config_path: std::path::PathBuf::from("/tmp/thinclaw_desktop_test_config.json"),
+            database: RwLock::new(None),
+            write_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    #[cfg(feature = "runtime-libsql")]
+    async fn canonical_database(temp: &tempfile::TempDir) -> Arc<dyn thinclaw_core::db::Database> {
+        use thinclaw_core::db::Database as _;
+        let path = temp.path().join("settings.db");
+        let backend = thinclaw_core::db::libsql::LibSqlBackend::new_local(&path)
+            .await
+            .expect("open canonical settings database");
+        backend.run_migrations().await.expect("run migrations");
+        Arc::new(backend)
     }
 
     #[test]
@@ -614,7 +1059,7 @@ mod tests {
         let mut updated = mgr.get_config();
         updated.max_search_results = 99;
         updated.mcp_cache_ttl_secs = 120;
-        mgr.save_config(&updated);
+        mgr.save_config(&updated).await.expect("save config");
 
         // The in-memory state must be updated synchronously (disk write is async)
         let read_back = mgr.get_config();
@@ -622,9 +1067,153 @@ mod tests {
         assert_eq!(read_back.mcp_cache_ttl_secs, 120);
     }
 
+    #[cfg(feature = "runtime-libsql")]
+    #[tokio::test]
+    async fn canonical_database_migrates_file_config_and_wins_on_restart() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let database = canonical_database(&temp).await;
+        let original = UserConfig {
+            max_search_results: 17,
+            selected_persona: "migrated".to_string(),
+            ..UserConfig::default()
+        };
+        let manager = ConfigManager {
+            config: Mutex::new(original),
+            config_path: temp.path().join("user_config.json"),
+            database: RwLock::new(None),
+            write_lock: tokio::sync::Mutex::new(()),
+        };
+        manager
+            .attach_database(Arc::clone(&database))
+            .await
+            .expect("attach canonical database");
+
+        let persisted = database
+            .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
+            .await
+            .expect("read canonical config")
+            .expect("canonical config exists");
+        assert_eq!(persisted["max_search_results"], 17);
+        assert_eq!(persisted["selected_persona"], "migrated");
+
+        let restarted = ConfigManager {
+            config: Mutex::new(UserConfig::default()),
+            config_path: temp.path().join("restarted-user_config.json"),
+            database: RwLock::new(None),
+            write_lock: tokio::sync::Mutex::new(()),
+        };
+        restarted
+            .attach_database(Arc::clone(&database))
+            .await
+            .expect("reattach canonical database");
+        assert_eq!(restarted.get_config().max_search_results, 17);
+        assert_eq!(restarted.get_config().selected_persona, "migrated");
+
+        let mut updated = restarted.get_config();
+        updated.max_search_results = 23;
+        restarted.save_config(&updated).await.expect("save update");
+        let persisted = database
+            .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
+            .await
+            .expect("read updated config")
+            .expect("updated config exists");
+        assert_eq!(persisted["max_search_results"], 23);
+    }
+
+    #[cfg(feature = "runtime-libsql")]
+    #[tokio::test]
+    async fn agent_and_workbench_views_share_storage_without_leaking_reserved_rows() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let database = canonical_database(&temp).await;
+        let manager = ConfigManager {
+            config: Mutex::new(UserConfig::default()),
+            config_path: temp.path().join("user_config.json"),
+            database: RwLock::new(None),
+            write_lock: tokio::sync::Mutex::new(()),
+        };
+        manager
+            .attach_database(database)
+            .await
+            .expect("attach canonical database");
+        manager
+            .set_agent_setting("llm.backend", &serde_json::json!("anthropic"))
+            .await
+            .expect("set agent setting");
+
+        let response = manager.agent_settings().await.expect("list agent settings");
+        let rows = response["settings"].as_array().expect("settings rows");
+        assert!(rows.iter().any(|row| row["key"] == "llm.backend"));
+        assert!(!rows.iter().any(|row| {
+            row["key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("desktop."))
+        }));
+        assert!(manager
+            .set_agent_setting("desktop.workbench", &serde_json::json!({}))
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn unified_schema_is_derived_from_every_workbench_field() {
+        let schema = unified_settings_schema();
+        let properties = schema["views"]["workbench"]["schema"]["properties"]
+            .as_object()
+            .expect("workbench properties");
+        let defaults = serde_json::to_value(UserConfig::default())
+            .expect("serialize defaults")
+            .as_object()
+            .expect("default fields")
+            .clone();
+        assert_eq!(properties.len(), defaults.len() - 1);
+        assert!(!properties.contains_key("mcp_auth_token"));
+        assert!(defaults
+            .keys()
+            .filter(|key| key.as_str() != "mcp_auth_token")
+            .all(|key| properties.contains_key(key)));
+    }
+
     // -------------------------------------------------------------------------
-    // JSON-level merge semantics (update_user_config logic)
+    // Presence-aware command patch semantics
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn user_config_patch_serializes_only_fields_the_caller_supplied() {
+        let patch: UserConfigPatch = serde_json::from_value(serde_json::json!({
+            "max_search_results": 15,
+            "mcp_base_url": null
+        }))
+        .expect("deserialize patch");
+
+        assert_eq!(
+            patch.into_json().expect("serialize patch"),
+            serde_json::json!({
+                "max_search_results": 15,
+                "mcp_base_url": null
+            })
+        );
+    }
+
+    #[test]
+    fn user_config_patch_rejects_null_for_non_nullable_fields() {
+        let error = serde_json::from_value::<UserConfigPatch>(serde_json::json!({
+            "max_search_results": null
+        }))
+        .expect_err("non-nullable field must reject null");
+
+        assert!(error.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn user_config_patch_rejects_unknown_fields() {
+        let error = serde_json::from_value::<UserConfigPatch>(serde_json::json!({
+            "raw": "legacy payload",
+            "baseHash": "stale hash"
+        }))
+        .expect_err("legacy wrapper must not be silently accepted");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
 
     #[test]
     fn json_merge_last_write_wins_on_basic_field() {
@@ -656,8 +1245,8 @@ mod tests {
         // The "incoming" patch only mentions max_search_results.
         // We build it as a raw JSON object so serde does NOT emit a null for
         // mcp_base_url (which would incorrectly overwrite the base value).
-        // This matches how update_user_config actually receives data from the
-        // frontend — partial objects, not full UserConfig serialisations.
+        // This matches the presence-aware UserConfigPatch representation used
+        // by update_user_config.
         let inc_val: serde_json::Value = serde_json::json!({
             "max_search_results": 15
         });

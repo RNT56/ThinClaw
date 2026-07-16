@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use super::keychain;
 use super::types::*;
+use sha2::{Digest as _, Sha256};
+use zeroize::Zeroizing;
 
 fn new_desktop_device_id() -> String {
     format!("thinclaw-{}", uuid::Uuid::new_v4())
@@ -20,6 +22,15 @@ fn new_desktop_device_id() -> String {
 /// Convert a keychain `String` error into `std::io::Error` for `?` chaining.
 fn io_err(msg: String) -> std::io::Error {
     std::io::Error::other(msg)
+}
+
+pub(crate) fn profile_token_key(profile_id: &str) -> String {
+    let digest = Sha256::digest(profile_id.as_bytes());
+    format!("remote_profile_token:{}", hex::encode(digest))
+}
+
+fn redacted_profiles(profiles: &[AgentProfile]) -> Vec<AgentProfile> {
+    profiles.iter().map(AgentProfile::redacted).collect()
 }
 
 impl ThinClawConfig {
@@ -73,13 +84,26 @@ impl ThinClawConfig {
         let raw_json_value: Option<serde_json::Value> = std::fs::read_to_string(&id_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());
+        let mut secrets_migration_succeeded = true;
         if let Some(ref val) = raw_json_value {
             if let Ok(mut legacy) = serde_json::from_value::<keychain::LegacyKeys>(val.clone()) {
-                if keychain::migrate_from_identity(&mut legacy) {
-                    // Merge the now-nulled fields back into identity so save_identity()
-                    // writes the sanitised version (no secrets in JSON).
-                    println!("[keychain] migrated legacy plaintext API keys to Keychain");
+                match keychain::migrate_from_identity(&mut legacy) {
+                    Ok(true) => {
+                        println!("[keychain] migrated legacy plaintext API keys to Keychain");
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        secrets_migration_succeeded = false;
+                        println!(
+                            "[keychain] preserving identity.json after secret migration failed: {}",
+                            error
+                        );
+                    }
                 }
+            } else {
+                // Do not rewrite an identity document containing legacy fields
+                // that we could not safely inspect.
+                secrets_migration_succeeded = false;
             }
 
             // Migrate custom_secrets values: the old JSON had `value` inline.
@@ -95,6 +119,7 @@ impl ThinClawConfig {
                             // Only migrate if the keychain doesn't already have this key
                             if keychain::get_key(id).is_none() {
                                 if let Err(e) = keychain::set_key(id, Some(value)) {
+                                    secrets_migration_succeeded = false;
                                     println!(
                                         "[keychain] custom secret migration failed for '{}': {}",
                                         id, e
@@ -109,6 +134,41 @@ impl ThinClawConfig {
                         }
                     }
                 }
+            }
+
+            // Older builds persisted each remote profile bearer token inline.
+            // Import those credentials before allowing the sanitized identity
+            // document to replace the only durable copy.
+            if let Some(profiles) = val.get("profiles").and_then(|value| value.as_array()) {
+                for profile in profiles {
+                    let id = profile.get("id").and_then(|value| value.as_str());
+                    let token = profile.get("token").and_then(|value| value.as_str());
+                    if let (Some(id), Some(token)) = (id, token) {
+                        if !id.is_empty() && !token.is_empty() {
+                            let key = profile_token_key(id);
+                            if keychain::get_key(&key).is_none() {
+                                if let Err(error) = keychain::set_key(&key, Some(token)) {
+                                    secrets_migration_succeeded = false;
+                                    println!(
+                                        "[keychain] remote profile token migration failed for '{}': {}",
+                                        id, error
+                                    );
+                                } else {
+                                    println!(
+                                        "[keychain] migrated remote profile token for '{}'",
+                                        id
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for profile in &mut identity.profiles {
+            if let Some(token) = keychain::get_key(&profile_token_key(&profile.id)) {
+                profile.token = Some(token);
             }
         }
 
@@ -149,18 +209,54 @@ impl ThinClawConfig {
             }
         }
 
-        if identity.auth_token.is_empty() {
-            identity.auth_token =
+        // `auth_token` was historically a local-only bridge value and older
+        // builds persisted it in identity.json. It now protects the real
+        // loopback/remote-access gateway, so migrate it into the encrypted
+        // credential envelope before sanitizing the JSON document.
+        let has_legacy_gateway_token = !identity.auth_token.is_empty();
+        let gateway_auth_token = if let Some(token) = keychain::get_key("gateway_auth_token") {
+            identity.auth_token.clear();
+            token
+        } else {
+            let token = if identity.auth_token.is_empty() {
                 rand::Rng::sample_iter(rand::thread_rng(), &rand::distributions::Alphanumeric)
                     .take(32)
                     .map(char::from)
-                    .collect();
-        }
+                    .collect()
+            } else {
+                identity.auth_token.clone()
+            };
+            match keychain::set_key("gateway_auth_token", Some(&token)) {
+                Ok(()) => identity.auth_token.clear(),
+                Err(error) => {
+                    if has_legacy_gateway_token {
+                        secrets_migration_succeeded = false;
+                        println!(
+                            "[keychain] preserving identity.json after gateway token migration failed: {}",
+                            error
+                        );
+                    } else {
+                        // A freshly generated token has no durable plaintext
+                        // source to preserve. Keep it process-local for this
+                        // run, but still persist non-secret identity settings.
+                        println!(
+                            "[keychain] local gateway token is ephemeral because secure storage is unavailable: {}",
+                            error
+                        );
+                    }
+                }
+            }
+            token
+        };
 
-        // Ensure state dir exists before writing identity (secrets-free JSON)
+        // Ensure state dir exists before writing identity. If any secret could
+        // not be durably migrated, retain the original document for a later
+        // retry instead of sanitising away the only copy of that credential.
         let _ = std::fs::create_dir_all(base_dir.join("state"));
-        if let Ok(json) = serde_json::to_string_pretty(&identity) {
-            let _ = std::fs::write(&id_path, json);
+        if secrets_migration_succeeded {
+            if let Ok(json) = serde_json::to_string_pretty(&identity) {
+                let _ = std::fs::write(&id_path, json);
+            }
         }
 
         let port = Self::find_available_port().unwrap_or(18789);
@@ -168,10 +264,10 @@ impl ThinClawConfig {
         // ── Load API keys from Keychain into memory ───────────────────────────
         // Keys are never written to disk — they live only in memory (here) and
         // in the OS Keychain (encrypted).
-        let config = Self {
+        Self {
             base_dir,
             device_id: identity.device_id,
-            auth_token: identity.auth_token,
+            auth_token: gateway_auth_token,
             // Sensitive fields: load from Keychain
             anthropic_api_key: keychain::get_key("anthropic"),
             anthropic_granted: identity.anthropic_granted,
@@ -258,9 +354,7 @@ impl ThinClawConfig {
             bedrock_secret_access_key: keychain::get_key("bedrock_secret_access_key"),
             bedrock_region: keychain::get_key("bedrock_region"),
             bedrock_granted: identity.bedrock_granted,
-        };
-        crate::thinclaw::secrets_adapter::update_default_secret_grants(&config);
-        config
+        }
     }
 
     pub(crate) fn find_available_port() -> Option<u16> {
@@ -571,11 +665,88 @@ impl ThinClawConfig {
         url: Option<String>,
         token: Option<String>,
     ) -> std::io::Result<()> {
+        let previous_mode = self.gateway_mode.clone();
+        let previous_url = self.remote_url.clone();
+        let previous_token = self.remote_token.clone();
+
         keychain::set_key("remote_token", token.as_deref()).map_err(io_err)?;
         self.gateway_mode = mode;
         self.remote_url = url;
         self.remote_token = token;
-        self.save_identity()
+        if let Err(save_error) = self.save_identity() {
+            self.gateway_mode = previous_mode;
+            self.remote_url = previous_url;
+            self.remote_token = previous_token.clone();
+            if let Err(rollback_error) =
+                keychain::set_key("remote_token", previous_token.as_deref()).map_err(io_err)
+            {
+                return Err(std::io::Error::other(format!(
+                    "failed to save gateway settings ({save_error}); credential rollback also failed ({rollback_error})"
+                )));
+            }
+            return Err(save_error);
+        }
+        Ok(())
+    }
+
+    /// Insert or replace a remote profile while storing its bearer token only
+    /// in the encrypted Keychain envelope. A missing token preserves the
+    /// existing credential for edits that only change profile metadata.
+    pub fn upsert_agent_profile(&mut self, mut profile: AgentProfile) -> std::io::Result<()> {
+        let previous_profiles = self.profiles.clone();
+        let existing_token = self
+            .profiles
+            .iter()
+            .find(|candidate| candidate.id == profile.id)
+            .and_then(|candidate| candidate.token.clone());
+        if profile.token.is_none() {
+            profile.token = existing_token;
+        }
+
+        let key = profile_token_key(&profile.id);
+        let previous_key_value = keychain::get_key(&key).map(Zeroizing::new);
+        keychain::set_key(&key, profile.token.as_deref()).map_err(io_err)?;
+
+        if let Some(existing) = self
+            .profiles
+            .iter_mut()
+            .find(|candidate| candidate.id == profile.id)
+        {
+            *existing = profile;
+        } else {
+            self.profiles.push(profile);
+        }
+        if let Err(save_error) = self.save_identity() {
+            self.profiles = previous_profiles;
+            let rollback_value = previous_key_value.as_ref().map(|value| value.as_str());
+            if let Err(rollback_error) = keychain::set_key(&key, rollback_value) {
+                return Err(std::io::Error::other(format!(
+                    "profile metadata save failed ({save_error}); credential rollback also failed ({rollback_error})"
+                )));
+            }
+            return Err(save_error);
+        }
+        Ok(())
+    }
+
+    /// Remove profile metadata first, then remove the now-unreferenced token.
+    pub fn remove_agent_profile(&mut self, id: &str) -> std::io::Result<()> {
+        let previous_profiles = self.profiles.clone();
+        self.profiles.retain(|profile| profile.id != id);
+        if let Err(save_error) = self.save_identity() {
+            self.profiles = previous_profiles;
+            return Err(save_error);
+        }
+        if let Err(delete_error) = keychain::set_key(&profile_token_key(id), None) {
+            self.profiles = previous_profiles;
+            if let Err(rollback_error) = self.save_identity() {
+                return Err(std::io::Error::other(format!(
+                    "profile credential removal failed ({delete_error}); metadata rollback also failed ({rollback_error})"
+                )));
+            }
+            return Err(io_err(delete_error));
+        }
+        Ok(())
     }
 
     pub fn toggle_expose_inference(&mut self, enabled: bool) -> std::io::Result<()> {
@@ -619,7 +790,8 @@ impl ThinClawConfig {
         );
         let identity = ThinClawIdentity {
             device_id: self.device_id.clone(),
-            auth_token: self.auth_token.clone(),
+            // Gateway bearer credential lives in the encrypted Keychain envelope.
+            auth_token: String::new(),
             // API key fields are intentionally omitted — stored in Keychain
             // Only the boolean `*_granted` flags are kept in JSON so the UI
             // knows whether a key has been configured without exposing the value.
@@ -636,7 +808,7 @@ impl ThinClawConfig {
             custom_llm_enabled: self.custom_llm_enabled,
             enabled_cloud_providers: self.enabled_cloud_providers.clone(),
             enabled_cloud_models: self.enabled_cloud_models.clone(),
-            profiles: self.profiles.clone(),
+            profiles: redacted_profiles(&self.profiles),
             gateway_mode: self.gateway_mode.clone(),
             remote_url: self.remote_url.clone(),
             // remote_token goes to Keychain — not saved here
@@ -730,7 +902,8 @@ impl ThinClawConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::new_desktop_device_id;
+    use super::{new_desktop_device_id, profile_token_key, redacted_profiles};
+    use crate::thinclaw::config::{AgentProfile, ThinClawIdentity};
 
     #[test]
     fn generated_desktop_device_ids_use_thinclaw_prefix() {
@@ -738,5 +911,60 @@ mod tests {
 
         assert!(id.starts_with("thinclaw-"));
         assert!(!id.starts_with("scrappy-"));
+    }
+
+    #[test]
+    fn profile_tokens_are_redacted_from_identity_serialization_and_debug() {
+        let profile = AgentProfile {
+            id: "remote-one".to_string(),
+            name: "Remote One".to_string(),
+            url: "https://gateway.example.com".to_string(),
+            token: Some("top-secret-token".to_string()),
+            mode: "remote".to_string(),
+            auto_connect: true,
+        };
+        let identity = ThinClawIdentity {
+            profiles: vec![profile.clone()],
+            ..ThinClawIdentity::default()
+        };
+
+        let serialized = serde_json::to_string(&identity).expect("serialize identity");
+        assert!(!serialized.contains("top-secret-token"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&serialized)
+                .expect("identity JSON")
+                .pointer("/profiles/0/token"),
+            Some(&serde_json::Value::Null)
+        );
+        assert!(!format!("{profile:?}").contains("top-secret-token"));
+        assert!(redacted_profiles(&[profile])[0].token.is_none());
+    }
+
+    #[test]
+    fn local_gateway_token_is_never_serialized_to_identity_json() {
+        let identity = ThinClawIdentity {
+            auth_token: "local-gateway-secret".to_string(),
+            ..ThinClawIdentity::default()
+        };
+
+        let serialized = serde_json::to_string(&identity).expect("serialize identity");
+        assert!(!serialized.contains("local-gateway-secret"));
+        assert!(serde_json::from_str::<serde_json::Value>(&serialized)
+            .expect("identity JSON")
+            .get("auth_token")
+            .is_none());
+
+        let legacy: ThinClawIdentity =
+            serde_json::from_str(r#"{"device_id":"desktop","auth_token":"legacy-token"}"#)
+                .expect("legacy identity remains readable for migration");
+        assert_eq!(legacy.auth_token, "legacy-token");
+    }
+
+    #[test]
+    fn profile_token_keys_are_namespaced_and_do_not_expose_profile_ids() {
+        let key = profile_token_key("customer@example.com");
+        assert!(key.starts_with("remote_profile_token:"));
+        assert!(!key.contains("customer@example.com"));
+        assert_eq!(key, profile_token_key("customer@example.com"));
     }
 }

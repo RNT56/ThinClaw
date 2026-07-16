@@ -29,6 +29,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 - Understanding repository layout and app/runtime placement: go to [REPOSITORY_LAYOUT.md](REPOSITORY_LAYOUT.md)
 - Understanding crate ownership and thin-shell boundaries: go to [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md)
 - Understanding security and trust: go to [SECURITY.md](SECURITY.md)
+- Publishing a signed release: go to [RELEASING.md](RELEASING.md)
 
 ## By Audience
 
@@ -61,6 +62,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 ### Contributors And Maintainers
 
 - [DEVELOPMENT.md](DEVELOPMENT.md)
+- [RELEASING.md](RELEASING.md)
 - [BUILD_PROFILES.md](BUILD_PROFILES.md)
 - [../CLAUDE.md](../CLAUDE.md)
 - [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
@@ -98,6 +100,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 | CLI, TUI, and WebUI skins | [TERMINAL_SKINS.md](TERMINAL_SKINS.md) |
 | Onboarding and setup behavior | [../src/setup/README.md](../src/setup/README.md) |
 | Deployment decision tree | [DEPLOYMENT.md](DEPLOYMENT.md) |
+| Maintainer release operations | [RELEASING.md](RELEASING.md) |
 | Platform-specific deploy runbooks | [deploy/](deploy/) |
 | Remote gateway and tunnel access | [deploy/remote-access.md](deploy/remote-access.md) |
 | Channel architecture | [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md) |

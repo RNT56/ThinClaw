@@ -3,9 +3,12 @@
 
 use std::time::Duration;
 
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use super::core::{ConnectionState, RemoteGatewayProxy};
+
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_SSE_BACKOFF: Duration = Duration::from_secs(30);
 
 impl RemoteGatewayProxy {
     /// Subscribe to the remote gateway's SSE event stream and re-emit
@@ -16,11 +19,14 @@ impl RemoteGatewayProxy {
     /// between local and remote agent events.
     ///
     /// Auto-reconnects on disconnect (exponential backoff, max 30s).
-    pub async fn start_sse_subscription(&self, app_handle: tauri::AppHandle) -> Result<(), String> {
+    pub async fn start_sse_subscription(
+        &self,
+        app_handle: tauri::AppHandle,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         // Stop existing subscription first
         self.stop_sse_subscription().await;
 
-        *self.inner.state.write().await = ConnectionState::Connected;
+        *self.inner.state.write().await = ConnectionState::Reconnecting;
 
         let proxy = self.clone();
         let handle = tokio::spawn(async move {
@@ -39,6 +45,13 @@ impl RemoteGatewayProxy {
     pub async fn stop_sse_subscription(&self) {
         if let Some(handle) = self.inner.sse_handle.write().await.take() {
             handle.abort();
+            // Await cancellation so shutdown cannot leave a reconnecting task
+            // racing a subsequent connection attempt.
+            if let Err(error) = handle.await {
+                if !error.is_cancelled() {
+                    warn!("[remote_proxy] SSE subscription exited during shutdown: {error}");
+                }
+            }
             info!("[remote_proxy] SSE subscription stopped");
         }
         *self.inner.state.write().await = ConnectionState::Disconnected;
@@ -53,11 +66,11 @@ impl RemoteGatewayProxy {
     async fn sse_loop(&self, app_handle: tauri::AppHandle) {
         use tauri::Emitter;
 
-        let mut backoff_secs: u64 = 1;
-        const MAX_BACKOFF: u64 = 30;
+        let mut backoff = Duration::from_secs(1);
 
         loop {
             *self.inner.state.write().await = ConnectionState::Reconnecting;
+            let mut wait = backoff;
 
             let url = self.url("/api/chat/events");
             info!("[remote_proxy] Connecting to SSE: {}", url);
@@ -66,7 +79,7 @@ impl RemoteGatewayProxy {
                 .inner
                 .client
                 .get(&url)
-                .header("Authorization", self.auth_header())
+                .header(reqwest::header::AUTHORIZATION, self.auth_header())
                 .header("Accept", "text/event-stream")
                 .header("Cache-Control", "no-cache")
                 // No global timeout — SSE is a long-lived connection
@@ -77,27 +90,56 @@ impl RemoteGatewayProxy {
             match result {
                 Err(e) => {
                     warn!(
-                        "[remote_proxy] SSE connection failed: {}. Retrying in {}s",
-                        e, backoff_secs
+                        "[remote_proxy] SSE connection failed: {}. Retrying in {:?}",
+                        e, backoff
+                    );
+                    emit_reconnecting(
+                        &app_handle,
+                        format!(
+                            "Remote stream unavailable — retrying in {}s",
+                            backoff.as_secs()
+                        ),
                     );
                 }
                 Ok(response) if !response.status().is_success() => {
                     let status = response.status();
-                    error!(
-                        "[remote_proxy] SSE endpoint returned HTTP {}. Retrying in {}s",
-                        status, backoff_secs
+                    let retry_after = response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.trim().parse::<u64>().ok())
+                        .map(Duration::from_secs)
+                        .map(|duration| duration.min(MAX_SSE_BACKOFF));
+                    error!("[remote_proxy] SSE endpoint returned HTTP {}", status);
+                    if !sse_status_is_retryable(status) {
+                        *self.inner.state.write().await = ConnectionState::Disconnected;
+                        emit_reconnecting(
+                            &app_handle,
+                            format!("Remote event stream stopped: HTTP {status}. Check gateway configuration and credentials."),
+                        );
+                        return;
+                    }
+                    if let Some(retry_after) = retry_after {
+                        wait = retry_after;
+                    }
+                    emit_reconnecting(
+                        &app_handle,
+                        format!(
+                            "Remote stream returned HTTP {status} — retrying in {}s",
+                            wait.as_secs()
+                        ),
                     );
                 }
                 Ok(response) => {
                     *self.inner.state.write().await = ConnectionState::Connected;
-                    backoff_secs = 1; // Reset backoff on successful connect
+                    backoff = Duration::from_secs(1); // Reset backoff on successful connect
 
                     info!("[remote_proxy] SSE stream connected");
 
                     // Emit Connected event to frontend
                     let _ = app_handle.emit(
                         "thinclaw-event",
-                        &crate::thinclaw::ui_types::UiEvent::Connected { protocol: 1 },
+                        &crate::thinclaw::ui_types::UiEvent::Connected { protocol: 2 },
                     );
 
                     // Stream SSE events
@@ -113,18 +155,16 @@ impl RemoteGatewayProxy {
                     }
 
                     // Emit Disconnected to frontend on stream end
-                    let _ = app_handle.emit(
-                        "thinclaw-event",
-                        &crate::thinclaw::ui_types::UiEvent::Disconnected {
-                            reason: "Remote stream ended — reconnecting".to_string(),
-                        },
+                    emit_reconnecting(
+                        &app_handle,
+                        "Remote stream ended — reconnecting in 1s".to_string(),
                     );
                 }
             }
 
             *self.inner.state.write().await = ConnectionState::Reconnecting;
-            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+            tokio::time::sleep(wait).await;
+            backoff = (backoff * 2).min(MAX_SSE_BACKOFF);
         }
     }
 
@@ -139,64 +179,97 @@ impl RemoteGatewayProxy {
         &self,
         response: reqwest::Response,
         app_handle: &tauri::AppHandle,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         use futures_util::StreamExt;
-        use tauri::Emitter;
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("SSE stream read error: {}", e))?;
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
-
-            // Process complete SSE lines (terminated by \n)
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim_end_matches('\r').to_string();
-                buffer.drain(..=pos);
-
-                if line.starts_with("data: ") {
-                    let data = line.trim_start_matches("data: ").trim();
-                    if data.is_empty() || data == "[DONE]" {
-                        continue;
-                    }
-
-                    // Prefer UiEvent for remote gateways that already speak
-                    // the desktop contract. Otherwise normalize ThinClaw
-                    // gateway SSE (`type`) events into the same bus.
-                    match serde_json::from_str::<crate::thinclaw::ui_types::UiEvent>(data) {
-                        Ok(event) => {
-                            debug!("[remote_proxy] SSE event: {:?}", event);
-                            if let Err(e) = app_handle.emit("thinclaw-event", &event) {
-                                warn!("[remote_proxy] Failed to emit Tauri event: {}", e);
-                            }
-                        }
-                        Err(_) => match serde_json::from_str::<serde_json::Value>(data) {
-                            Ok(raw_json) => {
-                                for event in
-                                    crate::thinclaw::event_mapping::gateway_sse_to_ui_events(
-                                        raw_json,
-                                    )
-                                {
-                                    debug!("[remote_proxy] normalized SSE event: {:?}", event);
-                                    if let Err(e) = app_handle.emit("thinclaw-event", &event) {
-                                        warn!(
-                                            "[remote_proxy] Failed to emit mapped gateway event: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                warn!("[remote_proxy] Failed to parse SSE data as JSON: {}", e)
-                            }
-                        },
-                    }
+            // Split before appending so a large network chunk containing many
+            // small events never creates one large intermediate buffer. Bytes
+            // are decoded only after a complete line arrives, preserving UTF-8
+            // sequences that cross transport chunk boundaries.
+            for segment in chunk.split_inclusive(|byte| *byte == b'\n') {
+                if buffer.len().saturating_add(segment.len()) > MAX_SSE_LINE_BYTES {
+                    return Err((format!(
+                        "SSE event exceeded the {MAX_SSE_LINE_BYTES}-byte safety limit"
+                    ))
+                    .into());
+                }
+                buffer.extend_from_slice(segment);
+                if segment.ends_with(b"\n") {
+                    forward_sse_line(&buffer, app_handle)?;
+                    buffer.clear();
                 }
             }
         }
 
+        if !buffer.is_empty() {
+            forward_sse_line(&buffer, app_handle)?;
+        }
+
         Ok(())
     }
+}
+
+fn sse_status_is_retryable(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
+fn emit_reconnecting(app_handle: &tauri::AppHandle, reason: String) {
+    use tauri::Emitter;
+
+    let _ = app_handle.emit(
+        "thinclaw-event",
+        &crate::thinclaw::ui_types::UiEvent::Disconnected { reason },
+    );
+}
+
+fn forward_sse_line(
+    line: &[u8],
+    app_handle: &tauri::AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    use tauri::Emitter;
+
+    let mut end = line.len();
+    if end > 0 && line[end - 1] == b'\n' {
+        end -= 1;
+    }
+    if end > 0 && line[end - 1] == b'\r' {
+        end -= 1;
+    }
+    let line = std::str::from_utf8(&line[..end])
+        .map_err(|_| "Remote SSE stream contained invalid UTF-8".to_string())?;
+    let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+        return Ok(());
+    };
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(());
+    }
+
+    // Prefer UiEvent for remote gateways that already speak the desktop
+    // contract. Otherwise normalize root gateway (`type`) events.
+    match serde_json::from_str::<crate::thinclaw::ui_types::UiEvent>(data) {
+        Ok(event) => {
+            if let Err(error) = app_handle.emit("thinclaw-event", &event) {
+                warn!("[remote_proxy] Failed to emit Tauri event: {}", error);
+            }
+        }
+        Err(_) => match serde_json::from_str::<serde_json::Value>(data) {
+            Ok(raw_json) => {
+                for event in crate::thinclaw::event_mapping::gateway_sse_to_ui_events(raw_json) {
+                    if let Err(error) = app_handle.emit("thinclaw-event", &event) {
+                        warn!(
+                            "[remote_proxy] Failed to emit mapped gateway event: {}",
+                            error
+                        );
+                    }
+                }
+            }
+            Err(error) => warn!("[remote_proxy] Failed to parse SSE data as JSON: {}", error),
+        },
+    }
+    Ok(())
 }

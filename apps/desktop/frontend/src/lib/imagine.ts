@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { commandClient } from './command-client';
 
 // Re-export findStyle for convenience
 export { findStyle } from './style-library';
@@ -42,18 +42,16 @@ export interface ImagineStats {
  * Generate an image using the Imagine mode
  */
 export async function directImagineGenerate(params: ImagineParams): Promise<GeneratedImage> {
-    return invoke<GeneratedImage>('direct_imagine_generate', {
-        params: {
-            prompt: params.prompt,
-            provider: params.provider,
-            aspect_ratio: params.aspectRatio,
-            resolution: params.resolution,
-            style_id: params.styleId,
-            style_prompt: params.stylePrompt,
-            source_images: params.sourceImages,
-            model: params.model,
-            steps: params.steps,
-        }
+    return commandClient.directImagineGenerate({
+        prompt: params.prompt,
+        provider: params.provider,
+        aspect_ratio: params.aspectRatio,
+        resolution: params.resolution ?? null,
+        style_id: params.styleId ?? null,
+        style_prompt: params.stylePrompt ?? null,
+        source_images: params.sourceImages ?? null,
+        model: params.model ?? null,
+        steps: params.steps ?? null,
     });
 }
 
@@ -65,37 +63,33 @@ export async function imagineListImages(
     offset?: number,
     favoritesOnly?: boolean
 ): Promise<GeneratedImage[]> {
-    return invoke<GeneratedImage[]>('direct_imagine_list_images', {
-        limit,
-        offset,
-        favoritesOnly
-    });
+    return commandClient.directImagineListImages(limit ?? null, offset ?? null, favoritesOnly ?? null);
 }
 
 /**
  * Search generated images by prompt
  */
 export async function imagineSearchImages(query: string): Promise<GeneratedImage[]> {
-    return invoke<GeneratedImage[]>('direct_imagine_search_images', { query });
+    return commandClient.directImagineSearchImages(query);
 }
 
 /**
  * Toggle favorite status for an image
  */
 export async function imagineToggleFavorite(imageId: string): Promise<boolean> {
-    return invoke<boolean>('direct_imagine_toggle_favorite', { imageId });
+    return commandClient.directImagineToggleFavorite(imageId);
 }
 
 /**
  * Delete a generated image
  */
 export async function imagineDeleteImage(imageId: string): Promise<void> {
-    return invoke<void>('direct_imagine_delete_image', { imageId });
+    await commandClient.directImagineDeleteImage(imageId);
 }
 
 /**
  * Get gallery statistics
  */
 export async function imagineGetStats(): Promise<ImagineStats> {
-    return invoke<ImagineStats>('direct_imagine_get_stats');
+    return await commandClient.directImagineGetStats() as unknown as ImagineStats;
 }

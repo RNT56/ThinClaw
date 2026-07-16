@@ -68,6 +68,7 @@ pub mod cli;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod desktop_api;
 pub mod desktop_autonomy;
 #[cfg(feature = "document-extraction")]
 pub mod document_extraction;
@@ -103,7 +104,9 @@ pub mod settings;
 pub mod setup;
 pub mod skills;
 pub mod talk_mode;
-pub mod tauri_commands;
+/// Compatibility alias for downstream callers while the pre-rename facade is retired.
+#[deprecated(since = "0.16.0", note = "use thinclaw::desktop_api")]
+pub use desktop_api as tauri_commands;
 pub mod terminal_branding;
 pub mod timezone;
 pub mod tools;

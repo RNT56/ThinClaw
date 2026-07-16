@@ -174,7 +174,7 @@ impl GatewayChannel {
             cost_tracker: None,
             metrics_registry: None,
             response_cache: None,
-            routine_engine: None,
+            routine_engine: Arc::new(std::sync::RwLock::new(None)),
             repo_project_supervisor: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
@@ -227,7 +227,7 @@ impl GatewayChannel {
             cost_tracker: self.state.cost_tracker.clone(),
             metrics_registry: self.state.metrics_registry.clone(),
             response_cache: self.state.response_cache.clone(),
-            routine_engine: self.state.routine_engine.clone(),
+            routine_engine: Arc::clone(&self.state.routine_engine),
             repo_project_supervisor: self.state.repo_project_supervisor.clone(),
             startup_time: self.state.startup_time,
             restart_requested: std::sync::atomic::AtomicBool::new(false),
@@ -396,10 +396,10 @@ impl GatewayChannel {
 
     /// Inject the routine engine for webhook-triggered routine execution.
     pub fn with_routine_engine(
-        mut self,
+        self,
         engine: Arc<crate::agent::routine_engine::RoutineEngine>,
     ) -> Self {
-        self.rebuild_state(|s| s.routine_engine = Some(engine));
+        self.state.set_routine_engine(Some(engine));
         self
     }
 

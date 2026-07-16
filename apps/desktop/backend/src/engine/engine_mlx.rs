@@ -1,16 +1,16 @@
 //! MLX inference engine implementation (macOS Apple Silicon only).
 //!
 //! Uses `uv` (bundled Tauri sidecar) to bootstrap an isolated Python
-//! environment with `mlx_lm` installed, then spawns `mlx_lm.server`
-//! as an OpenAI-compatible HTTP server on a dynamic port.
+//! environment with the pinned MLX service stack, then spawns
+//! `mlx-openai-server` on a dynamic port.
 //!
 //! ## First-launch bootstrap:
 //! 1. Creates `mlx-env/` under the ThinClaw Desktop app data directory via `uv venv`
-//! 2. Installs `mlx_lm` via `uv pip install`
+//! 2. Installs the exact validated service-stack pins via `uv pip install`
 //! 3. Subsequent starts skip steps 1-2
 //!
 //! ## On model start:
-//! 1. Spawns `python -m mlx_lm.server --model <path> --port <port>`
+//! 1. Spawns `mlx-openai-server --model-path <path> --port <port>`
 //! 2. Polls `/health` until ready
 //! 3. Returns `(port, "")` — MLX server has no auth token
 
@@ -20,7 +20,7 @@ use std::sync::Mutex;
 
 use super::{EngineStartOptions, InferenceEngine};
 
-/// MLX engine — spawns `mlx_lm.server` as an OpenAI-compatible server.
+/// MLX engine — spawns `mlx-openai-server` as an OpenAI-compatible server.
 pub struct MlxEngine {
     port: Mutex<Option<u16>>,
     process: Mutex<Option<tokio::process::Child>>,
@@ -116,13 +116,17 @@ impl MlxEngine {
 
     /// Check if the MLX environment is already bootstrapped.
     ///
-    /// Checks for a `.mlx-openai-server` marker file that is written after
-    /// a successful `mlx-openai-server` installation. This ensures venvs
-    /// bootstrapped with the old `mlx_lm` are re-bootstrapped correctly.
+    /// The marker contains the exact validated direct-dependency fingerprint.
+    /// A pin change therefore upgrades existing venvs on the next setup run.
     pub fn is_bootstrapped(&self) -> bool {
-        self.get_venv_path()
-            .map(|v| v.join(".mlx-openai-server").exists())
-            .unwrap_or(false)
+        let Some(venv) = self.get_venv_path() else {
+            return false;
+        };
+        venv.join("bin/python3").is_file()
+            && venv.join("bin/mlx-openai-server").is_file()
+            && std::fs::read_to_string(venv.join(".mlx-openai-server"))
+                .ok()
+                .is_some_and(|value| value.trim() == super::MLX_BOOTSTRAP_FINGERPRINT)
     }
 
     /// Check if a model directory contains a vision-capable (VLM) model.
@@ -327,7 +331,8 @@ impl MlxEngine {
         //   - mlx-embeddings:    Embedding model support (replaces llama-server --embedding)
         //   - mflux:             Image generation (replaces sd-server / sd.cpp)
         //   - mlx-whisper:       Speech-to-text (replaces whisper-server / whisper.cpp)
-        // Using --upgrade ensures we get the latest version even if upgrading.
+        // Exact direct pins keep the runtime reproducible. The versioned marker
+        // above causes this upgrade step to run whenever the validated matrix changes.
         println!("[mlx] Installing MLX service stack (mlx-openai-server, mlx-embeddings, mflux, mlx-whisper)...");
 
         let output = tokio::process::Command::new(&uv_bin)
@@ -337,10 +342,10 @@ impl MlxEngine {
                 "--upgrade",
                 "--python",
                 &python.to_string_lossy(),
-                "mlx-openai-server",
-                "mlx-embeddings",
-                "mflux",
-                "mlx-whisper",
+                super::MLX_OPENAI_SERVER_SPEC,
+                super::MLX_EMBEDDINGS_SPEC,
+                super::MFLUX_SPEC,
+                super::MLX_WHISPER_SPEC,
             ])
             .output()
             .await
@@ -351,152 +356,13 @@ impl MlxEngine {
             return Err(format!("MLX service stack install failed: {}", stderr));
         }
 
-        // Step 2b: Patch mlx-vlm handler for attention_mask→mask bug.
-        // mlx-vlm's stream_generate() expects a "mask" key but the HuggingFace
-        // processor returns "attention_mask".  Without this patch, Gemma 3 (and
-        // potentially other VLMs) crash with:
-        //   expand_dims(): incompatible function arguments … NoneType, int
-        // We insert a key-rename after the torch→mlx conversion block.
-        Self::apply_vlm_attention_mask_patch(&venv);
-        Self::apply_vlm_content_normalization_patch(&venv);
-
         // Step 3: Write marker file so is_bootstrapped() returns true next time
         let marker = venv.join(".mlx-openai-server");
-        std::fs::write(&marker, "installed")
+        std::fs::write(&marker, super::MLX_BOOTSTRAP_FINGERPRINT)
             .map_err(|e| format!("Failed to write marker file: {}", e))?;
 
         println!("[mlx] Bootstrap complete.");
         Ok(())
-    }
-
-    /// Patch `app/handler/mlx_vlm.py` inside the venv to fix the
-    /// `attention_mask` → `mask` key mismatch that causes VLMs to crash.
-    ///
-    /// This is a workaround for <https://github.com/Blaizzy/mlx-vlm/issues/XXX>.
-    /// The patch is idempotent — it does nothing if already applied.
-    fn apply_vlm_attention_mask_patch(venv: &std::path::Path) {
-        // The handler lives under site-packages/app/handler/mlx_vlm.py
-        let handler = venv
-            .join("lib")
-            .join("python3.12")
-            .join("site-packages")
-            .join("app")
-            .join("handler")
-            .join("mlx_vlm.py");
-
-        if !handler.exists() {
-            println!("[mlx] Patch: mlx_vlm.py handler not found, skipping");
-            return;
-        }
-
-        let Ok(source) = std::fs::read_to_string(&handler) else {
-            println!("[mlx] Patch: could not read mlx_vlm.py");
-            return;
-        };
-
-        // Already patched?
-        if source.contains("PATCH (thinclaw)") || source.contains("PATCH (scrappy)") {
-            println!("[mlx] Patch: attention_mask fix already applied");
-            return;
-        }
-
-        // The pattern we look for after the torch→mlx conversion block.
-        // We insert our rename right after it.
-        let needle = "                    vision_inputs[key] = mx.array(value)\n";
-        let patch = r#"                    vision_inputs[key] = mx.array(value)
-
-            # PATCH (thinclaw): mlx-vlm's stream_generate expects "mask" but the
-            # HuggingFace processor returns "attention_mask". Without this
-            # rename, Gemma 3 crashes with expand_dims(NoneType, int).
-            if "attention_mask" in vision_inputs and "mask" not in vision_inputs:
-                vision_inputs["mask"] = vision_inputs.pop("attention_mask")
-"#;
-
-        let patched = source.replace(needle, patch);
-        if patched == source {
-            println!("[mlx] Patch: could not locate insertion point, skipping");
-            return;
-        }
-
-        match std::fs::write(&handler, patched) {
-            Ok(_) => println!("[mlx] Patch: applied attention_mask→mask fix to mlx_vlm.py"),
-            Err(e) => println!("[mlx] Patch: failed to write: {}", e),
-        }
-    }
-
-    /// Patch `app/handler/mlx_vlm.py` to normalize list content in
-    /// system/assistant messages to plain strings.
-    ///
-    /// When ThinClaw (or any OpenAI-compatible client) sends multipart content
-    /// format for non-user messages, the VLM handler passes
-    /// `ChatCompletionContentPartText` Pydantic objects through as-is. Downstream
-    /// code then crashes with `'ChatCompletionContentPartText' object is not
-    /// subscriptable` because it expects plain strings or dicts.
-    ///
-    /// This patch normalizes list content to a joined text string for system
-    /// and assistant roles.
-    fn apply_vlm_content_normalization_patch(venv: &std::path::Path) {
-        let handler = venv
-            .join("lib")
-            .join("python3.12")
-            .join("site-packages")
-            .join("app")
-            .join("handler")
-            .join("mlx_vlm.py");
-
-        if !handler.exists() {
-            return;
-        }
-
-        let Ok(source) = std::fs::read_to_string(&handler) else {
-            return;
-        };
-
-        // Already patched?
-        if source.contains("PATCH (thinclaw): normalize list content")
-            || source.contains("PATCH (scrappy): normalize list content")
-        {
-            println!("[mlx] Patch: content normalization already applied");
-            return;
-        }
-
-        // The pattern: system/assistant messages pass content through as-is.
-        // We replace the block to normalize list content to plain text.
-        let needle = r#"            if message.role in ["system", "assistant"]:
-                chat_messages.append({"role": message.role, "content": message.content})
-                continue"#;
-
-        let patch = r#"            if message.role in ["system", "assistant"]:
-                # PATCH (thinclaw): normalize list content to plain text.
-                # ThinClaw sends multipart content format (list of ContentPart
-                # objects) for all roles. Without normalization, Pydantic objects
-                # cause "'ChatCompletionContentPartText' object is not subscriptable".
-                msg_content = message.content
-                if isinstance(msg_content, list):
-                    text_parts = []
-                    for part in msg_content:
-                        if hasattr(part, 'text'):
-                            text_parts.append(part.text)
-                        elif isinstance(part, dict) and 'text' in part:
-                            text_parts.append(part['text'])
-                        elif isinstance(part, str):
-                            text_parts.append(part)
-                    msg_content = "\n".join(text_parts) if text_parts else str(message.content)
-                chat_messages.append({"role": message.role, "content": msg_content})
-                continue"#;
-
-        let patched = source.replace(needle, patch);
-        if patched == source {
-            println!(
-                "[mlx] Patch: could not locate content normalization insertion point, skipping"
-            );
-            return;
-        }
-
-        match std::fs::write(&handler, patched) {
-            Ok(_) => println!("[mlx] Patch: applied content normalization fix to mlx_vlm.py"),
-            Err(e) => println!("[mlx] Patch: failed to write: {}", e),
-        }
     }
 
     /// Find a free port to use.
@@ -516,24 +382,35 @@ impl MlxEngine {
     /// The download is a one-time operation — subsequent bootstraps find
     /// the cached binary via `uv_bin()`.
     async fn auto_download_uv(&self) -> Result<String, String> {
-        let uv_version = "0.4.30"; // Pinned version — matches scripts/setup_uv.sh
+        const MAX_UV_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 
-        let (platform, asset) = if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-            ("aarch64-apple-darwin", "uv-aarch64-apple-darwin.tar.gz")
-        } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
-            ("x86_64-apple-darwin", "uv-x86_64-apple-darwin.tar.gz")
-        } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
-            (
-                "x86_64-unknown-linux-gnu",
-                "uv-x86_64-unknown-linux-gnu.tar.gz",
-            )
-        } else {
-            return Err("Unsupported platform for uv auto-download".into());
-        };
+        let (platform, asset, expected_sha256) =
+            if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+                (
+                    "aarch64-apple-darwin",
+                    "uv-aarch64-apple-darwin.tar.gz",
+                    "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232",
+                )
+            } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
+                (
+                    "x86_64-apple-darwin",
+                    "uv-x86_64-apple-darwin.tar.gz",
+                    "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
+                )
+            } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+                (
+                    "x86_64-unknown-linux-gnu",
+                    "uv-x86_64-unknown-linux-gnu.tar.gz",
+                    "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
+                )
+            } else {
+                return Err("Unsupported platform for uv auto-download".into());
+            };
 
         let url = format!(
             "https://github.com/astral-sh/uv/releases/download/{}/{}",
-            uv_version, asset
+            super::UV_VERSION,
+            asset
         );
 
         let dest_dir = std::env::var("HOME")
@@ -545,12 +422,22 @@ impl MlxEngine {
             .map_err(|e| format!("Failed to create ~/.thinclaw-desktop: {}", e))?;
 
         let dest_path = dest_dir.join("uv");
-        let archive_path = dest_dir.join(asset);
+        let archive_path = dest_dir.join(format!("{}.download", asset));
 
-        println!("[mlx] Downloading uv {} for {}...", uv_version, platform);
+        println!(
+            "[mlx] Downloading uv {} for {}...",
+            super::UV_VERSION,
+            platform
+        );
 
-        // Download the archive
-        let response = reqwest::get(&url)
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .map_err(|e| format!("Failed to configure uv download: {}", e))?;
+        let mut response = client
+            .get(&url)
+            .send()
             .await
             .map_err(|e| format!("Failed to download uv: {}", e))?;
 
@@ -558,16 +445,40 @@ impl MlxEngine {
             return Err(format!("Failed to download uv: HTTP {}", response.status()));
         }
 
-        let bytes = response
-            .bytes()
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_UV_ARCHIVE_BYTES as u64)
+        {
+            return Err("uv archive exceeds the 64 MiB safety limit".into());
+        }
+
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| format!("Failed to read uv download: {}", e))?;
+            .map_err(|e| format!("Failed to read uv download: {}", e))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_UV_ARCHIVE_BYTES {
+                return Err("uv archive exceeds the 64 MiB safety limit".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+
+        use sha2::{Digest, Sha256};
+        let actual_sha256 = hex::encode(Sha256::digest(&bytes));
+        if actual_sha256 != expected_sha256 {
+            return Err(format!(
+                "uv archive checksum mismatch: expected {}, got {}",
+                expected_sha256, actual_sha256
+            ));
+        }
 
         std::fs::write(&archive_path, &bytes)
             .map_err(|e| format!("Failed to write uv archive: {}", e))?;
 
         // Extract the archive using tar (available on macOS and Linux)
-        let temp_dir = dest_dir.join("uv-temp");
+        let temp_dir = dest_dir.join(format!("uv-temp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
@@ -591,7 +502,8 @@ impl MlxEngine {
         let uv_extracted = Self::find_file_recursive(&temp_dir, "uv")
             .ok_or("uv binary not found in extracted archive")?;
 
-        std::fs::copy(&uv_extracted, &dest_path)
+        let staged_path = dest_dir.join("uv.new");
+        std::fs::copy(&uv_extracted, &staged_path)
             .map_err(|e| format!("Failed to copy uv binary: {}", e))?;
 
         // Make executable
@@ -599,15 +511,38 @@ impl MlxEngine {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&dest_path, perms)
+            std::fs::set_permissions(&staged_path, perms)
                 .map_err(|e| format!("Failed to chmod uv: {}", e))?;
         }
+
+        let version = tokio::process::Command::new(&staged_path)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to verify uv binary: {}", e))?;
+        let stdout = String::from_utf8_lossy(&version.stdout);
+        if !version.status.success()
+            || !stdout
+                .trim()
+                .starts_with(&format!("uv {}", super::UV_VERSION))
+        {
+            return Err(format!(
+                "Downloaded uv binary failed version verification: {stdout}"
+            ));
+        }
+
+        std::fs::rename(&staged_path, &dest_path)
+            .map_err(|e| format!("Failed to install uv binary: {}", e))?;
 
         // Cleanup
         let _ = std::fs::remove_file(&archive_path);
         let _ = std::fs::remove_dir_all(&temp_dir);
 
-        println!("[mlx] uv {} installed at {:?}", uv_version, dest_path);
+        println!(
+            "[mlx] uv {} installed at {:?}",
+            super::UV_VERSION,
+            dest_path
+        );
         Ok(dest_path.to_string_lossy().into_owned())
     }
 
@@ -654,11 +589,6 @@ impl InferenceEngine for MlxEngine {
         if !python.exists() {
             return Err("MLX environment not found. Please set up MLX first.".into());
         }
-
-        // Apply any pending patches to the MLX server code.
-        // These are idempotent — they no-op if already applied.
-        Self::apply_vlm_attention_mask_patch(&venv);
-        Self::apply_vlm_content_normalization_patch(&venv);
 
         // Read the model's native context window from config.json
         let model_max = super::read_model_max_context(model_path);
@@ -1082,7 +1012,9 @@ mod tests {
     fn bootstrapped_requires_marker_file() {
         let dir = std::env::temp_dir().join("scrappy_test_bootstrap_marker");
         let venv = dir.join("mlx-env");
-        let _ = std::fs::create_dir_all(&venv);
+        let _ = std::fs::create_dir_all(venv.join("bin"));
+        std::fs::write(venv.join("bin/python3"), "").unwrap();
+        std::fs::write(venv.join("bin/mlx-openai-server"), "").unwrap();
 
         let engine = MlxEngine::new();
         engine.set_app_data_dir(dir.clone());
@@ -1090,8 +1022,16 @@ mod tests {
         // Venv dir exists but no marker → not bootstrapped
         assert!(!engine.is_bootstrapped());
 
-        // Write marker → bootstrapped
+        // A legacy/stale marker must trigger an upgrade.
         std::fs::write(venv.join(".mlx-openai-server"), "installed").unwrap();
+        assert!(!engine.is_bootstrapped());
+
+        // Only the validated dependency fingerprint is current.
+        std::fs::write(
+            venv.join(".mlx-openai-server"),
+            super::super::MLX_BOOTSTRAP_FINGERPRINT,
+        )
+        .unwrap();
         assert!(engine.is_bootstrapped());
 
         let _ = std::fs::remove_dir_all(&dir);

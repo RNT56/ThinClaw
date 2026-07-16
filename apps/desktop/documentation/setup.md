@@ -1,8 +1,20 @@
 # ThinClaw Desktop: Development Setup Guide
 
-> **Last updated:** 2026-05-15
+> **Last updated:** 2026-07-13
 
 ThinClaw Desktop is a cross-platform desktop AI application built with Tauri (Rust + React). It supports **multiple inference engines** — the engine is selected at compile time via Cargo feature flags.
+
+## First-run flow
+
+Desktop uses one adaptive wizard for the complete product instead of separate
+Workbench and Agent setup paths. It configures appearance, local versus remote
+deployment, a shared agent name and personality, engine bootstrap when needed,
+local or cloud inference, model downloads or provider credentials, and OS
+permissions. The same agent identity is persisted through the canonical Agent
+settings command in both local and remote mode. The wizard ends with both
+Workbench and Agent Cockpit ready and points optional messaging-channel setup
+to Cockpit → Channels, where credential schemas and encrypted secret handling
+remain authoritative.
 
 For alpha bridge and release-gate details, also see:
 
@@ -19,7 +31,7 @@ For alpha bridge and release-gate details, also see:
 | **llama.cpp** *(default)* | macOS (Metal), Linux (CUDA/CPU), Windows | GGUF | Bundled sidecar binary |
 | **MLX** | macOS Apple Silicon only | MLX safetensors (directory) | Python auto-bootstrapped via `uv` at first launch |
 | **vLLM** | Linux CUDA only | AWQ / HuggingFace (directory) | Python auto-bootstrapped via `uv` at first launch |
-| **Ollama** | macOS, Linux, Windows | GGUF (via Ollama daemon) | Requires external Ollama install from [ollama.ai](https://ollama.ai) |
+| **Ollama** | macOS, Linux, Windows | GGUF (via Ollama daemon) | Requires external Ollama install from [ollama.com](https://ollama.com/download) |
 | **Cloud Only** | All | — | No local inference; cloud providers only |
 
 ---
@@ -86,10 +98,10 @@ This does everything in one go:
 
 | Script | npm command | What it does |
 |--------|------------|-------------|
-| `setup_chromium.sh` | `npm run setup:chromium` | Downloads Chromium for local web scraping |
-| `download_ai_binaries.cjs` | `npm run setup:ai` | Downloads macOS ARM64 alpha llama-server, whisper-server, sd (Stable Diffusion) binaries + shared libraries |
+| `setup_chromium.sh` | `npm run setup:chromium` | Downloads the pinned Chromium snapshot and replaces the existing copy only after SHA-256 and archive-layout validation |
+| `setup_llama.sh` | `npm run setup:ai` | Downloads the validated llama.cpp sidecar and required shared libraries for the current host, verifies SHA-256 and `--version`, then installs atomically |
 
-All scripts are **idempotent** — they skip binaries that already exist in `backend/bin/`.
+All setup scripts are deterministic and safe to rerun: archives are verified before the existing installation is replaced. `setup:all` finishes by generating the strict llama.cpp bundle override and enforcing committed sidecar-size limits.
 
 > **Tip:** You can also run any sub-script individually, e.g. `npm run setup:ai` to re-download just the AI binaries. For non-macOS-ARM64 local builds, prefer the engine-specific scripts such as `scripts/setup_llama.sh` and `scripts/setup_uv.sh`.
 
@@ -97,22 +109,18 @@ All scripts are **idempotent** — they skip binaries that already exist in `bac
 If you need specific binaries individually or want to update just one:
 ```bash
 # Just the llama.cpp inference server (cross-platform)
-bash scripts/setup_llama.sh          # uses latest known-good release
-bash scripts/setup_llama.sh b4618    # pin to a specific release tag
+bash scripts/setup_llama.sh          # uses the validated b9988 release
+LLAMA_SHA256=<sha256> bash scripts/setup_llama.sh <tag> # explicit custom pin
 
 # Just the uv Python manager (for MLX/vLLM builds only)
 bash scripts/setup_uv.sh
 ```
 
 ### 4. Verify Binary Setup
-After setup, you should see the following in `backend/bin/` (macOS ARM64 example):
+After the default `setup:all`, you should see the following core runtime files (macOS ARM64 example):
 ```
 backend/bin/
 ├── llama-server-aarch64-apple-darwin
-├── whisper-server-aarch64-apple-darwin
-├── whisper-aarch64-apple-darwin
-├── sd-aarch64-apple-darwin
-├── tts-aarch64-apple-darwin
 ├── libllama.dylib
 ├── libggml*.dylib
 └── *.metal
@@ -120,7 +128,7 @@ backend/bin/
 
 On Linux, the suffix would be `x86_64-unknown-linux-gnu`. On Windows, `x86_64-pc-windows-msvc.exe`.
 
-> **Note:** `tts` (Piper) must currently be placed manually — see [Troubleshooting](#-troubleshooting).
+> **Optional media runtimes:** `whisper`, `whisper-server`, `sd`, and `tts` are not part of the core release download or size budget. They are declared only when explicitly installed under the target-suffixed names below; cloud/MLX media routes remain available without bundling those native binaries.
 
 ---
 
@@ -190,7 +198,7 @@ npm run tauri:build:ollama
 ```
 **Bundles:** optional whisper-server/piper when present, Chromium when `backend/resources/chromium` exists or `INCLUDE_CHROMIUM=1`.
 **Does NOT bundle:** llama-server, uv (Ollama manages its own inference).
-**Requires:** User must install [Ollama](https://ollama.ai) separately and run `ollama serve`.
+**Requires:** User must install [Ollama](https://ollama.com/download) separately and run `ollama serve`.
 
 ### Cloud-Only Build
 ```bash
@@ -210,20 +218,20 @@ The `scripts/generate_tauri_overrides.sh` script generates `backend/tauri.overri
 
 | Engine | `externalBin` included | `resources` included |
 |--------|----------------------|---------------------|
-| llamacpp | llama-server, whisper, whisper-server, sd, tts | `*.dylib`, `*.metal`, chromium |
-| mlx / vllm | uv, whisper, whisper-server, tts | `libwhisper*.dylib`, chromium |
-| ollama | whisper, whisper-server, tts | `libwhisper*.dylib`, chromium |
+| llamacpp | llama-server; optional installed whisper, whisper-server, sd, tts | `*.dylib`, `*.metal`, chromium |
+| mlx / vllm | uv; optional installed whisper, whisper-server, tts | platform libraries, chromium |
+| ollama | optional installed whisper, whisper-server, tts | platform libraries, chromium |
 | none (cloud) | *(none)* | chromium |
 
 Chromium inclusion is automatic when `backend/resources/chromium` exists. Use `INCLUDE_CHROMIUM=1 npm run tauri:build:llamacpp` for release builds that must fail if Chromium has not been prepared, or `INCLUDE_CHROMIUM=0` for a deliberate no-browser bundle.
 
-Release builds keep updater artifacts enabled and require `TAURI_SIGNING_PRIVATE_KEY`. The unsigned cloud smoke disables updater artifact generation through the generated override only for local validation.
+Release builds keep updater artifacts enabled and require `TAURI_SIGNING_PRIVATE_KEY`. `TAURI_RELEASE_VERSION` may override the committed Desktop version only with a validated SemVer; tag release CI derives it from the product tag and verifies it against root Cargo metadata. The unsigned cloud smoke disables updater artifact generation through the generated override only for local validation.
 
 ### Packaging Readiness Gate
 ```bash
 npm run validate:packaging
 ```
-This validates Tauri metadata, macOS app identity, entitlements, updater metadata, sidecar override generation, Keychain identifier alignment, legacy Scrappy fallback tests, and migration path checks. See [Packaging And Platform Readiness](packaging-platform-readiness.md).
+This validates Tauri metadata, macOS app identity, entitlements, updater metadata, clean setup/checksum behavior, signed release-manifest generation, sidecar override generation and budgets, Keychain identifier alignment, legacy Scrappy fallback tests, and migration path checks. See [Packaging And Platform Readiness](packaging-platform-readiness.md).
 
 ---
 
@@ -270,7 +278,7 @@ npm run test:backend:all-engines  # test all engine feature combinations
 
 ### Ollama
 - Connects to an existing **Ollama daemon** running on the system.
-- Install Ollama from [ollama.ai](https://ollama.ai) and run `ollama serve` before starting ThinClaw Desktop.
+- Install Ollama from [ollama.com](https://ollama.com/download) and run `ollama serve` before starting ThinClaw Desktop.
 - Uses GGUF models managed by Ollama's own model library.
 
 ---
@@ -369,7 +377,7 @@ apps/desktop/
 │   │   ├── chat.rs         # Chat streaming commands
 │   │   └── ...
 │   ├── bin/                # Sidecar binaries (downloaded)
-│   ├── scripts/            # download_ai_binaries.js, setup_chromium.sh
+│   ├── scripts/            # setup_chromium.sh and runtime helpers
 │   ├── mcp-tools crate     # MCP crate (sandbox, tools, skills)
 │   ├── Cargo.toml          # Features: llamacpp, mlx, vllm, ollama
 │   └── tauri.conf.json     # Tauri configuration
@@ -387,7 +395,7 @@ apps/desktop/
 
 ### All Platforms
 - **Dependencies Error**: If a binary fails to start, ensure you've run `npm run setup:all` to fetch the required shared libraries.
-- **TTS (Piper)**: The `download_ai_binaries.js` script does not yet auto-download the TTS sidecar. You must manually place the Piper binary at `backend/bin/tts-{target-triple}` (e.g., `tts-aarch64-apple-darwin` for macOS ARM64). The sidecar is registered as `bin/tts` in `tauri.conf.json`.
+- **Optional native voice/image sidecars**: `npm run setup:ai` installs only the validated llama.cpp inference sidecar. Whisper, Piper, and Stable Diffusion sidecars are optional and must be supplied separately at the names documented in the packaging matrix; absent optional binaries are not declared in the bundle.
 - **Engine Mismatch**: If you see errors about missing models, ensure you're running with the correct engine feature. Check the `ActiveEngineChip` badge in the Model Browser — it shows the compiled engine.
 
 ### macOS

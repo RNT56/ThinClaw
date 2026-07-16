@@ -21,11 +21,11 @@ pub struct OAuthCredentials {
 
 const GOOGLE_CLIENT_ID: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_ID") {
     Some(v) => v,
-    None => "564604149681-efo25d43rs85v0tibdepsmdv5dsrhhr0.apps.googleusercontent.com",
+    None => "",
 };
 const GOOGLE_CLIENT_SECRET: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_SECRET") {
     Some(v) => v,
-    None => "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",
+    None => "",
 };
 const GITHUB_CLIENT_ID: &str = match option_env!("THINCLAW_GITHUB_CLIENT_ID") {
     Some(v) => v,
@@ -46,10 +46,14 @@ const NOTION_CLIENT_SECRET: &str = match option_env!("THINCLAW_NOTION_CLIENT_SEC
 
 pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
     match secret_name {
-        "google_oauth_token" | "gmail_oauth_token" => Some(OAuthCredentials {
-            client_id: GOOGLE_CLIENT_ID,
-            client_secret: GOOGLE_CLIENT_SECRET,
-        }),
+        "google_oauth_token" | "gmail_oauth_token"
+            if !GOOGLE_CLIENT_ID.is_empty() && !GOOGLE_CLIENT_SECRET.is_empty() =>
+        {
+            Some(OAuthCredentials {
+                client_id: GOOGLE_CLIENT_ID,
+                client_secret: GOOGLE_CLIENT_SECRET,
+            })
+        }
         "github_oauth_token"
             if !GITHUB_CLIENT_ID.is_empty() && !GITHUB_CLIENT_SECRET.is_empty() =>
         {

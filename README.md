@@ -384,6 +384,7 @@ targeted log filtering, `RUST_LOG=...` still takes precedence.
 | Memory and growth surfaces | [docs/MEMORY_AND_GROWTH.md](docs/MEMORY_AND_GROWTH.md) |
 | Research and experiments | [docs/RESEARCH_AND_EXPERIMENTS.md](docs/RESEARCH_AND_EXPERIMENTS.md) |
 | Contributor workflow | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
+| Maintainer release operations | [docs/RELEASING.md](docs/RELEASING.md) |
 
 ## Development
 

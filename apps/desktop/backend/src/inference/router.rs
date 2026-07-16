@@ -12,7 +12,7 @@ use super::diffusion::DiffusionBackend;
 use super::embedding::EmbeddingBackend;
 use super::stt::SttBackend;
 use super::tts::TtsBackend;
-use super::{BackendInfo, Modality};
+use super::{BackendInfo, Modality, ModelProviderRegistry};
 
 /// Result of a `reconfigure()` call.
 ///
@@ -45,8 +45,8 @@ pub struct InferenceRouter {
     tts: RwLock<Option<Arc<dyn TtsBackend>>>,
     stt: RwLock<Option<Arc<dyn SttBackend>>>,
     diffusion: RwLock<Option<Arc<dyn DiffusionBackend>>>,
-    /// Reference to the app-wide secret store for live key reads.
-    secret_store: Arc<SecretStore>,
+    /// Shared provider metadata, model inventory, discovery cache, and key vault.
+    model_registry: ModelProviderRegistry,
 }
 
 impl InferenceRouter {
@@ -54,26 +54,22 @@ impl InferenceRouter {
     ///
     /// All backends start as `None`.  Call `reconfigure()` or
     /// `set_embedding_backend()` etc. to activate them.
-    pub fn new(secret_store: Arc<SecretStore>) -> Self {
+    pub fn new(model_registry: ModelProviderRegistry) -> Self {
         Self {
             embedding: RwLock::new(None),
             tts: RwLock::new(None),
             stt: RwLock::new(None),
             diffusion: RwLock::new(None),
-            secret_store,
+            model_registry,
         }
     }
 
-    fn get_secret(&self, secret_name: &str) -> Option<String> {
-        thinclaw_runtime_contracts::descriptor_for_secret_name(secret_name)
-            .and_then(|descriptor| self.secret_store.get_descriptor_secret(&descriptor))
-            .or_else(|| self.secret_store.get(secret_name))
+    fn get_secret(&self, provider: &str) -> Option<String> {
+        self.model_registry.provider_secret(provider)
     }
 
-    fn has_secret(&self, secret_name: &str) -> bool {
-        thinclaw_runtime_contracts::descriptor_for_secret_name(secret_name)
-            .map(|descriptor| self.secret_store.has_descriptor_secret(&descriptor))
-            .unwrap_or_else(|| self.secret_store.has(secret_name))
+    fn has_secret(&self, provider: &str) -> bool {
+        self.model_registry.has_provider_secret(provider)
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -102,7 +98,7 @@ impl InferenceRouter {
 
     /// Get a reference to the secret store.
     pub fn secret_store(&self) -> &SecretStore {
-        &self.secret_store
+        self.model_registry.secret_store()
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -186,7 +182,7 @@ impl InferenceRouter {
             display_name: endpoint.display_name.to_string(),
             is_local: false,
             model_id: Some(model_id),
-            available: self.has_secret(&endpoint.secret_name),
+            available: self.has_secret(chat_id),
         })
     }
 
@@ -224,72 +220,7 @@ impl InferenceRouter {
     /// List all available backends (active + those that COULD be activated)
     /// for a given modality, based on available API keys.
     pub fn available_backends_for(&self, modality: Modality) -> Vec<BackendInfo> {
-        let mut backends = vec![];
-
-        // Local is always "available" (might not be running, but it's an option)
-        backends.push(BackendInfo {
-            id: "local".to_string(),
-            display_name: match modality {
-                Modality::Chat => "Local (llama.cpp / MLX)".to_string(),
-                Modality::Embedding => "Local (llama-server / mlx-embed)".to_string(),
-                Modality::Tts => "Local (Piper)".to_string(),
-                Modality::Stt => "Local (Whisper)".to_string(),
-                Modality::Diffusion => "Local (sd.cpp / mflux)".to_string(),
-            },
-            is_local: true,
-            model_id: None,
-            available: true,
-        });
-
-        // Add cloud backends based on the shared provider catalog and modality
-        // specific direct-workbench support.
-        let cloud = match modality {
-            Modality::Chat => thinclaw_config::provider_catalog::catalog()
-                .values()
-                .map(|endpoint| {
-                    (
-                        endpoint.slug.as_str(),
-                        endpoint.display_name.as_str(),
-                        endpoint.secret_name.as_str(),
-                    )
-                })
-                .collect(),
-            Modality::Embedding => vec![
-                ("openai", "OpenAI Embeddings", "llm_openai_api_key"),
-                ("gemini", "Gemini Embeddings", "gemini"),
-                ("voyage", "Voyage AI", "voyage"),
-                ("cohere", "Cohere Embed", "cohere"),
-            ],
-            Modality::Tts => vec![
-                ("openai", "OpenAI TTS", "llm_openai_api_key"),
-                ("elevenlabs", "ElevenLabs", "elevenlabs"),
-                ("gemini", "Gemini TTS", "gemini"),
-            ],
-            Modality::Stt => vec![
-                ("openai", "OpenAI Whisper", "llm_openai_api_key"),
-                ("gemini", "Gemini STT", "gemini"),
-                ("deepgram", "Deepgram", "deepgram"),
-            ],
-            Modality::Diffusion => vec![
-                ("openai", "DALL·E 3", "llm_openai_api_key"),
-                ("gemini", "Imagen 3", "gemini"),
-                ("stability", "Stability AI", "stability"),
-                ("fal", "fal.ai", "fal"),
-                ("together", "Together AI", "together"),
-            ],
-        };
-
-        for (key_slug, display_name, secret_name) in cloud {
-            backends.push(BackendInfo {
-                id: key_slug.to_string(),
-                display_name: display_name.to_string(),
-                is_local: false,
-                model_id: None,
-                available: self.has_secret(secret_name),
-            });
-        }
-
-        backends
+        self.model_registry.available_backends_for(modality)
     }
 
     /// Reconfigure all backends from the given `UserConfig`.
@@ -321,14 +252,14 @@ impl InferenceRouter {
         let embed_id = config.embedding_backend.as_deref().unwrap_or("local");
         tracing::info!("[inference_router] Embedding backend: {}", embed_id);
 
-        if embed_id != "local" {
+        let embedding_backend: Option<Arc<dyn EmbeddingBackend>> = if embed_id != "local" {
             if let Some(api_key) = self.get_secret(embed_id) {
                 let model_override = config
                     .inference_models
                     .as_ref()
                     .and_then(|m| m.get("embedding"))
                     .cloned();
-                let maybe_backend: Option<Arc<dyn EmbeddingBackend>> = match embed_id {
+                match embed_id {
                     "openai" => Some(Arc::new(
                         super::embedding::cloud_openai::OpenAiEmbeddingBackend::new(
                             api_key,
@@ -357,20 +288,27 @@ impl InferenceRouter {
                         tracing::warn!("[inference_router] Unknown embedding backend: {}", other);
                         None
                     }
-                };
-                if let Some(backend) = maybe_backend {
-                    tracing::info!(
-                        "[inference_router] Activated embedding backend: {} ({}d)",
-                        embed_id,
-                        backend.dimensions()
-                    );
-                    *self.embedding.write().await = Some(backend);
                 }
+            } else {
+                tracing::warn!(
+                    "[inference_router] Embedding backend '{}' has no configured secret",
+                    embed_id
+                );
+                None
             }
         } else {
-            // Local — clear any stale cloud embedding backend
-            *self.embedding.write().await = None;
+            None
+        };
+        if let Some(backend) = embedding_backend.as_ref() {
+            tracing::info!(
+                "[inference_router] Activated embedding backend: {} ({}d)",
+                embed_id,
+                backend.dimensions()
+            );
         }
+        // Replace atomically even when the new selection is local, unknown, or
+        // missing a key so a previous cloud backend can never remain active.
+        *self.embedding.write().await = embedding_backend;
 
         // ── TTS backend ─────────────────────────────────────────────────
         let tts_id = config.tts_backend.as_deref().unwrap_or("local");

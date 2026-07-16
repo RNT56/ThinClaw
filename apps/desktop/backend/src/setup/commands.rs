@@ -10,6 +10,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
     builder.commands(tauri_specta::collect_commands![
         // ── Core ────────────────────────────────────────────────────────
         crate::greet,
+        crate::i18n::direct_i18n_get_catalog,
         // ── Chat ────────────────────────────────────────────────────────
         crate::chat::direct_chat_stream,
         crate::chat::direct_chat_completion,
@@ -90,6 +91,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::rig_lib::agent_chat,
         // ── ThinClaw Agent Cockpit ──────────────────────────────────────
         crate::thinclaw::commands::thinclaw_get_status,
+        crate::thinclaw::commands::thinclaw_reveal_gateway_token,
         crate::thinclaw::commands::thinclaw_save_anthropic_key,
         crate::thinclaw::commands::thinclaw_get_anthropic_key,
         crate::thinclaw::commands::thinclaw_save_brave_key,
@@ -115,6 +117,9 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_test_connection,
         crate::thinclaw::fleet::thinclaw_get_fleet_status,
         crate::thinclaw::fleet::thinclaw_broadcast_command,
+        crate::thinclaw::remote_access::thinclaw_remote_access_status,
+        crate::thinclaw::remote_access::thinclaw_remote_access_start,
+        crate::thinclaw::remote_access::thinclaw_remote_access_stop,
         crate::thinclaw::commands::thinclaw_start_gateway,
         crate::thinclaw::commands::thinclaw_stop_gateway,
         crate::thinclaw::commands::thinclaw_reload_secrets,
@@ -162,9 +167,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_system_presence,
         crate::thinclaw::commands::thinclaw_logs_tail,
         crate::thinclaw::commands::thinclaw_update_run,
-        crate::thinclaw::commands::thinclaw_web_login_whatsapp,
-        crate::thinclaw::commands::thinclaw_web_login_telegram,
         crate::thinclaw::commands::thinclaw_add_custom_secret,
+        crate::thinclaw::commands::thinclaw_update_custom_secret,
         crate::thinclaw::commands::thinclaw_remove_custom_secret,
         crate::thinclaw::commands::thinclaw_toggle_custom_secret,
         crate::thinclaw::commands::thinclaw_toggle_local_tools,
@@ -231,6 +235,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_agents_list,
         crate::thinclaw::commands::thinclaw_canvas_push,
         crate::thinclaw::commands::thinclaw_canvas_navigate,
+        crate::thinclaw::commands::thinclaw_canvas_dispatch_event,
         crate::thinclaw::commands::thinclaw_canvas_panels_list,
         crate::thinclaw::commands::thinclaw_canvas_panel_get,
         crate::thinclaw::commands::thinclaw_canvas_panel_dismiss,
@@ -269,6 +274,11 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_mcp_interaction_respond,
         // Diagnostics & tools
         crate::thinclaw::commands::thinclaw_diagnostics,
+        crate::thinclaw::commands::thinclaw_security_posture,
+        crate::thinclaw::commands::thinclaw_secret_recovery_status,
+        crate::thinclaw::commands::thinclaw_secret_recovery_export,
+        crate::thinclaw::commands::thinclaw_secret_master_key_rotate,
+        crate::thinclaw::commands::thinclaw_secret_recovery_import,
         crate::thinclaw::commands::thinclaw_tools_list,
         crate::thinclaw::commands::thinclaw_tool_policy_get,
         crate::thinclaw::commands::thinclaw_tool_policy_set,
@@ -283,6 +293,9 @@ pub fn specta_builder() -> tauri_specta::Builder {
         // Trajectory viewer (TDO-106)
         crate::thinclaw::commands::thinclaw_trajectory_stats,
         crate::thinclaw::commands::thinclaw_trajectory_records,
+        crate::thinclaw::commands::thinclaw_trajectory_export,
+        crate::thinclaw::commands::thinclaw_profile_evolution_status,
+        crate::thinclaw::commands::thinclaw_profile_evolution_run,
         // Sprint 13 — New backend APIs
         crate::thinclaw::commands::thinclaw_cost_summary,
         crate::thinclaw::commands::thinclaw_cost_export_csv,
@@ -317,6 +330,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::thinclaw::commands::thinclaw_learning_candidates,
         crate::thinclaw::commands::thinclaw_learning_artifact_versions,
         crate::thinclaw::commands::thinclaw_learning_provider_health,
+        crate::thinclaw::commands::thinclaw_external_memory_configure,
+        crate::thinclaw::commands::thinclaw_external_memory_disable,
         crate::thinclaw::commands::thinclaw_learning_code_proposals,
         crate::thinclaw::commands::thinclaw_learning_outcomes,
         crate::thinclaw::commands::thinclaw_learning_rollbacks,
@@ -388,6 +403,161 @@ pub fn specta_builder() -> tauri_specta::Builder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    fn command_signatures(bindings: &str) -> Vec<(&str, &str)> {
+        bindings
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let rest = line.strip_prefix("async ")?;
+                let open = rest.find('(')?;
+                let close = rest.rfind(") : Promise<")?;
+                Some((&rest[..open], &rest[open + 1..close]))
+            })
+            .collect()
+    }
+
+    fn top_level_parameters(signature: &str) -> Vec<&str> {
+        let mut depth = 0_u32;
+        let mut start = 0;
+        let mut parameters = Vec::new();
+
+        for (index, character) in signature.char_indices() {
+            match character {
+                '<' | '(' | '[' | '{' => depth += 1,
+                '>' | ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parameters.push(signature[start..index].trim());
+                    start = index + character.len_utf8();
+                }
+                _ => {}
+            }
+        }
+
+        if start < signature.len() {
+            parameters.push(signature[start..].trim());
+        }
+        parameters.retain(|parameter| !parameter.is_empty());
+        parameters
+    }
+
+    #[test]
+    fn every_registered_command_matches_the_sanitized_binding_contract() {
+        let raw = super::specta_builder()
+            .export_str(
+                specta_typescript::Typescript::default()
+                    .bigint(specta_typescript::BigIntExportBehavior::Number),
+            )
+            .expect("export command registry");
+        let sanitized = crate::sanitize_typescript_bindings_source(&raw);
+        let committed = include_str!("../../../frontend/src/lib/bindings.ts");
+
+        assert_eq!(
+            sanitized, committed,
+            "bindings.ts is stale; run `cargo run --locked --example export_bindings` from apps/desktop/backend"
+        );
+        assert_eq!(
+            sanitized,
+            crate::sanitize_typescript_bindings_source(&sanitized),
+            "binding sanitization must be idempotent"
+        );
+
+        let signatures = command_signatures(&sanitized);
+        let names = signatures
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            names.len(),
+            signatures.len(),
+            "the generated command registry must not contain duplicate names"
+        );
+        assert!(
+            signatures.len() >= 340,
+            "expected the complete Desktop registry, found only {} commands",
+            signatures.len()
+        );
+    }
+
+    #[test]
+    fn binding_sanitizer_preserves_channels_and_rejects_reserved_parameters() {
+        let raw = super::specta_builder()
+            .export_str(
+                specta_typescript::Typescript::default()
+                    .bigint(specta_typescript::BigIntExportBehavior::Number),
+            )
+            .expect("export command registry");
+        let sanitized = crate::sanitize_typescript_bindings_source(&raw);
+
+        assert!(raw.contains("export type TAURI_CHANNEL<TSend> = null"));
+        assert!(sanitized.contains(
+            "export type TAURI_CHANNEL<TSend> = import(\"@tauri-apps/api/core\").Channel<TSend>"
+        ));
+        assert!(sanitized.contains(
+            "async directChatStream(payload: DirectChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>)"
+        ));
+        assert!(sanitized.contains(
+            "async thinclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: JsonValue | null)"
+        ));
+
+        let reserved = BTreeSet::from([
+            "arguments",
+            "await",
+            "break",
+            "case",
+            "catch",
+            "class",
+            "const",
+            "continue",
+            "debugger",
+            "default",
+            "delete",
+            "do",
+            "else",
+            "enum",
+            "eval",
+            "export",
+            "extends",
+            "false",
+            "finally",
+            "for",
+            "function",
+            "if",
+            "import",
+            "in",
+            "instanceof",
+            "new",
+            "null",
+            "return",
+            "super",
+            "switch",
+            "this",
+            "throw",
+            "true",
+            "try",
+            "typeof",
+            "var",
+            "void",
+            "while",
+            "with",
+            "yield",
+        ]);
+
+        for (command, signature) in command_signatures(&sanitized) {
+            for parameter in top_level_parameters(signature) {
+                let name = parameter
+                    .split_once(':')
+                    .map(|(name, _)| name.trim())
+                    .expect("generated command parameter should include a type");
+                assert!(
+                    !reserved.contains(name),
+                    "generated command `{command}` exposes reserved TypeScript parameter `{name}`"
+                );
+            }
+        }
+    }
+
     #[test]
     fn generated_bindings_cover_phase_two_desktop_surfaces() {
         let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
@@ -395,6 +565,12 @@ mod tests {
         assert!(
             bindings.contains("generated by [tauri-specta"),
             "frontend bindings must stay generated, not hand-authored"
+        );
+        assert!(
+            bindings.contains(
+                "async thinclawRoutineCreate(name: string, description: string, schedule: string, task: string, triggerType: string | null)"
+            ),
+            "routine create binding must expose the optional trigger type contract"
         );
 
         for command in [
@@ -411,11 +587,15 @@ mod tests {
             "thinclawRoutineToggle",
             "thinclawRoutineAuditList",
             "thinclawClearRoutineRuns",
+            "thinclawTrajectoryExport",
+            "thinclawProfileEvolutionStatus",
+            "thinclawProfileEvolutionRun",
             "thinclawGmailOauthStart",
             "thinclawGmailStatus",
             "thinclawPairingList",
             "thinclawRoutingPoolsSave",
             "thinclawMemorySearch",
+            "thinclawCanvasDispatchEvent",
             "thinclawCanvasPanelsList",
             "thinclawCanvasPanelGet",
             "thinclawJobsList",
@@ -451,6 +631,8 @@ mod tests {
             "PlanUpdate",
             "UsageUpdate",
             "LifecycleUpdate",
+            "ContextPressure",
+            "ObserverRecord",
             "ApprovalRequested",
             "CredentialPrompt",
             "WebLogin",
@@ -466,5 +648,92 @@ mod tests {
                 "UiEvent binding should include {event_variant}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_frontend_api_delegates_to_generated_bindings() {
+        let compatibility_api = include_str!("../../../frontend/src/lib/thinclaw.ts");
+        let command_client = include_str!("../../../frontend/src/lib/command-client.ts");
+
+        assert!(
+            !compatibility_api.contains("@tauri-apps/api/core"),
+            "lib/thinclaw.ts must not bypass the generated binding surface"
+        );
+        assert!(
+            !compatibility_api.contains("safeInvoke"),
+            "the handwritten string-command bridge must stay retired"
+        );
+        assert!(
+            command_client.contains("import { commands, type Result } from './bindings'"),
+            "the frontend command client must derive from generated bindings.ts"
+        );
+    }
+
+    #[test]
+    fn registered_commands_never_expose_raw_string_errors() {
+        let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
+        let offenders: Vec<_> = bindings
+            .lines()
+            .filter(|line| line.trim_start().starts_with("async "))
+            .filter(|line| line.contains("Promise<Result<") && line.contains(", string>>"))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "registered commands must serialize BridgeError instead of raw strings: {offenders:#?}"
+        );
+    }
+
+    #[test]
+    fn custom_secret_updates_use_the_registered_generated_command() {
+        let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
+        let secrets_tab = include_str!("../../../frontend/src/components/settings/SecretsTab.tsx");
+
+        assert!(bindings.contains("async thinclawUpdateCustomSecret("));
+        assert!(secrets_tab.contains("commands.thinclawUpdateCustomSecret(id, value)"));
+        assert!(
+            !secrets_tab.contains("Update for custom secrets not implemented"),
+            "the visible custom-secret Update action must stay functional"
+        );
+    }
+
+    #[test]
+    fn production_frontend_has_one_command_calling_convention() {
+        fn inspect(directory: &std::path::Path, violations: &mut Vec<String>) {
+            for entry in std::fs::read_dir(directory).expect("read frontend source directory") {
+                let path = entry.expect("read frontend source entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "tests") {
+                        continue;
+                    }
+                    inspect(&path, violations);
+                    continue;
+                }
+
+                if !matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("ts" | "tsx")
+                ) || path.file_name().is_some_and(|name| name == "bindings.ts")
+                {
+                    continue;
+                }
+
+                let source = std::fs::read_to_string(&path).expect("read frontend source file");
+                let imports_raw_invoke = source
+                    .lines()
+                    .any(|line| line.contains("@tauri-apps/api/core") && line.contains("invoke"));
+                if imports_raw_invoke || source.contains("invoke(") || source.contains("invoke<") {
+                    violations.push(path.display().to_string());
+                }
+            }
+        }
+
+        let frontend = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../frontend/src");
+        let mut violations = Vec::new();
+        inspect(&frontend, &mut violations);
+        assert!(
+            violations.is_empty(),
+            "production frontend files must call Rust through commandClient/generated adapters: {violations:?}"
+        );
     }
 }

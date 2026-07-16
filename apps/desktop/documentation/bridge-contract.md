@@ -6,7 +6,7 @@ the `thinclaw_*` prefix, and frontend events are emitted on `thinclaw-event`.
 It covers the ThinClaw Agent Cockpit only. For the two-system Desktop split and
 the non-agent Direct AI Workbench, read `runtime-boundaries.md` first.
 
-Last updated: 2026-05-15
+Last updated: 2026-07-13
 
 Related docs:
 
@@ -40,6 +40,12 @@ Desktop talks to a remote ThinClaw gateway through `RemoteGatewayProxy`.
 - The remote SSE stream is subscribed by the proxy.
 - Remote events must be re-emitted to the frontend as the same `thinclaw-event` `UiEvent` schema used by local mode.
 - Unsupported remote endpoints must return a typed unavailable response or a clear error reason. They must not silently no-op.
+- Idempotent GET requests retry transient transport failures and HTTP 408/425/429/5xx
+  responses at most three times with bounded exponential backoff. `Retry-After` seconds are
+  honored up to ten seconds. Mutating requests are never retried implicitly.
+- SSE reconnects use a one-to-thirty-second bounded backoff, stop immediately on explicit
+  shutdown, and stop retrying non-transient HTTP failures such as rejected credentials or a
+  missing endpoint. The UI shows one updating reconnect notice and a recovery confirmation.
 
 ## Command Routing & Gating (TDO-001/002)
 
@@ -50,19 +56,22 @@ from "failed":
 - **`RouteMode`** — `LocalAndRemote` (works in both modes), `RemoteOnly` (needs a live gateway,
   e.g. sandbox job/GPU flows), `LocalOnly` (only meaningful embedded, e.g. sidecar control,
   channel-config submit, agent-loop eval).
-- **`BridgeError`** — an internally-tagged enum (`kind`): `Unavailable { capability, reason,
-  remediation, satisfied_by }` for a gated capability (the frontend renders a CTA), and
-  `Runtime { message }` for a genuine error. `From<String>`/`From<&str>` let existing
-  `?`/`map_err` sites migrate mechanically.
+- **`BridgeError`** — the only registered-command error envelope. Its stable `kind` taxonomy
+  distinguishes `Unavailable`, `InvalidInput`, `Unauthorized`, `NotFound`, `Conflict`,
+  `Timeout`, `Network`, and fallback `Runtime` outcomes. Actionable variants carry fields such
+  as remediation, retryability, and the affected resource/operation. `From<String>`/`From<&str>`
+  keep internal migrations mechanical without weakening the IPC shape.
 - **`gated(capability, reason, remediation, satisfied_by)`** — the helper that builds an
   `Unavailable`; it replaced the ad-hoc `local_unavailable`/`unavailable(...)` JSON helpers.
 - **`ROUTE_TABLE`** — a `&[(&str, RouteMode)]` registry mapping command names to their mode.
   It is the bridge linter's ground truth: the test suite asserts every command that calls
   `gated()` is classified, and every `ROUTE_TABLE` command is registered in the binding surface.
-  The table is additive — commands are enrolled as they are audited.
+  The committed per-command route matrix is generated from this table and guarded against drift.
 
 When adding or gating a command, call `gated(...)` for the unavailable path and add the
-command to `ROUTE_TABLE`, then update [`remote-gateway-route-matrix.md`](remote-gateway-route-matrix.md).
+command to `ROUTE_TABLE`, then run `cargo run --locked --example export_bindings` from
+`apps/desktop/backend`. Do not edit the generated block in
+[`remote-gateway-route-matrix.md`](remote-gateway-route-matrix.md) by hand.
 
 ## Event Contract
 
@@ -74,6 +83,8 @@ command to `ROUTE_TABLE`, then update [`remote-gateway-route-matrix.md`](remote-
 - Local conversion: `apps/desktop/backend/src/thinclaw/event_mapping.rs`
 - Local transport: `apps/desktop/backend/src/thinclaw/tauri_channel.rs`
 - Remote transport: `apps/desktop/backend/src/thinclaw/remote_proxy/`
+
+Both local and remote connection events use protocol version `2`.
 
 Every current ThinClaw `StatusUpdate` variant must be either mapped to `UiEvent` or explicitly documented as intentionally ignored. As of this checkpoint, Desktop maps chat, plan, usage, cost, lifecycle, approval, auth, canvas, job, subagent, agent-message, and routine events. Unknown remote gateway SSE events are forwarded as `UiEvent::GatewayEvent` instead of being silently dropped.
 
@@ -100,6 +111,32 @@ The frontend and existing automation scripts depend on the current Tauri command
 - Do not rename `thinclaw-desktop-tools` unless the migration is explicitly planned.
 - Regenerate `apps/desktop/frontend/src/lib/bindings.ts` from Rust after command/type changes. Do not hand-edit generated bindings.
 
+### Frontend Calling Convention
+
+`apps/desktop/frontend/src/lib/bindings.ts` is the only source of command names,
+parameter lists, and generated result types. `lib/command-client.ts` derives a
+runtime-guarded client from `commands`, unwraps the generated transport `Result`,
+and throws `ThinClawCommandError` while preserving error kind, remediation, and retryability.
+`lib/command-errors.ts` is the shared rendering path for direct binding consumers. A contract
+test rejects any generated `Promise<Result<…, string>>`, so raw string errors cannot re-enter
+the registered command surface.
+
+`lib/thinclaw.ts` is a compatibility surface for existing component-friendly
+names and richer legacy views over JSON-valued commands. It may delegate through
+`compatibilityCommands`, but it must not import Tauri `invoke`, spell raw command
+strings, or establish a second IPC path. Production frontend source is guarded
+against raw `invoke` imports and calls; new code must use `commandClient` or a
+purpose-built adapter that is itself derived from generated `commands`.
+
+`src/desktop_api.rs` owns reusable backend service helpers. Tauri registration
+and wire-shape adapters remain in `apps/desktop/backend/src/thinclaw/commands`;
+the retired `src/tauri_commands.rs` name survives only as a deprecated Rust
+re-export for downstream source compatibility.
+
+All `UiEvent` consumers subscribe through `useThinClawEvents`. That module owns
+the one native `thinclaw-event` listener and fans the generated discriminated
+union out in process; panel-local listeners are rejected by a contract test.
+
 ### Command Surface Groups
 
 The command registry lives in `apps/desktop/backend/src/setup/commands.rs`.
@@ -115,7 +152,21 @@ The command registry lives in `apps/desktop/backend/src/setup/commands.rs`.
 
 ## Binding Generation
 
-Bindings are exported by the debug Tauri startup path in `apps/desktop/backend/src/lib.rs`. For standalone regeneration without launching the app, create a temporary backend example that calls `tauri_app_lib::setup::commands::specta_builder().export(...)`, run it, and delete the example before committing. This is the same flow used during the P2-W4 checkpoint.
+Bindings are exported by the committed `apps/desktop/backend/examples/export_bindings.rs`
+entry point. Run the official exporter instead of creating a temporary example:
+
+```bash
+cd apps/desktop/backend
+cargo run --locked --example export_bindings
+```
+
+The backend contract suite regenerates the complete registry in memory and
+requires its sanitized output to match the committed binding byte-for-byte. It
+also proves that `Channel<T>` remains a real Tauri channel after Specta export,
+that sanitization is idempotent, that command names are unique, and that no
+generated command parameter is a reserved strict-mode TypeScript identifier.
+Adding or changing any command therefore requires regenerating the bindings;
+sampling a representative subset is not sufficient.
 
 After regeneration, run:
 
@@ -138,6 +189,6 @@ Desktop event routing is metadata-first.
 
 New writes use ThinClaw identifiers. Legacy Scrappy identifiers are read-only fallback inputs for app data, cloud, and keychain migration.
 
-`KeychainSecretsAdapter` must deny ungranted access for `get`, `get_for_injection`, `exists`, `list`, and `is_accessible`.
+The grant-aware `SecretsStore` implementation on the shared `SecretStore` must deny ungranted access for `get`, `get_for_injection`, `exists`, `list`, and `is_accessible`.
 
 Remote mode must never return raw provider secrets. It may expose save/delete/status capability only. Raw local injection commands must remain local-only and unavailable in remote mode.
