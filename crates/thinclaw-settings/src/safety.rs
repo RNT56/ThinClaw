@@ -13,7 +13,7 @@ fn default_smart_approval_mode() -> String {
 }
 
 fn default_external_scanner_mode() -> String {
-    "fail_open".to_string()
+    "fail_closed".to_string()
 }
 
 /// Safety configuration.
@@ -46,6 +46,11 @@ pub struct SafetySettings {
     /// Whether external shell scanners must carry verified ThinClaw provenance.
     #[serde(default)]
     pub external_scanner_require_verified: bool,
+
+    /// Whether workspace-confined shell commands may reference the host temp directory.
+    /// Disabled by default because temp paths are outside the configured workspace.
+    #[serde(default)]
+    pub allow_temp_paths: bool,
 }
 
 impl Default for SafetySettings {
@@ -58,6 +63,7 @@ impl Default for SafetySettings {
             external_scanner_mode: default_external_scanner_mode(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         }
     }
 }

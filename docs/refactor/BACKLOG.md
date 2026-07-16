@@ -144,16 +144,14 @@ joined at shutdown. Register those handles in an owned task set and add cancella
 **Verify:** `cargo check`; agent/dispatcher/scheduler shutdown tests. **Guardrail:** loop-inventory
 audit plus the existing `await_holding_lock` clippy gate.
 
-### A10 · Security long-tail · P1/P2 · M · **[OPEN]**
-Independent fixes (can be 1–2 PRs): **(a)** `/tmp` path-escape exemption (`thinclaw-tools/.../
-shell_security.rs:1312`) — gate behind an opt-in setting (default = no exemption) threaded into
-`detect_path_escape`; note it also currently allows `/tmp/../` traversal. **(b)** `SAFE_BINS` →
-rename `ALLOWED_EXECUTABLES` + split read-only vs network/mutation (curl/wget/docker still
-smart-approval). **(c)** `ExternalCommandScanner` default `FailOpen → FailClosed` (+ startup warn).
-**(d)** `InMemorySecretsStore::record_access_audit` — implement an in-memory audit (no-op stub
-today). **(e)** `Policy::default()` shell-injection regex requires a leading `;` — add undecorated
-patterns. **(f)** `?token=` query-param: operator startup warning (RFC 6750 log-exposure). **(g)**
-`ToolPolicyManager::load_from_settings` per-call I/O on the hot path → short-TTL cache.
+### A10 · Security long-tail · P1/P2 · M · **[DONE]**
+The `/tmp` path exemption is default-off and controlled by `safety.allow_temp_paths`; traversal and
+string-prefix sibling escapes stay blocked. The former safe-bins list is now an executable allowlist
+split into read-only, network-capable, and mutating categories, with the latter two routed through
+approval. The external scanner defaults to fail-closed, while status reports degraded availability.
+The in-memory secrets store records access audits, bare shell-injection patterns are covered, and
+query-token authentication emits the RFC 6750 exposure warning. Tool-policy loading now uses a
+one-second cache with explicit invalidation after in-process TOML writes.
 **Verify:** `cargo check --all-features`; safety/tools tests + new tests per fix.
 
 ### A11 · Panic long-tail · P2 · S · **[PARTIAL]**

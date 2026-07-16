@@ -169,10 +169,10 @@ pub(super) async fn configure(
             resolved_root.to_str().unwrap_or("ThinClaw").into(),
         );
 
-        // Enable safe bins allowlist for sandboxed mode (belt-and-suspenders
+        // Enable the executable allowlist for sandboxed mode (belt-and-suspenders
         // with ShellTool's own base_dir enforcement)
         if workspace_mode == "sandboxed" {
-            bridge_config.insert("IRONCLAW_SAFE_BINS_ONLY".into(), "true".into());
+            bridge_config.insert("THINCLAW_ALLOWED_EXECUTABLES_ONLY".into(), "true".into());
         }
         // Note: for non-sandboxed mode, we simply don't insert the key.
         // The overlay check returns None, and optional_env falls through
@@ -202,7 +202,7 @@ pub(super) async fn configure(
         }
 
         tracing::info!(
-            "[thinclaw-runtime] Set ALLOW_LOCAL_TOOLS={}, WORKSPACE_MODE={}, WORKSPACE_ROOT={:?}, SAFE_BINS_ONLY={}",
+            "[thinclaw-runtime] Set ALLOW_LOCAL_TOOLS={}, WORKSPACE_MODE={}, WORKSPACE_ROOT={:?}, ALLOWED_EXECUTABLES_ONLY={}",
             allow_local,
             workspace_mode,
             resolved_root,

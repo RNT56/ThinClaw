@@ -62,6 +62,19 @@ pub struct WorkerRuntime {
     job: Option<JobDescription>,
 }
 
+fn worker_safety_config() -> SafetyConfig {
+    SafetyConfig {
+        max_output_length: 100_000,
+        injection_check_enabled: true,
+        redact_pii_in_prompts: true,
+        smart_approval_mode: "off".to_string(),
+        external_scanner_mode: "off".to_string(),
+        external_scanner_path: None,
+        external_scanner_require_verified: false,
+        allow_temp_paths: false,
+    }
+}
+
 impl WorkerRuntime {
     /// Create a new worker runtime.
     ///
@@ -77,15 +90,7 @@ impl WorkerRuntime {
             "proxied".to_string(),
         ));
 
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: true,
-            redact_pii_in_prompts: true,
-            smart_approval_mode: "off".to_string(),
-            external_scanner_mode: "off".to_string(),
-            external_scanner_path: None,
-            external_scanner_require_verified: false,
-        }));
+        let safety = Arc::new(SafetyLayer::new(&worker_safety_config()));
 
         let tools = Arc::new(ToolRegistry::new());
         // Register only container-safe tools
@@ -662,7 +667,15 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::worker::runtime::truncate;
+    use crate::worker::runtime::{truncate, worker_safety_config};
+
+    #[test]
+    fn worker_shell_policy_denies_temp_paths() {
+        let config = worker_safety_config();
+
+        assert!(!config.allow_temp_paths);
+        assert_eq!(config.external_scanner_mode, "off");
+    }
 
     #[test]
     fn test_truncate_within_limit() {

@@ -360,6 +360,7 @@ async fn completed_subagent_is_marked_completed_and_not_running() {
         external_scanner_mode: "off".to_string(),
         external_scanner_path: None,
         external_scanner_require_verified: false,
+        allow_temp_paths: false,
     }));
     let tools = Arc::new(ToolRegistry::new());
     let channels = Arc::new(ChannelManager::new());
@@ -475,6 +476,7 @@ async fn wait_for_subagent_is_bounded_when_completion_status_delivery_hangs() {
         external_scanner_mode: "off".to_string(),
         external_scanner_path: None,
         external_scanner_require_verified: false,
+        allow_temp_paths: false,
     }));
     let channels = Arc::new(ChannelManager::new());
     channels.add(Box::new(BlockingCompletionChannel)).await;

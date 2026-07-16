@@ -138,6 +138,7 @@ impl ShellTool {
             external_scanner_mode: config.external_scanner_mode.parse().ok(),
             external_scanner_path: config.external_scanner_path.clone(),
             external_scanner_require_verified: Some(config.external_scanner_require_verified),
+            allow_temp_paths: Some(config.allow_temp_paths),
         });
         self
     }
@@ -228,4 +229,49 @@ impl Tool for ShellTool {
 #[allow(dead_code)]
 fn _local_backend_adapter() -> Arc<RootExecutionBackendAdapter> {
     RootExecutionBackendAdapter::new(LocalHostExecutionBackend::shared())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn safety_config_controls_temp_path_access() {
+        let base_dir = PathBuf::from("/workspace");
+        let command = serde_json::json!({"command": "echo /tmp/thinclaw-temp-path"});
+        let context = JobContext::default();
+        let strict_config = SafetyConfig {
+            external_scanner_mode: "off".to_string(),
+            ..SafetyConfig::default()
+        };
+
+        let blocked = ShellTool::new()
+            .with_base_dir(base_dir.clone())
+            .with_safety_config(&strict_config)
+            .execute(command.clone(), &context)
+            .await;
+        assert!(
+            matches!(blocked, Err(ToolError::NotAuthorized(ref message)) if message.contains("outside workspace")),
+            "unexpected strict-policy result: {blocked:?}"
+        );
+
+        let opted_in_config = SafetyConfig {
+            allow_temp_paths: true,
+            ..strict_config
+        };
+        let allowed = ShellTool::new()
+            .with_base_dir(base_dir)
+            .with_safety_config(&opted_in_config)
+            .execute(command, &context)
+            .await
+            .expect("explicit temp-path opt-in should reach shell execution");
+        assert!(
+            allowed
+                .result
+                .get("output")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .contains("/tmp/thinclaw-temp-path")
+        );
+    }
 }

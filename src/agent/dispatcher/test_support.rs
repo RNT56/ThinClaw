@@ -688,6 +688,7 @@ pub(super) async fn make_test_agent_with_channel(
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         })),
         tools,
         desktop_autonomy_manager: None,

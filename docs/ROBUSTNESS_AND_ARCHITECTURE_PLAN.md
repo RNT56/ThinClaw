@@ -232,8 +232,9 @@ sit in the 1,500–1,999 band and could be split further if desired.
 - Miri CI job for `thinclaw-secrets` (crypto) + `thinclaw-safety` (sanitizer/leak-detector).
 - Plugin manifest version check `!=` → range (`>= MIN_SUPPORTED`); settings rename registry
   (`serde(alias)` + DB key-migration) documented in CLAUDE.md.
-- `SAFE_BINS` rename + split (curl/wget/docker are not "safe"); `ExternalScanner` default
-  `FailOpen → FailClosed`; in-memory secrets-store audit trail; `?token=` query-param log-exposure warning.
+- Security long-tail landed: workspace temp paths are opt-in, executable policy is split into
+  read-only/network/mutation categories, the external scanner defaults fail-closed, in-memory
+  secret access is audited, query-token use warns, and tool-policy loading is short-TTL cached.
 - Frontend test coverage for the chat hook + Tauri bridge (53 Vitest cases cover only utilities today).
 
 Landed guardrail: `check-msrv-sync.py` now runs in CI and enforces that package MSRV and the pinned

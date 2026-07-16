@@ -16,6 +16,7 @@ pub struct SafetyConfig {
     pub external_scanner_mode: String,
     pub external_scanner_path: Option<PathBuf>,
     pub external_scanner_require_verified: bool,
+    pub allow_temp_paths: bool,
 }
 
 impl Default for SafetyConfig {
@@ -25,9 +26,10 @@ impl Default for SafetyConfig {
             injection_check_enabled: true,
             redact_pii_in_prompts: true,
             smart_approval_mode: "off".to_string(),
-            external_scanner_mode: "fail_open".to_string(),
+            external_scanner_mode: "fail_closed".to_string(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         }
     }
 }
@@ -68,6 +70,10 @@ impl SafetyConfig {
             external_scanner_require_verified: parse_bool_env(
                 "SAFETY_EXTERNAL_SCANNER_REQUIRE_VERIFIED",
                 settings.safety.external_scanner_require_verified,
+            )?,
+            allow_temp_paths: parse_bool_env(
+                "SAFETY_ALLOW_TEMP_PATHS",
+                settings.safety.allow_temp_paths,
             )?,
             external_scanner_path: if external_scanner_path.trim().is_empty() {
                 None
