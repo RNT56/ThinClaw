@@ -45,20 +45,56 @@ def normalized_version(version: str) -> str:
     return version.removesuffix(".0")
 
 
-drifted_pins: list[str] = []
+toolchain_errors: list[str] = []
 
 workflow_pin_pattern = re.compile(
     r"^\s*toolchain:\s*([0-9]+\.[0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$",
     re.MULTILINE,
 )
 for workflow in sorted((root / ".github" / "workflows").glob("*.y*ml")):
-    for workflow_match in workflow_pin_pattern.finditer(
-        workflow.read_text(encoding="utf-8")
-    ):
+    workflow_text = workflow.read_text(encoding="utf-8")
+    for workflow_match in workflow_pin_pattern.finditer(workflow_text):
         pin = workflow_match.group(1)
         if normalized_version(pin) != rust_version:
             line = workflow_match.string.count("\n", 0, workflow_match.start()) + 1
-            drifted_pins.append(f"{workflow.relative_to(root)}:{line} pins Rust {pin}")
+            toolchain_errors.append(
+                f"{workflow.relative_to(root)}:{line} pins Rust {pin}"
+            )
+
+    workflow_lines = workflow_text.splitlines()
+    for index, line in enumerate(workflow_lines):
+        if not line.lstrip().startswith("uses: dtolnay/rust-toolchain@"):
+            continue
+
+        uses_indent = len(line) - len(line.lstrip())
+        with_indent: int | None = None
+        has_toolchain_input = False
+        for candidate in workflow_lines[index + 1 :]:
+            stripped = candidate.lstrip()
+            candidate_indent = len(candidate) - len(stripped)
+            if stripped.startswith("- ") and candidate_indent < uses_indent:
+                break
+            if stripped == "with:" and candidate_indent == uses_indent:
+                with_indent = candidate_indent
+                continue
+            if (
+                with_indent is not None
+                and stripped
+                and candidate_indent <= with_indent
+            ):
+                with_indent = None
+            if (
+                with_indent is not None
+                and stripped.startswith("toolchain:")
+                and candidate_indent > with_indent
+            ):
+                has_toolchain_input = True
+                break
+
+        if not has_toolchain_input:
+            toolchain_errors.append(
+                f"{workflow.relative_to(root)}:{index + 1} is missing a toolchain input"
+            )
 
 container_pin_pattern = re.compile(
     r"^FROM\s+rust:([0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-@\s]|$)", re.MULTILINE
@@ -67,16 +103,16 @@ for dockerfile in (root / "Dockerfile.worker", root / "docker" / "sandbox.Docker
     dockerfile_text = dockerfile.read_text(encoding="utf-8")
     container_match = container_pin_pattern.search(dockerfile_text)
     if container_match is None:
-        drifted_pins.append(
+        toolchain_errors.append(
             f"{dockerfile.relative_to(root)} is missing a numeric rust:<version> base image"
         )
         continue
     pin = container_match.group(1)
     if normalized_version(pin) != rust_version:
-        drifted_pins.append(f"{dockerfile.relative_to(root)} pins Rust {pin}")
+        toolchain_errors.append(f"{dockerfile.relative_to(root)} pins Rust {pin}")
 
-if drifted_pins:
-    details = "\n".join(f"- {pin}" for pin in drifted_pins)
-    raise SystemExit(f"MSRV drift outside Cargo.toml/rust-toolchain.toml:\n{details}")
+if toolchain_errors:
+    details = "\n".join(f"- {error}" for error in toolchain_errors)
+    raise SystemExit(f"Rust toolchain configuration errors:\n{details}")
 
 print(f"MSRV, CI, and container toolchains synchronized at Rust {rust_version}")
