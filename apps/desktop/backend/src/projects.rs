@@ -33,6 +33,21 @@ pub struct CreateProjectRequest {
     pub description: Option<String>,
 }
 
+fn normalize_project_name(name: String) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(crate::thinclaw::bridge::BridgeError::from(
+            "Project name cannot be empty".to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn normalize_project_description(description: String) -> Option<String> {
+    let description = description.trim();
+    (!description.is_empty()).then(|| description.to_string())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn create_project(
@@ -47,8 +62,8 @@ pub async fn create_project(
 
     let project = Project {
         id: id.clone(),
-        name: request.name,
-        description: request.description,
+        name: normalize_project_name(request.name)?,
+        description: request.description.and_then(normalize_project_description),
         created_at: now,
         updated_at: now,
         sort_order: 0,
@@ -167,8 +182,7 @@ pub async fn update_project(
         .unwrap()
         .as_millis() as i64;
 
-    // Dynamic query helper or just simple if checks?
-    // Let's fetch first to maintain existing values if None passed
+    // Fetch first so omitted fields preserve their existing values.
     let mut project = sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?")
         .bind(&id)
         .fetch_one(pool.inner())
@@ -176,10 +190,10 @@ pub async fn update_project(
         .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     if let Some(n) = name {
-        project.name = n;
+        project.name = normalize_project_name(n)?;
     }
     if let Some(d) = description {
-        project.description = Some(d);
+        project.description = normalize_project_description(d);
     }
     project.updated_at = now;
 
@@ -193,6 +207,29 @@ pub async fn update_project(
         .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(project)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_project_description, normalize_project_name};
+
+    #[test]
+    fn project_names_are_trimmed_and_must_not_be_empty() {
+        assert_eq!(
+            normalize_project_name("  Research  ".into()).unwrap(),
+            "Research"
+        );
+        assert!(normalize_project_name(" \n\t ".into()).is_err());
+    }
+
+    #[test]
+    fn empty_project_descriptions_clear_the_field() {
+        assert_eq!(
+            normalize_project_description("  Active project  ".into()),
+            Some("Active project".into())
+        );
+        assert_eq!(normalize_project_description("   ".into()), None);
+    }
 }
 
 #[tauri::command]

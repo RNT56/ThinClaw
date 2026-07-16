@@ -58,7 +58,10 @@ pub async fn direct_rag_upload_document(
         .write(&relative_path, &file_bytes)
         .await
         .map_err(|e| format!("Failed to save document: {}", e))?;
-    let path = file_store.resolve_path(&relative_path).await;
+    let path = file_store
+        .resolve_path(&relative_path)
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let mut metadata = HashMap::new();
     metadata.insert("original_filename".to_string(), filename);

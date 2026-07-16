@@ -54,7 +54,8 @@ pub async fn direct_assets_upload_image(
     let filename = format!("{}.jpg", id);
     let path = file_store
         .resolve_path(&format!("images/{}", filename))
-        .await;
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     rgb_img
         .save(&path)
@@ -120,11 +121,17 @@ pub async fn direct_assets_get_image_path(
     let jpg_path = format!("images/{}.jpg", id);
 
     if file_store.exists(&png_path).await {
-        let full = file_store.resolve_path(&png_path).await;
+        let full = file_store
+            .resolve_path(&png_path)
+            .await
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
         return Ok(full.to_string_lossy().to_string());
     }
     if file_store.exists(&jpg_path).await {
-        let full = file_store.resolve_path(&jpg_path).await;
+        let full = file_store
+            .resolve_path(&jpg_path)
+            .await
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
         return Ok(full.to_string_lossy().to_string());
     }
 
@@ -211,7 +218,10 @@ pub async fn direct_assets_open_images_folder(
         .create_dir_all("images")
         .await
         .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
-    let images_dir = file_store.resolve_path("images").await;
+    let images_dir = file_store
+        .resolve_path("images")
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")

@@ -6,10 +6,10 @@
 //! In **local mode**, all operations are straight pass-through to the
 //! local filesystem.
 //!
-//! In **cloud mode** (future), writes will go local + queue upload,
-//! and reads will check local cache first, then download from cloud.
+//! In **cloud mode**, writes go to the local cache and queue an upload, while
+//! reads check the cache first and download from cloud on a miss.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -43,6 +43,9 @@ pub enum FileStoreError {
 
     #[error("Cloud upload failed: {0}")]
     CloudUploadFailed(String),
+
+    #[error("Invalid relative path: {0}")]
+    InvalidRelativePath(String),
 }
 
 /// Managed Tauri state for all file I/O operations.
@@ -97,6 +100,22 @@ pub enum UploadOp {
 }
 
 impl FileStore {
+    /// Resolve a store-relative path without allowing it to escape `root`.
+    /// Callers that intentionally need arbitrary filesystem access must use
+    /// the explicitly named `*_absolute` methods instead.
+    fn resolve_relative(root: &Path, relative_path: &str) -> FileStoreResult<PathBuf> {
+        let relative = Path::new(relative_path);
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(FileStoreError::InvalidRelativePath(
+                relative_path.to_string(),
+            ));
+        }
+        Ok(root.join(relative))
+    }
+
     /// Create a new FileStore (starts in local mode).
     pub fn new(root: PathBuf) -> Self {
         info!("[file_store] Initialized: root={}", root.display());
@@ -163,10 +182,10 @@ impl FileStore {
     /// Write a file. Creates parent directories as needed.
     ///
     /// In local mode: writes directly to disk.
-    /// In cloud mode: writes locally + queues upload (TODO).
+    /// In cloud mode: writes locally and queues a background upload.
     pub async fn write(&self, relative_path: &str, data: &[u8]) -> FileStoreResult<()> {
         let inner = self.inner.read().await;
-        let full_path = inner.root.join(relative_path);
+        let full_path = Self::resolve_relative(&inner.root, relative_path)?;
 
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
@@ -226,12 +245,12 @@ impl FileStore {
     /// Read a file by relative path.
     ///
     /// In local mode: reads directly from disk.
-    /// In cloud mode: reads from local cache, downloads if missing (TODO).
+    /// In cloud mode: reads from the local cache and downloads on a miss.
     pub async fn read(&self, relative_path: &str) -> FileStoreResult<Vec<u8>> {
         let (full_path, mode, download) = {
             let inner = self.inner.read().await;
             (
-                inner.root.join(relative_path),
+                Self::resolve_relative(&inner.root, relative_path)?,
                 inner.mode.clone(),
                 inner.download.clone(),
             )
@@ -300,7 +319,7 @@ impl FileStore {
         let (full_path, mode, download) = {
             let inner = self.inner.read().await;
             (
-                inner.root.join(relative_path),
+                Self::resolve_relative(&inner.root, relative_path)?,
                 inner.mode.clone(),
                 inner.download.clone(),
             )
@@ -332,8 +351,9 @@ impl FileStore {
 
     /// Get the absolute local path for a relative path.
     /// Does NOT check if the file exists.
-    pub async fn resolve_path(&self, relative_path: &str) -> PathBuf {
-        self.inner.read().await.root.join(relative_path)
+    pub async fn resolve_path(&self, relative_path: &str) -> FileStoreResult<PathBuf> {
+        let inner = self.inner.read().await;
+        Self::resolve_relative(&inner.root, relative_path)
     }
 
     // ── Delete Operations ────────────────────────────────────────────────
@@ -341,7 +361,7 @@ impl FileStore {
     /// Delete a file by relative path.
     pub async fn delete(&self, relative_path: &str) -> FileStoreResult<()> {
         let inner = self.inner.read().await;
-        let full_path = inner.root.join(relative_path);
+        let full_path = Self::resolve_relative(&inner.root, relative_path)?;
 
         if full_path.exists() {
             tokio::fs::remove_file(&full_path).await?;
@@ -381,7 +401,7 @@ impl FileStore {
     /// Check if a file exists (locally).
     pub async fn exists(&self, relative_path: &str) -> bool {
         let inner = self.inner.read().await;
-        inner.root.join(relative_path).exists()
+        Self::resolve_relative(&inner.root, relative_path).is_ok_and(|path| path.exists())
     }
 
     /// Check if a file exists by absolute path.
@@ -392,7 +412,7 @@ impl FileStore {
     /// List files in a directory (relative path).
     pub async fn list(&self, relative_dir: &str) -> FileStoreResult<Vec<String>> {
         let inner = self.inner.read().await;
-        let full_path = inner.root.join(relative_dir);
+        let full_path = Self::resolve_relative(&inner.root, relative_dir)?;
 
         if !full_path.exists() {
             return Ok(Vec::new());
@@ -412,7 +432,7 @@ impl FileStore {
     /// Get metadata for a file (relative path).
     pub async fn metadata(&self, relative_path: &str) -> FileStoreResult<std::fs::Metadata> {
         let inner = self.inner.read().await;
-        let full_path = inner.root.join(relative_path);
+        let full_path = Self::resolve_relative(&inner.root, relative_path)?;
         Ok(tokio::fs::metadata(&full_path).await?)
     }
 
@@ -421,7 +441,7 @@ impl FileStore {
     /// Create a directory and all parents.
     pub async fn create_dir_all(&self, relative_path: &str) -> FileStoreResult<()> {
         let inner = self.inner.read().await;
-        let full_path = inner.root.join(relative_path);
+        let full_path = Self::resolve_relative(&inner.root, relative_path)?;
         tokio::fs::create_dir_all(&full_path).await?;
         Ok(())
     }
@@ -429,8 +449,8 @@ impl FileStore {
     /// Copy a file within the store.
     pub async fn copy(&self, from: &str, to: &str) -> FileStoreResult<()> {
         let inner = self.inner.read().await;
-        let from_path = inner.root.join(from);
-        let to_path = inner.root.join(to);
+        let from_path = Self::resolve_relative(&inner.root, from)?;
+        let to_path = Self::resolve_relative(&inner.root, to)?;
 
         if let Some(parent) = to_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -457,8 +477,8 @@ impl FileStore {
     /// Move/rename a file within the store.
     pub async fn rename(&self, from: &str, to: &str) -> FileStoreResult<()> {
         let inner = self.inner.read().await;
-        let from_path = inner.root.join(from);
-        let to_path = inner.root.join(to);
+        let from_path = Self::resolve_relative(&inner.root, from)?;
+        let to_path = Self::resolve_relative(&inner.root, to)?;
 
         if let Some(parent) = to_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -612,5 +632,55 @@ mod tests {
         // A miss now reports NotFound (local pass-through), not download-failed.
         let result = store.read("documents/x.txt").await;
         assert!(matches!(result, Err(FileStoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn relative_path_resolution_rejects_escape_components() {
+        let root = Path::new("store-root");
+        assert_eq!(
+            FileStore::resolve_relative(root, "documents/report.txt").unwrap(),
+            root.join("documents/report.txt")
+        );
+
+        for invalid in ["../secret", "documents/../../secret", "./secret"] {
+            assert!(matches!(
+                FileStore::resolve_relative(root, invalid),
+                Err(FileStoreError::InvalidRelativePath(_))
+            ));
+        }
+
+        let absolute = std::env::temp_dir().join("thinclaw-absolute-path");
+        assert!(matches!(
+            FileStore::resolve_relative(root, &absolute.to_string_lossy()),
+            Err(FileStoreError::InvalidRelativePath(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn relative_operations_cannot_write_or_download_outside_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        let store = FileStore::new(root.clone());
+        let downloader = Arc::new(MockDownloader {
+            files: std::collections::HashMap::new(),
+            fetched: Mutex::new(Vec::new()),
+        });
+        store.set_mode(FileStoreMode::Cloud).await;
+        store.set_downloader(downloader.clone()).await;
+
+        let write_result = store.write("../escaped.txt", b"blocked").await;
+        assert!(matches!(
+            write_result,
+            Err(FileStoreError::InvalidRelativePath(_))
+        ));
+        assert!(!tmp.path().join("escaped.txt").exists());
+
+        let read_result = store.read("../escaped.txt").await;
+        assert!(matches!(
+            read_result,
+            Err(FileStoreError::InvalidRelativePath(_))
+        ));
+        assert!(downloader.fetched.lock().unwrap().is_empty());
+        assert!(!store.exists("../escaped.txt").await);
     }
 }

@@ -252,7 +252,10 @@ async fn persist_voice_input(
         .write(&relative_path, audio_bytes)
         .await
         .map_err(|e| format!("Failed to persist STT audio: {}", e))?;
-    let path = file_store.resolve_path(&relative_path).await;
+    let path = file_store
+        .resolve_path(&relative_path)
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     let mut metadata = std::collections::HashMap::new();
     metadata.insert("transcript".to_string(), transcript.to_string());

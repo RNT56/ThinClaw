@@ -385,9 +385,11 @@ export function ProjectsSidebar({
                 <ProjectSettingsDialog
                     open={!!editingProject}
                     onOpenChange={(open) => !open && setEditingProject(null)}
-                    projectId={editingProject.id}
-                    projectName={editingProject.name}
-                    onProjectUpdated={() => fetchProjects()}
+                    project={editingProject}
+                    onProjectUpdated={(project) => {
+                        setEditingProject(project);
+                        fetchProjects();
+                    }}
                     onProjectDeleted={() => {
                         setEditingProject(null);
                         fetchProjects();
