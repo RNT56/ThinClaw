@@ -158,9 +158,9 @@ pub async fn run_status_command(
         println!("disabled");
     }
 
-    // Shell scanner (defense-in-depth external command scanner; FailOpen by default).
-    // Surfaced so an operator notices a degraded/fail-open posture and can opt into
-    // fail_closed. Built from settings only — no DB or tool registry needed.
+    // Shell scanner (defense-in-depth external command scanner; fail-closed by default).
+    // Surfaced so an operator can diagnose scanner availability and deliberately
+    // opt into the weaker fail-open mode if needed.
     print!("{}", branding.muted("  Shell scanner "));
     {
         let opts = thinclaw_tools::builtin::ShellSafetyOptions {
@@ -170,6 +170,7 @@ pub async fn run_status_command(
             external_scanner_require_verified: Some(
                 settings.safety.external_scanner_require_verified,
             ),
+            allow_temp_paths: Some(settings.safety.allow_temp_paths),
         };
         let scanner = thinclaw_tools::builtin::ShellTool::new()
             .with_safety_options(&opts)

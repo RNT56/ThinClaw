@@ -92,6 +92,7 @@ fn permissive_safety() -> SafetyLayer {
         external_scanner_mode: "off".to_string(),
         external_scanner_path: None,
         external_scanner_require_verified: false,
+        allow_temp_paths: false,
     })
 }
 
@@ -105,6 +106,7 @@ fn strict_safety() -> SafetyLayer {
         external_scanner_mode: "off".to_string(),
         external_scanner_path: None,
         external_scanner_require_verified: false,
+        allow_temp_paths: false,
     })
 }
 
@@ -400,6 +402,7 @@ mod safety_layer {
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         });
         let big = "A".repeat(100);
         let out = safety.sanitize_tool_output("tool", &big);

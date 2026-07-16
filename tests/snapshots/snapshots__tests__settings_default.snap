@@ -242,9 +242,10 @@ expression: settings
     "injection_check_enabled": true,
     "redact_pii_in_prompts": true,
     "smart_approval_mode": "off",
-    "external_scanner_mode": "fail_open",
+    "external_scanner_mode": "fail_closed",
     "external_scanner_path": null,
-    "external_scanner_require_verified": false
+    "external_scanner_require_verified": false,
+    "allow_temp_paths": false
   },
   "builder": {
     "enabled": true,

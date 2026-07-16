@@ -138,6 +138,7 @@ impl ShellTool {
             external_scanner_mode: config.external_scanner_mode.parse().ok(),
             external_scanner_path: config.external_scanner_path.clone(),
             external_scanner_require_verified: Some(config.external_scanner_require_verified),
+            allow_temp_paths: Some(config.allow_temp_paths),
         });
         self
     }

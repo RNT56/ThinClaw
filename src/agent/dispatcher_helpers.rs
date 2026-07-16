@@ -242,6 +242,7 @@ mod tests {
                 external_scanner_mode: "off".to_string(),
                 external_scanner_path: None,
                 external_scanner_require_verified: false,
+                allow_temp_paths: false,
             })),
             tools: Arc::new(ToolRegistry::new()),
             desktop_autonomy_manager: None,
@@ -532,6 +533,7 @@ mod tests {
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         });
 
         let job_ctx = JobContext::with_user("test", "chat", "test session");
@@ -568,6 +570,7 @@ mod tests {
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         });
         let job_ctx = JobContext::with_user("test", "chat", "test session");
 

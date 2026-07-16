@@ -136,7 +136,9 @@ impl Settings {
         }
 
         std::fs::write(path, content)
-            .map_err(|e| format!("failed to write {}: {}", path.display(), e))
+            .map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
+        ToolPolicyManager::invalidate_runtime_cache();
+        Ok(())
     }
 
     /// Merge values from `other` into `self`, preferring `other` for

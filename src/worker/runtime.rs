@@ -85,6 +85,7 @@ impl WorkerRuntime {
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         }));
 
         let tools = Arc::new(ToolRegistry::new());
