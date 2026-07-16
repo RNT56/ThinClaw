@@ -143,12 +143,12 @@ jobs:
       - name: Run app unit and UI tests
         working-directory: apps/ios
         run: ./scripts/app-tests.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: app-build-xcresult
           path: apps/ios/build/app-simulator.xcresult
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: app-tests-xcresult
@@ -204,7 +204,7 @@ jobs:
             -scheme ThinClawWatch \
             -destination 'generic/platform=watchOS' \
             CODE_SIGNING_ALLOWED=NO
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: watch-build-xcresult
@@ -245,7 +245,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
@@ -263,12 +263,12 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       - name: Generate workspace
@@ -285,7 +285,7 @@ jobs:
             -resultBundlePath build/archive-validation.xcresult \
             CODE_SIGNING_ALLOWED=NO \
             CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: archive-validation
