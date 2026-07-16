@@ -238,7 +238,10 @@ async fn persist_voice_output(
         .write(&relative_path, audio_bytes)
         .await
         .map_err(|e| format!("Failed to persist TTS audio: {}", e))?;
-    let path = file_store.resolve_path(&relative_path).await;
+    let path = file_store
+        .resolve_path(&relative_path)
+        .await
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
 
     Ok(DirectAssetStore::upsert(
         pool,

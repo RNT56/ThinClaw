@@ -1046,7 +1046,10 @@ pub async fn direct_history_delete_all_history(
 
     // 3. Clear Files via FileStore
     if file_store.exists("documents").await {
-        let docs_path = file_store.resolve_path("documents").await;
+        let docs_path = file_store
+            .resolve_path("documents")
+            .await
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
         let _ = tokio::fs::remove_dir_all(&docs_path).await;
         file_store
             .create_dir_all("documents")
@@ -1055,7 +1058,10 @@ pub async fn direct_history_delete_all_history(
     }
 
     if file_store.exists("images").await {
-        let images_path = file_store.resolve_path("images").await;
+        let images_path = file_store
+            .resolve_path("images")
+            .await
+            .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
         let _ = tokio::fs::remove_dir_all(&images_path).await;
         file_store
             .create_dir_all("images")
