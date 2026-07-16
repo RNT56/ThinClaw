@@ -8,6 +8,16 @@ use std::path::PathBuf;
 use crate::settings::Settings;
 use crate::terminal_branding::TerminalBranding;
 
+fn shell_safety_options(settings: &Settings) -> thinclaw_tools::builtin::ShellSafetyOptions {
+    thinclaw_tools::builtin::ShellSafetyOptions {
+        smart_approval_mode: None,
+        external_scanner_mode: settings.safety.external_scanner_mode.parse().ok(),
+        external_scanner_path: settings.safety.external_scanner_path.clone(),
+        external_scanner_require_verified: Some(settings.safety.external_scanner_require_verified),
+        allow_temp_paths: Some(settings.safety.allow_temp_paths),
+    }
+}
+
 /// Run the status command, printing system health info.
 pub async fn run_status_command(
     linux_profile: crate::platform::LinuxReadinessProfile,
@@ -163,15 +173,7 @@ pub async fn run_status_command(
     // opt into the weaker fail-open mode if needed.
     print!("{}", branding.muted("  Shell scanner "));
     {
-        let opts = thinclaw_tools::builtin::ShellSafetyOptions {
-            smart_approval_mode: None,
-            external_scanner_mode: settings.safety.external_scanner_mode.parse().ok(),
-            external_scanner_path: settings.safety.external_scanner_path.clone(),
-            external_scanner_require_verified: Some(
-                settings.safety.external_scanner_require_verified,
-            ),
-            allow_temp_paths: Some(settings.safety.allow_temp_paths),
-        };
+        let opts = shell_safety_options(&settings);
         let scanner = thinclaw_tools::builtin::ShellTool::new()
             .with_safety_options(&opts)
             .scanner_status();
@@ -302,4 +304,25 @@ fn default_tools_dir() -> PathBuf {
 
 fn default_channels_dir() -> PathBuf {
     crate::platform::state_paths().channels_dir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_safety_options;
+    use crate::settings::Settings;
+
+    #[test]
+    fn status_shell_options_include_temp_path_policy() {
+        let mut settings = Settings::default();
+        settings.safety.external_scanner_mode = "off".to_string();
+        settings.safety.allow_temp_paths = true;
+
+        let options = shell_safety_options(&settings);
+
+        assert_eq!(options.allow_temp_paths, Some(true));
+        assert_eq!(
+            options.external_scanner_mode,
+            Some(thinclaw_tools::builtin::shell::ExternalScannerMode::Off)
+        );
+    }
 }
