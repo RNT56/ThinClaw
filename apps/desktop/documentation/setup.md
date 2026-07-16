@@ -98,7 +98,7 @@ This does everything in one go:
 
 | Script | npm command | What it does |
 |--------|------------|-------------|
-| `setup_chromium.sh` | `npm run setup:chromium` | Downloads the pinned Chromium snapshot and replaces the existing copy only after SHA-256 and archive-layout validation |
+| `setup_chromium.sh` | `npm run setup:chromium` | Selects the pinned macOS, Linux x64, Windows x64, or Windows ARM64 Chromium snapshot for the current host and replaces the existing copy only after SHA-256 and archive-layout validation |
 | `setup_llama.sh` | `npm run setup:ai` | Downloads the validated llama.cpp sidecar and required shared libraries for the current host, verifies SHA-256 and `--version`, then installs atomically |
 
 All setup scripts are deterministic and safe to rerun: archives are verified before the existing installation is replaced. `setup:all` finishes by generating the strict llama.cpp bundle override and enforcing committed sidecar-size limits.
