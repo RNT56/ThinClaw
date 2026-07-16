@@ -91,6 +91,13 @@ jobs:
   feature-matrix:
     name: "Profile: ${{ matrix.name }}"
     runs-on: ubuntu-latest
+    # These are compile-only gates, so debug symbols and incremental objects add
+    # no signal while consuming tens of gigabytes across check, clippy, and test.
+    # Keep peak usage below the hosted runner limit so rust-lld cannot SIGBUS.
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     strategy:
       fail-fast: false
       matrix:
