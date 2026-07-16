@@ -43,15 +43,19 @@ require_command() {
 wait_for_path() {
     local path="$1"
     local label="$2"
-    local attempt=""
-    for attempt in $(seq 1 80); do
+    local producer_pid="${3:-}"
+    for _ in $(seq 1 300); do
         if [[ -e "$path" ]]; then
             return 0
+        fi
+        if [[ -n "$producer_pid" ]] && ! kill -0 "$producer_pid" >/dev/null 2>&1; then
+            echo "$label producer exited before creating $path" >&2
+            return 1
         fi
         sleep 0.1
     done
     echo "timed out waiting for $label at $path" >&2
-    exit 1
+    return 1
 }
 
 start_x11_session() {
@@ -83,8 +87,7 @@ start_x11_session() {
 wait_for_process() {
     local pattern="$1"
     local label="$2"
-    local attempt=""
-    for attempt in $(seq 1 100); do
+    for _ in $(seq 1 100); do
         if pgrep -f "$pattern" >/dev/null 2>&1; then
             return 0
         fi
@@ -141,10 +144,17 @@ EOF
         --no-global-shortcuts \
         "${apps[@]}" \
         >"$TMP_DIR/kwin_wayland.log" 2>&1 &
-    SESSION_PIDS+=("$!")
+    local kwin_pid="$!"
+    SESSION_PIDS+=("$kwin_pid")
 
-    wait_for_path "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "KWin Wayland socket"
-    wait_for_path "$child_env" "KWin child application environment"
+    if ! wait_for_path "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "KWin Wayland socket" "$kwin_pid"; then
+        cat "$TMP_DIR/kwin_wayland.log" >&2 || true
+        exit 1
+    fi
+    if ! wait_for_path "$child_env" "KWin child application environment" "$kwin_pid"; then
+        cat "$TMP_DIR/kwin_wayland.log" >&2 || true
+        exit 1
+    fi
     if grep -q '^DISPLAY=' "$child_env"; then
         export DISPLAY
         DISPLAY="$(sed -n 's/^DISPLAY=//p' "$child_env" | tail -n 1)"

@@ -2,7 +2,20 @@ import "@wdio/native-types";
 
 async function expandSidebar() {
   const sidebar = await $('[data-testid="app-sidebar"]');
-  await sidebar.moveTo();
+  const { innerWidth, innerHeight } = await browser.execute(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+  }));
+  await browser
+    .action("pointer", { parameters: { pointerType: "mouse" } })
+    .move({
+      origin: "viewport",
+      x: Math.max(0, innerWidth - 1),
+      y: Math.max(0, Math.floor(innerHeight / 2)),
+    })
+    .pause(50)
+    .move({ origin: sidebar })
+    .perform();
   await browser.waitUntil(
     async () => (await sidebar.getCSSProperty("width")).value === "256px",
     { timeout: 5_000, timeoutMsg: "desktop sidebar did not expand" },

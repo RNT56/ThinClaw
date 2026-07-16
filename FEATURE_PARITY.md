@@ -4,6 +4,8 @@
 
 > **Desktop RAG reconciliation (2026-07-13):** reranker artifacts are revision/checksum verified and fail soft; embedding providers validate response shape and use asymmetric query/document tasks; cloud selections restore at startup; live local output drives vector-dimension migration while FTS remains available.
 
+> **Desktop Chromium reconciliation (2026-07-16):** the deterministic installer and runtime resolver now agree on pinned, checksum-verified snapshot layouts for macOS ARM64/x64, Linux x64, and Windows ARM64/x64. Clean-machine fixtures exercise every archive layout without downloading production artifacts.
+
 This document tracks both feature parity against OpenClaw (TypeScript reference implementation) and ThinClaw-first capabilities that now extend well beyond parity. Use it both as a compatibility map and as a ledger of the newer Rust-native features we are actively adding.
 
 Desktop-oriented sections are maintained from ThinClaw Desktop contracts, local Tauri wiring, and the integration surfaces present in this repo. Detailed desktop runtime boundaries live under `apps/desktop/documentation/`.

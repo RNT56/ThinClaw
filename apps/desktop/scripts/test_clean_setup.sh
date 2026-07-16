@@ -6,7 +6,11 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/thinclaw-clean-setup.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 FIXTURES="$TMP_ROOT/fixtures"
 TEST_APP="$TMP_ROOT/app"
-mkdir -p "$FIXTURES/llama" "$FIXTURES/chromium/chrome-mac/Chromium.app/Contents/MacOS"
+mkdir -p \
+  "$FIXTURES/llama" \
+  "$FIXTURES/chromium-mac/chrome-mac/Chromium.app/Contents/MacOS" \
+  "$FIXTURES/chromium-linux/chrome-linux" \
+  "$FIXTURES/chromium-windows/chrome-win"
 
 cp "$DESKTOP_DIR/scripts/setup_llama.sh" "$TMP_ROOT/setup_llama.sh"
 cp "$DESKTOP_DIR/backend/scripts/setup_chromium.sh" "$TMP_ROOT/setup_chromium.sh"
@@ -19,9 +23,16 @@ printf '#!/usr/bin/env bash\necho "llama fixture 1.0"\n' > "$FIXTURES/llama/llam
 chmod +x "$FIXTURES/llama/llama-server"
 tar -czf "$FIXTURES/llama-fixture.tar.gz" -C "$FIXTURES/llama" llama-server
 
-printf '#!/usr/bin/env bash\necho "Chromium fixture"\n' > "$FIXTURES/chromium/chrome-mac/Chromium.app/Contents/MacOS/Chromium"
-chmod +x "$FIXTURES/chromium/chrome-mac/Chromium.app/Contents/MacOS/Chromium"
-(cd "$FIXTURES/chromium" && zip -qr "$FIXTURES/chromium-fixture.zip" chrome-mac)
+printf '#!/usr/bin/env bash\necho "Chromium macOS fixture"\n' > "$FIXTURES/chromium-mac/chrome-mac/Chromium.app/Contents/MacOS/Chromium"
+printf '#!/usr/bin/env bash\necho "Chromium Linux fixture"\n' > "$FIXTURES/chromium-linux/chrome-linux/chrome"
+printf '#!/usr/bin/env bash\necho "Chromium Windows fixture"\n' > "$FIXTURES/chromium-windows/chrome-win/chrome.exe"
+chmod +x \
+  "$FIXTURES/chromium-mac/chrome-mac/Chromium.app/Contents/MacOS/Chromium" \
+  "$FIXTURES/chromium-linux/chrome-linux/chrome" \
+  "$FIXTURES/chromium-windows/chrome-win/chrome.exe"
+(cd "$FIXTURES/chromium-mac" && zip -qr "$FIXTURES/chromium-mac.zip" chrome-mac)
+(cd "$FIXTURES/chromium-linux" && zip -qr "$FIXTURES/chromium-linux.zip" chrome-linux)
+(cd "$FIXTURES/chromium-windows" && zip -qr "$FIXTURES/chromium-windows.zip" chrome-win)
 
 checksum() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -32,7 +43,9 @@ checksum() {
 }
 
 LLAMA_SHA="$(checksum "$FIXTURES/llama-fixture.tar.gz")"
-CHROMIUM_SHA="$(checksum "$FIXTURES/chromium-fixture.zip")"
+CHROMIUM_MAC_SHA="$(checksum "$FIXTURES/chromium-mac.zip")"
+CHROMIUM_LINUX_SHA="$(checksum "$FIXTURES/chromium-linux.zip")"
+CHROMIUM_WINDOWS_SHA="$(checksum "$FIXTURES/chromium-windows.zip")"
 
 cd "$TEST_APP"
 BACKEND_BIN_DIR="$TEST_APP/backend/bin" \
@@ -42,8 +55,38 @@ LLAMA_SHA256="$LLAMA_SHA" \
   bash "$TMP_ROOT/setup_llama.sh"
 
 CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/chromium" \
-CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-fixture.zip" \
-CHROMIUM_SHA256="$CHROMIUM_SHA" \
+CHROMIUM_OS="Darwin" \
+CHROMIUM_ARCH="arm64" \
+CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-mac.zip" \
+CHROMIUM_SHA256="$CHROMIUM_MAC_SHA" \
+  bash "$TMP_ROOT/setup_chromium.sh"
+
+CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/chromium-linux-test" \
+CHROMIUM_OS="Linux" \
+CHROMIUM_ARCH="x86_64" \
+CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-linux.zip" \
+CHROMIUM_SHA256="$CHROMIUM_LINUX_SHA" \
+  bash "$TMP_ROOT/setup_chromium.sh"
+
+CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/chromium-mac-x64-test" \
+CHROMIUM_OS="Darwin" \
+CHROMIUM_ARCH="x86_64" \
+CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-mac.zip" \
+CHROMIUM_SHA256="$CHROMIUM_MAC_SHA" \
+  bash "$TMP_ROOT/setup_chromium.sh"
+
+CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/chromium-windows-test" \
+CHROMIUM_OS="MINGW64_NT-10.0" \
+CHROMIUM_ARCH="x86_64" \
+CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-windows.zip" \
+CHROMIUM_SHA256="$CHROMIUM_WINDOWS_SHA" \
+  bash "$TMP_ROOT/setup_chromium.sh"
+
+CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/chromium-windows-arm-test" \
+CHROMIUM_OS="Windows_NT" \
+CHROMIUM_ARCH="aarch64" \
+CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-windows.zip" \
+CHROMIUM_SHA256="$CHROMIUM_WINDOWS_SHA" \
   bash "$TMP_ROOT/setup_chromium.sh"
 
 INSTALLED_LLAMA="$(find backend/bin -maxdepth 1 -type f -name 'llama-server-*' -print -quit)"
@@ -62,16 +105,43 @@ TAURI_TARGET_TRIPLE="$TEST_TARGET" \
 
 test -x "$INSTALLED_LLAMA"
 test -x backend/resources/chromium/chrome-mac/Chromium.app/Contents/MacOS/Chromium
+test -x backend/resources/chromium-linux-test/chrome-linux/chrome
+test -x backend/resources/chromium-mac-x64-test/chrome-mac/Chromium.app/Contents/MacOS/Chromium
+test -x backend/resources/chromium-windows-test/chrome-win/chrome.exe
+test -x backend/resources/chromium-windows-arm-test/chrome-win/chrome.exe
 if grep -Eq 'bin/(whisper|whisper-server|sd|tts)' backend/tauri.override.json; then
   echo "Clean setup unexpectedly bundled an optional media sidecar." >&2
   exit 1
 fi
 
 if CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/rejected" \
-  CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-fixture.zip" \
+  CHROMIUM_OS="Darwin" \
+  CHROMIUM_ARCH="arm64" \
+  CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-mac.zip" \
   CHROMIUM_SHA256="$(printf '0%.0s' {1..64})" \
   bash "$TMP_ROOT/setup_chromium.sh" >/dev/null 2>&1; then
   echo "Chromium setup accepted an invalid checksum." >&2
+  exit 1
+fi
+
+if CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/rejected-path" \
+  CHROMIUM_OS="Darwin" \
+  CHROMIUM_ARCH="arm64" \
+  CHROMIUM_ARCHIVE_ROOT="../escape" \
+  CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-mac.zip" \
+  CHROMIUM_SHA256="$CHROMIUM_MAC_SHA" \
+  bash "$TMP_ROOT/setup_chromium.sh" >/dev/null 2>&1; then
+  echo "Chromium setup accepted an unsafe archive root." >&2
+  exit 1
+fi
+
+if CHROMIUM_TARGET_DIR="$TEST_APP/backend/resources/rejected-host" \
+  CHROMIUM_OS="Linux" \
+  CHROMIUM_ARCH="aarch64" \
+  CHROMIUM_DOWNLOAD_URL="file://$FIXTURES/chromium-linux.zip" \
+  CHROMIUM_SHA256="$CHROMIUM_LINUX_SHA" \
+  bash "$TMP_ROOT/setup_chromium.sh" >/dev/null 2>&1; then
+  echo "Chromium setup accepted an unsupported Linux ARM64 host." >&2
   exit 1
 fi
 
