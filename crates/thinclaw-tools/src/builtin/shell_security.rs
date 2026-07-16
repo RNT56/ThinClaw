@@ -1374,13 +1374,12 @@ pub fn detect_path_escape(cmd: &str, base_dir: &Path, allow_temp_paths: bool) ->
             continue;
         }
 
-        if is_windows_absolute {
-            if token.starts_with(r"C:\Windows\System32")
+        if is_windows_absolute
+            && (token.starts_with(r"C:\Windows\System32")
                 || token.starts_with(r"C:\Program Files")
-                || token.starts_with(r"C:\Program Files (x86)")
-            {
-                continue;
-            }
+                || token.starts_with(r"C:\Program Files (x86)"))
+        {
+            continue;
         }
 
         // Allow common tool paths that are invoked, not accessed
