@@ -202,11 +202,32 @@ pub(crate) async fn devices_pair_start_handler(
 
     Ok(Json(PairStartResponse {
         qr_payload,
+        qr_svg: render_pairing_qr_svg(&qr_uri),
         qr_uri,
         human_code: pairing.code,
         expires_at: pairing.expires_at as i64,
         pairing_id: pairing.pairing_id,
     }))
+}
+
+fn render_pairing_qr_svg(data: &str) -> Option<String> {
+    use qrcode::{QrCode, render::svg};
+
+    match QrCode::new(data.as_bytes()) {
+        Ok(code) => Some(
+            code.render::<svg::Color>()
+                .min_dimensions(280, 280)
+                .dark_color(svg::Color("#111827"))
+                .light_color(svg::Color("#ffffff"))
+                .build(),
+        ),
+        Err(error) => {
+            // Do not log the secret-bearing URI. The authenticated panel keeps
+            // the human-code/manual path available if encoding ever fails.
+            tracing::warn!(%error, payload_bytes = data.len(), "failed to render pairing QR");
+            None
+        }
+    }
 }
 
 fn base64_url_encode(bytes: &[u8]) -> String {
@@ -1116,6 +1137,15 @@ mod tests {
     #[test]
     fn pair_complete_body_limit_matches_hardening_spec() {
         assert_eq!(PAIR_COMPLETE_BODY_LIMIT_BYTES, 4096);
+    }
+
+    #[test]
+    fn pairing_qr_svg_is_self_contained_and_does_not_embed_the_secret_text() {
+        let uri = "thinclaw://pair?d=secret-material";
+        let svg = render_pairing_qr_svg(uri).expect("render pairing QR");
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("<path"));
+        assert!(!svg.contains(uri));
     }
 
     #[test]

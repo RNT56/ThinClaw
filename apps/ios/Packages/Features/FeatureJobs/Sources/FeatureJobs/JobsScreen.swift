@@ -12,15 +12,19 @@ import ThinClawDesign
 /// view tails the job's event log by polling `GET /api/jobs/{id}/events`.
 public struct JobsScreen: View {
     @State private var store: JobsStore?
-    @State private var selectedJobID: String?
+    @Binding private var selectedJobID: String?
 
     private let makeStore: @MainActor () -> JobsStore?
 
     /// - Parameter store: A factory that builds the wired ``JobsStore`` (nil
     ///   when unpaired). A factory rather than a value so the view owns the
     ///   store lifecycle and the app can hand it the live gateway adapter.
-    public init(store: @escaping @MainActor () -> JobsStore? = { nil }) {
+    public init(
+        store: @escaping @MainActor () -> JobsStore? = { nil },
+        selectedJobID: Binding<String?> = .constant(nil)
+    ) {
         self.makeStore = store
+        self._selectedJobID = selectedJobID
     }
 
     public var body: some View {
@@ -51,6 +55,15 @@ private struct JobsList: View {
 
     var body: some View {
         List {
+            if let error = store.listError {
+                Section {
+                    VStack(alignment: .leading, spacing: ThinClawSpacing.sm) {
+                        Label(error, systemImage: "wifi.exclamationmark")
+                            .foregroundStyle(.orange)
+                        Button("Try again") { Task { await store.refresh() } }
+                    }
+                }
+            }
             if let summary = store.summary, summary.total > 0 {
                 Section {
                     JobsSummaryRow(summary: summary)

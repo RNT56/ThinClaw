@@ -1,6 +1,7 @@
 import SwiftUI
 import ThinClawCore
 import ThinClawDesign
+import ThinClawSnapshotKit
 
 /// Stable `UserDefaults` keys for privacy-related operator preferences shared
 /// across the app. The FeatureSettings "Enhanced protection" toggle persists
@@ -8,7 +9,7 @@ import ThinClawDesign
 /// protection level (the app-switcher redaction overlay is always on,
 /// independent of this toggle).
 enum PrivacySettingsKey {
-    static let enhancedProtection = "com.thinclaw.ios.settings.enhancedProtection"
+    static let enhancedProtection = DataProtectionPolicy.enhancedPreferenceKey
 }
 
 /// App-switcher / snapshot redaction (M5, docs/MOBILE_SECURITY.md

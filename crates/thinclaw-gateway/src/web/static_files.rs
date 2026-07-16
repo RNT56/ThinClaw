@@ -145,4 +145,13 @@ mod tests {
         assert!(js.contains("token ids"));
         assert!(js.contains("logprobs"));
     }
+
+    #[test]
+    fn pairing_panel_renders_the_server_generated_qr_svg() {
+        let js = include_str!("static/app.js");
+        assert!(js.contains("data.qr_svg"));
+        assert!(js.contains("new DOMParser()"));
+        assert!(js.contains("device-pair-qr"));
+        assert!(!js.contains("Not a QR image yet"));
+    }
 }

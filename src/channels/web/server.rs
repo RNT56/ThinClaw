@@ -2,8 +2,11 @@
 //!
 //! Handles all API routes: chat, memory, jobs, health, and static file serving.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use axum::{
@@ -64,16 +67,173 @@ pub(crate) fn test_device_registry() -> Arc<DeviceRegistry> {
     )
 }
 
-/// In-memory, best-effort cache of pending tool-approval requests, keyed by
-/// `request_id` (as a string — mirrors `SseEvent::ApprovalNeeded.request_id`).
-/// Populated when an `ApprovalNeeded` SSE event is broadcast (see
-/// `GatewayChannel::send_status` in `src/channels/web/mod.rs`) and drained
-/// when `chat_approval_handler` submits a decision for that id. Backs
-/// `GET /api/chat/approvals` (milestone B1) for clients that were not
-/// holding an open stream when the approval was raised. Never persisted —
-/// see `PendingApprovalEntry`'s doc comment for the lossiness caveat.
-pub type PendingApprovalsCache =
-    Arc<std::sync::Mutex<std::collections::HashMap<String, PendingApprovalEntry>>>;
+/// Durable registry of pending approval requests. A custom guard persists each
+/// mutation atomically, while tests can use the in-memory constructor.
+pub struct PendingApprovalsStore {
+    entries: Mutex<HashMap<String, PendingApprovalEntry>>,
+    path: Option<PathBuf>,
+}
+
+pub type PendingApprovalsCache = Arc<PendingApprovalsStore>;
+
+impl PendingApprovalsStore {
+    pub fn persisted_default() -> Self {
+        Self::with_path(crate::platform::resolve_data_dir("mobile").join("pending-approvals.json"))
+    }
+
+    pub fn in_memory() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            path: None,
+        }
+    }
+
+    fn with_path(path: PathBuf) -> Self {
+        let entries: HashMap<String, PendingApprovalEntry> = std::fs::read(&path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
+        Self {
+            entries: Mutex::new(entries),
+            path: Some(path),
+        }
+    }
+
+    pub fn lock(&self) -> Result<PendingApprovalsGuard<'_>, std::sync::PoisonError<()>> {
+        self.entries
+            .lock()
+            .map(|guard| PendingApprovalsGuard { owner: self, guard })
+            .map_err(|_| std::sync::PoisonError::new(()))
+    }
+
+    pub fn remove_for_thread(&self, thread_id: &str) {
+        if let Ok(mut entries) = self.lock() {
+            entries.retain(|_, entry| entry.thread_id.as_deref() != Some(thread_id));
+        }
+    }
+
+    fn persist(&self, entries: &HashMap<String, PendingApprovalEntry>) {
+        let Some(path) = &self.path else { return };
+        if let Err(error) = persist_pending_approvals(path, entries) {
+            tracing::warn!(%error, "failed to persist pending approvals");
+        }
+    }
+}
+
+pub struct PendingApprovalsGuard<'a> {
+    owner: &'a PendingApprovalsStore,
+    guard: MutexGuard<'a, HashMap<String, PendingApprovalEntry>>,
+}
+
+impl Deref for PendingApprovalsGuard<'_> {
+    type Target = HashMap<String, PendingApprovalEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for PendingApprovalsGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for PendingApprovalsGuard<'_> {
+    fn drop(&mut self) {
+        self.owner.persist(&self.guard);
+    }
+}
+
+fn persist_pending_approvals(
+    path: &Path,
+    entries: &HashMap<String, PendingApprovalEntry>,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_vec(entries).map_err(std::io::Error::other)?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, data)?;
+    std::fs::rename(temporary, path)
+}
+
+/// Reconcile the durable projection with the authoritative thread runtime.
+/// Unknown state is preserved; only a definitive runtime mismatch removes a
+/// record, so a long-running approval cannot disappear because of a guessed
+/// wall-clock expiry.
+pub(crate) async fn reconcile_pending_approvals(state: &GatewayState) {
+    let entries: Vec<PendingApprovalEntry> = match state.pending_approvals.lock() {
+        Ok(entries) => entries.values().cloned().collect(),
+        Err(_) => return,
+    };
+    let mut resolved = Vec::new();
+
+    for entry in entries {
+        let Some(thread_id) = entry
+            .thread_id
+            .as_deref()
+            .and_then(|value| Uuid::parse_str(value).ok())
+        else {
+            continue;
+        };
+
+        let in_memory = if let Some(manager) = &state.session_manager {
+            if let Some(session) = manager.session_for_thread(thread_id).await {
+                let session = session.lock().await;
+                Some(
+                    session
+                        .threads
+                        .get(&thread_id)
+                        .and_then(|thread| thread.pending_approval.as_ref())
+                        .is_some_and(|pending| pending.request_id.to_string() == entry.request_id),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let is_active = match in_memory {
+            Some(value) => Some(value),
+            None => {
+                if let Some(store) = &state.store {
+                    match crate::agent::load_thread_runtime(store, thread_id).await {
+                        Ok(Some(runtime)) => {
+                            Some(runtime.pending_approval.is_some_and(|pending| {
+                                pending.request_id.to_string() == entry.request_id
+                            }))
+                        }
+                        Ok(None) => None,
+                        Err(error) => {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                %error,
+                                "failed to reconcile pending approval runtime"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        if is_active == Some(false) {
+            resolved.push(entry.request_id);
+        }
+    }
+
+    if !resolved.is_empty()
+        && let Ok(mut entries) = state.pending_approvals.lock()
+    {
+        for request_id in resolved {
+            entries.remove(&request_id);
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) use crate::channels::web::handlers::providers::{
@@ -207,8 +367,7 @@ pub struct GatewayState {
     /// authentication index, shared with the auth middleware's `AuthState`.
     /// See `docs/MOBILE_SECURITY.md` / `docs/MOBILE_APP.md`.
     pub device_registry: Arc<DeviceRegistry>,
-    /// Best-effort pending-approvals cache backing `GET /api/chat/approvals`.
-    /// See [`PendingApprovalsCache`].
+    /// Durable pending-approvals registry backing `GET /api/chat/approvals`.
     pub pending_approvals: PendingApprovalsCache,
 }
 
@@ -723,7 +882,8 @@ impl ExtensionAuthPort for GatewayState {
         );
         crate::channels::web::handlers::chat::clear_auth_mode_for_identity(self, &request_identity)
             .await;
-        tracing::debug!(extension_name, "cancelled gateway extension auth prompt");
+        let _ = extension_name;
+        tracing::debug!("cancelled gateway extension auth prompt");
         Ok(())
     }
 }

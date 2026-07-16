@@ -1,4 +1,5 @@
 import Foundation
+import ThinClawAuth
 import ThinClawSnapshotKit
 
 /// Well-known App Group / snapshot wiring shared by the widget timeline
@@ -32,7 +33,14 @@ public enum WidgetSnapshotAccess {
     /// placeholder, not crash the extension process.
     public static func load<S: SharedSnapshot>(_ type: S.Type) -> S? {
         guard let store = store() else { return nil }
-        return (try? store.load(type)) ?? nil
+        guard let snapshot = (try? store.load(type)) ?? nil else { return nil }
+        if let scoped = snapshot as? any GatewayScopedSnapshot,
+            let credential = SharedGatewayConnection.loadCredential(),
+            scoped.gatewayInstanceID != credential.installationID
+        {
+            return nil
+        }
+        return snapshot
     }
 }
 
@@ -41,6 +49,7 @@ extension SharedSnapshot {
     /// glance surface can honestly badge it "stale as of <generatedAt>"
     /// instead of implying live data.
     public func isStale(asOf now: Date = .now, maxAge: TimeInterval = 30 * 60) -> Bool {
-        now.timeIntervalSince(generatedAt) > maxAge
+        (self as? any FreshnessAwareSnapshot)?.isKnownStale == true
+            || now.timeIntervalSince(generatedAt) > maxAge
     }
 }

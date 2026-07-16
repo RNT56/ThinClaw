@@ -14034,12 +14034,9 @@ function renderPairingSession(data) {
   const card = document.createElement('div');
   card.className = 'ui-panel ui-panel--subtle';
 
-  // TODO(milestone M1): render the qr_uri as an actual scannable QR code on
-  // a <canvas> once a self-contained QR encoder lands in the codebase. For
-  // now we show the payload string, the human-typable fallback code, and a
-  // live expiry countdown so a no-camera operator can still pair.
   card.innerHTML =
-    '<p class="ui-panel-desc">Scan this on the ThinClaw iOS app, or enter the code manually. Not a QR image yet — see the TODO in app.js (milestone M1).</p>'
+    '<p class="ui-panel-desc">Scan this with the ThinClaw app, or use the manual code below.</p>'
+    + '<div id="device-pair-qr" role="img" aria-label="ThinClaw device pairing QR code" style="display:flex;justify-content:center;margin:1rem auto;padding:0.75rem;max-width:304px;background:#fff;border-radius:16px;"></div>'
     + '<div class="setting-row">'
     + '<div class="setting-label-wrap"><label class="setting-label">Pairing payload</label><span class="setting-desc">Full <code>thinclaw://pair</code> URI</span></div>'
     + '<div class="setting-control"><pre id="device-pair-uri" style="white-space:pre-wrap;word-break:break-all;max-width:100%;">' + escapeHtml(data.qr_uri || '') + '</pre></div>'
@@ -14059,6 +14056,21 @@ function renderPairingSession(data) {
 
   host.innerHTML = '';
   host.appendChild(card);
+
+  const qrHost = card.querySelector('#device-pair-qr');
+  if (typeof data.qr_svg === 'string' && data.qr_svg.indexOf('<svg') !== -1) {
+    const parsed = new DOMParser().parseFromString(data.qr_svg, 'image/svg+xml');
+    const svg = parsed.documentElement;
+    if (svg && svg.localName === 'svg') {
+      svg.setAttribute('width', '280');
+      svg.setAttribute('height', '280');
+      svg.setAttribute('aria-hidden', 'true');
+      qrHost.replaceChildren(document.importNode(svg, true));
+    }
+  }
+  if (!qrHost.firstChild) {
+    qrHost.textContent = 'QR rendering unavailable — copy the payload or use the manual code.';
+  }
 
   const copyBtn = card.querySelector('#device-pair-copy');
   copyBtn.addEventListener('click', function() {

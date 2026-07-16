@@ -28,6 +28,14 @@
         }
 
         public func setSecret(_ data: Data, for key: String) throws {
+            try setSecret(data, for: key, accessibility: .afterFirstUnlockDeviceOnly)
+        }
+
+        public func setSecret(
+            _ data: Data,
+            for key: String,
+            accessibility: KeychainAccessibility
+        ) throws {
             // Delete-then-add keeps the logic simple and attribute-complete
             // (SecItemUpdate cannot change accessibility attributes).
             try removeSecret(for: key)
@@ -37,7 +45,12 @@
             // Device-only, available after first unlock: background refresh
             // and push handlers need the credential without UI unlock.
             attributes[kSecAttrAccessible as String] =
-                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                switch accessibility {
+                case .afterFirstUnlockDeviceOnly:
+                    kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                case .whenUnlockedDeviceOnly:
+                    kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                }
 
             let status = SecItemAdd(attributes as CFDictionary, nil)
             guard status == errSecSuccess else {

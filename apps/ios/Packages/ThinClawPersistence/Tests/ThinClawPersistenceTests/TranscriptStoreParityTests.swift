@@ -173,6 +173,49 @@ struct TranscriptStoreParityTests {
         #expect(remaining.map(\.content) == ["second"])
         #expect(remaining.first?.threadID == ThreadID("t"))
     }
+
+    @Test("offline enqueue atomically associates a stable timeline row", arguments: StoreKind.allCases)
+    func atomicOfflineEnqueue(_ kind: StoreKind) async throws {
+        let (store, cleanup) = try makeStore(kind)
+        defer { cleanup() }
+        let thread = ThreadID("t")
+        let row = TimelineItem(
+            id: MessageID("11111111-1111-1111-1111-111111111111"),
+            threadID: thread,
+            timestamp: Date(timeIntervalSince1970: 1),
+            kind: .userMessage(text: "queued"),
+            deliveryState: .queued)
+        let message = OutboxMessage(
+            id: UUID(uuidString: row.id.rawValue)!,
+            threadID: thread,
+            content: "queued",
+            queuedAt: row.timestamp,
+            timelineItemID: row.id)
+
+        try await store.enqueueOutbox(message, timelineItem: row, in: thread)
+
+        #expect(try await store.timeline(for: thread) == [row])
+        #expect(try await store.outbox() == [message])
+    }
+
+    @Test("clearAll erases threads, timelines, and queued sends", arguments: StoreKind.allCases)
+    func clearAll(_ kind: StoreKind) async throws {
+        let (store, cleanup) = try makeStore(kind)
+        defer { cleanup() }
+        let thread = makeThread("t")
+        try await store.upsert(thread: thread)
+        try await store.append(
+            TimelineItem(threadID: thread.id, timestamp: .now, kind: .userMessage(text: "hi")),
+            to: thread.id)
+        try await store.enqueueOutbox(
+            OutboxMessage(threadID: thread.id, content: "queued", queuedAt: .now))
+
+        try await store.clearAll()
+
+        #expect(try await store.threads().isEmpty)
+        #expect(try await store.timeline(for: thread.id).isEmpty)
+        #expect(try await store.outbox().isEmpty)
+    }
 }
 
 /// GRDB-specific coverage: on-disk round-trip across reopen, migration head,

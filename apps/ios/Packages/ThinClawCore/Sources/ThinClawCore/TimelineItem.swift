@@ -6,6 +6,12 @@ import Foundation
 /// per-row payload. Codable so ThinClawPersistence can store transcripts
 /// without a parallel record type (GRDB rows will wrap this at M1).
 public struct TimelineItem: Hashable, Sendable, Codable, Identifiable {
+    public enum DeliveryState: String, Hashable, Sendable, Codable {
+        case sending
+        case queued
+        case failed
+    }
+
     public enum Kind: Hashable, Sendable, Codable {
         /// A message typed by the operator on this device.
         case userMessage(text: String)
@@ -38,11 +44,21 @@ public struct TimelineItem: Hashable, Sendable, Codable, Identifiable {
     public var threadID: ThreadID
     public var timestamp: Date
     public var kind: Kind
+    /// Local delivery state for an operator-authored row. Nil once the gateway
+    /// has accepted the message or for rows originating from gateway history.
+    public var deliveryState: DeliveryState?
 
-    public init(id: MessageID = MessageID(), threadID: ThreadID, timestamp: Date, kind: Kind) {
+    public init(
+        id: MessageID = MessageID(),
+        threadID: ThreadID,
+        timestamp: Date,
+        kind: Kind,
+        deliveryState: DeliveryState? = nil
+    ) {
         self.id = id
         self.threadID = threadID
         self.timestamp = timestamp
         self.kind = kind
+        self.deliveryState = deliveryState
     }
 }

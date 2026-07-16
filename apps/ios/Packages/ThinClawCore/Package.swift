@@ -16,7 +16,7 @@ let package = Package(
     name: "ThinClawCore",
     platforms: [
         .macOS(.v14),
-        .iOS(.v26),
+        .iOS(.v18),
     ],
     products: [
         .library(name: "ThinClawCore", targets: ["ThinClawCore"])

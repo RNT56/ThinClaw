@@ -17,8 +17,19 @@ public protocol TranscriptStoring: Sendable {
 
     /// Messages composed while offline, flushed in order on reconnect.
     func enqueueOutbox(_ message: OutboxMessage) async throws
+    /// Persist the optimistic timeline row and its outbox envelope as one
+    /// transaction. Implementations must not leave only one half behind.
+    func enqueueOutbox(
+        _ message: OutboxMessage,
+        timelineItem: TimelineItem,
+        in thread: ThreadID
+    ) async throws
     func outbox() async throws -> [OutboxMessage]
     func removeFromOutbox(_ id: UUID) async throws
+
+    /// Erase every cached thread, timeline row, and queued send in this
+    /// namespace. Used by the deterministic unpair lifecycle.
+    func clearAll() async throws
 }
 
 /// A send queued while the gateway was unreachable.
@@ -27,11 +38,19 @@ public struct OutboxMessage: Hashable, Sendable, Codable, Identifiable {
     public var threadID: ThreadID?
     public var content: String
     public var queuedAt: Date
+    public var timelineItemID: MessageID?
 
-    public init(id: UUID = UUID(), threadID: ThreadID?, content: String, queuedAt: Date) {
+    public init(
+        id: UUID = UUID(),
+        threadID: ThreadID?,
+        content: String,
+        queuedAt: Date,
+        timelineItemID: MessageID? = nil
+    ) {
         self.id = id
         self.threadID = threadID
         self.content = content
         self.queuedAt = queuedAt
+        self.timelineItemID = timelineItemID
     }
 }

@@ -103,7 +103,7 @@
         "tags": [
           "chat"
         ],
-        "summary": "Pull-based fallback for pending tool approvals (milestone B1): a mobile\nclient that was not holding an open SSE/WS stream when\n`SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of\nmissing the approval entirely. **Best-effort and lossy** — see\n`PendingApprovalEntry`'s doc comment: the backing cache lives only in\ngateway process memory, is not persisted, and is cleared on restart.",
+        "summary": "Authoritative pull surface for pending tool approvals: a mobile\nclient that was not holding an open SSE/WS stream when\n`SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of\nmissing the approval entirely. The registry is persisted across restarts\nand drained only after an approval decision is accepted.",
         "operationId": "chat_approvals_handler",
         "responses": {
           "200": {
@@ -2352,6 +2352,13 @@
           "qr_payload": {
             "$ref": "#/components/schemas/QrPairingPayload"
           },
+          "qr_svg": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Self-contained SVG rendering of `qr_uri` for the authenticated gateway\npairing panel. Optional so newer clients remain compatible with older\ngateways and non-visual gateway hosts can omit it."
+          },
           "qr_uri": {
             "type": "string",
             "description": "Rendered `thinclaw://pair?d=<base64url(json)>` URI."
@@ -2446,7 +2453,7 @@
       },
       "PendingApprovalEntry": {
         "type": "object",
-        "description": "One pending tool-approval request, as surfaced by `GET /api/chat/approvals`\n(milestone B1 approvals-pull endpoint for mobile clients that are not\nholding an open SSE/WS stream when the approval is raised).\n\nPopulated from the `StatusUpdate::ApprovalNeeded` -> `SseEvent::ApprovalNeeded`\nprojection at broadcast time (see `src/channels/web/mod.rs::send_status`),\nand removed once `chat_approval_handler` submits a decision for the\n`request_id`. This cache is **best-effort**: it lives only in gateway\nprocess memory, is not persisted, and is cleared on restart — a client\nthat misses the SSE broadcast *and* queries after a restart will not see\nan approval that was already resolved or that predates the restart. It\nexists to close the gap for a client that connects (or reconnects) after\nthe SSE event already fired, not to be an authoritative durable queue.",
+        "description": "One pending tool-approval request, as surfaced by `GET /api/chat/approvals`\n(milestone B1 approvals-pull endpoint for mobile clients that are not\nholding an open SSE/WS stream when the approval is raised).\n\nPopulated from the `StatusUpdate::ApprovalNeeded` -> `SseEvent::ApprovalNeeded`\nprojection at broadcast time (see `src/channels/web/mod.rs::send_status`),\nand removed once the underlying decision is accepted. The gateway persists\nthis registry so reconnecting mobile clients receive an authoritative\nsnapshot across process restarts.",
         "required": [
           "request_id",
           "tool_name",
@@ -2720,6 +2727,13 @@
               "string",
               "null"
             ]
+          },
+          "client_message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional client-generated UUID used to make offline/retry sends\nidempotent across ambiguous transport failures."
           },
           "content": {
             "type": "string"

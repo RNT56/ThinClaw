@@ -68,7 +68,8 @@
         @discardableResult
         public static func sendPrompt(
             _ content: String,
-            threadID: String?
+            threadID: String?,
+            clientMessageID: UUID = UUID()
         ) async throws -> String {
             guard let credential = SharedGatewayConnection.loadCredential() else {
                 throw Failure.notPaired
@@ -87,7 +88,11 @@
 
             do {
                 let output = try await client.chatSendHandler(
-                    body: .json(.init(content: content, threadId: threadID)))
+                    body: .json(
+                        .init(
+                            clientMessageId: clientMessageID.uuidString,
+                            content: content,
+                            threadId: threadID)))
                 return try output.accepted.body.json.messageId
             } catch {
                 throw Failure.gateway(String(describing: error))

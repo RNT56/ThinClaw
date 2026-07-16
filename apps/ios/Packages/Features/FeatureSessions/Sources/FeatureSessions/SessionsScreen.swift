@@ -14,24 +14,58 @@ public struct SessionsScreen: View {
     }
 
     public var body: some View {
-        List(store.threads) { thread in
-            Button {
-                onSelect(thread.id)
-            } label: {
-                VStack(alignment: .leading, spacing: ThinClawSpacing.xs) {
-                    Text(thread.title)
-                        .font(ThinClawTypography.cardTitle)
-                    if let preview = thread.lastMessagePreview {
-                        Text(preview)
-                            .font(ThinClawTypography.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
+        List {
+            if let error = store.errorMessage {
+                Section {
+                    Label(error, systemImage: "wifi.exclamationmark")
+                        .foregroundStyle(.orange)
                 }
+            }
+            if store.threads.isEmpty, store.hasRefreshed {
+                ContentUnavailableView(
+                    "No sessions",
+                    systemImage: "list.bullet.rectangle",
+                    description: Text("New conversations appear here.")
+                )
+                .listRowBackground(Color.clear)
+            } else {
+                ForEach(store.threads) { thread in
+                    Button {
+                        onSelect(thread.id)
+                    } label: {
+                        VStack(alignment: .leading, spacing: ThinClawSpacing.xs) {
+                            Text(thread.title)
+                                .font(ThinClawTypography.cardTitle)
+                            if let preview = thread.lastMessagePreview {
+                                Text(preview)
+                                    .font(ThinClawTypography.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier(SessionsPresentation.accessibilityIdentifier(for: thread.id))
+                }
+            }
+            if store.isShowingCachedData {
+                Text("Showing saved sessions. Pull to refresh when you're online.")
+                    .font(ThinClawTypography.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Sessions")
         .refreshable { await store.refresh() }
         .task { await store.load() }
+        .overlay {
+            if store.isLoading && store.threads.isEmpty {
+                ProgressView("Loading sessions…")
+            }
+        }
+    }
+}
+
+enum SessionsPresentation {
+    static func accessibilityIdentifier(for threadID: ThreadID) -> String {
+        "session.\(threadID.rawValue)"
     }
 }

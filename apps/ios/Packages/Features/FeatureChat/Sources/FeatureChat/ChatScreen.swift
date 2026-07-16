@@ -7,9 +7,11 @@ import ThinClawDesign
 /// glass composer bar with a 429 cooldown.
 public struct ChatScreen: View {
     @State private var store: ChatStore
+    private let approvalsStore: ApprovalsStore?
 
-    public init(store: ChatStore) {
+    public init(store: ChatStore, approvalsStore: ApprovalsStore? = nil) {
         self._store = State(initialValue: store)
+        self.approvalsStore = approvalsStore
     }
 
     public var body: some View {
@@ -18,18 +20,40 @@ public struct ChatScreen: View {
                 offlineBanner
             }
 
-            List {
-                if store.hasMoreHistory {
-                    historyLoader
-                }
-                ForEach(store.timeline) { item in
-                    TimelineRow(item: item) {
-                        Task { await store.retry(rowID: item.id) }
+            ScrollViewReader { proxy in
+                List {
+                    if store.hasMoreHistory {
+                        historyLoader
                     }
-                    .listRowSeparator(.hidden)
+                    ForEach(store.timeline) { item in
+                        TimelineRow(
+                            item: item,
+                            onRetry: { Task { await store.retry(rowID: item.id) } },
+                            onDelete: { Task { await store.delete(rowID: item.id) } },
+                            onApprove: { requestID in
+                                Task { await approvalsStore?.approve(requestID) }
+                            },
+                            onDeny: { requestID in
+                                Task { await approvalsStore?.deny(requestID) }
+                            }
+                        )
+                        .id(item.id)
+                        .listRowSeparator(.hidden)
+                    }
+                }
+                .listStyle(.plain)
+                .scrollDismissesKeyboard(.interactively)
+                .onChange(of: store.timeline.last?.id) { _, latest in
+                    guard let latest else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(latest, anchor: .bottom)
+                    }
+                }
+                .task {
+                    guard let latest = store.timeline.last?.id else { return }
+                    proxy.scrollTo(latest, anchor: .bottom)
                 }
             }
-            .listStyle(.plain)
 
             composer
         }
@@ -87,6 +111,7 @@ public struct ChatScreen: View {
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .padding(ThinClawSpacing.md)
+                    .accessibilityIdentifier("chat.composer")
                 Button {
                     Task { await store.send() }
                 } label: {
@@ -94,11 +119,14 @@ public struct ChatScreen: View {
                         .font(.title2)
                 }
                 .disabled(store.isSendDisabled)
+                .frame(minWidth: 44, minHeight: 44)
+                .accessibilityLabel("Send message")
+                .accessibilityIdentifier("chat.send")
             }
         }
         .padding(.horizontal, ThinClawSpacing.md)
         .padding(.vertical, ThinClawSpacing.sm)
-        .glassEffect(.regular, in: .rect(cornerRadius: ThinClawRadius.card))
+        .thinClawSurface()
         .padding(ThinClawSpacing.md)
     }
 }
@@ -108,6 +136,9 @@ struct TimelineRow: View {
     let item: TimelineItem
     /// Invoked when a failure row is tapped (retry). No-op for other kinds.
     var onRetry: () -> Void = {}
+    var onDelete: () -> Void = {}
+    var onApprove: (String) -> Void = { _ in }
+    var onDeny: (String) -> Void = { _ in }
 
     /// Opens external URLs (the `auth_required` OAuth flow). The mobile client
     /// only *opens* the consent page — per D-T4 it never captures the returned
@@ -127,9 +158,26 @@ struct TimelineRow: View {
     private var rowContent: some View {
         switch item.kind {
         case .userMessage(let text):
-            Text(text)
-                .font(ThinClawTypography.body)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+            VStack(alignment: .trailing, spacing: ThinClawSpacing.xs) {
+                Text(text)
+                    .font(ThinClawTypography.body)
+                if let deliveryState = item.deliveryState {
+                    Label(deliveryState.label, systemImage: deliveryState.symbolName)
+                        .font(.caption2)
+                        .foregroundStyle(
+                            deliveryState == .failed
+                                ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                    if deliveryState == .failed {
+                        HStack(spacing: ThinClawSpacing.sm) {
+                            Button("Retry", action: onRetry)
+                            Button("Delete", role: .destructive, action: onDelete)
+                        }
+                        .buttonStyle(.borderless)
+                        .frame(minHeight: 44)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         case .agentMessage(let text):
             StreamingText(text, isStreaming: false)
         case .streamingAgentMessage(let text):
@@ -142,8 +190,13 @@ struct TimelineRow: View {
             Label(name, systemImage: status == .running ? "gearshape.2" : "checkmark.circle")
                 .font(ThinClawTypography.caption)
         case .approval(let request):
-            Text("Approval requested: \(request.toolName)")
-                .font(ThinClawTypography.caption)
+            ApprovalCard(
+                toolName: request.toolName,
+                requestDescription: request.description,
+                parameters: request.parameters,
+                risk: request.risk == .low ? .low : .high,
+                onApprove: { onApprove(request.requestID) },
+                onDeny: { onDeny(request.requestID) })
         case .authPrompt(let prompt):
             AuthPromptCard(
                 extensionName: prompt.extensionName,
@@ -163,6 +216,24 @@ struct TimelineRow: View {
                     .foregroundStyle(.red)
             }
             .buttonStyle(.plain)
+        }
+    }
+}
+
+extension TimelineItem.DeliveryState {
+    fileprivate var label: String {
+        switch self {
+        case .sending: "Sending"
+        case .queued: "Queued"
+        case .failed: "Not sent"
+        }
+    }
+
+    fileprivate var symbolName: String {
+        switch self {
+        case .sending: "arrow.up.circle"
+        case .queued: "clock"
+        case .failed: "exclamationmark.triangle"
         }
     }
 }

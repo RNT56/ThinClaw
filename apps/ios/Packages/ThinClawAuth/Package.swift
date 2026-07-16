@@ -12,8 +12,8 @@ let package = Package(
     name: "ThinClawAuth",
     platforms: [
         .macOS(.v14),
-        .iOS(.v26),
-        .watchOS(.v26),
+        .iOS(.v18),
+        .watchOS(.v11),
     ],
     products: [
         .library(name: "ThinClawAuth", targets: ["ThinClawAuth"])

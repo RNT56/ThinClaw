@@ -65,7 +65,7 @@ public final class DiscoveryStore {
                 if Task.isCancelled { break }
                 self?.gateways = set
             }
-            await self?.markStopped()
+            self?.markStopped()
         }
     }
 

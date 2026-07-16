@@ -19,3 +19,11 @@ public protocol SharedSnapshot: Codable, Sendable, Equatable {
     /// When the writer produced this snapshot.
     var generatedAt: Date { get }
 }
+
+public protocol GatewayScopedSnapshot {
+    var gatewayInstanceID: String? { get }
+}
+
+public protocol FreshnessAwareSnapshot {
+    var isKnownStale: Bool { get }
+}

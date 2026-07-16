@@ -626,7 +626,9 @@ mod backfill_tests {
                 10, 300,
             ),
             device_registry: crate::channels::web::server::test_device_registry(),
-            pending_approvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            pending_approvals: Arc::new(
+                crate::channels::web::server::PendingApprovalsStore::in_memory(),
+            ),
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,

@@ -13,6 +13,22 @@ private func date(_ secondsSince1970: Double) -> Date {
 
 @Suite("SnapshotInputs projection + privacy")
 struct SnapshotProjectionTests {
+    @Test("gateway identity and per-section stale markers reach every snapshot")
+    func gatewayScopeAndFreshness() {
+        let inputs = SnapshotInputs(
+            gatewayInstanceID: "gateway-a",
+            statusIsStale: true,
+            approvalsAreStale: false,
+            jobsAreStale: true)
+        let projected = inputs.project(at: .now, privacy: .default)
+
+        #expect(projected.status.gatewayInstanceID == "gateway-a")
+        #expect(projected.approvals.gatewayInstanceID == "gateway-a")
+        #expect(projected.jobs.gatewayInstanceID == "gateway-a")
+        #expect(projected.status.isKnownStale)
+        #expect(!projected.approvals.isKnownStale)
+        #expect(projected.jobs.isKnownStale)
+    }
     @Test("Projects agent status fields verbatim, stamping generatedAt")
     func projectsAgentStatus() {
         let inputs = SnapshotInputs(

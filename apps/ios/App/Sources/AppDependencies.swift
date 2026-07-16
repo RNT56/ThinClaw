@@ -35,7 +35,7 @@ import ThinClawWidgetKitShared
 @MainActor
 @Observable
 final class AppDependencies {
-    let transcriptStore: any TranscriptStoring
+    private(set) var transcriptStore: any TranscriptStoring
 
     /// Shared-group keychain holding the device credential (D-K1/D-K2).
     private let keychain: any KeychainStoring
@@ -54,12 +54,17 @@ final class AppDependencies {
     /// paired. Shared so the badge count and the presented sheet observe the
     /// same pending set. Cleared on unpair.
     private var approvalsStore: ApprovalsStore?
+    private var chatStores: [ThreadID: ChatStore] = [:]
+    private var sessionsStore: SessionsStore?
+    private var jobsStore: JobsStore?
+    private var settingsStore: SettingsStore?
+    private var onboardingStore: OnboardingStore?
 
     /// The App Group snapshot pipeline (status/approvals/jobs → widgets). Built
     /// once and reused; a `nil` container inside makes every call a no-op, so it
     /// is always safe to touch. Owns its own publisher, independent of the live
     /// event session's lifecycle.
-    private let snapshotService = SnapshotService()
+    private let snapshotService: SnapshotService
 
     /// Background task mirroring the approvals store's pending set into the
     /// snapshot publisher; cancelled on unpair.
@@ -84,21 +89,44 @@ final class AppDependencies {
     #endif
 
     init(
-        transcriptStore: any TranscriptStoring = AppDependencies.defaultTranscriptStore(),
+        transcriptStore: (any TranscriptStoring)? = nil,
         keychain: any KeychainStoring = AppDependencies.defaultKeychain()
     ) {
-        self.transcriptStore = transcriptStore
         self.keychain = keychain
         let existing = (try? DeviceCredential.load(from: keychain)) ?? nil
+        self.transcriptStore =
+            transcriptStore
+            ?? AppDependencies.defaultTranscriptStore(
+                gatewayInstanceID: existing?.installationID)
+        self.snapshotService = SnapshotService(
+            gatewayInstanceID: existing?.installationID)
         self.isPaired = existing != nil
+        let enhancedProtection = UserDefaults.standard.bool(
+            forKey: PrivacySettingsKey.enhancedProtection)
+        UserDefaults(suiteName: WidgetSnapshotAccess.appGroupID)?.set(
+            enhancedProtection,
+            forKey: PrivacySettingsKey.enhancedProtection)
+        if let grdb = self.transcriptStore as? GRDBTranscriptStore {
+            _ = grdb.applyFileProtection(enhanced: enhancedProtection)
+        }
+        if let snapshotURL = WidgetSnapshotAccess.store()?.baseURL {
+            _ = SnapshotStore(
+                baseURL: snapshotURL,
+                protectionPolicy: DataProtectionPolicy(enhanced: enhancedProtection)
+            ).applyFileProtection()
+        }
     }
 
     /// The production transcript cache: the GRDB-backed store at the default
     /// app-support location (app-process-only). Falls back to the in-memory
     /// store if the database cannot be opened, so a storage fault degrades to a
     /// non-persistent cache rather than blocking chat entirely.
-    static func defaultTranscriptStore() -> any TranscriptStoring {
-        (try? GRDBTranscriptStore.atDefaultLocation()) ?? InMemoryTranscriptStore()
+    static func defaultTranscriptStore(
+        gatewayInstanceID: String? = nil
+    ) -> any TranscriptStoring {
+        guard let gatewayInstanceID else { return InMemoryTranscriptStore() }
+        return (try? GatewayStorageFactory().transcriptStore(for: gatewayInstanceID))
+            ?? InMemoryTranscriptStore()
     }
 
     /// The real shared-group keychain store. The resolved access group is
@@ -108,6 +136,11 @@ final class AppDependencies {
     /// the resolved string. Widgets/extensions read the same item via the
     /// shared entitlement.
     static func defaultKeychain() -> any KeychainStoring {
+        #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--uitesting-unpaired") {
+                return InMemoryKeychain()
+            }
+        #endif
         #if canImport(Security)
             return SecItemKeychainStore()
         #else
@@ -123,6 +156,8 @@ final class AppDependencies {
         guard isPaired else { return }
         let session = ensureSession()
         await session?.start()
+        AppLog.transport.debug("Foreground gateway session started")
+        await drainQuickAskOutbox()
         // Mirror approvals into the snapshot pipeline for the foreground live
         // path, and kick one immediate fetch so widgets reflect current state
         // right after launch/foreground without waiting for a push.
@@ -139,6 +174,7 @@ final class AppDependencies {
     /// unpair.
     func stopSession() async {
         await session?.shutdown()
+        AppLog.transport.debug("Gateway session stopped")
     }
 
     // MARK: - Snapshot pipeline (M3)
@@ -152,9 +188,13 @@ final class AppDependencies {
     @discardableResult
     func refreshSnapshots() async -> Bool {
         guard isPaired, let client = makePushClient() else { return false }
-        let wrote = await snapshotService.refresh(client: client)
-        if wrote { pushWatchMirror() }
-        return wrote
+        await drainQuickAskOutbox()
+        let result = await snapshotService.refresh(client: client)
+        if !result.didWrite {
+            AppLog.snapshots.notice("Snapshot refresh preserved existing data or produced no data")
+        }
+        if result.didWrite { pushWatchMirror() }
+        return result.didWrite
     }
 
     /// Push the freshest glanceable snapshots to a paired watch, if a sink is
@@ -170,8 +210,47 @@ final class AppDependencies {
         let approvals = (try? store.load(PendingApprovalsSnapshot.self)) ?? nil
         guard status != nil || approvals != nil else { return }
         sink(
-            status ?? AgentStatusSnapshot(generatedAt: .now, phase: .idle),
-            approvals ?? PendingApprovalsSnapshot(generatedAt: .now, approvals: []))
+            status
+                ?? AgentStatusSnapshot(
+                    gatewayInstanceID: activeGatewayInstanceID,
+                    generatedAt: .now,
+                    phase: .idle),
+            approvals
+                ?? PendingApprovalsSnapshot(
+                    gatewayInstanceID: activeGatewayInstanceID,
+                    generatedAt: .now,
+                    approvals: []))
+    }
+
+    private func drainQuickAskOutbox() async {
+        #if canImport(Security) && canImport(CryptoKit)
+            guard let credential = (try? DeviceCredential.load(from: keychain)) ?? nil,
+                let session = ensureSession(),
+                let queued = try? QuickAskOutbox.pending(
+                    gatewayInstanceID: credential.installationID)
+            else { return }
+            for prompt in queued {
+                do {
+                    _ = try await session.send(
+                        prompt.content,
+                        in: prompt.threadID.map(ThreadID.init),
+                        clientMessageID: prompt.id)
+                    try QuickAskOutbox.remove(prompt.id)
+                    if let snapshotStore = WidgetSnapshotAccess.store() {
+                        try? snapshotStore.save(
+                            QuickAskReceipt(
+                                gatewayInstanceID: credential.installationID,
+                                generatedAt: .now,
+                                text: prompt.content,
+                                threadID: prompt.threadID,
+                                deliveryState: .sent))
+                    }
+                } catch {
+                    break
+                }
+            }
+            WidgetReload.quickAsk()
+        #endif
     }
 
     /// Begin mirroring the shared approvals store's pending set into the snapshot
@@ -334,14 +413,20 @@ final class AppDependencies {
     /// Build a chat store for `thread`, wired to the live session and the
     /// transcript cache. Requires a paired session.
     func makeChatStore(thread: ThreadID) -> ChatStore? {
+        if let existing = chatStores[thread] { return existing }
         guard let session = ensureSession() else { return nil }
-        return ChatStore(threadID: thread, session: session, store: transcriptStore)
+        let store = ChatStore(threadID: thread, session: session, store: transcriptStore)
+        chatStores[thread] = store
+        return store
     }
 
     /// Build the sessions-list store, wired to the live session and cache.
     func makeSessionsStore() -> SessionsStore? {
+        if let sessionsStore { return sessionsStore }
         guard let session = ensureSession() else { return nil }
-        return SessionsStore(session: session, store: transcriptStore)
+        let store = SessionsStore(session: session, store: transcriptStore)
+        sessionsStore = store
+        return store
     }
 
     /// Build the M5 Settings store, wired to the paired credential: a
@@ -353,6 +438,7 @@ final class AppDependencies {
     /// an enhanced-protection control that persists the shared overlay preference
     /// and re-tags the transcript cache. Nil until paired.
     func makeSettingsStore() -> SettingsStore? {
+        if let settingsStore { return settingsStore }
         guard let credential = (try? DeviceCredential.load(from: keychain)) ?? nil,
             let client = makePushClient(),
             let session = ensureSession()
@@ -367,21 +453,36 @@ final class AppDependencies {
             // Persist for the app-switcher redaction overlay's @AppStorage read…
             UserDefaults.standard.set(
                 enabled, forKey: PrivacySettingsKey.enhancedProtection)
+            UserDefaults(suiteName: WidgetSnapshotAccess.appGroupID)?.set(
+                enabled, forKey: PrivacySettingsKey.enhancedProtection)
             // …and re-tag the transcript cache if it is the file-backed store.
+            var applied = true
             if let grdb = store as? GRDBTranscriptStore {
-                return grdb.applyFileProtection(enhanced: enabled)
+                applied = grdb.applyFileProtection(enhanced: enabled)
             }
-            return false
+            if let snapshotURL = WidgetSnapshotAccess.store()?.baseURL {
+                applied =
+                    SnapshotStore(
+                        baseURL: snapshotURL,
+                        protectionPolicy: DataProtectionPolicy(enhanced: enabled)
+                    ).applyFileProtection() && applied
+            }
+            return applied
         }
 
-        return SettingsStore(
+        let settingsStore = SettingsStore(
             devices: GatewayDeviceManager(client: client),
             identity: identity,
             biometrics: SettingsBiometricGate(),
             unpairer: ClosureUnpairing { [weak self] in await self?.unpair() },
+            localDataRemover: ClosureUnpairing { [weak self] in
+                await self?.unpair(revokeRemote: false)
+            },
             keyValueStore: AppGroupDefaultsStore(),
             protectionControl: protection,
             connectionSource: GatewaySessionConnectionSource(session: session))
+        self.settingsStore = settingsStore
+        return settingsStore
     }
 
     /// Build the read-only Jobs glance store, wired to the generated REST client
@@ -391,6 +492,7 @@ final class AppDependencies {
     /// (D-X2). Nil until paired. The phone token holds `jobs:read` only, so the
     /// resulting store is read-only by construction.
     func makeJobsStore() -> JobsStore? {
+        if let jobsStore { return jobsStore }
         guard let credential = (try? DeviceCredential.load(from: keychain)) ?? nil,
             let baseURL = credential.preferredBaseURL
         else { return nil }
@@ -405,7 +507,9 @@ final class AppDependencies {
 
         let adapter = GatewayJobsAdapter(
             client: client, baseURL: baseURL, token: tokenProvider, session: pinnedSession)
-        return JobsStore(gateway: adapter)
+        let store = JobsStore(gateway: adapter)
+        jobsStore = store
+        return store
     }
 
     /// The shared approvals store, wired to the live session and the real
@@ -453,12 +557,31 @@ final class AppDependencies {
     /// Build the onboarding store, wired to the live pairing service and this
     /// keychain; `onPaired` flips `isPaired` so RootView swaps to the shell.
     func makeOnboardingStore() -> OnboardingStore {
+        if let onboardingStore { return onboardingStore }
+        let store = makeNewOnboardingStore()
+        onboardingStore = store
+        return store
+    }
+
+    func handlePairingURL(_ url: URL) {
+        makeOnboardingStore().handleScanned(url)
+    }
+
+    private func makeNewOnboardingStore() -> OnboardingStore {
         OnboardingStore(
             pairingService: LivePairingService(),
             keychain: keychain,
             deviceName: Self.defaultDeviceName(),
-            onPaired: { [weak self] _ in
+            onPaired: { [weak self] credential in
                 self?.isPaired = true
+                self?.transcriptStore = Self.defaultTranscriptStore(
+                    gatewayInstanceID: credential.installationID)
+                self?.snapshotService.useGateway(credential.installationID)
+                if let grdb = self?.transcriptStore as? GRDBTranscriptStore {
+                    _ = grdb.applyFileProtection(
+                        enhanced: UserDefaults.standard.bool(
+                            forKey: PrivacySettingsKey.enhancedProtection))
+                }
             })
     }
 
@@ -466,26 +589,58 @@ final class AppDependencies {
     /// `/api/devices/{id}/revoke`), then erase the local credential regardless
     /// of the network result, tear down the live session, and flip back to
     /// onboarding.
-    func unpair() async {
-        if let credential = (try? DeviceCredential.load(from: keychain)) ?? nil {
+    func unpair(revokeRemote: Bool = true) async {
+        let credential = (try? DeviceCredential.load(from: keychain)) ?? nil
+        if let credential {
             // Clear the push registration first (needs the still-valid token),
             // then self-revoke. Both are best-effort — the local erase below is
             // authoritative for signing out.
-            if let client = makePushClient() {
-                _ = try? await client.devicesMePushRemoveHandler()
+            if revokeRemote {
+                if let client = makePushClient() {
+                    _ = try? await client.devicesMePushRemoveHandler()
+                }
+                await UnpairService.revoke(credential)
             }
-            await UnpairService.revoke(credential)
+            #if canImport(Security) && canImport(CryptoKit)
+                try? QuickAskOutbox.removeAll(gatewayInstanceID: credential.installationID)
+            #endif
         }
+        try? await transcriptStore.clearAll()
         try? DeviceCredential.erase(from: keychain)
+        clearSharedSnapshots()
         stopSnapshotMirroring()
         approvalsStore?.stop()
         approvalsStore = nil
+        chatStores.removeAll()
+        sessionsStore = nil
+        jobsStore = nil
+        settingsStore = nil
+        transcriptStore = InMemoryTranscriptStore()
+        if let credential {
+            try? GatewayStorageFactory().deleteNamespace(
+                for: credential.installationID)
+        }
         #if canImport(ActivityKit)
             await stopLiveActivity()
         #endif
         await session?.shutdown()
         session = nil
+        snapshotService.useGateway(nil)
         isPaired = false
+        onboardingStore = nil
+    }
+
+    private var activeGatewayInstanceID: String? {
+        ((try? DeviceCredential.load(from: keychain)) ?? nil)?.installationID
+    }
+
+    private func clearSharedSnapshots() {
+        guard let store = WidgetSnapshotAccess.store() else { return }
+        try? store.remove(AgentStatusSnapshot.self)
+        try? store.remove(PendingApprovalsSnapshot.self)
+        try? store.remove(JobsSnapshot.self)
+        try? store.remove(QuickAskReceipt.self)
+        try? store.remove(EncryptedQuickAskQueue.self)
     }
 
     /// Default device name for the confirm sheet (D-P1): the user's device

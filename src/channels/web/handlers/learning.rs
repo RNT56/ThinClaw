@@ -517,9 +517,9 @@ mod tests {
             channel_manager: None,
             hooks: None,
             device_registry: crate::channels::web::server::test_device_registry(),
-            pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            pending_approvals: std::sync::Arc::new(
+                crate::channels::web::server::PendingApprovalsStore::in_memory(),
+            ),
         }
     }
 

@@ -144,6 +144,7 @@ public final class SettingsStore {
     private let identity: PairedGatewayIdentity
     private let biometrics: any BiometricGating
     private let unpairer: any Unpairing
+    private let localDataRemover: any Unpairing
     private let preferencesStore: NotificationPreferencesStore
     private let protectionControl: any TranscriptProtectionControlling
     private let connectionSource: any ConnectionStateSource
@@ -155,6 +156,7 @@ public final class SettingsStore {
         identity: PairedGatewayIdentity,
         biometrics: any BiometricGating,
         unpairer: any Unpairing,
+        localDataRemover: any Unpairing = ClosureUnpairing {},
         keyValueStore: any KeyValueStoring,
         protectionControl: any TranscriptProtectionControlling,
         connectionSource: any ConnectionStateSource
@@ -163,6 +165,7 @@ public final class SettingsStore {
         self.identity = identity
         self.biometrics = biometrics
         self.unpairer = unpairer
+        self.localDataRemover = localDataRemover
         self.preferencesStore = NotificationPreferencesStore(store: keyValueStore)
         self.protectionControl = protectionControl
         self.connectionSource = connectionSource
@@ -222,6 +225,13 @@ public final class SettingsStore {
     /// onboarding, via the injected ``Unpairing`` (`AppDependencies.unpair()`).
     public func unpair() async {
         await unpairer.unpair()
+    }
+
+    /// Erase this installation without attempting server revocation. This is
+    /// the explicit offline escape hatch; an administrator must revoke the
+    /// orphaned server record later.
+    public func removeLocalDataOnly() async {
+        await localDataRemover.unpair()
     }
 
     // MARK: - Notification preferences

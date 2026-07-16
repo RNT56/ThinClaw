@@ -8,6 +8,11 @@ public enum KeychainStoreError: Error, Equatable {
     case invalidData
 }
 
+public enum KeychainAccessibility: Sendable {
+    case afterFirstUnlockDeviceOnly
+    case whenUnlockedDeviceOnly
+}
+
 /// Minimal secret storage seam.
 ///
 /// The real implementation is ``SecItemKeychainStore``; tests and previews
@@ -16,6 +21,7 @@ public enum KeychainStoreError: Error, Equatable {
 public protocol KeychainStoring: Sendable {
     /// Insert or replace the secret stored under `key`.
     func setSecret(_ data: Data, for key: String) throws
+    func setSecret(_ data: Data, for key: String, accessibility: KeychainAccessibility) throws
     /// The secret stored under `key`, or `nil` when absent.
     func secret(for key: String) throws -> Data?
     /// Remove any secret stored under `key` (no error when absent).
@@ -23,6 +29,14 @@ public protocol KeychainStoring: Sendable {
 }
 
 extension KeychainStoring {
+    public func setSecret(
+        _ data: Data,
+        for key: String,
+        accessibility: KeychainAccessibility
+    ) throws {
+        try setSecret(data, for: key)
+    }
+
     /// Convenience: store a Codable value as JSON.
     public func setCodable<T: Encodable>(_ value: T, for key: String) throws {
         try setSecret(JSONEncoder().encode(value), for: key)
@@ -49,6 +63,14 @@ public final class InMemoryKeychain: KeychainStoring, @unchecked Sendable {
     public init() {}
 
     public func setSecret(_ data: Data, for key: String) throws {
+        lock.withLock { storage[key] = data }
+    }
+
+    public func setSecret(
+        _ data: Data,
+        for key: String,
+        accessibility: KeychainAccessibility
+    ) throws {
         lock.withLock { storage[key] = data }
     }
 

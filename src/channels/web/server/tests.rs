@@ -3,6 +3,57 @@ use super::*;
 use crate::db::ConversationStore;
 
 #[test]
+fn pending_approval_registry_persists_and_removes_by_thread() {
+    let directory = tempfile::tempdir().expect("temporary approval registry");
+    let path = directory.path().join("pending-approvals.json");
+    let request_id = Uuid::new_v4().to_string();
+    let thread_id = Uuid::new_v4().to_string();
+
+    {
+        let store = PendingApprovalsStore::with_path(path.clone());
+        store.lock().expect("approval registry lock").insert(
+            request_id.clone(),
+            thinclaw_gateway::web::types::PendingApprovalEntry {
+                request_id: request_id.clone(),
+                tool_name: "shell".to_string(),
+                description: "Run a command".to_string(),
+                parameters: r#"{"command":"pwd"}"#.to_string(),
+                risk: thinclaw_gateway::web::devices::ApprovalRisk::Low,
+                thread_id: Some(thread_id.clone()),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
+    }
+
+    let reloaded = PendingApprovalsStore::with_path(path.clone());
+    assert!(
+        reloaded
+            .lock()
+            .expect("reloaded approval registry lock")
+            .contains_key(&request_id)
+    );
+    reloaded.remove_for_thread(&thread_id);
+
+    let final_store = PendingApprovalsStore::with_path(path);
+    assert!(
+        !final_store
+            .lock()
+            .expect("final approval registry lock")
+            .contains_key(&request_id)
+    );
+}
+
+#[test]
+fn pending_approval_registry_handles_malformed_storage_conservatively() {
+    let directory = tempfile::tempdir().expect("temporary approval registry");
+    let path = directory.path().join("pending-approvals.json");
+    std::fs::write(&path, b"not-json").expect("seed malformed registry");
+
+    let store = PendingApprovalsStore::with_path(path);
+    assert!(store.lock().expect("approval registry lock").is_empty());
+}
+
+#[test]
 fn test_provider_model_options_from_discovery_returns_live_models_only() {
     let discovered = vec![
         crate::llm::discovery::DiscoveredModel {
@@ -772,7 +823,7 @@ fn test_gateway_state(
         channel_manager: None,
         hooks: None,
         device_registry: test_device_registry(),
-        pending_approvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_approvals: Arc::new(PendingApprovalsStore::in_memory()),
     }
 }
 
@@ -927,6 +978,65 @@ async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates(
 }
 
 #[tokio::test]
+async fn pending_approval_reconciliation_keeps_only_runtime_pending_requests() {
+    let manager = Arc::new(SessionManager::new());
+    let session = manager.get_or_create_session("gateway-user").await;
+    let active_thread_id = Uuid::new_v4();
+    let resolved_thread_id = Uuid::new_v4();
+    let active_request_id = Uuid::new_v4();
+    let resolved_request_id = Uuid::new_v4();
+
+    {
+        let mut session = session.lock().await;
+        let session_id = session.id;
+        let mut active = crate::agent::session::Thread::with_id(active_thread_id, session_id);
+        active.pending_approval = Some(crate::agent::session::PendingApproval {
+            request_id: active_request_id,
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "pwd"}),
+            description: "Run a command".to_string(),
+            tool_call_id: "call-1".to_string(),
+            context_messages: Vec::new(),
+            deferred_tool_calls: Vec::new(),
+        });
+        session.threads.insert(active_thread_id, active);
+        session.threads.insert(
+            resolved_thread_id,
+            crate::agent::session::Thread::with_id(resolved_thread_id, session_id),
+        );
+    }
+
+    let mut state = test_gateway_state("gateway-user", "gateway-user", None);
+    state.session_manager = Some(manager);
+    let entry = |request_id: Uuid, thread_id: Uuid| PendingApprovalEntry {
+        request_id: request_id.to_string(),
+        tool_name: "shell".to_string(),
+        description: "Run a command".to_string(),
+        parameters: r#"{"command":"pwd"}"#.to_string(),
+        risk: thinclaw_gateway::web::devices::ApprovalRisk::Low,
+        thread_id: Some(thread_id.to_string()),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    {
+        let mut approvals = state.pending_approvals.lock().unwrap();
+        approvals.insert(
+            active_request_id.to_string(),
+            entry(active_request_id, active_thread_id),
+        );
+        approvals.insert(
+            resolved_request_id.to_string(),
+            entry(resolved_request_id, resolved_thread_id),
+        );
+    }
+
+    reconcile_pending_approvals(&state).await;
+
+    let approvals = state.pending_approvals.lock().unwrap();
+    assert!(approvals.contains_key(&active_request_id.to_string()));
+    assert!(!approvals.contains_key(&resolved_request_id.to_string()));
+}
+
+#[tokio::test]
 async fn test_request_user_id_prefers_non_empty_request_value() {
     let state = test_gateway_state("gateway-default", "gateway-actor", None);
 
@@ -1029,7 +1139,7 @@ fn test_request_actor_id_preserves_explicit_family_member_default() {
         channel_manager: None,
         hooks: None,
         device_registry: test_device_registry(),
-        pending_approvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_approvals: Arc::new(PendingApprovalsStore::in_memory()),
     };
 
     assert_eq!(

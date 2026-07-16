@@ -4,7 +4,7 @@ import Foundation
 
 /// What the agent is doing right now — drives the AgentStatus widget, the
 /// watch complication, and the Live Activity's fallback state.
-public struct AgentStatusSnapshot: SharedSnapshot {
+public struct AgentStatusSnapshot: SharedSnapshot, GatewayScopedSnapshot, FreshnessAwareSnapshot {
     public static let fileName = "agent-status.json"
     public static let currentSchemaVersion = 1
 
@@ -18,6 +18,8 @@ public struct AgentStatusSnapshot: SharedSnapshot {
     }
 
     public var schemaVersion: Int
+    public var gatewayInstanceID: String?
+    public var stale: Bool?
     public var generatedAt: Date
     public var phase: Phase
     /// Tool currently executing, when `phase == .runningTool`.
@@ -31,6 +33,8 @@ public struct AgentStatusSnapshot: SharedSnapshot {
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
+        gatewayInstanceID: String? = nil,
+        stale: Bool = false,
         generatedAt: Date,
         phase: Phase,
         activeToolName: String? = nil,
@@ -39,6 +43,8 @@ public struct AgentStatusSnapshot: SharedSnapshot {
         unreadCount: Int = 0
     ) {
         self.schemaVersion = schemaVersion
+        self.gatewayInstanceID = gatewayInstanceID
+        self.stale = stale
         self.generatedAt = generatedAt
         self.phase = phase
         self.activeToolName = activeToolName
@@ -46,13 +52,15 @@ public struct AgentStatusSnapshot: SharedSnapshot {
         self.activeThreadTitle = activeThreadTitle
         self.unreadCount = unreadCount
     }
+
+    public var isKnownStale: Bool { stale ?? false }
 }
 
 // MARK: - Pending approvals
 
 /// Tool calls blocked on operator approval — drives the PendingApprovals
 /// widget and the watch approval list.
-public struct PendingApprovalsSnapshot: SharedSnapshot {
+public struct PendingApprovalsSnapshot: SharedSnapshot, GatewayScopedSnapshot, FreshnessAwareSnapshot {
     public static let fileName = "pending-approvals.json"
     public static let currentSchemaVersion = 1
 
@@ -112,25 +120,33 @@ public struct PendingApprovalsSnapshot: SharedSnapshot {
     }
 
     public var schemaVersion: Int
+    public var gatewayInstanceID: String?
+    public var stale: Bool?
     public var generatedAt: Date
     public var approvals: [PendingApproval]
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
+        gatewayInstanceID: String? = nil,
+        stale: Bool = false,
         generatedAt: Date,
         approvals: [PendingApproval]
     ) {
         self.schemaVersion = schemaVersion
+        self.gatewayInstanceID = gatewayInstanceID
+        self.stale = stale
         self.generatedAt = generatedAt
         self.approvals = approvals
     }
+
+    public var isKnownStale: Bool { stale ?? false }
 }
 
 // MARK: - Jobs
 
 /// Long-running background jobs (sandbox jobs, subagents) — drives the Jobs
 /// tab's widget surface.
-public struct JobsSnapshot: SharedSnapshot {
+public struct JobsSnapshot: SharedSnapshot, GatewayScopedSnapshot, FreshnessAwareSnapshot {
     public static let fileName = "jobs.json"
     public static let currentSchemaVersion = 1
 
@@ -156,25 +172,33 @@ public struct JobsSnapshot: SharedSnapshot {
     }
 
     public var schemaVersion: Int
+    public var gatewayInstanceID: String?
+    public var stale: Bool?
     public var generatedAt: Date
     public var jobs: [JobSummary]
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
+        gatewayInstanceID: String? = nil,
+        stale: Bool = false,
         generatedAt: Date,
         jobs: [JobSummary]
     ) {
         self.schemaVersion = schemaVersion
+        self.gatewayInstanceID = gatewayInstanceID
+        self.stale = stale
         self.generatedAt = generatedAt
         self.jobs = jobs
     }
+
+    public var isKnownStale: Bool { stale ?? false }
 }
 
 // MARK: - Quick Ask receipt
 
 /// Written by the QuickAsk widget/intent after handing a prompt to the app
 /// (or queuing it for next launch), so the widget can render "sent ✓" state.
-public struct QuickAskReceipt: SharedSnapshot {
+public struct QuickAskReceipt: SharedSnapshot, GatewayScopedSnapshot {
     public static let fileName = "quick-ask-receipt.json"
     public static let currentSchemaVersion = 1
 
@@ -188,6 +212,7 @@ public struct QuickAskReceipt: SharedSnapshot {
     }
 
     public var schemaVersion: Int
+    public var gatewayInstanceID: String?
     public var generatedAt: Date
     public var text: String
     public var threadID: String?
@@ -195,15 +220,58 @@ public struct QuickAskReceipt: SharedSnapshot {
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
+        gatewayInstanceID: String? = nil,
         generatedAt: Date,
         text: String,
         threadID: String? = nil,
         deliveryState: DeliveryState
     ) {
         self.schemaVersion = schemaVersion
+        self.gatewayInstanceID = gatewayInstanceID
         self.generatedAt = generatedAt
         self.text = text
         self.threadID = threadID
         self.deliveryState = deliveryState
+    }
+}
+
+/// Encrypted prompt envelopes shared between the widget and main app. The
+/// ciphertext is safe to place in the App Group; its AES-GCM key lives only in
+/// the shared device-only Keychain.
+public struct EncryptedQuickAskQueue: SharedSnapshot {
+    public static let fileName = "quick-ask-outbox.json"
+    public static let currentSchemaVersion = 1
+
+    public struct Entry: Codable, Sendable, Equatable, Identifiable {
+        public var id: UUID
+        public var gatewayInstanceID: String
+        public var queuedAt: Date
+        public var sealedPayload: Data
+
+        public init(
+            id: UUID,
+            gatewayInstanceID: String,
+            queuedAt: Date,
+            sealedPayload: Data
+        ) {
+            self.id = id
+            self.gatewayInstanceID = gatewayInstanceID
+            self.queuedAt = queuedAt
+            self.sealedPayload = sealedPayload
+        }
+    }
+
+    public var schemaVersion: Int
+    public var generatedAt: Date
+    public var entries: [Entry]
+
+    public init(
+        schemaVersion: Int = Self.currentSchemaVersion,
+        generatedAt: Date,
+        entries: [Entry]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.generatedAt = generatedAt
+        self.entries = entries
     }
 }

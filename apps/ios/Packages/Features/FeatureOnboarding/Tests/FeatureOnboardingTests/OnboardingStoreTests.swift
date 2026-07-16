@@ -200,7 +200,7 @@ struct PairingTests {
         #expect(service.lastName == "iPhone")
     }
 
-    @Test("require_confirm mode parks in pendingApproval, stores nothing")
+    @Test("require_confirm mode parks in pendingApproval and securely stores the retry material")
     func pendingApproval() async {
         let keychain = InMemoryKeychain()
         let service = FakePairingService(.result(.pendingConfirmation(pairingID: "pair_42")))
@@ -208,7 +208,23 @@ struct PairingTests {
         store.handleScanned(Fixture.pairingURL())
         await store.confirmAndPair()
         #expect(store.step == .pendingApproval(pairingID: "pair_42"))
-        #expect(keychain.count == 0)
+        #expect(keychain.count == 1)
+    }
+
+    @Test("a pending confirmation resumes after relaunch")
+    func pendingApprovalResumes() async {
+        let keychain = InMemoryKeychain()
+        let service = FakePairingService(.result(.pendingConfirmation(pairingID: "pair_42")))
+        let first = Fixture.makeStore(service, keychain: keychain)
+        first.handleScanned(Fixture.pairingURL())
+        await first.confirmAndPair()
+
+        let relaunched = Fixture.makeStore(service, keychain: keychain)
+
+        #expect(relaunched.step == .pendingApproval(pairingID: "pair_42"))
+        #expect(relaunched.pendingPayload?.installationID == "inst_9f8e")
+        relaunched.reset()
+        first.reset()
     }
 
     @Test("confirmAndPair with no pending payload fails instead of crashing")
@@ -286,6 +302,7 @@ struct FailureTests {
             .rateLimited(retryAfter: nil), .server(status: 500), .pinMismatch,
             .transport(.notConnectedToInternet), .keyGenerationFailed,
             .credentialStorageFailed, .unexpected(status: 418),
+            .gatewayIdentityMismatch,
         ]
         for error in errors {
             #expect(!error.userMessage.isEmpty, "empty message for \(error)")
