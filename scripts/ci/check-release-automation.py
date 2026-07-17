@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -79,6 +82,67 @@ def validate_dist_binaries() -> tuple[str, ...]:
         )
 
     return binaries
+
+
+def validate_google_oauth_build_configurator() -> None:
+    script = ROOT / "scripts/ci/configure-google-oauth-build.sh"
+
+    def run(client_id: str | None, client_secret: str | None):
+        environment = os.environ.copy()
+        for name in (
+            "THINCLAW_RELEASE_GOOGLE_CLIENT_ID",
+            "THINCLAW_RELEASE_GOOGLE_CLIENT_SECRET",
+            "THINCLAW_GOOGLE_CLIENT_ID",
+            "THINCLAW_GOOGLE_CLIENT_SECRET",
+        ):
+            environment.pop(name, None)
+        if client_id is not None:
+            environment["THINCLAW_RELEASE_GOOGLE_CLIENT_ID"] = client_id
+        if client_secret is not None:
+            environment["THINCLAW_RELEASE_GOOGLE_CLIENT_SECRET"] = client_secret
+
+        with tempfile.NamedTemporaryFile() as github_env:
+            environment["GITHUB_ENV"] = github_env.name
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            github_env.seek(0)
+            exported = github_env.read().decode("utf-8")
+        return result, exported
+
+    byok, byok_exports = run(None, None)
+    if byok.returncode != 0 or byok_exports:
+        raise SystemExit("Google OAuth release configurator must allow BYOK builds")
+
+    for client_id, client_secret in (("client-id", None), (None, "client-secret")):
+        partial, partial_exports = run(client_id, client_secret)
+        if partial.returncode == 0 or partial_exports:
+            raise SystemExit(
+                "Google OAuth release configurator must reject partial credential pairs"
+            )
+
+    complete, complete_exports = run("client-id", "client-secret")
+    expected_exports = (
+        "THINCLAW_GOOGLE_CLIENT_ID=client-id\n"
+        "THINCLAW_GOOGLE_CLIENT_SECRET=client-secret\n"
+    )
+    if complete.returncode != 0 or complete_exports != expected_exports:
+        raise SystemExit(
+            "Google OAuth release configurator did not export a complete build pair"
+        )
+    if "client-id" in complete.stdout or "client-secret" in complete.stdout:
+        raise SystemExit("Google OAuth release configurator prints credential values")
+
+    whitespace, whitespace_exports = run("client id", "client-secret")
+    if whitespace.returncode == 0 or whitespace_exports:
+        raise SystemExit(
+            "Google OAuth release configurator must reject credential whitespace"
+        )
 
 
 def main() -> int:
@@ -207,6 +271,7 @@ def main() -> int:
         )
 
     release_binaries = validate_dist_binaries()
+    validate_google_oauth_build_configurator()
 
     required_workflow_fragments = [
         f"googleapis/release-please-action@{ACTION_SHA}",
@@ -297,10 +362,37 @@ def main() -> int:
             "Desktop artifact workflow is missing: " + ", ".join(missing_desktop)
         )
 
+    oauth_release_step = "run: bash scripts/ci/configure-google-oauth-build.sh"
+    if artifact_workflow.count(oauth_release_step) != 3:
+        raise SystemExit(
+            "optional Google OAuth client must be configured in the host, Desktop, "
+            "and edge release build jobs"
+        )
+    for secret_fragment in (
+        "THINCLAW_RELEASE_GOOGLE_CLIENT_ID: ${{ secrets.THINCLAW_GOOGLE_CLIENT_ID }}",
+        "THINCLAW_RELEASE_GOOGLE_CLIENT_SECRET: ${{ secrets.THINCLAW_GOOGLE_CLIENT_SECRET }}",
+    ):
+        if artifact_workflow.count(secret_fragment) != 3:
+            raise SystemExit(
+                "official binary jobs are missing optional Google OAuth secret wiring: "
+                + secret_fragment
+            )
+    for gate_fragment in (
+        "THINCLAW_GOOGLE_CLIENT_ID: ${{ secrets.THINCLAW_GOOGLE_CLIENT_ID }}",
+        "THINCLAW_GOOGLE_CLIENT_SECRET: ${{ secrets.THINCLAW_GOOGLE_CLIENT_SECRET }}",
+        "Optional ThinClaw Google OAuth credentials must both be configured or both be absent",
+    ):
+        if gate_fragment not in credential_workflow:
+            raise SystemExit(
+                "release credential gate is missing optional Google OAuth validation: "
+                + gate_fragment
+            )
+
     print(
         f"Release automation: root thinclaw v{version}, immutable action, "
         f"PR-associated protected CI approval, pre-tag credential status, "
-        f"synchronized Desktop versioning, and artifact dispatch, "
+        f"synchronized Desktop versioning, optional official Google OAuth client, "
+        f"and artifact dispatch, "
         f"binaries {', '.join(release_binaries)}"
     )
     return 0

@@ -19,6 +19,77 @@ use super::provider::CloudError;
 
 // ── OAuth Configuration ──────────────────────────────────────────────────
 
+const BUILTIN_GOOGLE_CLIENT_ID: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_ID") {
+    Some(value) => value,
+    None => "",
+};
+const BUILTIN_GOOGLE_CLIENT_SECRET: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_SECRET") {
+    Some(value) => value,
+    None => "",
+};
+
+/// Resolve the Google Drive client used by Desktop cloud storage.
+///
+/// Google Drive's PKCE exchange only sends the client ID, but the standard
+/// Google tool override remains an atomic pair. `GOOGLE_CLIENT_ID` is retained
+/// as an ID-only compatibility override for existing Desktop installations.
+pub fn google_drive_client_id() -> Result<String, String> {
+    let runtime_client_id = nonempty_env("GOOGLE_OAUTH_CLIENT_ID");
+    let runtime_client_secret = nonempty_env("GOOGLE_OAUTH_CLIENT_SECRET");
+    let legacy_client_id = nonempty_env("GOOGLE_CLIENT_ID");
+    let builtin_client_id = nonempty(BUILTIN_GOOGLE_CLIENT_ID);
+    let builtin_client_secret = nonempty(BUILTIN_GOOGLE_CLIENT_SECRET);
+
+    resolve_google_drive_client_id(
+        runtime_client_id,
+        runtime_client_secret,
+        legacy_client_id,
+        builtin_client_id,
+        builtin_client_secret,
+    )
+}
+
+fn resolve_google_drive_client_id(
+    runtime_client_id: Option<String>,
+    runtime_client_secret: Option<String>,
+    legacy_client_id: Option<String>,
+    builtin_client_id: Option<String>,
+    builtin_client_secret: Option<String>,
+) -> Result<String, String> {
+    if runtime_client_id.is_some() || runtime_client_secret.is_some() {
+        return match (runtime_client_id, runtime_client_secret) {
+            (Some(client_id), Some(_)) => Ok(client_id),
+            _ => Err(
+                "GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET must both be configured"
+                    .to_string(),
+            ),
+        };
+    }
+
+    if let Some(client_id) = legacy_client_id {
+        return Ok(client_id);
+    }
+
+    match (builtin_client_id, builtin_client_secret) {
+        (Some(client_id), Some(_)) => Ok(client_id),
+        (None, None) => Err(
+            "Google Drive OAuth is not configured; set GOOGLE_OAUTH_CLIENT_ID and \
+             GOOGLE_OAUTH_CLIENT_SECRET (or legacy GOOGLE_CLIENT_ID), or use an official \
+             build with a built-in client"
+                .to_string(),
+        ),
+        _ => Err("The built-in Google OAuth client is incomplete".to_string()),
+    }
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|value| nonempty(&value))
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| value.to_string())
+}
+
 /// Provider-specific OAuth parameters.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
@@ -516,6 +587,83 @@ impl OAuthManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn google_drive_runtime_pair_overrides_builtin_client() {
+        let client_id = resolve_google_drive_client_id(
+            Some("user-client-id".to_string()),
+            Some("user-client-secret".to_string()),
+            None,
+            Some("official-client-id".to_string()),
+            Some("official-client-secret".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(client_id, "user-client-id");
+    }
+
+    #[test]
+    fn google_drive_rejects_partial_runtime_pair_without_builtin_fallback() {
+        let result = resolve_google_drive_client_id(
+            Some("user-client-id".to_string()),
+            None,
+            None,
+            Some("official-client-id".to_string()),
+            Some("official-client-secret".to_string()),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn google_drive_keeps_legacy_id_only_override() {
+        let client_id = resolve_google_drive_client_id(
+            None,
+            None,
+            Some("legacy-client-id".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(client_id, "legacy-client-id");
+    }
+
+    #[test]
+    fn google_drive_requires_complete_builtin_pair() {
+        assert!(
+            resolve_google_drive_client_id(
+                None,
+                None,
+                None,
+                Some("official-client-id".to_string()),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_google_drive_client_id(None, None, None, None, None).is_err()
+        );
+    }
+
+    #[test]
+    fn compiled_google_drive_client_matches_complete_build_pair() {
+        let builtin_client_id = nonempty(BUILTIN_GOOGLE_CLIENT_ID);
+        let builtin_client_secret = nonempty(BUILTIN_GOOGLE_CLIENT_SECRET);
+        let expected_client_id = builtin_client_id.clone().zip(builtin_client_secret.clone());
+        let resolved = resolve_google_drive_client_id(
+            None,
+            None,
+            None,
+            builtin_client_id,
+            builtin_client_secret,
+        );
+
+        match expected_client_id {
+            Some((client_id, _)) => assert_eq!(resolved.unwrap(), client_id),
+            None => assert!(resolved.is_err()),
+        }
+    }
 
     #[test]
     fn test_pkce_verifier_length() {

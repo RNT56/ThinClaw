@@ -201,11 +201,10 @@ pub async fn cloud_test_sftp(
 pub async fn cloud_oauth_start(
     provider: String,
 ) -> Result<OAuthStartResult, crate::thinclaw::bridge::BridgeError> {
-    use super::oauth::{OAuthConfig, OAuthManager};
+    use super::oauth::{OAuthConfig, OAuthManager, google_drive_client_id};
 
     let client_id = match provider.as_str() {
-        "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
-            .unwrap_or_else(|_| "thinclaw-desktop.apps.googleusercontent.com".to_string()),
+        "gdrive" => google_drive_client_id()?,
         "dropbox" => std::env::var("DROPBOX_CLIENT_ID")
             .unwrap_or_else(|_| "thinclaw_desktop_app".to_string()),
         "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
@@ -243,12 +242,11 @@ pub async fn cloud_oauth_complete(
     code: String,
     code_verifier: String,
 ) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
-    use super::oauth::{OAuthConfig, OAuthManager};
+    use super::oauth::{OAuthConfig, OAuthManager, google_drive_client_id};
     use super::provider::CloudProvider;
 
     let client_id = match provider.as_str() {
-        "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
-            .unwrap_or_else(|_| "thinclaw-desktop.apps.googleusercontent.com".to_string()),
+        "gdrive" => google_drive_client_id()?,
         "dropbox" => std::env::var("DROPBOX_CLIENT_ID")
             .unwrap_or_else(|_| "thinclaw_desktop_app".to_string()),
         "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
