@@ -155,6 +155,12 @@ jobs:
           persist-credentials: false
           submodules: recursive
           ref: ${{ env.RELEASE_REF }}
+      - name: Configure optional built-in Google OAuth client
+        shell: bash
+        env:
+          THINCLAW_RELEASE_GOOGLE_CLIENT_ID: ${{ secrets.THINCLAW_GOOGLE_CLIENT_ID }}
+          THINCLAW_RELEASE_GOOGLE_CLIENT_SECRET: ${{ secrets.THINCLAW_GOOGLE_CLIENT_SECRET }}
+        run: bash scripts/ci/configure-google-oauth-build.sh
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
@@ -611,6 +617,12 @@ jobs:
           persist-credentials: false
           submodules: recursive
           ref: ${{ env.RELEASE_REF }}
+      - name: Configure optional built-in Google OAuth client
+        shell: bash
+        env:
+          THINCLAW_RELEASE_GOOGLE_CLIENT_ID: ${{ secrets.THINCLAW_GOOGLE_CLIENT_ID }}
+          THINCLAW_RELEASE_GOOGLE_CLIENT_SECRET: ${{ secrets.THINCLAW_GOOGLE_CLIENT_SECRET }}
+        run: bash scripts/ci/configure-google-oauth-build.sh
       - name: Require production signing and notarization credentials
         shell: bash
         run: |
@@ -857,6 +869,12 @@ jobs:
           persist-credentials: false
           submodules: recursive
           ref: ${{ env.RELEASE_REF }}
+      - name: Configure optional built-in Google OAuth client
+        shell: bash
+        env:
+          THINCLAW_RELEASE_GOOGLE_CLIENT_ID: ${{ secrets.THINCLAW_GOOGLE_CLIENT_ID }}
+          THINCLAW_RELEASE_GOOGLE_CLIENT_SECRET: ${{ secrets.THINCLAW_GOOGLE_CLIENT_SECRET }}
+        run: bash scripts/ci/configure-google-oauth-build.sh
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:

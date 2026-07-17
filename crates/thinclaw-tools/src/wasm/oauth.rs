@@ -193,6 +193,9 @@ pub enum WasmToolOAuthError {
     #[error("Missing OAuth client_id configuration")]
     MissingClientId,
 
+    #[error("OAuth client ID and client secret must be configured together")]
+    IncompleteClientCredentials,
+
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -242,33 +245,10 @@ impl<'a> WasmToolOAuthFlow<'a> {
         required_scopes.sort();
         required_scopes.dedup();
 
-        let builtin = builtin_credentials(&canonical_secret_name(&auth.secret_name));
-
-        let client_id = oauth
-            .client_id
-            .clone()
-            .or_else(|| {
-                oauth
-                    .client_id_env
-                    .as_ref()
-                    .and_then(|env| std::env::var(env).ok())
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))
-            .ok_or(WasmToolOAuthError::MissingClientId)?;
-
-        let client_secret = oauth
-            .client_secret
-            .clone()
-            .or_else(|| {
-                oauth
-                    .client_secret_env
-                    .as_ref()
-                    .and_then(|env| std::env::var(env).ok())
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()))
-            .filter(|value| !value.trim().is_empty());
+        let canonical_name = canonical_secret_name(&auth.secret_name);
+        let builtin = builtin_credentials(&canonical_name);
+        let (client_id, client_secret) =
+            resolve_client_credentials(oauth, builtin, is_google_secret_name(&canonical_name))?;
 
         let mut merged_oauth = oauth.clone();
         merged_oauth.scopes = required_scopes.clone();
@@ -790,46 +770,66 @@ pub fn generate_pkce_pair() -> OAuthPkcePair {
 pub fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefreshConfig> {
     let auth = cap_file.auth.as_ref()?;
     let oauth = auth.oauth.as_ref()?;
-    let builtin = builtin_credentials(&canonical_secret_name(&auth.secret_name));
-
-    let client_id = oauth
-        .client_id
-        .clone()
-        .or_else(|| {
-            oauth
-                .client_id_env
-                .as_ref()
-                .and_then(|env| std::env::var(env).ok())
-        })
-        .or_else(|| {
-            builtin
-                .as_ref()
-                .map(|credentials| credentials.client_id.to_string())
-        })?;
-
-    let client_secret = oauth
-        .client_secret
-        .clone()
-        .or_else(|| {
-            oauth
-                .client_secret_env
-                .as_ref()
-                .and_then(|env| std::env::var(env).ok())
-        })
-        .or_else(|| {
-            builtin
-                .as_ref()
-                .map(|credentials| credentials.client_secret.to_string())
-        })
-        .filter(|value| !value.trim().is_empty());
+    let canonical_name = canonical_secret_name(&auth.secret_name);
+    let builtin = builtin_credentials(&canonical_name);
+    let (client_id, client_secret) =
+        resolve_client_credentials(oauth, builtin, is_google_secret_name(&canonical_name)).ok()?;
 
     Some(OAuthRefreshConfig {
         token_url: oauth.token_url.clone(),
         client_id,
         client_secret,
-        secret_name: canonical_secret_name(&auth.secret_name),
+        secret_name: canonical_name,
         provider: auth.provider.clone().or_else(|| shared_auth_provider(auth)),
     })
+}
+
+/// Resolve an OAuth client as one credential source, never field-by-field.
+///
+/// Manifest values take precedence over their runtime environment variables.
+/// If either configured value is present, the optional compile-time client is
+/// ignored completely. This makes a user's runtime pair an atomic override and
+/// prevents accidentally combining a user-owned client ID with a distributor's
+/// embedded client secret (or the reverse).
+fn resolve_client_credentials(
+    oauth: &OAuthConfigSchema,
+    builtin: Option<OAuthCredentials>,
+    require_complete_pair: bool,
+) -> Result<(String, Option<String>), WasmToolOAuthError> {
+    let configured_client_id =
+        configured_credential(oauth.client_id.as_ref(), oauth.client_id_env.as_ref());
+    let configured_client_secret = configured_credential(
+        oauth.client_secret.as_ref(),
+        oauth.client_secret_env.as_ref(),
+    );
+
+    if configured_client_id.is_some() || configured_client_secret.is_some() {
+        if require_complete_pair
+            && (configured_client_id.is_none() || configured_client_secret.is_none())
+        {
+            return Err(WasmToolOAuthError::IncompleteClientCredentials);
+        }
+
+        let client_id = configured_client_id.ok_or(WasmToolOAuthError::MissingClientId)?;
+        return Ok((client_id, configured_client_secret));
+    }
+
+    let builtin = builtin.ok_or(WasmToolOAuthError::MissingClientId)?;
+    Ok((
+        builtin.client_id.to_string(),
+        Some(builtin.client_secret.to_string()),
+    ))
+}
+
+fn configured_credential(value: Option<&String>, env_name: Option<&String>) -> Option<String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            env_name
+                .and_then(|name| std::env::var(name).ok())
+                .filter(|value| !value.trim().is_empty())
+        })
 }
 
 pub fn canonical_secret_name(secret_name: &str) -> String {
@@ -963,8 +963,37 @@ async fn discover_google_token_scopes(token: &str) -> Result<Vec<String>, WasmTo
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ffi::OsString;
 
     use super::*;
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            // SAFETY: These names are unique to this test module, and the guard
+            // restores their previous values before the test exits.
+            unsafe { std::env::set_var(name, value) };
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: See `EnvVarGuard::set`; no production code reads these
+            // test-only environment variable names.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
 
     #[test]
     fn canonical_google_secret_is_shared() {
@@ -976,6 +1005,80 @@ mod tests {
             canonical_secret_name(LEGACY_GMAIL_OAUTH_TOKEN),
             GOOGLE_OAUTH_TOKEN
         );
+    }
+
+    #[test]
+    fn runtime_google_pair_atomically_overrides_builtin_client() {
+        const CLIENT_ID_ENV: &str = "THINCLAW_TEST_GOOGLE_OAUTH_CLIENT_ID";
+        const CLIENT_SECRET_ENV: &str = "THINCLAW_TEST_GOOGLE_OAUTH_CLIENT_SECRET";
+        let _client_id = EnvVarGuard::set(CLIENT_ID_ENV, "user-client-id");
+        let _client_secret = EnvVarGuard::set(CLIENT_SECRET_ENV, "user-client-secret");
+        let oauth = OAuthConfigSchema {
+            client_id_env: Some(CLIENT_ID_ENV.to_string()),
+            client_secret_env: Some(CLIENT_SECRET_ENV.to_string()),
+            ..OAuthConfigSchema::default()
+        };
+        let builtin = OAuthCredentials {
+            client_id: "official-client-id",
+            client_secret: "official-client-secret",
+        };
+
+        let resolved = resolve_client_credentials(&oauth, Some(builtin), true).unwrap();
+
+        assert_eq!(resolved.0, "user-client-id");
+        assert_eq!(resolved.1.as_deref(), Some("user-client-secret"));
+    }
+
+    #[test]
+    fn incomplete_google_override_never_mixes_with_builtin_client() {
+        let oauth = OAuthConfigSchema {
+            client_id: Some("user-client-id".to_string()),
+            ..OAuthConfigSchema::default()
+        };
+        let builtin = OAuthCredentials {
+            client_id: "official-client-id",
+            client_secret: "official-client-secret",
+        };
+
+        assert!(matches!(
+            resolve_client_credentials(&oauth, Some(builtin), true),
+            Err(WasmToolOAuthError::IncompleteClientCredentials)
+        ));
+    }
+
+    #[test]
+    fn source_build_without_google_credentials_remains_byok() {
+        assert!(matches!(
+            resolve_client_credentials(&OAuthConfigSchema::default(), None, true),
+            Err(WasmToolOAuthError::MissingClientId)
+        ));
+    }
+
+    #[test]
+    fn compiled_google_client_requires_a_complete_pair() {
+        let credentials = builtin_credentials(GOOGLE_OAUTH_TOKEN);
+        let expected = option_env!("THINCLAW_GOOGLE_CLIENT_ID")
+            .filter(|value| !value.is_empty())
+            .zip(option_env!("THINCLAW_GOOGLE_CLIENT_SECRET").filter(|value| !value.is_empty()));
+
+        assert_eq!(credentials.is_some(), expected.is_some());
+        if let (Some(credentials), Some((client_id, client_secret))) = (credentials, expected) {
+            assert_eq!(credentials.client_id, client_id);
+            assert_eq!(credentials.client_secret, client_secret);
+        }
+    }
+
+    #[test]
+    fn oauth_clients_without_secrets_remain_supported() {
+        let oauth = OAuthConfigSchema {
+            client_id: Some("public-client-id".to_string()),
+            ..OAuthConfigSchema::default()
+        };
+
+        let resolved = resolve_client_credentials(&oauth, None, false).unwrap();
+
+        assert_eq!(resolved.0, "public-client-id");
+        assert_eq!(resolved.1, None);
     }
 
     #[test]

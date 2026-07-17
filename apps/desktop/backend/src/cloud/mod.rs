@@ -626,13 +626,12 @@ impl CloudManager {
     fn create_oauth_provider(
         config: &CloudProviderConfig,
     ) -> Result<Option<Box<dyn CloudProvider>>, String> {
-        use oauth::{OAuthConfig, OAuthManager};
+        use oauth::{OAuthConfig, OAuthManager, google_drive_client_id};
 
         let provider_type = config.provider_type.as_str();
 
         let client_id = match provider_type {
-            "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
-                .unwrap_or_else(|_| "thinclaw-desktop.apps.googleusercontent.com".to_string()),
+            "gdrive" => google_drive_client_id()?,
             "dropbox" => std::env::var("DROPBOX_CLIENT_ID")
                 .unwrap_or_else(|_| "thinclaw_desktop_app".to_string()),
             "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")

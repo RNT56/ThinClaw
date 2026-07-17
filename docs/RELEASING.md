@@ -73,6 +73,37 @@ release infrastructure. Back them up in the project password manager before
 adding repository secrets. Rotating the updater key also requires a deliberate
 client migration; do not silently generate a replacement during a release.
 
+## Optional Built-In Google OAuth Client
+
+Official host, Desktop, and edge binaries can include a ThinClaw-owned Google
+Desktop OAuth client. Configure these repository secrets when that client is
+ready:
+
+| Secret | Value |
+|---|---|
+| `THINCLAW_GOOGLE_CLIENT_ID` | ThinClaw-owned Google Desktop OAuth client ID |
+| `THINCLAW_GOOGLE_CLIENT_SECRET` | Matching Google Desktop OAuth client secret |
+
+These secrets are optional, but they are an atomic pair: configure both or
+neither. The release credential gate rejects a partial pair. Each official
+binary job promotes a complete pair to Rust's compile-time environment; when
+both are absent it explicitly continues as a BYOK build. Ordinary CI, source
+builds, and self-hosted deployments receive neither value and remain BYOK by
+default.
+
+Every binary still honors the runtime `GOOGLE_OAUTH_CLIENT_ID` and
+`GOOGLE_OAUTH_CLIENT_SECRET` pair before the embedded client, so users can
+always use their own Google Cloud project. A Desktop client secret embedded in
+a distributed application is extractable and must not be treated as
+confidential. Repository secrets keep it out of Git history and routine logs;
+they do not make it secret after distribution. ThinClaw owns the client quota,
+consent configuration, verification, rotation, and abuse response.
+
+Desktop Google Drive storage uses the same runtime client pair and embedded
+release client ID. Its PKCE exchange does not transmit the client secret; the
+legacy `GOOGLE_CLIENT_ID` ID-only runtime override remains supported for
+existing Desktop deployments.
+
 ## Publish And Verify
 
 1. Merge the green Release Please PR.
