@@ -35,6 +35,11 @@ pub const DATA_REPAIRS: &[&str] = &[
     "#,
     r#"
     UPDATE conversations
+    SET surface = 'agent_cockpit'
+    WHERE surface IS NULL OR surface = ''
+    "#,
+    r#"
+    UPDATE conversations
     SET actor_id = COALESCE(NULLIF(actor_id, ''), user_id),
         conversation_scope_id = COALESCE(NULLIF(conversation_scope_id, ''), id),
         conversation_kind = COALESCE(NULLIF(conversation_kind, ''), 'direct'),

@@ -1060,7 +1060,7 @@ mod tests {
 
         let mut rows = conn
             .query(
-                "SELECT actor_id, conversation_scope_id, stable_external_conversation_key \
+                "SELECT actor_id, conversation_scope_id, stable_external_conversation_key, surface \
                  FROM conversations WHERE id = 'legacy-conv'",
                 (),
             )
@@ -1070,9 +1070,11 @@ mod tests {
         let legacy_actor_id: String = row.get(0).unwrap();
         let legacy_scope_id: String = row.get(1).unwrap();
         let legacy_key: String = row.get(2).unwrap();
+        let legacy_surface: String = row.get(3).unwrap();
         assert_eq!(legacy_actor_id, "legacy-user");
         assert_eq!(legacy_scope_id, "legacy-conv");
         assert_eq!(legacy_key, "gateway:legacy-conv");
+        assert_eq!(legacy_surface, "agent_cockpit");
 
         let mut rows = conn
             .query(
@@ -1128,6 +1130,14 @@ mod tests {
         )
         .await
         .expect("Fresh database should have all V11 columns");
+
+        let mut rows = conn
+            .query("SELECT surface FROM conversations WHERE id = 'c1'", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let surface: String = row.get(0).unwrap();
+        assert_eq!(surface, "agent_cockpit");
     }
 
     #[tokio::test]

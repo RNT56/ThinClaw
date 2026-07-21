@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS _migrations (
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     channel TEXT NOT NULL,
+    surface TEXT NOT NULL DEFAULT 'agent_cockpit',
     user_id TEXT NOT NULL,
     actor_id TEXT,
     conversation_scope_id TEXT,
@@ -43,6 +44,8 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
+CREATE INDEX IF NOT EXISTS idx_conversations_surface_activity
+    ON conversations(surface, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_actor ON conversations(actor_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations(conversation_scope_id);
@@ -1880,6 +1883,17 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         version: 29,
         description: "Index active tool failure incidents",
         sql: "CREATE INDEX IF NOT EXISTS idx_tool_failures_active_incident ON tool_failures(tool_name) WHERE repaired_at IS NULL AND quarantined_at IS NULL",
+    },
+    // ── V30: canonical conversation surfaces ────────────────────────────
+    LibsqlColumnUpgrade {
+        version: 30,
+        description: "Add canonical conversation surface",
+        sql: "ALTER TABLE conversations ADD COLUMN surface TEXT NOT NULL DEFAULT 'agent_cockpit'",
+    },
+    LibsqlColumnUpgrade {
+        version: 30,
+        description: "Index conversations by surface and activity",
+        sql: "CREATE INDEX IF NOT EXISTS idx_conversations_surface_activity ON conversations(surface, last_activity DESC)",
     },
     // ── V31: experiment project/runner ownership ────────────────────────
     LibsqlColumnUpgrade {
